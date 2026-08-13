@@ -1,18 +1,21 @@
 "use client";
 
+import { ViewIcon, ViewOffSlashIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Field,
 	FieldError,
 	FieldGroup,
+	FieldLabel,
 	FieldSeparator,
 } from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import type { ReactNode, SVGProps } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /** Google brand mark, inlined so the block has no app-local SVG dependency. */
 function Google(props: SVGProps<SVGSVGElement>) {
@@ -104,6 +107,17 @@ export default function SignInForm({
 }: SignInFormProps) {
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
+	const [showPassword, setShowPassword] = useState(false);
+	// A field that has been edited since its error arrived is back in its
+	// default state — the error described the *previous* value, and leaving it
+	// lit while the user retypes reads as "still wrong". Reset on each new
+	// error so a second failed submit re-surfaces it.
+	const [emailEdited, setEmailEdited] = useState(false);
+	const [passwordEdited, setPasswordEdited] = useState(false);
+	useEffect(() => setEmailEdited(false), [emailError]);
+	useEffect(() => setPasswordEdited(false), [passwordError]);
+	const visibleEmailError = emailEdited ? undefined : emailError;
+	const visiblePasswordError = passwordEdited ? undefined : passwordError;
 	const submitting = loading || sendingMagicLink;
 
 	return (
@@ -138,36 +152,83 @@ export default function SignInForm({
 					}}
 				>
 					<FieldGroup>
-						<Field data-invalid={Boolean(emailError)}>
+						{/* The oversized fields carry their name in the placeholder by
+						    design, so the label is visually hidden rather than dropped —
+						    a placeholder is not an accessible name and disappears the
+						    moment the user types. */}
+						<Field data-invalid={Boolean(visibleEmailError)}>
+							<FieldLabel className="sr-only" htmlFor="email">
+								Email address
+							</FieldLabel>
 							<Input
-								aria-invalid={Boolean(emailError)}
+								aria-describedby={visibleEmailError ? "email-error" : undefined}
+								aria-invalid={Boolean(visibleEmailError)}
+								autoComplete="email"
 								className="h-16 border-0 bg-muted shadow-none"
 								id="email"
+								inputMode="email"
 								name="email"
-								onChange={(e) => setEmail(e.target.value)}
+								onChange={(e) => {
+									setEmail(e.target.value);
+									setEmailEdited(true);
+								}}
 								placeholder="Email Address"
 								type="email"
 								value={email}
 							/>
-							{emailError ? (
-								<FieldError errors={[{ message: emailError }]} />
+							{visibleEmailError ? (
+								<FieldError
+									errors={[{ message: visibleEmailError }]}
+									id="email-error"
+								/>
 							) : null}
 						</Field>
 
 						{useMagicLink ? null : (
-							<Field data-invalid={Boolean(passwordError)}>
-								<Input
-									aria-invalid={Boolean(passwordError)}
-									className="h-16 border-0 bg-muted shadow-none"
-									id="password"
-									name="password"
-									onChange={(e) => setPassword(e.target.value)}
-									placeholder="Password"
-									type="password"
-									value={password}
-								/>
-								{passwordError ? (
-									<FieldError errors={[{ message: passwordError }]} />
+							<Field data-invalid={Boolean(visiblePasswordError)}>
+								<FieldLabel className="sr-only" htmlFor="password">
+									Password
+								</FieldLabel>
+								<div className="relative w-full">
+									<Input
+										aria-describedby={
+											visiblePasswordError ? "password-error" : undefined
+										}
+										aria-invalid={Boolean(visiblePasswordError)}
+										autoComplete="current-password"
+										className="h-16 border-0 bg-muted pr-14 shadow-none"
+										id="password"
+										name="password"
+										onChange={(e) => {
+											setPassword(e.target.value);
+											setPasswordEdited(true);
+										}}
+										placeholder="Password"
+										type={showPassword ? "text" : "password"}
+										value={password}
+									/>
+									<Button
+										aria-label={
+											showPassword ? "Hide password" : "Show password"
+										}
+										aria-pressed={showPassword}
+										className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground"
+										onClick={() => setShowPassword((v) => !v)}
+										size="icon-sm"
+										type="button"
+										variant="ghost"
+									>
+										<HugeiconsIcon
+											icon={showPassword ? ViewOffSlashIcon : ViewIcon}
+											strokeWidth={2}
+										/>
+									</Button>
+								</div>
+								{visiblePasswordError ? (
+									<FieldError
+										errors={[{ message: visiblePasswordError }]}
+										id="password-error"
+									/>
 								) : null}
 							</Field>
 						)}

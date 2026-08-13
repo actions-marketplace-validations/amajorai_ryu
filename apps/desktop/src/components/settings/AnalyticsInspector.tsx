@@ -35,6 +35,7 @@ import {
 	getInstallId,
 	isAnalyticsConfigured,
 } from "@/src/lib/analytics.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 function formatProps(props: Record<string, string | number | boolean>): string {
 	const entries = Object.entries(props);
@@ -50,7 +51,7 @@ function EgressRow({ entry }: { entry: EgressLogEntry }) {
 			<div className="flex items-center justify-between gap-2">
 				<code className="font-medium text-xs">{entry.event}</code>
 				<span className="text-[10px] text-muted-foreground">
-					{new Date(entry.at).toLocaleString()}
+					{formatDateTime(entry.at)}
 				</span>
 			</div>
 			<span className="text-[11px] text-muted-foreground">

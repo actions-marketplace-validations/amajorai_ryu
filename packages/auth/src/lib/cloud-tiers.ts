@@ -11,7 +11,8 @@
  * per-tier 2X/3X Polar products are RETIRED.
  *
  * All that remains here is the free BASE node definition — the cx23 (2 vCPU · 4
- * GB · 40 GB) node that ships free with Max (its compute cost is absorbed into
+ * GB · 40 GB) node that ships free with every recurring plan — Pro, Max and
+ * Teams (its compute cost is absorbed into
  * the plan price). It has NO Polar product; it is granted by an active Max
  * subscription. The user never sees the Hetzner/CX name — only CPU / RAM / SSD +
  * a perf label ("Cost-optimized").
@@ -35,9 +36,9 @@ export interface CloudTier {
 	readonly id: string;
 	/** Included monthly AI usage credits (USD) attached to this hosted node. */
 	readonly includedAiUsageUsd: number;
-	/** True when the node ships free with the Max plan (BASE). */
+	/** True when the node ships free with the org's plan (BASE). */
 	readonly includedWithMax: boolean;
-	/** Customer-facing managed monthly price (USD). `0` for BASE (free with Max). */
+	/** Customer-facing managed monthly price (USD). `0` for BASE (free with a plan). */
 	readonly monthlyUsd: number;
 	/** Display name. */
 	readonly name: string;
@@ -51,7 +52,7 @@ export interface CloudTier {
 export const BASE_CLOUD_TYPE = "cx23";
 
 /**
- * The free BASE managed node — included with the Max plan. Paid instances are no
+ * The free BASE managed node — included with any recurring plan. Paid instances are no
  * longer a fixed ladder; they are picked dynamically from the live Hetzner
  * catalog and billed ad-hoc (see the module header).
  */
@@ -64,9 +65,9 @@ export const BASE_CLOUD_TIER: CloudTier = {
 	monthlyUsd: 0,
 	includedWithMax: true,
 	includedAiUsageUsd: 0,
-	description: "A free managed node, included with your Max plan.",
+	description: "A free managed node, included with your plan.",
 	perks: [
-		"Free with Max · 2 vCPU · 4 GB · 40 GB",
+		"Free with your plan · 2 vCPU · 4 GB · 40 GB",
 		"Ryu Core + Gateway, fully hosted",
 		"24/7 agents & automations",
 		"Local models on the node's CPU",

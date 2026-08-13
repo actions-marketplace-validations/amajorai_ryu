@@ -81,6 +81,14 @@ async function saveField(
 
 interface FieldControlProps {
 	/**
+	 * Render this field outside the group's card. Read off THIS element by the
+	 * enclosing SettingsGroup — same opt-in as `description` — which is why the
+	 * caller passes it rather than the leaf control setting it internally:
+	 * `Children.toArray` only sees the wrapper's props, not the `SettingsItem`
+	 * buried inside it.
+	 */
+	bare?: boolean;
+	/**
 	 * iOS-style footer caption for this field's card. The wrapper never renders
 	 * it — the enclosing SettingsGroup reads it off this element and renders it
 	 * below the card (see settings-items).
@@ -181,7 +189,7 @@ function SelectField({ field, target }: FieldControlProps) {
 	);
 }
 
-function TextField({ field, target }: FieldControlProps) {
+function TextField({ bare, description, field, target }: FieldControlProps) {
 	const fallback =
 		field.default === undefined || field.default === null
 			? ""
@@ -208,7 +216,14 @@ function TextField({ field, target }: FieldControlProps) {
 	};
 
 	return (
-		<SettingsItem title={field.label}>
+		// A `textarea` field is a tall bordered box; inside the group's card fill it
+		// reads as a box in a box, so those rows go `bare` while the single-line
+		// `text` fields stay ordinary rows. Driven by the declared field type at the
+		// call site, so every plugin that declares a textarea gets the same
+		// treatment without touching this file again.
+		// `description` is forwarded, not dropped: the group only renders a caption
+		// for a CARDED row, so a bare one has to render its own.
+		<SettingsItem bare={bare} description={description} title={field.label}>
 			{isTextarea ? (
 				<Textarea
 					className="min-h-24 text-sm"
@@ -684,6 +699,7 @@ export function PluginSettingsFields({
 					<SettingsGroup>
 						{tab.fields.map((field) => (
 							<FieldControl
+								bare={field.type === "textarea"}
 								description={
 									field.description ?? defaultFieldDescription(field.type)
 								}

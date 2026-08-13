@@ -296,6 +296,18 @@ pub struct StoredMessage {
     /// maintained by `append_message` once `active_leaf` is engaged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_message_id: Option<String>,
+    /// This assistant turn was cut off mid-stream and never finalized — the node
+    /// died (crash, force-quit, OOM, power loss) while it was still being written,
+    /// so `content`/`parts` hold only what had been flushed by then.
+    ///
+    /// Nothing stamps this during a normal turn: both terminal exits of the
+    /// streaming loop write the finished row. It is set at boot by
+    /// [`ConversationStore::reconcile_interrupted_runs`], which is the only place
+    /// that can tell the difference — a process that dies never gets to say so.
+    /// The client renders it as an explicit "this reply was cut off" marker
+    /// instead of passing a truncated answer off as a complete one.
+    #[serde(default)]
+    pub interrupted: bool,
     /// 0-based index of this message among its siblings (messages sharing the
     /// same `parent_message_id`), ordered by `created_at`. `0` for messages with
     /// no siblings. Computed at read time by `get_active_messages`, not stored.
@@ -365,7 +377,11 @@ pub struct ConversationSummary {
     pub branch: Option<String>,
     /// Per-run worktree path (populated when a dedicated worktree was created).
     pub worktree_path: Option<String>,
-    /// Run lifecycle status: "running" | "completed" | "failed" | null.
+    /// Run lifecycle status: "running" | "completed" | "failed" | "interrupted" |
+    /// null. "interrupted" is written only by
+    /// [`ConversationStore::reconcile_interrupted_runs`] at boot, for a turn the
+    /// node died in the middle of — it is a TERMINAL state, so anything counting
+    /// live runs must keep testing for "running" specifically.
     pub run_status: Option<String>,
     /// All agent ids participating in this conversation (multi-agent, #414).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -439,6 +455,18 @@ pub struct BtwEntry {
     pub created_at: i64,
 }
 
+/// One `(message_id, emoji)` bucket of a conversation's reactions, aggregated
+/// across users. `reacted_by_me` is resolved for the viewer passed to
+/// [`ConversationStore::list_reactions`] — the caller's own identity comes from
+/// the verified JWT at the route, never from a request body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageReaction {
+    pub message_id: String,
+    pub emoji: String,
+    pub count: i64,
+    pub reacted_by_me: bool,
+}
+
 fn default_child_entry_kind() -> String {
     "btw".to_owned()
 }
@@ -505,6 +533,40 @@ pub struct Session {
     pub updated_at: i64,
 }
 
+/// Canonical spelling of a workspace folder path, for the `folder_path` /
+/// `worktree_path` columns clients group conversations by.
+///
+/// Collapses runs of either separator to one and drops trailing separators,
+/// without ever emptying a root. Deliberately conservative: it does NOT change
+/// case (both macOS and Windows are case-insensitive but case-PRESERVING, and
+/// the sidebar draws the leaf as the project's name), does not resolve symlinks
+/// or `..` (that needs the path to exist, and this runs on rows for machines
+/// that may not be this one), and does not rewrite `\` to `/` (a Windows path
+/// must survive this round trip intact).
+fn normalize_folder_path(path: &str) -> String {
+    let trimmed = path.trim();
+    let mut out = String::with_capacity(trimmed.len());
+    let mut last_was_sep = false;
+    for ch in trimmed.chars() {
+        let is_sep = ch == '/' || ch == '\\';
+        if is_sep && last_was_sep {
+            continue;
+        }
+        last_was_sep = is_sep;
+        out.push(ch);
+    }
+    // A single trailing separator is the common accident; strip it, but never
+    // turn "/" or "C:\" into something that no longer names a directory.
+    while out.len() > 1 && (out.ends_with('/') || out.ends_with('\\')) {
+        let is_root = out.len() == 3 && out.as_bytes()[1] == b':';
+        if is_root {
+            break;
+        }
+        out.pop();
+    }
+    out
+}
+
 /// SQLite-backed conversation store. Cheap to clone (wraps an `Arc<Mutex<Connection>>`).
 ///
 /// Message bodies are encrypted at rest via [`ryu_crypto::FieldCipher`]: the
@@ -566,6 +628,27 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Whether `message_id` names a persisted message *of this conversation*. The
+/// existence gate every `message_reactions` write runs first: FK enforcement is
+/// off on this database (deletes are manual), so without it any string would
+/// insert an orphan reaction row, and a cross-conversation id would react into a
+/// thread the caller was never authorized against.
+fn message_in_conversation(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM messages WHERE id = ?1 AND conversation_id = ?2",
+            params![message_id, conversation_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking message membership")?;
+    Ok(found.is_some())
+}
+
 /// Default on-disk location for the conversation database (`~/.ryu/conversations.db`).
 fn default_db_path() -> PathBuf {
     crate::paths::ryu_dir().join("conversations.db")
@@ -592,6 +675,16 @@ impl ConversationStore {
         // failure here must never stop the node from opening its chat db.
         if let Err(e) = Self::backfill_tenancy(&conn) {
             tracing::warn!("conversation tenancy backfill skipped: {e:#}");
+        }
+        // Nothing else can close the books on a turn the node died in the middle
+        // of: `set_run_status` only ever runs from the turn lifecycle, so a killed
+        // process leaves the conversation at `running` and its half-written
+        // assistant row looking finished. Same placement + best-effort rule as the
+        // backfill above (out of `init_schema`, warn on failure, never blocks the
+        // node opening its chat db), but deliberately NOT marker-gated: every crash
+        // produces new stuck rows, so this has to run on every boot.
+        if let Err(e) = Self::reconcile_interrupted_runs(&conn) {
+            tracing::warn!("interrupted-run reconciliation skipped: {e:#}");
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -681,6 +774,65 @@ impl ConversationStore {
             "tenancy backfill: attributed {claimed} pre-ACL conversation(s) to the local owner"
         );
         Ok(())
+    }
+
+    /// Close the books, at boot, on turns this node died in the middle of.
+    ///
+    /// A turn's status is written by the streaming loop at exactly two terminal
+    /// points (`completed` / `failed`), so a process that is killed mid-stream —
+    /// crash, force-quit, OOM, power loss — leaves the conversation parked at
+    /// `running` forever and its assistant row holding only what had been flushed.
+    /// Nothing downstream can tell that row apart from a finished answer that just
+    /// happens to stop mid-sentence. This is the one moment where the difference is
+    /// still knowable: a `running` row at startup means nobody is streaming it, so
+    /// it is by definition interrupted.
+    ///
+    /// Two statements, in this order:
+    ///   1. flag the trailing assistant message of every `running` conversation
+    ///      (it is the row that was being written when the node went down), and
+    ///   2. move the conversation itself off `running`.
+    /// The message pass keys off `run_status = 'running'`, so flipping the status
+    /// first would flag nothing.
+    ///
+    /// Raw SQL rather than a `set_run_status` loop on purpose: `set_run_status`
+    /// re-reads a full run summary and fans out a `RunStatusEvent` per row. At boot
+    /// there are no subscribers yet (the HTTP server is not up), so the fan-out
+    /// would buy nothing and the loop would pay N summary loads under the store
+    /// mutex. Do not "fix" this into a per-row call.
+    ///
+    /// Returns `(runs_reconciled, messages_flagged)` for the log line.
+    fn reconcile_interrupted_runs(conn: &Connection) -> Result<(usize, usize)> {
+        let flagged = conn
+            .execute(
+                "UPDATE messages SET interrupted = 1
+                 WHERE id IN (
+                     SELECT m.id FROM messages m
+                     JOIN conversations c ON c.id = m.conversation_id
+                     WHERE c.run_status = 'running'
+                       AND m.role = 'assistant'
+                       AND m.id = (
+                           SELECT m2.id FROM messages m2
+                           WHERE m2.conversation_id = c.id
+                           ORDER BY m2.created_at DESC, m2.rowid DESC
+                           LIMIT 1
+                       )
+                 )",
+                [],
+            )
+            .context("flagging interrupted assistant messages")?;
+        let runs = conn
+            .execute(
+                "UPDATE conversations SET run_status = 'interrupted' WHERE run_status = 'running'",
+                [],
+            )
+            .context("reconciling interrupted run statuses")?;
+        if runs > 0 {
+            tracing::info!(
+                "run reconciliation: {runs} conversation(s) were still 'running' at boot \
+                 ({flagged} truncated assistant message(s) marked interrupted)"
+            );
+        }
+        Ok((runs, flagged))
     }
 
     /// Wire the semantic message index (backing the `search_conversations` builtin
@@ -778,7 +930,17 @@ impl ConversationStore {
                  created_at      INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_title_history_conversation
-                 ON conversation_title_history(conversation_id, created_at);",
+                 ON conversation_title_history(conversation_id, created_at);
+             CREATE TABLE IF NOT EXISTS message_reactions (
+                 message_id      TEXT NOT NULL,
+                 conversation_id TEXT NOT NULL,
+                 user_id         TEXT NOT NULL,
+                 emoji           TEXT NOT NULL,
+                 created_at      INTEGER NOT NULL,
+                 PRIMARY KEY (message_id, user_id, emoji)
+             );
+             CREATE INDEX IF NOT EXISTS idx_reactions_conversation
+                 ON message_reactions(conversation_id);",
         )
         .context("initializing conversation schema")?;
 
@@ -972,6 +1134,20 @@ impl ConversationStore {
                 .context("adding parent_message_id column to messages")?;
         }
 
+        // Additive migration: "this turn was cut off mid-stream". A killed node
+        // (crash / force-quit / OOM) leaves the assistant row holding whatever the
+        // streaming loop had flushed and no terminal write ever lands, so the row
+        // is indistinguishable from a finished answer that simply stops mid
+        // sentence. Stamped at boot by `reconcile_interrupted_runs` for the rows
+        // whose conversation is still parked at `run_status = 'running'`. 0 for
+        // every existing row and every normally-completed turn.
+        if !existing_msg_columns.contains("interrupted") {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0",
+            )
+            .context("adding interrupted column to messages")?;
+        }
+
         // Additive migration: the conversation's currently-selected leaf in the
         // version tree. NULL means the conversation is flat (never branched) and
         // reads fall back to chronological order. Once set, the active thread is
@@ -1026,6 +1202,15 @@ impl ConversationStore {
         branch: Option<&str>,
         worktree_path: Option<&str>,
     ) -> Result<()> {
+        // Normalised here because this is the ONE write path for `folder_path`,
+        // and its callers are three different producers of the same string: a
+        // native run (the desktop's picked folder), a thread import (Claude
+        // Code's / Codex's recorded `cwd`), and the threads MCP. Clients group
+        // conversations into project folders by this value, so a lone trailing
+        // separator from any one of them showed up as a second project folder
+        // with the same name.
+        let folder_path = folder_path.map(normalize_folder_path);
+        let worktree_path = worktree_path.map(normalize_folder_path);
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE conversations
@@ -1033,7 +1218,12 @@ impl ConversationStore {
                  branch       = COALESCE(?3, branch),
                  worktree_path = COALESCE(?4, worktree_path)
              WHERE id = ?1",
-            params![conversation_id, folder_path, branch, worktree_path],
+            params![
+                conversation_id,
+                folder_path.as_deref(),
+                branch,
+                worktree_path.as_deref()
+            ],
         )
         .context("setting run metadata")?;
         Ok(())
@@ -1818,7 +2008,7 @@ impl ConversationStore {
     pub async fn get_messages(&self, conversation_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, parts, parent_message_id
+            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, parts, parent_message_id, interrupted
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY created_at ASC, rowid ASC",
@@ -1838,6 +2028,7 @@ impl ConversationStore {
                     author_name: row.get(6)?,
                     parts: None,
                     parent_message_id: row.get(8)?,
+                    interrupted: row.get::<_, i64>(9)? != 0,
                     sibling_index: 0,
                     sibling_count: 1,
                     sibling_ids: Vec::new(),
@@ -1894,6 +2085,156 @@ impl ConversationStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    // ── Message reactions ─────────────────────────────────────────────────────
+    //
+    // Same shape as `feedback` above and for the same reason: a per-message datum
+    // deliberately kept OUT of the `get_messages` SELECT (which has many non-UI
+    // callers) and served instead by one bulk per-conversation read fetched
+    // alongside the transcript. Unlike feedback, a reaction is per-*person*, so it
+    // needs its own table rather than a column.
+    //
+    // Two deliberate policies, both visible in the code below:
+    //   * **Reactions are per message VERSION.** `edit_user_message` mints a fresh
+    //     uuid rather than mutating the row, so an edited message is a new row and
+    //     starts with no reactions. That is honest — people reacted to different
+    //     text — and needs no migration. `sibling_ids` is the only link if
+    //     carry-forward is ever wanted.
+    //   * **A message must be persisted before it can be reacted to.** Every write
+    //     first proves the id exists *in this conversation* (`WHERE EXISTS` on
+    //     `messages`). FK enforcement is off, so without that check any string
+    //     would insert an orphan row. This is also why there is no
+    //     `allow_latest_fallback` twin of the feedback retarget hack: a streaming
+    //     reply still carrying its client-generated id simply 404s until it lands.
+
+    /// Add `emoji` from `user_id` to a message. Scoped by `conversation_id` so a
+    /// stray id can't react into another conversation, and gated on the message
+    /// actually existing (see the module note above). Idempotent: reacting twice
+    /// with the same emoji keeps one row. Returns `false` when the message is not
+    /// in this conversation (→ 404 at the route) and `true` otherwise; a repeat of
+    /// an existing reaction returns `true` but does not fan out.
+    pub async fn add_reaction(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        user_id: &str,
+        emoji: &str,
+    ) -> Result<bool> {
+        let now = now_millis();
+        let inserted = {
+            let conn = self.conn.lock().await;
+            if !message_in_conversation(&conn, conversation_id, message_id)? {
+                return Ok(false);
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO message_reactions
+                     (message_id, conversation_id, user_id, emoji, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![message_id, conversation_id, user_id, emoji, now],
+            )
+            .context("adding message reaction")?
+        };
+        if inserted > 0 {
+            self.broadcast_reaction(conversation_id, message_id, user_id, emoji, "add");
+        }
+        Ok(true)
+    }
+
+    /// Remove `emoji` by `user_id` from a message. Same scoping and the same
+    /// message-exists gate as [`ConversationStore::add_reaction`]. Returns `false`
+    /// when the message is not in this conversation; removing a reaction that was
+    /// never placed is a success (`true`) but does not fan out.
+    pub async fn remove_reaction(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        user_id: &str,
+        emoji: &str,
+    ) -> Result<bool> {
+        let removed = {
+            let conn = self.conn.lock().await;
+            if !message_in_conversation(&conn, conversation_id, message_id)? {
+                return Ok(false);
+            }
+            conn.execute(
+                "DELETE FROM message_reactions
+                 WHERE message_id = ?1 AND conversation_id = ?2
+                   AND user_id = ?3 AND emoji = ?4",
+                params![message_id, conversation_id, user_id, emoji],
+            )
+            .context("removing message reaction")?
+        };
+        if removed > 0 {
+            self.broadcast_reaction(conversation_id, message_id, user_id, emoji, "remove");
+        }
+        Ok(true)
+    }
+
+    /// Every reaction bucket of a conversation, aggregated. `viewer_user_id` is the
+    /// caller whose own reactions light up (`reacted_by_me`) — it is resolved in the
+    /// same GROUP BY, never a second query. Ordered by first-placed so the chip row
+    /// does not reshuffle between reloads.
+    pub async fn list_reactions(
+        &self,
+        conversation_id: &str,
+        viewer_user_id: &str,
+    ) -> Result<Vec<MessageReaction>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT message_id,
+                    emoji,
+                    COUNT(*)                                            AS count,
+                    MAX(CASE WHEN user_id = ?2 THEN 1 ELSE 0 END)       AS mine,
+                    MIN(created_at)                                     AS first_at
+             FROM message_reactions
+             WHERE conversation_id = ?1
+             GROUP BY message_id, emoji
+             ORDER BY first_at ASC, emoji ASC",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, viewer_user_id], |row| {
+            Ok(MessageReaction {
+                message_id: row.get(0)?,
+                emoji: row.get(1)?,
+                count: row.get(2)?,
+                reacted_by_me: row.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Room-keyed realtime fan-out for a reaction, mirroring the
+    /// `conversation.message` publish in `append_message`: a self-describing
+    /// `"type": "reaction"` payload on the typed named-event contract. The DB lock
+    /// is already released by every caller. Do NOT pre-wrap with `"channel"` —
+    /// `frame_to_message` in the WS gateway does that. No-op when realtime is
+    /// unwired (tests/CLI) or the room has no members.
+    fn broadcast_reaction(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        user_id: &str,
+        emoji: &str,
+        op: &str,
+    ) {
+        if let Some(realtime) = &self.realtime {
+            realtime.broadcast_event(
+                conversation_id,
+                "conversation.reaction",
+                serde_json::json!({
+                    "type": "reaction",
+                    "conversation_id": conversation_id,
+                    "message_id": message_id,
+                    "emoji": emoji,
+                    "user_id": user_id,
+                    "op": op,
+                }),
+            );
+        }
     }
 
     /// The decrypted `(user_prompt, assistant_reply, agent_id)` for the turn that
@@ -2241,6 +2582,10 @@ impl ConversationStore {
                 // read here — only `get_messages` (the reload path) decodes them.
                 parts: None,
                 parent_message_id: None,
+                // Same reason as `parts` above: short-term memory feeds the model
+                // plain text and has no use for the render-side interruption
+                // marker. Only `get_messages` (the reload path) reads it.
+                interrupted: false,
                 sibling_index: 0,
                 sibling_count: 1,
                 sibling_ids: Vec::new(),
@@ -2478,6 +2823,11 @@ impl ConversationStore {
         // Copy each message with a fresh id, preserving role/content/agent/ordering.
         // `m.content` is already decrypted (get_messages opened it), so re-seal it
         // for the new row.
+        //
+        // Deliberately NOT copied: `parts`, `feedback`, `interrupted` — and, for the
+        // same reason, `message_reactions`. A fork is a new thread whose messages
+        // have new ids; per-person reactions belong to the rows people actually
+        // reacted to, so the branch starts with none.
         for m in &slice {
             let copy_id = uuid::Uuid::new_v4().to_string();
             let sealed = self.cipher.seal(&m.content)?;
@@ -3082,6 +3432,12 @@ impl ConversationStore {
         // FK enforcement is off (deletes are manual), so drop side chats here too.
         conn.execute(
             "DELETE FROM btw_entries WHERE conversation_id = ?1",
+            params![conversation_id],
+        )?;
+        // Same reason: `message_reactions` has no FK either, so its rows would
+        // outlive both the messages and the conversation forever.
+        conn.execute(
+            "DELETE FROM message_reactions WHERE conversation_id = ?1",
             params![conversation_id],
         )?;
         let removed = conn.execute(
@@ -4182,6 +4538,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_reactions_aggregate_per_emoji_and_resolve_the_viewer() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        store
+            .append_message("conv-x", "user", "ship it?", None, None, None)
+            .await
+            .unwrap();
+        let asst = store
+            .append_message("conv-x", "assistant", "shipped", None, None, None)
+            .await
+            .unwrap();
+
+        // Nothing yet.
+        assert!(store
+            .list_reactions("conv-x", "alice")
+            .await
+            .unwrap()
+            .is_empty());
+
+        assert!(store
+            .add_reaction("conv-x", &asst, "alice", "🎉")
+            .await
+            .unwrap());
+        let seen = store.list_reactions("conv-x", "alice").await.unwrap();
+        assert_eq!(
+            seen,
+            vec![MessageReaction {
+                message_id: asst.clone(),
+                emoji: "🎉".to_owned(),
+                count: 1,
+                reacted_by_me: true,
+            }]
+        );
+        // Bob sees the same bucket, but it is not his.
+        assert!(!store.list_reactions("conv-x", "bob").await.unwrap()[0].reacted_by_me);
+
+        // A second user on the same emoji aggregates into one bucket; both see
+        // themselves in it.
+        assert!(store
+            .add_reaction("conv-x", &asst, "bob", "🎉")
+            .await
+            .unwrap());
+        for viewer in ["alice", "bob"] {
+            let seen = store.list_reactions("conv-x", viewer).await.unwrap();
+            assert_eq!(seen.len(), 1, "one bucket for one emoji");
+            assert_eq!(seen[0].count, 2);
+            assert!(seen[0].reacted_by_me, "{viewer} reacted");
+        }
+
+        // Double-tapping is idempotent — no PK error, no double count.
+        assert!(store
+            .add_reaction("conv-x", &asst, "alice", "🎉")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.list_reactions("conv-x", "alice").await.unwrap()[0].count,
+            2
+        );
+
+        // A different emoji is a separate bucket.
+        assert!(store
+            .add_reaction("conv-x", &asst, "alice", "👀")
+            .await
+            .unwrap());
+        assert_eq!(
+            store.list_reactions("conv-x", "alice").await.unwrap().len(),
+            2
+        );
+
+        // Removing drops only this user's row from the bucket.
+        assert!(store
+            .remove_reaction("conv-x", &asst, "alice", "🎉")
+            .await
+            .unwrap());
+        let seen = store.list_reactions("conv-x", "alice").await.unwrap();
+        let party = seen.iter().find(|r| r.emoji == "🎉").expect("bucket kept");
+        assert_eq!(party.count, 1);
+        assert!(!party.reacted_by_me);
+        // Removing again is a harmless no-op, not an error.
+        assert!(store
+            .remove_reaction("conv-x", &asst, "alice", "🎉")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn message_reactions_are_gated_on_a_persisted_message_of_this_conversation() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        let msg = store
+            .append_message("conv-g", "assistant", "hi", None, None, None)
+            .await
+            .unwrap();
+
+        // A client-generated id for a still-streaming reply has no row yet: false
+        // (→ 404 at the route). This IS the persistence gate — there is no
+        // `allow_latest_fallback` retarget for reactions.
+        assert!(!store
+            .add_reaction("conv-g", "client-generated-id", "alice", "🎉")
+            .await
+            .unwrap());
+        // …and no orphan row was written.
+        assert!(store
+            .list_reactions("conv-g", "alice")
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A real id under the WRONG conversation is equally refused.
+        assert!(!store
+            .add_reaction("conv-other", &msg, "alice", "🎉")
+            .await
+            .unwrap());
+        assert!(!store
+            .remove_reaction("conv-other", &msg, "alice", "🎉")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_conversation_removes_its_reactions() {
+        // FK enforcement is off, so this only holds because `delete_conversation`
+        // drops the rows by hand.
+        let store = ConversationStore::open_in_memory().unwrap();
+        let msg = store
+            .append_message("conv-d", "assistant", "bye", None, None, None)
+            .await
+            .unwrap();
+        assert!(store
+            .add_reaction("conv-d", &msg, "alice", "👋")
+            .await
+            .unwrap());
+
+        assert!(store.delete_conversation("conv-d").await.unwrap());
+
+        // Query the table directly: `list_reactions` would also pass on an empty
+        // result, but this proves no row survived under the old conversation id.
+        let conn = store.conn.lock().await;
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_reactions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0, "reactions must not outlive their conversation");
+    }
+
+    #[tokio::test]
     async fn turn_resolution_pairs_second_assistant_reply_to_the_user() {
         // Regenerate / council case: a second consecutive assistant reply must
         // still pair to the preceding user turn (not return None).
@@ -4541,6 +5042,31 @@ mod tests {
         assert_eq!(reloaded.runnable_kind, RunnableKind::Workflow);
     }
 
+    #[test]
+    fn folder_paths_normalize_to_one_spelling() {
+        // The reported bug: an imported thread's cwd and a native run's folder
+        // differ only in punctuation and became two sidebar project folders.
+        assert_eq!(
+            normalize_folder_path("/Users/j/Code/ryu/"),
+            normalize_folder_path("/Users/j/Code/ryu")
+        );
+        assert_eq!(
+            normalize_folder_path("/Users/j//Code/ryu"),
+            "/Users/j/Code/ryu"
+        );
+        assert_eq!(normalize_folder_path("  /Users/j/Code/ryu  "), "/Users/j/Code/ryu");
+        // Roots survive: stripping these would leave a string that names nothing.
+        assert_eq!(normalize_folder_path("/"), "/");
+        assert_eq!(normalize_folder_path("C:\\"), "C:\\");
+        // Case is preserved — the leaf is the project's display name.
+        assert_eq!(normalize_folder_path("/Users/J/Code"), "/Users/J/Code");
+        // Windows separators survive as backslashes.
+        assert_eq!(
+            normalize_folder_path("C:\\Users\\j\\Code\\ryu\\"),
+            "C:\\Users\\j\\Code\\ryu"
+        );
+    }
+
     #[tokio::test]
     async fn run_metadata_round_trips_and_migration_is_idempotent() {
         // Build a store via the normal path (exercises init_schema including the
@@ -4648,6 +5174,75 @@ mod tests {
         // Verify via get_participants.
         let final_list = store.get_participants("conv-multi").await.unwrap();
         assert_eq!(final_list, vec!["agent-beta"]);
+    }
+
+    // ── Crash recovery: turns the node died in the middle of ──────────────────
+
+    #[tokio::test]
+    async fn reconcile_interrupted_runs_marks_the_truncated_trailing_turn() {
+        let store = ConversationStore::open_in_memory().unwrap();
+
+        // A conversation the node died mid-turn on: the assistant row holds only
+        // what the incremental flush had written, and the run is still "running".
+        store
+            .append_message("conv-crash", "user", "write me an essay", None, None, None)
+            .await
+            .unwrap();
+        let truncated = store
+            .append_message("conv-crash", "assistant", "Sure — here is the fi", None, None, None)
+            .await
+            .unwrap();
+        store.set_run_status("conv-crash", "running").await.unwrap();
+
+        // A conversation that finished cleanly must be left alone.
+        store
+            .append_message("conv-ok", "user", "hi", None, None, None)
+            .await
+            .unwrap();
+        let finished = store
+            .append_message("conv-ok", "assistant", "hello!", None, None, None)
+            .await
+            .unwrap();
+        store.set_run_status("conv-ok", "completed").await.unwrap();
+
+        let (runs, flagged) = {
+            let conn = store.conn.lock().await;
+            ConversationStore::reconcile_interrupted_runs(&conn).unwrap()
+        };
+        assert_eq!(runs, 1, "only the stuck run is reconciled");
+        assert_eq!(flagged, 1, "only its trailing assistant row is flagged");
+
+        let crashed = store.get_messages("conv-crash").await.unwrap();
+        assert!(
+            !crashed[0].interrupted,
+            "the user turn is never marked interrupted"
+        );
+        assert!(
+            crashed[1].interrupted && crashed[1].id == truncated,
+            "the trailing assistant row carries the marker"
+        );
+        // The text that was never written is gone — the marker is what makes the
+        // truncation visible, it does not restore it.
+        assert_eq!(crashed[1].content, "Sure — here is the fi");
+
+        let ok = store.get_messages("conv-ok").await.unwrap();
+        assert!(
+            !ok.iter().any(|m| m.interrupted),
+            "a completed run's rows are untouched"
+        );
+        assert_eq!(ok[1].id, finished);
+
+        let summaries = store.list_conversations().await.unwrap();
+        let crashed_summary = summaries.iter().find(|c| c.id == "conv-crash").unwrap();
+        assert_eq!(crashed_summary.run_status.as_deref(), Some("interrupted"));
+
+        // Idempotent: a second boot flips nothing further (there is no `running`
+        // row left) and does not re-flag anything.
+        let (runs2, flagged2) = {
+            let conn = store.conn.lock().await;
+            ConversationStore::reconcile_interrupted_runs(&conn).unwrap()
+        };
+        assert_eq!((runs2, flagged2), (0, 0));
     }
 
     #[tokio::test]

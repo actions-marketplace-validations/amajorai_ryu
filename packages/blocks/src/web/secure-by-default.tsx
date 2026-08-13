@@ -11,22 +11,24 @@ import { SectionTitle, sectionSubtitleClass } from "./sections.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
 
 /**
- * The risk contrast: an agent can work in a demo and still lack the controls
- * required for production. Styled like the rest of the landing page.
+ * The sign-off contrast, written for the partner who has to answer the client —
+ * so the language here is deliberately plain. "Audit", "governance" and
+ * "observability" are the words that lose this reader; "we show you exactly
+ * what it did" is the same claim they will actually act on.
  */
 
 const RISKS = [
-	"No record of what the agent did or who approved it",
-	"Customer data leaves for an outside provider on every call",
-	"No budget ceiling means next month's bill is unknown",
-	"Keeping the runtime alive becomes a platform team's full-time job",
+	"No record of what was done, or who said yes to it",
+	"Client details leave the firm on every request",
+	"No spending ceiling, so nobody can promise what next month costs",
+	"Keeping it all running turns into somebody's second job",
 ] as const;
 
 const DEFENSES = [
-	"Every call, tool use, and approval recorded in order",
-	"PII redacted before a request leaves for an outside provider",
-	"Per-agent and per-team budget ceilings enforced at request time",
-	"Writes and risky tool calls can wait for human approval",
+	"Every step written down in order, readable by a partner",
+	"Personal details stripped out before a request leaves the firm",
+	"A spending ceiling per person and per team, enforced as work runs",
+	"Anything risky waits for a person to say yes",
 ] as const;
 
 function RiskCard() {
@@ -34,10 +36,10 @@ function RiskCard() {
 		<div className={landingMutedCardSurfaceClass}>
 			<AlertTriangle className="size-5 text-foreground" strokeWidth={1.75} />
 			<p className="mt-6 font-semibold text-muted-foreground/60 text-xs uppercase tracking-widest">
-				What stops production
+				Why it never ships
 			</p>
 			<h3 className="mt-2 font-medium text-foreground text-xl tracking-tight md:text-2xl">
-				The agent works, but nobody can sign off
+				It works, and still nobody will sign off
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{RISKS.map((risk) => (
@@ -76,7 +78,7 @@ function DefenseCard() {
 					tone.title
 				)}
 			>
-				Governed by default
+				You can answer the client
 			</h3>
 			<ul className="mt-6 space-y-3">
 				{DEFENSES.map((defense) => (
@@ -101,10 +103,10 @@ export default function SecureByDefault() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-5xl">
 				<StaggerLines className="max-w-2xl">
-					<SectionTitle title="Governance is the deal" />
+					<SectionTitle title="We show you exactly what it did" />
 					<p className={sectionSubtitleClass}>
-						Ryu puts audit, redaction, budgets, and approvals in the path of
-						every call.
+						A plain record of every action, a ceiling on every cost, and a
+						person in the loop wherever it matters.
 					</p>
 				</StaggerLines>
 
@@ -123,15 +125,15 @@ export default function SecureByDefault() {
 						className="size-4 shrink-0 text-muted-foreground"
 						strokeWidth={1.5}
 					/>
-					The control layer that makes a real deployment possible.
+					This is the part that lets you put your name on the output.
 				</p>
 
 				<div className="mt-16 md:mt-20">
 					<StaggerLines className="max-w-2xl">
-						<SectionTitle title="One gateway in front of every agent" />
+						<SectionTitle title="Everything passes one checkpoint" />
 						<p className={sectionSubtitleClass}>
-							Routing, firewall, PII/DLP, budgets, and audit sit between your
-							agents and the model providers.
+							Records, redaction, spending limits and approvals sit between the
+							work and the outside world. Requests do not route around them.
 						</p>
 					</StaggerLines>
 					<Reveal>

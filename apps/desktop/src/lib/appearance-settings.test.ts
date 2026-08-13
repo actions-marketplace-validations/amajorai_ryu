@@ -22,6 +22,8 @@ describe("appearance settings registry", () => {
 			"appearance.expand-file-edits",
 			"appearance.expand-commands",
 			"appearance.pin-user-message",
+			"appearance.seasonal-effects",
+			"appearance.seasonal-theme",
 		]) {
 			expect(ids.has(id)).toBe(true);
 		}
@@ -47,6 +49,7 @@ describe("appearance settings registry", () => {
 			"appearance.usage-bar",
 			"appearance.diff-view",
 			"appearance.file-tree",
+			"appearance.timezone",
 		]) {
 			expect(ids.has(id)).toBe(true);
 		}

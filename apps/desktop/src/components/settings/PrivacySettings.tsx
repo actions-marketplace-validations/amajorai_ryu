@@ -59,6 +59,7 @@ import {
 	setSupportAccessLocalExpiry,
 } from "@/src/lib/api/preferences.ts";
 import { setCrashReportingEnabled } from "@/src/lib/crash.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 import { AnalyticsInspector } from "./AnalyticsInspector.tsx";
 import {
 	DISCLOSURE_ACK_KEY,
@@ -508,7 +509,7 @@ export function PrivacySettings() {
 						}
 						description={
 							supportAccess && supportExpiry > 0
-								? `Active until ${new Date(supportExpiry).toLocaleString()}. Diagnostics are sent only over your private, encrypted connection.`
+								? `Active until ${formatDateTime(supportExpiry)}. Diagnostics are sent only over your private, encrypted connection.`
 								: "Requires your private, encrypted connection to be turned on so diagnostics stay on your own network."
 						}
 						title="Grant local support access"

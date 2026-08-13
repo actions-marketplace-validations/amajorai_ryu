@@ -19,6 +19,7 @@
 
 import type { ChatStatus, UIMessage } from "ai";
 import type { ComponentProps } from "react";
+import type { ChatDisplayPrefs } from "../../desktop/agent-elements/chat-display-prefs.tsx";
 import { ChatDisplayPrefsProvider } from "../../desktop/agent-elements/chat-display-prefs.tsx";
 import { MessageList } from "../../desktop/agent-elements/message-list.tsx";
 
@@ -43,6 +44,36 @@ export interface IslandTranscriptProps {
 	toolRenderers?: MessageListProps["toolRenderers"];
 }
 
+/**
+ * Module-level so the context value has a stable identity — an inline literal
+ * re-renders every transcript consumer on every island render, since a context
+ * read is not gated by `memo()`.
+ */
+const ISLAND_DISPLAY_PREFS: Partial<ChatDisplayPrefs> = {
+	density: "compact",
+	// Long bash output and file diffs would swallow the whole island; they stay
+	// collapsed behind their disclosure here regardless of the desktop's own
+	// setting.
+	expandCommands: false,
+	expandFileEdits: false,
+	pinUserMessage: false,
+	// NOT inherited: Detail level "None" (`hideToolDetail`). Deliberate, and it
+	// has to be — the island is a separate Electron process that cannot read the
+	// desktop's localStorage, where `ryu:hide-tool-detail` lives. The only pref
+	// that does cross is `island-appearance`, and that is a window-material
+	// contract (changing it recreates the window), not a transcript channel.
+	//
+	// Leaving it at the provider default (`false`, i.e. tool rows shown) is also
+	// the right *product* answer, not just the cheap one: this surface already
+	// pins its own detail prefs above, and the island is where the user watches a
+	// background agent work. A pure messaging view there would show a turn
+	// running with nothing on screen at all.
+	//
+	// Making it follow the desktop is a cross-process feature, not a line here:
+	// the desktop would have to mirror the pref into Core's KV store, plus a new
+	// IPC channel + preload + renderer hook. That belongs in its own task.
+};
+
 export function IslandTranscript({
 	assistantAvatar,
 	assistantName,
@@ -57,17 +88,7 @@ export function IslandTranscript({
 	toolRenderers,
 }: IslandTranscriptProps) {
 	return (
-		<ChatDisplayPrefsProvider
-			value={{
-				density: "compact",
-				// Long bash output and file diffs would swallow the whole island;
-				// they stay collapsed behind their disclosure here regardless of the
-				// desktop's own setting.
-				expandCommands: false,
-				expandFileEdits: false,
-				pinUserMessage: false,
-			}}
-		>
+		<ChatDisplayPrefsProvider value={ISLAND_DISPLAY_PREFS}>
 			<MessageList
 				assistantAvatar={assistantAvatar}
 				assistantName={assistantName}

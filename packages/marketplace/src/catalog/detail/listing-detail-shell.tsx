@@ -36,11 +36,10 @@
 
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { DitherGradient } from "@ryu/ui/components/dither-kit/gradient.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
-import { normalizeDither, opaqueDither } from "../chrome/dither.ts";
-import DitherBanner, { OPPOSITE_DIRECTION } from "../chrome/dither-banner.tsx";
+import AppIcon from "../chrome/app-icon.tsx";
+import DitherBanner from "../chrome/dither-banner.tsx";
 import { safeHttpUrl } from "../safe-url.ts";
 import type { CardDither, CatalogBanner } from "../types.ts";
 
@@ -109,7 +108,12 @@ export function ListingHero({
 	nameBadge,
 	tagline,
 	badges,
+	cacheKey,
 	icon,
+	iconId,
+	iconName,
+	iconUrl,
+	seedId,
 	banner,
 	dither,
 	iconBackground,
@@ -133,32 +137,67 @@ export function ListingHero({
 	 *  chip treatment rather than the page's Badge variants, which assume a
 	 *  neutral surface. */
 	badges?: string[];
-	/** The listing's art, already resolved by the caller (an `AppIcon`, a brand
-	 *  mark, a glyph). Painted on a tile with its own counter-direction wash. */
+	/** Persist the icon bytes under `<id>@<version>` — set it for anything
+	 *  INSTALLED, leave it unset while browsing a catalog. Forwarded verbatim to
+	 *  {@link AppIcon}. */
+	cacheKey?: string | null;
+	/**
+	 * @deprecated Pass the icon DATA (`iconId`/`iconUrl`/`seedId`/`iconName`)
+	 * instead, so the hero resolves the listing's art through the same rules as its
+	 * card. Kept as an escape hatch for the callers that hand-build a REAL mark (a
+	 * realm-specific logo component): a node given here renders INSIDE the hero
+	 * tile, as {@link AppIcon}'s `fallback`, and therefore suppresses the
+	 * generative tile the way an `iconId`/`iconUrl` does — the same role
+	 * `brandIcon` plays on `StoreCatalogCard`.
+	 *
+	 * So do NOT migrate a generic glyph into it. A stock `BotIcon` here is worse
+	 * than nothing: the card drops exactly that glyph in favour of the tile seeded
+	 * from the item's id, and a hero that keeps it becomes the one surface showing
+	 * a listing as a stock symbol instead of as itself.
+	 *
+	 * It is also not a second tile. Passing an `<AppIcon>` here stacks two of them
+	 * — which is exactly what two Installed-tab heroes shipped before the `hero`
+	 * variant existed.
+	 */
 	icon?: ReactNode;
+	/** Icon-primitive id (Iconify `prefix:name`, bare Hugeicons name, `svgl:<slug>`)
+	 *  — the manifest's `icon`, straight through. */
+	iconId?: string | null;
+	/** Display name for the icon's alt text and as its seed of last resort. A
+	 *  STRING, unlike `name`, which is a ReactNode the title row may decorate. */
+	iconName?: string | null;
+	/** Raster logo URL — the manifest's `iconUrl`, straight through. */
+	iconUrl?: string | null;
+	/** Stable seed for the generative tile: ALWAYS the item's unique id, so the
+	 *  hero and the card tile the same app identically. */
+	seedId?: string | null;
 	banner?: CatalogBanner | null;
 	dither?: CardDither | null;
 	iconBackground?: string | null;
 	/** Flat CSS background when there is neither a banner nor a dither. */
 	fallback?: string | null;
 }) {
-	// The tile is the one surface here whose foreground CANNOT adapt: it is
-	// `text-white` because it sits on the hero's own wash, above the scrim, and a
-	// theme-aware glyph colour would be unreadable on a dark banner. So the tile
-	// forces its spec opaque instead of branching on it. Every packaged manifest now
-	// declares a wash that dissolves to transparent; painted as-is, the far end of
-	// this 5rem tile would be whatever the banner behind it happens to be, and a
-	// white glyph on the light end of that disappears. `opaqueDither` re-ramps the
-	// listing's OWN hue, so the tile still carries the app's colour — it just covers
-	// its box. (A caller that passes an `<AppIcon>` as `icon` is already safe: that
-	// component sets its own glyph colour. This protects the raw-glyph callers.)
-	const tileDither = opaqueDither(normalizeDither(dither));
+	// The tile is `AppIcon`'s `hero` variant, not a square painted here. It used to
+	// be the latter, and the cost was structural rather than cosmetic: taking the
+	// art as an opaque ReactNode meant every caller resolved its own icon, so 13 of
+	// 15 heroes never ran the resolution rules their own cards run, and the 2 that
+	// passed an `<AppIcon>` painted its tile INSIDE this one. The variant keeps the
+	// treatment that made this square different — the opaque wash, the fixed white
+	// glyph, the ring and the counter-direction ramp — while the resolution order,
+	// the dither validation and the icon cache come from the one component.
 	return (
 		<div className="relative h-40 shrink-0 overflow-hidden sm:h-44">
+			{/* `live` — the ONE opt-in to a WebGL context in the catalog. A hero is a
+			    single band per open detail pane, which is the only place an
+			    `animated-gradient` banner can animate without instances evicting each
+			    other's contexts; see the tier + budget note in `dither-banner.tsx`.
+			    Cards and rows call the same component without this prop and get the
+			    static paint. */}
 			<DitherBanner
 				banner={banner}
 				dither={dither}
 				fallback={fallback ?? iconBackground ?? null}
+				live
 			/>
 			{/* Scrim: the wash is author-supplied and can land anywhere on the
 			    lightness range, so the title needs a floor it can read against
@@ -170,26 +209,19 @@ export function ListingHero({
 				className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/45 to-transparent"
 			/>
 			<div className="absolute inset-0 flex items-end gap-4 p-5 lg:px-7">
-				<span
-					className={cn(
-						"relative flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-white shadow-lg ring-1 ring-white/25 sm:size-20",
-						tileDither || iconBackground ? undefined : "bg-background/20"
-					)}
-					style={iconBackground ? { background: iconBackground } : undefined}
-				>
-					{tileDither && !iconBackground ? (
-						// Counter-direction wash, so the tile reads as a tile sitting ON
-						// the hero rather than as a hole punched through it.
-						<DitherGradient
-							direction={OPPOSITE_DIRECTION[tileDither.direction ?? "up"]}
-							from={tileDither.from}
-							to={tileDither.to}
-						/>
-					) : null}
-					<span className="relative flex items-center justify-center">
-						{icon}
-					</span>
-				</span>
+				<AppIcon
+					cacheKey={cacheKey}
+					className="size-16 sm:size-20"
+					dither={dither}
+					fallback={icon}
+					iconBackground={iconBackground}
+					iconId={iconId}
+					iconUrl={iconUrl}
+					name={iconName}
+					seedId={seedId}
+					size={34}
+					variant="hero"
+				/>
 				<div className="min-w-0 flex-1 pb-0.5">
 					{/* `truncate` sits on the INNER span, not the h2: the row has to be a
 					    flex line so `nameBadge` keeps its width while the title alone

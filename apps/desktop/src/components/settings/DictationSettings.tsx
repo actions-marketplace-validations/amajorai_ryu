@@ -314,29 +314,34 @@ export function DictationSettings() {
 									value={prefs.postProcess.selection}
 								/>
 							</SettingsItem>
-							<SettingsItem
-								actions={
-									<Textarea
-										aria-label="Dictation cleanup prompt"
-										className="min-h-24 w-72 text-sm"
-										onChange={(e) =>
-											writePrefs({
-												...prefs,
-												postProcess: {
-													...prefs.postProcess,
-													prompt: e.target.value,
-												},
-											})
-										}
-										value={prefs.postProcess.prompt}
-									/>
-								}
-								description="Instructions for the cleanup model. It sees this plus your raw transcript."
-								title="Cleanup prompt"
-							/>
 						</>
 					) : null}
 				</SettingsGroup>
+				{/* Outside the group on purpose: a prompt is a tall text block, so it
+				    goes `bare` — the row to itself, full width — instead of a 288px
+				    box crammed into the row's right column on top of the card fill. */}
+				{prefs.postProcess.enabled ? (
+					<SettingsItem
+						bare
+						description="Instructions for the cleanup model. It sees this plus your raw transcript."
+						title="Cleanup prompt"
+					>
+						<Textarea
+							aria-label="Dictation cleanup prompt"
+							className="min-h-24 text-sm"
+							onChange={(e) =>
+								writePrefs({
+									...prefs,
+									postProcess: {
+										...prefs.postProcess,
+										prompt: e.target.value,
+									},
+								})
+							}
+							value={prefs.postProcess.prompt}
+						/>
+					</SettingsItem>
+				) : null}
 			</SettingsSection>
 
 			<SettingsSection
@@ -438,26 +443,29 @@ export function DictationSettings() {
 									value={prefs.ask.selection}
 								/>
 							</SettingsItem>
-							<SettingsItem
-								actions={
-									<Textarea
-										aria-label="Agent-ask prompt"
-										className="min-h-24 w-72 text-sm"
-										onChange={(e) =>
-											writePrefs({
-												...prefs,
-												ask: { ...prefs.ask, prompt: e.target.value },
-											})
-										}
-										value={prefs.ask.prompt}
-									/>
-								}
-								description="Instructions for the ask agent. It sees this plus your spoken question."
-								title="Ask prompt"
-							/>
 						</>
 					) : null}
 				</SettingsGroup>
+				{/* `bare`, outside the group — same reason as the cleanup prompt. */}
+				{prefs.ask.enabled ? (
+					<SettingsItem
+						bare
+						description="Instructions for the ask agent. It sees this plus your spoken question."
+						title="Ask prompt"
+					>
+						<Textarea
+							aria-label="Agent-ask prompt"
+							className="min-h-24 text-sm"
+							onChange={(e) =>
+								writePrefs({
+									...prefs,
+									ask: { ...prefs.ask, prompt: e.target.value },
+								})
+							}
+							value={prefs.ask.prompt}
+						/>
+					</SettingsItem>
+				) : null}
 			</SettingsSection>
 
 			{prefs.ask.enabled && prefs.ask.selection.agent_id.trim() ? (

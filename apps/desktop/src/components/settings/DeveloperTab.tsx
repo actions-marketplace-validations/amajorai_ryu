@@ -13,7 +13,9 @@ import { Switch } from "@ryu/ui/components/switch.tsx";
 import { useCallback, useEffect, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
+import { useMidnightWipe } from "@/src/hooks/useMidnightWipe.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import { channelLabel } from "@/src/lib/channel-brand.ts";
 import {
 	getConsoleBufferText,
 	installConsoleCapture,
@@ -38,6 +40,11 @@ export function DeveloperTab() {
 	const [consoleActive, setConsoleActive] = useState(isConsoleCaptureActive);
 	const [bridge, setBridge] = useState<McpBridgeStatus | null>(null);
 	const activeNode = useActiveNode();
+	// Prerelease-only daily wipe. `supported` is decided in Rust from the running
+	// build's PROFILE, never from the release-channel preference — that one is a
+	// user-settable updater feed, and a stable user pointing it at "Canary" must
+	// not be offered a delete of their real data folder.
+	const midnightWipe = useMidnightWipe();
 
 	const target: ApiTarget = {
 		url: activeNode.url,
@@ -248,6 +255,50 @@ export function DeveloperTab() {
 									{mcpBridgeConfigSnippet(bridge)}
 								</pre>
 							</SettingsItem>
+						) : null}
+					</SettingsGroup>
+				</SettingsSection>
+			) : null}
+
+			{/* Prerelease builds only. OUTSIDE the Developer Mode gate on purpose:
+			    this one deletes data, so the switch that turns it OFF must never
+			    be reachable only through a second toggle. `supported` is false on
+			    stable and dev builds, where the row is hidden rather than disabled
+			    because there is no isolated data folder for it to act on. */}
+			{midnightWipe.status?.supported ? (
+				<SettingsSection
+					caption={`Returns this ${channelLabel(midnightWipe.status.profile)} build to a just-installed state on the first launch of each day, so first-run and onboarding paths get exercised the way a new user meets them. Off by default, stored outside the folder it clears, and it never touches your stable install.`}
+					title="Daily data reset"
+				>
+					<SettingsGroup>
+						<SettingsItem
+							actions={
+								<Switch
+									checked={midnightWipe.status.enabled}
+									id="midnight-wipe"
+									onCheckedChange={(next) => {
+										midnightWipe.setEnabled(next).then((applied) => {
+											if (!applied) {
+												toast.error("Couldn't save that setting");
+												return;
+											}
+											toast.success(
+												next
+													? "Daily reset on — this build's data folder clears at the first launch after midnight"
+													: "Daily reset off"
+											);
+										});
+									}}
+								/>
+							}
+							description={`Deletes everything in ${midnightWipe.status.data_dir} — chats, agents, spaces, installed apps and downloads — at the first launch after midnight. Your encryption key survives so the node still boots, and several missed days still clear it exactly once.${midnightWipe.status.last_wipe_date ? ` Last cleared ${midnightWipe.status.last_wipe_date}.` : ""}`}
+							title="Wipe this data folder at midnight"
+						/>
+						{midnightWipe.error ? (
+							<SettingsItem
+								description={midnightWipe.error}
+								title="Couldn't save that setting"
+							/>
 						) : null}
 					</SettingsGroup>
 				</SettingsSection>

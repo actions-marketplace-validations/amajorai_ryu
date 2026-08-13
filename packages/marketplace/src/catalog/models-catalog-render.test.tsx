@@ -191,11 +191,11 @@ describe("ModelsCatalogSection — list states", () => {
 		expect(html).toContain("Try a different search.");
 	});
 
-	test("installed-only empty state reads differently", () => {
+	test("added-only empty state reads differently", () => {
 		const html = render(
 			makeModelsState({ models: [], installedOnly: true, loading: false })
 		);
-		expect(html).toContain("No installed models yet");
+		expect(html).toContain("No models added yet");
 	});
 });
 

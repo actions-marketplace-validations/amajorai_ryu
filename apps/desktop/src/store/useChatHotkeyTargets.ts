@@ -34,6 +34,11 @@ interface ChatHotkeyHandlers {
 	startVoiceMode: (() => void) | null;
 	/** Interrupt the current turn. Null when this tab owns no stoppable turn. */
 	stop: (() => void) | null;
+	/** Show/hide this chat's bottom dock. Panel open state is ChatPage-local, so
+	 *  it reaches a global hotkey the same way Stop does. */
+	toggleBottomPanel: (() => void) | null;
+	/** Show/hide this chat's right dock. */
+	toggleRightPanel: (() => void) | null;
 }
 
 interface ChatHotkeyTargetsState extends ChatHotkeyHandlers {
@@ -49,6 +54,8 @@ const EMPTY: ChatHotkeyHandlers = {
 	isStreaming: false,
 	stop: null,
 	startVoiceMode: null,
+	toggleBottomPanel: null,
+	toggleRightPanel: null,
 };
 
 export const useChatHotkeyTargets = create<ChatHotkeyTargetsState>((set) => ({

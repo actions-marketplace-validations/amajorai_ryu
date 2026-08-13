@@ -37,6 +37,7 @@
 
 import { updatesCutoffMs } from "@ryu/auth/lib/plans";
 import { getActiveUserId } from "@/lib/auth-client.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 /** localStorage key: `{ accountId, windowEndsAt }` for the active account. */
 const UPDATES_WINDOW_KEY = "ryu.updates-window";
@@ -150,7 +151,7 @@ export function getUpdatesCutoff(): string | null {
  * about the date a user's updates run to.
  */
 export function formatUpdatesCutoff(iso: string): string {
-	return new Date(iso).toLocaleDateString(undefined, {
+	return formatDate(iso, {
 		year: "numeric",
 		month: "long",
 		day: "numeric",

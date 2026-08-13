@@ -39,6 +39,7 @@ import {
 	ServerStack01Icon,
 	Settings01Icon,
 	SidebarLeftIcon,
+	SidebarRightIcon,
 	SidebarTopIcon,
 	Square01Icon,
 	Tag01Icon,
@@ -87,8 +88,8 @@ import {
 	useSyncExternalStore,
 	type WheelEvent,
 } from "react";
-import { TextShimmer } from "@/components/agent-elements/text-shimmer.tsx";
 import { openTabWindow } from "@/lib/tauri-bridge.ts";
+import { isDockableRoutePath } from "@/src/components/panels/dock-panels.ts";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import type {
 	Split,
@@ -109,6 +110,7 @@ import {
 } from "@/src/contributions/tab-icon-registry.ts";
 import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useNodeTabOverride } from "@/src/hooks/useNodeDisplayMode.ts";
+import { useActiveSeason } from "@/src/hooks/useSeasonalEffects.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { useTabCycleHotkeys } from "@/src/hooks/useTabCycleHotkeys.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
@@ -116,7 +118,10 @@ import { setTabSizing, useTabSizing } from "@/src/hooks/useTabSizing.ts";
 import { setTitlebarHidden } from "@/src/lib/decorumTitlebar.ts";
 import { toggleFullscreen, useFullscreen } from "@/src/lib/fullscreen.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { useSidePanelRouteStore } from "@/src/store/useSidePanelRouteStore.ts";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
+import { SeasonalParticles } from "./SeasonalEffects.tsx";
+import { SplitPresetMenuItems } from "./SplitPresetMenu.tsx";
 import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
@@ -508,6 +513,8 @@ function SplitSubmenu({ tab }: { tab: Tab }) {
 							<ContextMenuRadioItem value="rows">Stacked</ContextMenuRadioItem>
 						</ContextMenuRadioGroup>
 						<ContextMenuSeparator />
+						<SplitPresetMenuItems split={split} />
+						<ContextMenuSeparator />
 						{/* Grow the split to 3+ panes: the new pane joins at the end of
 						    the root run, keeping any nested arrangement intact. */}
 						<ContextMenuItem
@@ -569,10 +576,55 @@ function SplitSubmenu({ tab }: { tab: Tab }) {
 								</span>
 							</ContextMenuItem>
 						))}
+						<ContextMenuSeparator />
+						{/* Applying a preset from an unsplit tab lays the shape out over
+						    fresh panes; there is no layout here yet to save. */}
+						<SplitPresetMenuItems split={null} />
 					</>
 				)}
 			</ContextMenuSubContent>
 		</ContextMenuSub>
+	);
+}
+
+/**
+ * "Open in side panel" — show what this tab is showing in the workspace's right
+ * dock instead of (or as well as) a window tab.
+ *
+ * The dock lives inside the chat surface, so the page lands in the focused chat's
+ * right panel; when the current tab is not a chat, the request is held until a
+ * chat tab is next focused rather than being dropped.
+ *
+ * This is the USER-initiated half of the seam and so passes a raw path
+ * (`openPath`); the system-/agent-facing half selects a page KEY from the shared
+ * allowlist instead — see `useSidePanelRouteStore`.
+ */
+function OpenInSidePanelItem({ tab }: { tab: Tab }) {
+	const openPath = useSidePanelRouteStore((s) => s.openPath);
+	const { tabs, activeTabId } = useTabsContext();
+	if (!isDockableRoutePath(tab.path)) {
+		return null;
+	}
+	// The dock lives inside the chat surface, so a request raised from a non-chat
+	// tab is HELD until a chat tab is next focused. Held is the right behaviour
+	// (better than dropping it), but silently held is not: the click would look
+	// dead now and produce a page appearing from nowhere later. Say where it went.
+	const focused = tabs.find((t) => t.id === activeTabId);
+	const dockIsLive = focused?.path.startsWith("/chat") ?? false;
+	return (
+		<ContextMenuItem
+			onClick={() => {
+				openPath(tab.path, tab.title);
+				if (!dockIsLive) {
+					toast.info("Queued for the side panel", {
+						description: "It opens when you switch to a chat tab.",
+					});
+				}
+			}}
+		>
+			<HugeiconsIcon className="size-4" icon={SidebarRightIcon} />
+			Open in side panel
+		</ContextMenuItem>
 	);
 }
 
@@ -720,6 +772,7 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 					<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
 					Open in new window
 				</ContextMenuItem>
+				<OpenInSidePanelItem tab={tab} />
 				<ContextMenuSeparator />
 				<NodeSubmenu tabId={tab.id} />
 				<ContextMenuSeparator />
@@ -860,30 +913,24 @@ function RegularTab({
 								</TooltipContent>
 							</Tooltip>
 						)}
-						{busy && !tab.unloaded ? (
-							<TextShimmer
-								as="span"
-								className="min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none"
-								duration={2}
-							>
-								{tab.title}
-							</TextShimmer>
-						) : (
-							<OverflowTooltip
-								className={cn(
-									"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
-									tab.unloaded && "italic"
-								)}
-								fade
-								forceShow={tab.unloaded}
-								text={tab.title}
-								tooltip={
-									tab.unloaded
-										? `${tab.title} (unloaded — click to reload)`
-										: undefined
-								}
-							/>
-						)}
+						{/* One label in both states: a streaming title shimmers on the
+						    SAME clipped line, so an over-long busy title dissolves at the
+						    edge exactly like a resting one instead of losing the fade. */}
+						<OverflowTooltip
+							className={cn(
+								"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
+								tab.unloaded && "italic"
+							)}
+							fade
+							forceShow={tab.unloaded}
+							shimmer={busy && !tab.unloaded}
+							text={tab.title}
+							tooltip={
+								tab.unloaded
+									? `${tab.title} (unloaded — click to reload)`
+									: undefined
+							}
+						/>
 					</button>
 				</div>
 			</ContextMenuTrigger>
@@ -914,6 +961,7 @@ function RegularTab({
 					<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
 					Open in new window
 				</ContextMenuItem>
+				<OpenInSidePanelItem tab={tab} />
 				<ContextMenuItem disabled={!hasClosedTabs} onClick={restoreTab}>
 					<HugeiconsIcon className="size-4" icon={ArrowTurnBackwardIcon} />
 					Restore closed tab
@@ -1170,6 +1218,8 @@ function SplitBracketHeader({
 					<ContextMenuRadioItem value="rows">Stacked</ContextMenuRadioItem>
 				</ContextMenuRadioGroup>
 				<ContextMenuSeparator />
+				<SplitPresetMenuItems split={split} />
+				<ContextMenuSeparator />
 				<ContextMenuItem onClick={() => unsplit(anyMemberId)}>
 					<HugeiconsIcon className="size-4" icon={ArrowShrinkIcon} />
 					Unsplit
@@ -1235,6 +1285,7 @@ function buildSegments(
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 export function TitleBar() {
 	const { open } = useSidebar();
+	const activeSeason = useActiveSeason();
 	// At phone widths the sidebar is never docked, so the strip always has to
 	// leave room for the fixed nav cluster (see Layout) — but only for the two
 	// buttons it keeps there, not the full desktop four-button + traffic-light
@@ -1561,6 +1612,23 @@ export function TitleBar() {
 							"pointer-events-none absolute left-0 w-full bg-background",
 							floatingChromeOffset ? "-top-2 h-14" : "top-0 h-12"
 						)}
+					/>
+				)}
+				{/* Seasonal particles drift down the bar on holidays. They sit ABOVE
+				    the background layer and BELOW the z-10 controls row, so they never
+				    cover a tab label, and they fade out towards the bottom edge so the
+				    bar does not end in a hard line of emoji. */}
+				{activeSeason && (
+					<SeasonalParticles
+						color={activeSeason.color}
+						count={30}
+						emoji={activeSeason.emoji}
+						fadeBottom
+						maxOpacity={1}
+						maxSize={activeSeason.maxSize ?? 30}
+						minOpacity={0}
+						minSize={activeSeason.minSize ?? 1}
+						zIndex={1}
 					/>
 				)}
 				<div

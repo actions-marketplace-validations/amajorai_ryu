@@ -78,12 +78,12 @@ pub struct SeedSpec {
 /// same table, so a row is all it takes for a companion — default-on or opt-in — to
 /// receive its bundle. Adding a 16th companion to a second list is what caused the
 /// bug that function's docs describe; there is no second list.
-fn seed_overrides() -> [SeedSpec; 22] {
+fn seed_overrides() -> [SeedSpec; 25] {
     use crate::plugin_manifest::{
         ACTIVITY_UI_HTML, APPROVALS_UI_HTML, BLUEPRINT_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID,
         CANVAS_UI_HTML, FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML,
         MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, QUESTS_UI_HTML, REASONING_PLUGIN_ID,
-        REASONING_UI_HTML, TUITION_UI_HTML,
+        REASONING_UI_HTML, RLM_UI_HTML, SUBTITLES_UI_HTML, TUITION_UI_HTML,
         SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML, TIMELINE_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
         WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
     };
@@ -153,6 +153,28 @@ fn seed_overrides() -> [SeedSpec; 22] {
             // spawns on the Core auto-run path instead.
             grants: &["social:crud", "hook:side-model", "shell:integrate"],
             ui_code: Some(SOCIAL_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::SUBTITLES_PLUGIN_ID,
+            // Subtitles' sandboxed frame drives its own `ryu-subtitles` sidecar through
+            // the `subtitles:crud` bridge forwarder (`subtitles.request` → the host
+            // re-issues onto Core's `/api/subtitles` public mount, host-direct, the
+            // monitors pattern). The frame has NO network of its own — its CSP is
+            // `connect-src 'none'` and the manifest declares no `csp` widening — so
+            // without this grant the app mounts, renders an empty picker, and every
+            // fetch rejects.
+            //
+            // ONE grant, and that is the whole list: the app needs no side model (its
+            // translation call is the SIDECAR's, made from a process that holds the
+            // gateway token itself) and no shell integration (it opens no chat tab).
+            // A grant it does not use is a grant a compromised frame could.
+            //
+            // The `grants` here must stay SET-EQUAL to the manifest's top-level
+            // `permission_grants`, which is asserted. Core-tier, so it must NOT declare
+            // `sidecar:process` — the Gateway validates and denies that grant at enable;
+            // the sidecar spawns on the Core auto-run path instead.
+            grants: &["subtitles:crud"],
+            ui_code: Some(SUBTITLES_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::MONITORS_PLUGIN_ID,
@@ -247,6 +269,25 @@ fn seed_overrides() -> [SeedSpec; 22] {
             // enable).
             grants: &["learning:crud"],
             ui_code: Some(LEARNING_UI_HTML),
+        },
+        SeedSpec {
+            id: "@ryu/chat-title",
+            // A grants-only spec (no companion UI). It is here because its
+            // context-menu row ("Rename with AI") dispatches through the HTTP host
+            // relay, and THAT path authorises against the stored
+            // `approved_grants` — not, as the sandbox hook path does, against the
+            // manifest's declared `permission_grants`. Without a spec the seed
+            // enables this plugin with `grants: &[]`, so its hook kept working
+            // while the menu row would have 403'd on every existing profile. The
+            // set mirrors the manifest exactly; `backfill_declared_grants` is what
+            // carries it onto records that predate the row.
+            grants: &[
+                "hook:side-model",
+                "conversation:set-title",
+                "preferences:read",
+                "hook:run-self",
+            ],
+            ui_code: None,
         },
         SeedSpec {
             id: crate::plugins::builtins::APPROVALS_PLUGIN_ID,
@@ -356,6 +397,26 @@ fn seed_overrides() -> [SeedSpec; 22] {
                 "mcp:reasoning",
             ],
             ui_code: Some(REASONING_UI_HTML),
+        },
+        SeedSpec {
+            id: crate::plugins::builtins::RLM_PLUGIN_ID,
+            // Its sandboxed frame loads a corpus, browses the outline, asks questions
+            // and reads run traces, driving the `ryu-rlm` sidecar through ONE generic
+            // `rlm.request` forwarder (the Outpost shape) — so the ten sidecar routes
+            // cost one bridge verb and a route added later costs none. Ships a prebuilt
+            // companion UI. Core-tier, so it must NOT declare `sidecar:process` (the
+            // Gateway denies that grant at enable); the sidecar is spawned by the
+            // manifest loader, not by a grant.
+            //
+            // The other three are not the frame's: `hook:side-model` is what lets the
+            // SIDECAR call back for a completion (declared ∩ approved, so it must be
+            // approved here as well as in `host_api.grants` or every query 403s and the
+            // app can read nothing at all), `hook:run-agent` is the turn hook's only
+            // route to the engine (the plugin sandbox has no HTTP), and `mcp:rlm`
+            // registers the app's own MCP server so `rlm__ask` exists for agents and
+            // workflow `mcp` nodes — which is this app's main surface, not a side one.
+            grants: &["rlm:query", "hook:side-model", "hook:run-agent", "mcp:rlm"],
+            ui_code: Some(RLM_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::BLUEPRINT_PLUGIN_ID,
@@ -746,6 +807,14 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     // policy, so a pre-installed record would advertise a feature that could not do
     // anything yet.
     crate::plugin_manifest::REASONING_PLUGIN_ID,
+    // Deep Read. Same shape as Automated Reasoning directly above — an opt-in
+    // companion that DOES carry a compiled-in bundle, so `install_app` sources it via
+    // `compiled_in_ui_code` and Install → Enable from the Store mounts a real UI with
+    // no seeded record. It belongs here for the ordinary reason, plus one specific to
+    // it: enabling the app is what makes a process that reads files out of the user's
+    // home directory available to an agent. That should be a choice someone made, not
+    // a row that was already there.
+    crate::plugins::builtins::RLM_PLUGIN_ID,
     // Tuition and Wire. Both carry a compiled-in companion bundle, so `install_app`
     // sources it via `compiled_in_ui_code` and Install → Enable from the Store mounts
     // a real UI with no seeded record. They belong here for the ordinary reason — a
@@ -763,6 +832,15 @@ pub(crate) const NOT_PRE_INSTALLED: &[&str] = &[
     // publicly under the user's connected accounts. Arriving pre-installed would put
     // a publishing daemon one accidental toggle away on every fresh store.
     crate::plugins::builtins::SOCIAL_PLUGIN_ID,
+    // Subtitles. Same posture as Outpost — an opt-in companion that DOES carry a
+    // compiled-in bundle, so `install_app` sources it via `compiled_in_ui_code` and
+    // Install → Enable from the Store mounts a real UI with no seeded record. The
+    // ordinary reason applies (a fresh machine should not list an app nobody asked for
+    // as *Installed*), and one specific to it: enabling the app is what spawns
+    // `ryu-subtitles`, a process whose whole job is to open files off the user's disk
+    // by path. That is a capability a user should switch on deliberately, not find
+    // already present.
+    crate::plugins::builtins::SUBTITLES_PLUGIN_ID,
     // Blueprint. Same posture as Automated Reasoning above, and for a sharper version
     // of its second reason: the app is not merely inert until someone uses it, it is
     // inert until an *agent* publishes a plan into it. Every plan arrives over

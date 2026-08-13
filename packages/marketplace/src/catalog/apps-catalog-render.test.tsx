@@ -66,7 +66,7 @@ function makeAppsState(over: Partial<AppsCatalogState> = {}): AppsCatalogState {
 		hasNextPage: false,
 		install: () => Promise.resolve(),
 		installFromUrl: () => Promise.resolve(),
-		installing: false,
+		installing: null,
 		items: [],
 		lifecyclePending: false,
 		loading: false,
@@ -199,12 +199,12 @@ describe("AppsCatalogSection — list states", () => {
 		expect(html).toContain("Second one.");
 	});
 
-	test("with an install layer, list cards expose the Install action", () => {
+	test("with an install layer, list cards expose the Add action", () => {
 		const html = render(makeAppsState({ items: [makeItem()] }));
-		expect(html).toContain("Install");
+		expect(html).toContain("Add");
 	});
 
-	test("read-only host (install:null) shows Details, not Install, on cards", () => {
+	test("read-only host (install:null) shows Details, not Add, on cards", () => {
 		const html = render(makeAppsState({ items: [makeItem()] }), {
 			install: null,
 		});
@@ -326,7 +326,7 @@ describe("AppsCatalogSection — community shelf", () => {
 		expect(html).not.toContain("From the community");
 	});
 
-	test("community rows are browse-only — Details, never Install", () => {
+	test("community rows are browse-only — Details, never Add", () => {
 		const html = render(makeAppsState({ items: [] }), {
 			community: makeAppsState({ items: [makeCommunityItem("plugin")] }),
 			variant: "plugins",

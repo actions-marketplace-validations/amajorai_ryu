@@ -94,9 +94,16 @@ use spaces::SpaceStore;
 /// discards it. Holds both the diff (for display) and the live guard (for
 /// apply). The guard is `None` after apply/cleanup; the diff is always present.
 pub struct WorktreeRun {
+    /// The last computed diff. A **cache**, not the truth: while the guard is
+    /// live, `GET /api/worktree/:run_id/diff` recomputes from the worktree and
+    /// refreshes this. It is the answer only once the worktree is gone (applied
+    /// or cleaned up), when there is nothing left to read.
     pub diff: worktree::WorktreeDiff,
     /// Live worktree guard — `Some` until apply is called, then `None`.
     pub guard: Option<worktree::WorktreeGuard>,
+    /// When `diff` was computed. Bounds how often a client can make the node
+    /// shell out for a fresh one (see `WORKTREE_DIFF_MAX_AGE`).
+    pub computed_at: std::time::Instant,
 }
 
 /// Maps `conversation_id` → [`WorktreeRun`]. Populated by `route_chat_stream`
@@ -2628,6 +2635,17 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/conversations/:id/feedback",
             get(get_conversation_feedback_handler),
         )
+        // Emoji reactions on a message. Same shape as feedback above: ONE bulk read
+        // per conversation fetched alongside the transcript (never per message),
+        // plus per-message add/remove.
+        .route(
+            "/api/conversations/:id/reactions",
+            get(get_conversation_reactions_handler),
+        )
+        .route(
+            "/api/conversations/:id/messages/:message_id/reactions",
+            post(add_message_reaction_handler).delete(remove_message_reaction_handler),
+        )
         // What is filling this conversation's context window, by category. Read
         // model for the desktop Context panel; see `sidecar::adapters::context_breakdown`.
         .route(
@@ -2759,6 +2777,13 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route(
             "/api/engine/active",
             get(get_active_engine).post(set_active_engine),
+        )
+        // Which llama.cpp BUILD runs (CPU vs an accelerated one). Distinct from
+        // the engine swap above: that picks the runtime, this picks the backend
+        // the runtime was compiled against. Auto by default.
+        .route(
+            "/api/engine/llamacpp/acceleration",
+            get(get_llamacpp_acceleration).post(set_llamacpp_acceleration),
         )
         // Sandbox (code-execution) backend default. Unlike the engine swap, this
         // is a *default* the agent's `sandbox_exec` tool uses when no per-call
@@ -4098,13 +4123,34 @@ async fn get_preference(
     State(state): State<ServerState>,
     Path(key): Path<String>,
 ) -> axum::response::Response {
+    // The node-wide default selection has a built-in value (flagship agent on the
+    // bundled local Gemma), served HERE rather than seeded into the store: every
+    // client — the composer's seed chain, the Defaults dialog, plugins — reads the
+    // preference through this one route, so a read-default reaches all of them
+    // while still letting a cleared preference genuinely return to the default.
+    let default_value = |key: &str| -> Option<String> {
+        (key == crate::agent_selection::GLOBAL_SELECTION_PREF)
+            .then(|| serde_json::to_string(&crate::agent_selection::builtin_default_selection()).ok())
+            .flatten()
+    };
     match state.preferences.get(&key).await {
+        Ok(Some(value)) if value.trim().is_empty() => {
+            let value = default_value(&key)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
+        }
         Ok(Some(value)) => {
             (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
         }
         // An unset key is not an error for a KV store: return 200 with a null
         // value so clients reading optional prefs don't generate console 404 noise.
-        Ok(None) => (StatusCode::OK, Json(json!({ "key": key, "value": null }))).into_response(),
+        Ok(None) => {
+            let value = default_value(&key)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(json!({ "key": key, "value": value }))).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -6405,6 +6451,26 @@ async fn run_chat_with_hooks(
     crate::sidecar::adapters::sse_response(Body::from_stream(stream))
 }
 
+/// Query for the ACP-config probe: the caller's current config-option picks.
+#[derive(Default, serde::Deserialize)]
+struct AcpConfigQuery {
+    /// A JSON object of `{ configOptionId: valueId }` the probe should apply to
+    /// its throwaway session before reading what the agent advertises.
+    ///
+    /// One opaque parameter rather than "every query key is a selection": config
+    /// option ids and values are agent-defined strings, so a scheme that reads
+    /// stray query params as selections would turn any future unrelated param
+    /// (a cache-buster, a trace id) into a bogus write to the agent.
+    selections: Option<String>,
+}
+
+/// Parse an `AcpConfigQuery::selections` blob. Unparseable ⇒ no selections, which
+/// degrades to the plain `session/new` answer rather than failing the request.
+fn parse_acp_selections(raw: Option<&str>) -> crate::sidecar::adapters::acp::SessionSelections {
+    raw.and_then(|s| serde_json::from_str::<std::collections::BTreeMap<String, String>>(s).ok())
+        .unwrap_or_default()
+}
+
 /// `GET /api/agents/:id/acp-config` — the agent's advertised ACP session config.
 ///
 /// Opens a throwaway ACP session (no prompt) and returns `{ modes, models,
@@ -6412,17 +6478,22 @@ async fn run_chat_with_hooks(
 /// `null` when unsupported). This is the data the desktop's per-agent permission
 /// mode / reasoning effort / model pickers are built from — fully agent-driven,
 /// nothing hardcoded. Non-ACP agents return all-null. Cached per spawn command.
+///
+/// `?selections={"model":"…"}` applies those picks to the probe session first, so
+/// the answer includes options the agent only offers for that selection (an
+/// agent's option set can depend on its model — see `probe_acp_config_with`).
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/acp-config",
     tag = "Agents",
     summary = "Get an agent's ACP configuration",
-    params(("id" = String, Path)),
+    params(("id" = String, Path), ("selections" = Option<String>, Query)),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn acp_config(
     State(state): State<ServerState>,
     Path(agent_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<AcpConfigQuery>,
 ) -> axum::response::Response {
     let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
         &agent_id,
@@ -6440,7 +6511,8 @@ async fn acp_config(
         .into_response();
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    match crate::sidecar::adapters::acp::probe_acp_config(spawn_cmd, cwd).await {
+    let selections = parse_acp_selections(query.selections.as_deref());
+    match crate::sidecar::adapters::acp::probe_acp_config_with(spawn_cmd, cwd, selections).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -7079,6 +7151,18 @@ async fn agent_update(
 struct AgentCapabilitiesQuery {
     #[serde(default)]
     model: Option<String>,
+    /// The caller's ACP config-option picks, same shape and purpose as
+    /// [`AcpConfigQuery::selections`].
+    ///
+    /// Load-bearing for the reasoning flag: `reasoning` is derived from whether
+    /// the probe reported a thought-level option, and an agent whose reasoning
+    /// option only exists for some models advertises none on its default one.
+    /// Without the picks this endpoint would answer `reasoning: false` for a
+    /// model that reasons — and the composer HIDES a reasoning option whenever
+    /// this says false, so the two answers must be probed with the same
+    /// selections or they contradict each other.
+    #[serde(default)]
+    selections: Option<String>,
 }
 
 /// Resolve the model ref to probe for capability detection: an explicit query
@@ -7135,6 +7219,7 @@ async fn agent_capabilities(
     use crate::model_catalog::capabilities::{self as caps, CapabilityReport, DetectedCaps};
 
     let overrides = caps::load_override(&agent_id);
+    let acp_selections = parse_acp_selections(query.selections.as_deref());
     let model_ref = resolve_capability_model_ref(&state, &agent_id, query.model).await;
     let local_detected = model_ref.as_deref().and_then(caps::detect_local);
 
@@ -7149,8 +7234,12 @@ async fn agent_capabilities(
     .await
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // Same selections the composer's `/acp-config` read used, so the
+        // reasoning flag and the advertised options describe the SAME session.
         let (detected, source) =
-            match crate::sidecar::adapters::acp::probe_acp_config(spawn_cmd, cwd).await {
+            match crate::sidecar::adapters::acp::probe_acp_config_with(spawn_cmd, cwd, acp_selections)
+                .await
+            {
                 Ok(v) => {
                     let acp = DetectedCaps {
                         tools: true,
@@ -7254,7 +7343,10 @@ async fn set_agent_capabilities(
     agent_capabilities(
         State(state),
         Path(agent_id),
-        axum::extract::Query(AgentCapabilitiesQuery { model: None }),
+        axum::extract::Query(AgentCapabilitiesQuery {
+            model: None,
+            selections: None,
+        }),
     )
     .await
 }
@@ -7696,17 +7788,93 @@ async fn worktree_diff_handler(
     if let Err(resp) = require_conversation_access_if_known(&state, &caller, &run_id, false).await {
         return resp;
     }
-    let store = state.worktree_diffs.lock().await;
-    match store.get(&run_id) {
-        Some(run) => {
-            Json(serde_json::to_value(&run.diff).unwrap_or(serde_json::json!({}))).into_response()
+
+    // Snapshot what we need and DROP the lock before shelling out — the git read
+    // below is slow enough to stall every other run's worktree bookkeeping if it
+    // were held across it. Same discipline as `worktree_status_handler`.
+    let snapshot = {
+        let store = state.worktree_diffs.lock().await;
+        let Some(run) = store.get(&run_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no diff found for run", "run_id": run_id })),
+            )
+                .into_response();
+        };
+        let live = run.guard.as_ref().map(|g| {
+            let base = if g.base_hash.is_empty() {
+                "HEAD".to_string()
+            } else {
+                g.base_hash.clone()
+            };
+            (g.path.clone(), base)
+        });
+        (live, run.diff.clone(), run.computed_at.elapsed())
+    };
+    let (live, cached, age) = snapshot;
+
+    // `run.diff` was computed when the run ended. Anything that touched the
+    // worktree since — the user committing, resetting or discarding from a
+    // terminal, another tool, a later turn — makes it fiction, and it stayed on
+    // screen as "+N −M" long after the change was gone. So while the worktree is
+    // still live, RE-READ it; the stored diff is the answer only once the
+    // worktree has been applied/removed and there is nothing left to read.
+    //
+    // Throttled: the recompute stages the run's own (ephemeral, Ryu-created)
+    // worktree index and walks every changed file, so a client that asked on a
+    // tight loop would make the node shell out on a tight loop. Well under any
+    // interval a UI polls at, far above per-keystroke.
+    const WORKTREE_DIFF_MAX_AGE: std::time::Duration = std::time::Duration::from_millis(1500);
+    let Some((path, base)) = live.filter(|_| age >= WORKTREE_DIFF_MAX_AGE) else {
+        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({}))).into_response();
+    };
+
+    let read = |path: std::path::PathBuf, base: String| async move {
+        tokio::task::spawn_blocking(move || worktree::worktree_diff(&path, &base))
+            .await
+            .ok()
+    };
+
+    let Some(mut fresh) = read(path.clone(), base.clone()).await else {
+        // The blocking task panicked or was cancelled — answer with what we had
+        // rather than failing the read.
+        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({}))).into_response();
+    };
+
+    // `worktree_diff` answers "no changes" for a git FAILURE as well as for a
+    // genuinely clean tree, and the failure is reachable here: staging takes
+    // `index.lock`, so two reads arriving together (a focus refetch landing on
+    // top of the turn-end invalidation, or a second client) can collide and one
+    // comes back empty. Accepting that would hide the Changes section and its
+    // Apply / Open PR buttons for a worktree that still holds the run's work.
+    //
+    // So "everything disappeared" is CONFIRMED before it is believed — read once
+    // more, and take the empty answer only if it repeats. A lock collision does
+    // not survive the retry; a tree the user really did reset does. Note this is
+    // not a "keep the old number" fallback: that would be the very staleness this
+    // handler exists to end.
+    if !fresh.has_changes && cached.has_changes {
+        match read(path, base).await {
+            Some(second) => fresh = second,
+            None => {
+                return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({})))
+                    .into_response();
+            }
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "no diff found for run", "run_id": run_id })),
-        )
-            .into_response(),
     }
+
+    // Write the fresh diff back so `apply` and the throttle both see it. The
+    // entry can have been removed (applied) while we were shelling out; that is
+    // fine, the read still answers.
+    {
+        let mut store = state.worktree_diffs.lock().await;
+        if let Some(run) = store.get_mut(&run_id) {
+            run.diff = fresh.clone();
+            run.computed_at = std::time::Instant::now();
+        }
+    }
+
+    Json(serde_json::to_value(&fresh).unwrap_or(serde_json::json!({}))).into_response()
 }
 
 #[utoipa::path(
@@ -8674,19 +8842,29 @@ async fn with_github_token(
 /// Merged Ryu Marketplace plugin catalog: built-in manifests + marketplace items +
 /// legacy registry, deduped by id. Used by `list_apps_catalog` and the marketplace
 /// browse path.
-/// Catalog entries for every built-in APP — a compiled fixture that ships a Companion
-/// runnable — derived from `BUILTIN_MANIFESTS` once. They re-classify default-off Core
-/// apps (Canvas/Whiteboard/Meetings/Clips/…) that the open git catalog lists as bare
-/// plugin cards with empty `kinds`: mapped through `plugin_manifest_to_entry` they carry
-/// the companion `kinds`, the explicit `type:"app"`, and the `runnables` the
-/// preview needs, and (placed above the marketplace/git groups) they win the id dedup.
-/// Internal system fixtures (firewall/routing/…) have NO Companion runnable and are
+/// Catalog entries for every built-in APP — a compiled fixture that claims a UI
+/// DESTINATION ([`manifest_declares_destination`]) — derived from `BUILTIN_MANIFESTS`
+/// once. They re-classify default-off Core apps (Canvas/Whiteboard/Meetings/Clips/…)
+/// that the open git catalog lists as bare plugin cards with empty `kinds`: mapped
+/// through `plugin_manifest_to_entry` they carry the explicit `type:"app"` and the
+/// `runnables` the preview needs, and (placed above the marketplace/git groups) they
+/// win the id dedup.
+///
+/// This filter and the `type` stamp in `plugin_manifest_to_entry` MUST use the same
+/// predicate, and that is why both call the one helper. When this group was
+/// companion-only while a non-companion app (Browser/Simulator/CRM/UGC, or a
+/// route-claiming app like Dashboards/Drafts/Mission Control) was correctly stamped
+/// `type:"app"` elsewhere, the app was still excluded from the group that outranks
+/// the remote sources — so the open catalog's bare plugin card won its id and the
+/// listing reappeared in the Plugins tab anyway.
+///
+/// Internal system fixtures (firewall/routing/…) claim no destination and are still
 /// excluded, so this never over-exposes non-app plugins in the store.
 static BUILTIN_APP_ENTRIES: std::sync::LazyLock<Vec<serde_json::Value>> =
     std::sync::LazyLock::new(|| {
         crate::plugin_manifest::PluginManifestLoader::load_builtins()
             .iter()
-            .filter(|m| m.runnables.iter().any(|r| r.kind.as_str() == "companion"))
+            .filter(|m| manifest_declares_destination(m))
             .map(plugin_manifest_to_entry)
             .collect()
     });
@@ -9303,6 +9481,20 @@ fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
         "builtIn".to_owned(),
         json!(crate::plugins::builtins::find_system_plugin(&m.id).is_some()),
     );
+    // Publisher identity, matching the card projection in `plugin_manifest_to_entry`
+    // and keyed on the same provenance predicate `reviewed` above is (camelCase here
+    // because this payload is camelCase — see `builtIn`).
+    //
+    // Emitted ONLY when it is true, and that is not a style choice: the hero treats
+    // the detail as authoritative the moment `orgVerified !== undefined` and then
+    // ignores the card's flag entirely. Emitting `false` for every third-party
+    // listing would therefore ERASE a check a hosted marketplace card legitimately
+    // carried, on the exact screen where it matters most. Absent means "this payload
+    // knows nothing about it — keep what the card said".
+    if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
+        obj.insert("orgVerified".to_owned(), json!(true));
+        obj.insert("orgVerifiedTier".to_owned(), json!("official"));
+    }
     merge_plugin_contract_fields(&mut obj, m);
 
     // The API surface is projected from the manifest's own JSON, through the exact
@@ -9317,6 +9509,76 @@ fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
         obj.insert("readme".to_owned(), json!(readme));
     }
     Some(serde_json::Value::Object(obj))
+}
+
+/// True when a client route is a TOP-LEVEL path — one non-empty segment, e.g.
+/// `/drafts`. Deliberately the same shape the desktop's `COMPANION_ALIAS` catch-all
+/// matches (`/^\/[^/]+$/`, apps/desktop/src/contributions/builtins.ts).
+///
+/// Core cannot know which routes the desktop shell registers, so "a top-level path
+/// the item INTRODUCES" can only be approximated from here by segment count. That is
+/// a layering fact, not a shortcut: the shell owns `/library`, `/settings`, `/store`
+/// and friends, and every one of them is claimed unconditionally, so no item can
+/// introduce a top-level path that the shell already owns. It is exact for every
+/// manifest shipped today and the discriminating case (`/library/memory`) is pinned
+/// by test.
+pub(crate) fn is_top_level_route(target: &str) -> bool {
+    let trimmed = target.trim();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    !rest.is_empty() && !rest.contains('/')
+}
+
+/// True when a manifest claims a UI **destination** — somewhere the user navigates TO
+/// that does not exist while the item is uninstalled. This is THE app-vs-plugin
+/// predicate; anything else is a plugin.
+///
+/// Exactly three manifest keys mint a destination, and no others:
+///
+/// 1. `runnables[].kind == "companion"` — a companion window backed by the item's own
+///    sandboxed `ui/` bundle.
+/// 2. a non-empty `contributes.dock_panels` — a workspace tab, in ANY `panel` mode.
+///    `panel: "native"` counts: the React component ships in the shell, but "the tab's
+///    existence, label and placement become the app's declaration, so disabling the
+///    app removes the tab" (packages/app-host/src/views.ts). Browser, Simulator, CRM
+///    and UGC are apps this way.
+/// 3. `contributes.sidebar_buttons[].target` pointing at a TOP-LEVEL path
+///    (`/dashboard`, `/drafts`, `/mission-control`). The shell mints that route from
+///    the live contributions feed and tears it down when the app is disabled
+///    (apps/desktop/src/contributions/app-shell-routes.ts, whose first line reads
+///    "Routes for shell pages an APP owns").
+///
+/// Three things are deliberately NOT evidence, because they are where the question
+/// used to get argued:
+///
+/// - **A sidecar is not evidence.** `@ryu/docling`, `@ryu/markitdown`, `@ryu/mineru`
+///   and `@ryu/unstructured` each ship a Python sidecar and are four interchangeable
+///   providers of ONE capability (`document.parse`) with no contributions at all.
+///   Nobody opens Docling. They are plugins.
+/// - **The package directory is not the taxonomy.** `apps-store/` is a PACKAGING root
+///   (items published as their own satellite repo because they carry an
+///   out-of-process backend); 20 of its members are plugins by function.
+/// - **`views` / `sidebar_sections` / `store_tabs` are content, not destinations.** A
+///   view renders inside a companion or a `panel:"view"` dock panel; a sidebar
+///   section is rows inside a list the shell already draws. A SUB-path target is a
+///   link for the same reason: `@ryu/memory` targets `/library/memory`, and `/library`
+///   is registered unconditionally by the shell, so Memory decorates a page it does
+///   not own — it stays a plugin.
+fn manifest_declares_destination(m: &crate::plugin_manifest::PluginManifest) -> bool {
+    if m.runnables.iter().any(|r| r.kind.as_str() == "companion") {
+        return true;
+    }
+    let Some(contributes) = m.contributes.as_ref() else {
+        return false;
+    };
+    if !contributes.dock_panels.is_empty() {
+        return true;
+    }
+    contributes
+        .sidebar_buttons
+        .iter()
+        .any(|b| is_top_level_route(&b.target))
 }
 
 /// Map a loaded [`crate::plugin_manifest::PluginManifest`] to a Plugins-catalog
@@ -9337,10 +9599,14 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
             })
             .collect()
     };
-    // Explicit app-vs-plugin discriminator: an app ships a Companion UI surface;
-    // everything else is a plugin. Emitted so the browse client no longer has to
-    // derive app-ness from `kinds.contains("companion")`.
-    let is_app = kinds.iter().any(|k| *k == "companion");
+    // Explicit app-vs-plugin discriminator: an app claims a UI DESTINATION (a
+    // companion window, a workspace dock tab, or a top-level route) — everything
+    // else is a plugin. See `manifest_declares_destination` for why those three keys
+    // and no others. Emitted so the browse client no longer has to derive app-ness
+    // from `kinds.contains("companion")`, which is the same rule minus dock panels
+    // and route claims — i.e. the rule that filed Browser, Simulator, CRM, UGC,
+    // Dashboards, Drafts and Mission Control as plugins.
+    let is_app = manifest_declares_destination(m);
     let mut entry = json!({
         "id": m.id,
         "name": m.name,
@@ -9414,6 +9680,28 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         // lifecycle would then refuse to back up.
         if crate::plugins::builtins::is_mandatory(&m.id) {
             obj.insert("mandatory".to_owned(), json!(true));
+        }
+        // Publisher identity — the blue check beside the NAME. Server-DERIVED, never
+        // a manifest claim, for the same reason `mandatory` above is: a listing that
+        // could author its own verification would badge itself.
+        //
+        // The predicate is PROVENANCE (`is_compiled_in_manifest`: the manifest ships
+        // inside this binary), the same discriminator `local_plugin_detail` already
+        // uses to decide `reviewed` — not the `@ryu/` scope, which is just a string
+        // anything under `~/.ryu/plugins` can write, and not `find_system_plugin`,
+        // which names the four sidecar-backed system plugins and would badge Ghost
+        // while leaving Calendar bare. Id comparison is safe here because the loader
+        // parses built-ins first and rejects duplicate ids, so a disk manifest can
+        // never take a compiled-in id.
+        //
+        // This has to happen HERE rather than by field-merging the hosted card that
+        // carries `orgVerified`: `merge_plugin_catalog_entries` is whole-entry
+        // first-writer-wins (load-bearing for the `hidden` suppression), and a
+        // built-in's manifest entry always wins its id, so the hosted card is
+        // discarded entirely and never reaches the client.
+        if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
+            obj.insert("org_verified".to_owned(), json!(true));
+            obj.insert("org_verified_tier".to_owned(), json!("official"));
         }
     }
     entry
@@ -9674,6 +9962,12 @@ fn plugin_marketplace_item_to_entry(
             "provenance",
             "repo_url",
             "license",
+            // Publisher identity. `org_verified_tier` only ever QUALIFIES the check
+            // ("Verified organization — Partner"); the flag below is what renders it,
+            // so a tier arriving without the flag correctly shows nothing. Snake_case
+            // end to end for the same reason as `origin` above — a camelCase key
+            // reads as undefined on the client and silently keeps the badge dark.
+            "org_verified_tier",
         ] {
             if let Some(v) = it.get(key).and_then(|v| v.as_str()) {
                 obj.insert(key.to_owned(), json!(v));
@@ -9682,6 +9976,15 @@ fn plugin_marketplace_item_to_entry(
         // Non-string passthroughs (the loop above copies strings only).
         if let Some(reviewed) = it.get("reviewed").and_then(|v| v.as_bool()) {
             obj.insert("reviewed".to_owned(), json!(reviewed));
+        }
+        // Is the PUBLISHING ORGANIZATION identity-checked? A separate axis from
+        // `reviewed` (did anyone read the code) and from manifest signing, and it
+        // rides the community shelf too — an unreviewed listing from a verified
+        // publisher is still from a verified publisher. Copied verbatim, INCLUDING a
+        // `false` (that is how a revoked check propagates); absent stays absent, so a
+        // source that never computes it is never flattened to "not verified".
+        if let Some(verified) = it.get("org_verified").and_then(|v| v.as_bool()) {
+            obj.insert("org_verified".to_owned(), json!(verified));
         }
         if let Some(stars) = it.get("stars").and_then(serde_json::Value::as_u64) {
             obj.insert("stars".to_owned(), json!(stars));
@@ -11000,7 +11303,32 @@ async fn install_app_handler(
         );
     };
 
-    match crate::plugins::lifecycle::install_app(&state.app_store, &manifest).await {
+    // Register the add in the download center, the same way the catalog-resolve
+    // path does (`resolve_plugin_from_catalog`), under the SAME `plugin:<id>` row
+    // id so a retry dedupes onto one row and the store button can find its own
+    // progress by id.
+    //
+    // Without this, the whole built-in branch was invisible to the global tracker:
+    // `/api/plugins/:id/install` is a bare store write with nothing to download,
+    // and it is the branch the desktop takes for every `source === "built-in"`
+    // listing — i.e. most shipped items. So "install a plugin" was the one
+    // long-running action in the app that the download center never mentioned.
+    //
+    // The wrapped future is deliberately just the store write: it is small and
+    // idempotent, because `register_indeterminate_as` races it against a Cancel
+    // watch and a Cancel must not be able to tear a half-written record.
+    let installed = state
+        .downloads
+        .register_indeterminate_as(
+            format!("plugin:{id}"),
+            crate::downloads::DownloadKind::Other,
+            crate::downloads::DownloadRole::Plugin,
+            id.clone(),
+            async { crate::plugins::lifecycle::install_app(&state.app_store, &manifest).await },
+        )
+        .await;
+
+    match installed {
         Ok(record) => {
             // Live contributions refresh — same lossy `system:plugins` nudge as
             // the enable handler, so a newly installed plugin's presence reaches
@@ -12066,6 +12394,7 @@ async fn plugin_contributions(
     let mut settings_tabs = Vec::new();
     let mut message_actions = Vec::new();
     let mut context_menu_items = Vec::new();
+    let mut create_actions = Vec::new();
     let mut turn_hooks = Vec::new();
     let mut hook_events = Vec::new();
     let mut views = Vec::new();
@@ -12143,6 +12472,10 @@ async fn plugin_contributions(
         // vocabulary and ignores a member it does not know.
         message_actions.extend(c.message_actions.iter().cloned().map(tag));
         context_menu_items.extend(c.context_menu_items.iter().cloned().map(tag));
+        // "New X" rows for the shell's create menu. Enabled-gated like the rest of
+        // this loop, which is the entire point: the row has to vanish with the app,
+        // or clicking it navigates to a route the app no longer serves.
+        create_actions.extend(c.create_actions.iter().cloned().map(tag));
         // Declarative views (the Raycast tier): serialize each typed contribution to
         // a Value and tag it with its owning plugin, exactly like the sibling families.
         views.extend(
@@ -12320,6 +12653,7 @@ async fn plugin_contributions(
         "settings_tabs": settings_tabs,
         "message_actions": message_actions,
         "context_menu_items": context_menu_items,
+        "create_actions": create_actions,
         "slash_commands": slash_commands,
         "turn_hooks": turn_hooks,
         "hook_events": hook_events,
@@ -15541,11 +15875,19 @@ fn binary_installed_on_disk(name: &str) -> bool {
     if name == "tailscale" {
         return crate::sidecar::tailscale::resolve_mesh_pair().is_ok();
     }
+    // llama.cpp (and every tier that shares its binary) installs into a
+    // per-variant directory rather than loose in `~/.ryu/bin`, because the CPU,
+    // CUDA and Vulkan builds ship different `ggml-*` libraries under the same
+    // names. Ask the resolver so this probe agrees with what `start()` launches;
+    // the legacy path is still accepted for an install that predates variants
+    // and has not been re-run yet.
+    if matches!(name, "llamacpp" | "llamacpp-embed") {
+        use crate::sidecar::providers::llamacpp::variant;
+        return variant::server_path().exists() || variant::legacy_server_path().exists();
+    }
     // Some sidecars install a binary whose filename differs from the sidecar
-    // name: llamacpp (and the embeddings sidecar that shares it) ship as
-    // "llama-server"; the stable-diffusion.cpp media engine ships as "sd-server".
+    // name: the stable-diffusion.cpp media engine ships as "sd-server".
     let bin_name = match name {
-        "llamacpp" | "llamacpp-embed" => format!("llama-server{ext}"),
         "sdcpp" => format!("sd-server{ext}"),
         _ => format!("{name}{ext}"),
     };
@@ -16094,6 +16436,191 @@ async fn get_conversation_feedback_handler(
                 .collect();
             Json(json!({ "feedback": map })).into_response()
         }
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// The identity a reaction is attributed to: the verified caller's `user_id`, or
+/// the `LOCAL_USER` sentinel when the request is anonymous (loopback / node-token
+/// single-tenant flow). Never read from a request body.
+///
+/// Deliberately NOT [`memory_owner_user_id`]: that one collapses to `LOCAL_USER`
+/// on an *unbound* node even for a verified caller, because memory is scoped per
+/// tenant. A reaction is per **person** — collapsing two signed-in users onto one
+/// id would merge their reactions in the `(message_id, user_id, emoji)` key.
+fn reaction_user_id(caller: &Option<crate::identity_verify::VerifiedCaller>) -> String {
+    caller
+        .as_ref()
+        .map(|c| c.user_id.clone())
+        .unwrap_or_else(|| memory::LOCAL_USER.to_owned())
+}
+
+/// `POST|DELETE /api/conversations/:id/messages/:message_id/reactions` body.
+#[derive(serde::Deserialize)]
+struct MessageReactionBody {
+    /// The emoji to add/remove. Required — a missing field is a 422, not a silent
+    /// no-op. The reacting user is NOT in this body; it comes from the JWT.
+    emoji: String,
+}
+
+/// Longest accepted `emoji` in bytes. Comfortably covers the longest real
+/// grapheme cluster (a ZWJ family sequence with skin-tone modifiers is ~35 bytes)
+/// while stopping the field being used as an unbounded per-message write
+/// primitive — it lands in a TEXT PRIMARY KEY column with no other constraint.
+const MAX_REACTION_EMOJI_BYTES: usize = 64;
+
+/// Validate and normalize a reaction emoji, or return the 400 to send back.
+fn normalize_reaction_emoji(raw: &str) -> Result<String, axum::response::Response> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "emoji must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.len() > MAX_REACTION_EMOJI_BYTES {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            format!("emoji must be at most {MAX_REACTION_EMOJI_BYTES} bytes"),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// `POST /api/conversations/:id/messages/:message_id/reactions` — add an emoji
+/// reaction to a persisted message, as the verified caller.
+///
+/// 404s when the message is not in this conversation, which is also the
+/// **persistence gate**: a still-streaming reply carries a client-generated id
+/// that has no row yet, so it cannot be reacted to until it lands. There is
+/// deliberately no `allow_latest_fallback` twin of the feedback retarget hack —
+/// retargeting a *per-person* row at "the newest assistant message" would attach
+/// someone's reaction to a message they never saw.
+#[utoipa::path(
+    post,
+    path = "/api/conversations/{id}/messages/{message_id}/reactions",
+    tag = "Conversations",
+    summary = "Add an emoji reaction to a message",
+    params(("id" = String, Path), ("message_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn add_message_reaction_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path((id, message_id)): axum::extract::Path<(String, String)>,
+    Json(body): Json<MessageReactionBody>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let emoji = match normalize_reaction_emoji(&body.emoji) {
+        Ok(emoji) => emoji,
+        Err(resp) => return resp,
+    };
+    let user_id = reaction_user_id(&caller);
+    match state
+        .conversations
+        .add_reaction(&id, &message_id, &user_id, &emoji)
+        .await
+    {
+        Ok(true) => Json(json!({
+            "ok": true,
+            "message_id": message_id,
+            "emoji": emoji,
+        }))
+        .into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("message '{message_id}' not found in conversation '{id}'"),
+        ),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `DELETE /api/conversations/:id/messages/:message_id/reactions` — remove the
+/// caller's own `{ emoji }` reaction. Removing one that was never placed is a
+/// success (idempotent un-react); an unknown message is still a 404.
+#[utoipa::path(
+    delete,
+    path = "/api/conversations/{id}/messages/{message_id}/reactions",
+    tag = "Conversations",
+    summary = "Remove an emoji reaction from a message",
+    params(("id" = String, Path), ("message_id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn remove_message_reaction_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path((id, message_id)): axum::extract::Path<(String, String)>,
+    Json(body): Json<MessageReactionBody>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_write(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let emoji = match normalize_reaction_emoji(&body.emoji) {
+        Ok(emoji) => emoji,
+        Err(resp) => return resp,
+    };
+    let user_id = reaction_user_id(&caller);
+    match state
+        .conversations
+        .remove_reaction(&id, &message_id, &user_id, &emoji)
+        .await
+    {
+        Ok(true) => Json(json!({
+            "ok": true,
+            "message_id": message_id,
+            "emoji": emoji,
+        }))
+        .into_response(),
+        Ok(false) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("message '{message_id}' not found in conversation '{id}'"),
+        ),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/conversations/:id/reactions` — every reaction bucket of a
+/// conversation as `{ reactions: [{ message_id, emoji, count, reacted_by_me }] }`.
+///
+/// ONE call fetched alongside the transcript, exactly like the feedback read and
+/// for the same reason: it restores the chip row on reload without inflating
+/// `get_messages` (which has many non-UI callers). `reacted_by_me` is resolved
+/// against the verified caller.
+#[utoipa::path(
+    get,
+    path = "/api/conversations/{id}/reactions",
+    tag = "Conversations",
+    summary = "Get emoji reactions for a conversation",
+    params(("id" = String, Path)),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_conversation_reactions_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if let Err(resp) = require_resource_read(
+        state.conversations.get_access_meta(&id).await,
+        caller.as_ref(),
+        &format!("conversation '{id}' not found"),
+    ) {
+        return resp;
+    }
+    let user_id = reaction_user_id(&caller);
+    match state.conversations.list_reactions(&id, &user_id).await {
+        Ok(reactions) => Json(json!({ "reactions": reactions })).into_response(),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -25947,12 +26474,37 @@ async fn get_active_engine(State(state): State<ServerState>) -> Json<serde_json:
         "active": active,
         "running": running,
         "available": available,
+        // Which llama.cpp build is installed, so a picker can render
+        // "LlamaCpp — CPU only" without a second round trip. `null` until the
+        // engine has been installed once.
+        "llamacpp_variant": crate::sidecar::providers::llamacpp::variant::installed_variant()
+            .map(|v| v.as_str()),
     }))
 }
 
 #[derive(serde::Deserialize)]
 struct SetActiveEngineBody {
     name: String,
+}
+
+/// Engine names that are really "llama.cpp with a pinned build": selecting one
+/// sets the acceleration preference and then makes plain `llamacpp` resident.
+///
+/// These are aliases rather than entries in `LOCAL_ENGINES` on purpose. A second
+/// engine name would mean a second manager, a second port and a second row in
+/// every "which engine serves GGUF" decision — while resolving, on GPU-less
+/// hardware, to byte-identical bits on the same port. The user gets the
+/// swap-to-CPU action they asked for; Core keeps one resident engine.
+fn llamacpp_variant_alias(name: &str) -> Option<&'static str> {
+    use crate::sidecar::providers::llamacpp::variant::AUTO;
+    match name.trim().to_ascii_lowercase().as_str() {
+        "llamacpp-cpu" => Some("cpu"),
+        "llamacpp-metal" => Some("metal"),
+        "llamacpp-cuda" => Some("cuda"),
+        "llamacpp-vulkan" => Some("vulkan"),
+        "llamacpp-auto" | "llamacpp-gpu" => Some(AUTO),
+        _ => None,
+    }
 }
 
 /// Swap the resident local engine to `name`: stop whatever local engine is
@@ -25970,7 +26522,17 @@ async fn set_active_engine(
     State(state): State<ServerState>,
     Json(body): Json<SetActiveEngineBody>,
 ) -> Json<serde_json::Value> {
-    match state.manager.set_active_local_engine(&body.name).await {
+    // "Switch to CPU llama.cpp" arrives here as an engine name. Resolve it to
+    // the acceleration preference it really is, install that build, then fall
+    // through to the ordinary `llamacpp` swap below.
+    let mut name = body.name.clone();
+    if let Some(requested) = llamacpp_variant_alias(&body.name) {
+        if let Err(e) = apply_llamacpp_variant(&state, requested).await {
+            return Json(json!({ "success": false, "error": e.to_string() }));
+        }
+        name = "llamacpp".to_string();
+    }
+    match state.manager.set_active_local_engine(&name).await {
         Ok(swap) => {
             // Re-point the gateway's `local` provider at the now-active engine
             // so an agent bound to a local model keeps routing through the
@@ -25994,6 +26556,159 @@ async fn set_active_engine(
             }))
         }
         Err(e) => Json(json!({ "success": false, "error": e.to_string() })),
+    }
+}
+
+/// Persist `requested` (`auto` or a variant name) as the llama.cpp acceleration
+/// choice and make the machine match it: install that build if it isn't the one
+/// on disk, and restart the engine if it is currently resident.
+///
+/// Refuses an accelerated build this node cannot run — that is the "don't
+/// install the GPU version on GPU-less hardware" gate, enforced here rather than
+/// only in the UI so an API caller cannot route around it.
+async fn apply_llamacpp_variant(state: &ServerState, requested: &str) -> anyhow::Result<()> {
+    use crate::sidecar::providers::llamacpp::{variant, LlamaCppDownloader};
+
+    let device = variant::device();
+    if let Some(v) = variant::LlamaVariant::parse(requested) {
+        if !v.available_on(device) {
+            anyhow::bail!(
+                "{} is not available on this computer: {}",
+                v.label(),
+                v.unavailable_reason(device)
+                    .unwrap_or("unsupported hardware")
+            );
+        }
+    } else if !requested.eq_ignore_ascii_case(variant::AUTO) {
+        anyhow::bail!("unknown llama.cpp acceleration '{requested}'");
+    }
+
+    state
+        .preferences
+        .set(variant::VARIANT_PREF, requested)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not save the acceleration choice: {e}"))?;
+
+    let resolved = variant::LlamaVariant::resolve(Some(requested), device);
+    if variant::installed_variant() == Some(resolved) {
+        return Ok(());
+    }
+
+    // The build on disk is the wrong one. Stop the engine before replacing its
+    // directory — the install wipes it, and unlinking a running server's backend
+    // libraries is how you get a process that is alive but cannot serve.
+    let was_resident = state.manager.active_local_engine().await.as_deref() == Some("llamacpp");
+    if was_resident {
+        if let Err(e) = state.manager.stop_sidecar("llamacpp").await {
+            tracing::warn!("could not stop llama.cpp before swapping its build: {e}");
+        }
+    }
+    LlamaCppDownloader::new()
+        .ensure_variant_installed(&state.downloads, resolved)
+        .await?;
+    // The installer writes `versions.json`, but the manager's in-memory
+    // installed set is only seeded at boot — without this, choosing a build on a
+    // node that never had llama.cpp installs it and then refuses to make it
+    // resident ("llamacpp is not installed") until Core restarts.
+    state.manager.mark_installed("llamacpp").await;
+    if was_resident {
+        state.manager.start_sidecar("llamacpp").await?;
+    }
+    Ok(())
+}
+
+/// Report which llama.cpp build is selected, which one is installed, what this
+/// machine's hardware supports, and every option with a plain-language reason
+/// when it is unavailable.
+///
+/// The shape is deliberately "answer, then options": `resolved` is what will
+/// actually run, so a client can show one sentence ("Using your graphics card")
+/// without the user needing to know what CUDA or Vulkan is.
+#[utoipa::path(
+    get,
+    path = "/api/engine/llamacpp/acceleration",
+    tag = "Engines",
+    summary = "Get the llama.cpp acceleration (CPU vs GPU build)",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_llamacpp_acceleration(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    use crate::model_catalog::device::has_usable_gpu;
+    use crate::sidecar::providers::llamacpp::variant::{self, LlamaVariant, AUTO, VARIANT_PREF};
+
+    let device = variant::device();
+    let selected = state
+        .preferences
+        .get(VARIANT_PREF)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| AUTO.to_string());
+    let resolved = LlamaVariant::resolve(Some(&selected), device);
+
+    let options: Vec<_> = LlamaVariant::ALL
+        .iter()
+        .map(|v| {
+            json!({
+                "id": v.as_str(),
+                "label": v.label(),
+                "description": v.description(),
+                "available": v.available_on(device),
+                "unavailable_reason": v.unavailable_reason(device),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "selected": selected,
+        "resolved": resolved.as_str(),
+        "resolved_label": resolved.label(),
+        "installed": crate::sidecar::providers::llamacpp::variant::installed_variant()
+            .map(|v| v.as_str()),
+        "has_gpu": has_usable_gpu(device),
+        "gpu_name": device.gpu_name.clone(),
+        "vram": device.vram_human.clone(),
+        "options": options,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct SetLlamacppAccelerationBody {
+    /// `auto` (the default) or a variant id from the `options` list.
+    variant: String,
+}
+
+/// Choose the llama.cpp build. `auto` re-detects the hardware; an explicit id
+/// pins it. Installing the new build happens here, synchronously, so the caller
+/// knows whether the choice actually took.
+#[utoipa::path(
+    post,
+    path = "/api/engine/llamacpp/acceleration",
+    tag = "Engines",
+    summary = "Choose the llama.cpp acceleration (CPU vs GPU build)",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn set_llamacpp_acceleration(
+    State(state): State<ServerState>,
+    Json(body): Json<SetLlamacppAccelerationBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match apply_llamacpp_variant(&state, &body.variant).await {
+        Ok(()) => {
+            let installed = crate::sidecar::providers::llamacpp::variant::installed_variant();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "success": true,
+                    "selected": body.variant,
+                    "installed": installed.map(|v| v.as_str()),
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": e.to_string() })),
+        ),
     }
 }
 
@@ -29462,9 +30177,9 @@ mod connection_identity_tests {
 #[cfg(test)]
 mod plugin_catalog_tests {
     use super::{
-        local_detail_trust_signals, local_plugin_detail, manifest_policy_types,
-        merge_plugin_catalog_entries, plugin_manifest_to_entry, plugin_marketplace_item_to_entry,
-        plugin_runtime_dir,
+        is_top_level_route, local_detail_trust_signals, local_plugin_detail,
+        manifest_declares_destination, manifest_policy_types, merge_plugin_catalog_entries,
+        plugin_manifest_to_entry, plugin_marketplace_item_to_entry, plugin_runtime_dir,
     };
     use crate::plugin_manifest::{schema::RunnableEntry, PluginManifest};
     use crate::runnable::RunnableKind;
@@ -29613,6 +30328,243 @@ mod plugin_catalog_tests {
         // Duplicate kinds are deduped (two Tool runnables → one "tool").
         assert_eq!(e["kinds"], json!(["tool"]));
         assert_eq!(e["permission_grants"], json!(["network.fetch"]));
+        // No destination of any kind → a plugin.
+        assert_eq!(e["type"], "plugin");
+    }
+
+    /// A manifest's `banner` reaches the card VERBATIM, whatever keys it carries.
+    ///
+    /// The banner is how a listing declares its own hero background instead of
+    /// inheriting the wash derived from its icon, and Core is deliberately not a
+    /// party to that decision: `PluginManifest::banner` is `serde_json::Value` and
+    /// this projection copies the whole object across. That is what lets the client
+    /// grow a new treatment key (`background`, `imageUrl`, `style: "flat"`) with no
+    /// Core release — but only for as long as nobody "tidies" this into a typed
+    /// struct, at which point every key the struct does not know would be silently
+    /// dropped by serde and the feature would look like a client bug.
+    ///
+    /// So the assertion is on an object Core has never heard of, not on the three
+    /// keys it was written against.
+    #[test]
+    fn manifest_banner_reaches_the_card_verbatim_including_unknown_keys() {
+        let banner = json!({
+            "background": "linear-gradient(135deg, #0099ff, #6633ff)",
+            "imageUrl": "https://example.test/hero.png",
+            "style": "flat",
+            "seed": 7,
+            "unheard-of": { "nested": [1, 2, 3] },
+        });
+        let m: PluginManifest = serde_json::from_value(json!({
+            "id": "acme/banner",
+            "name": "Banner",
+            "version": "1.0.0",
+            "runnables": [],
+            "banner": banner.clone(),
+            "iconDither": { "from": 210, "to": "transparent", "direction": "down" },
+        }))
+        .expect("fixture manifest parses");
+
+        let e = plugin_manifest_to_entry(&m);
+        assert_eq!(e["banner"], banner, "banner is an opaque passthrough");
+        // The derived tier still ships alongside it: the client decides which one
+        // wins, so dropping `icon_dither` once a banner exists would take the
+        // choice away from it.
+        assert_eq!(e["icon_dither"]["from"], 210);
+
+        // And a manifest with no banner emits no key at all, rather than a null the
+        // client would have to distinguish from an empty spec.
+        let bare: PluginManifest = serde_json::from_value(json!({
+            "id": "acme/bare",
+            "name": "Bare",
+            "version": "1.0.0",
+            "runnables": [],
+        }))
+        .expect("fixture manifest parses");
+        assert!(plugin_manifest_to_entry(&bare).get("banner").is_none());
+    }
+
+    /// The app-vs-plugin rule, on synthetic manifests: exactly three keys mint a
+    /// destination, and the ones people keep arguing about mint nothing.
+    #[test]
+    fn catalog_app_predicate_counts_only_the_three_destination_keys() {
+        let manifest = |extra: serde_json::Value| -> PluginManifest {
+            let mut base =
+                json!({ "id": "acme/x", "name": "X", "version": "1.0.0", "runnables": [] });
+            let (Some(obj), Some(more)) = (base.as_object_mut(), extra.as_object()) else {
+                panic!("test fixtures are objects");
+            };
+            for (k, v) in more {
+                obj.insert(k.clone(), v.clone());
+            }
+            serde_json::from_value(base).expect("fixture manifest parses")
+        };
+
+        // (a) a companion runnable.
+        assert!(manifest_declares_destination(&manifest(json!({
+            "runnables": [{ "id": "ui", "name": "UI", "kind": "companion" }]
+        }))));
+        // (b) a dock panel — in ANY panel mode, `native` included.
+        assert!(manifest_declares_destination(&manifest(json!({
+            "contributes": { "dock_panels": [
+                { "id": "p", "title": "P", "placement": "bottom", "panel": "native" }
+            ] }
+        }))));
+        assert!(manifest_declares_destination(&manifest(json!({
+            "contributes": { "dock_panels": [
+                { "id": "p", "title": "P", "placement": "right", "panel": "view" }
+            ] }
+        }))));
+        // (c) a TOP-LEVEL sidebar-button target.
+        assert!(manifest_declares_destination(&manifest(json!({
+            "contributes": { "sidebar_buttons": [
+                { "id": "home", "title": "Home", "target": "/drafts" }
+            ] }
+        }))));
+
+        // A SUB-path target is a link into a surface the shell already owns.
+        assert!(!manifest_declares_destination(&manifest(json!({
+            "contributes": { "sidebar_buttons": [
+                { "id": "home", "title": "Memory", "target": "/library/memory" }
+            ] }
+        }))));
+        // A sidecar is not evidence — the docling/markitdown/mineru/unstructured
+        // shape. Their real manifests are asserted in the sibling test below; here
+        // the point is that the process spec is never even consulted.
+        assert!(!manifest_declares_destination(&manifest(json!({
+            "sidecars": [{
+                "name": "s",
+                "port": 8095,
+                "health_path": "/health",
+                "process": { "kind": "local", "command": "ryu-s" }
+            }],
+            "contributes": {}
+        }))));
+        // Neither are views, sidebar sections or store tabs: all render inside a
+        // surface that exists without the item.
+        assert!(!manifest_declares_destination(&manifest(json!({
+            "contributes": {
+                "views": [{ "id": "v", "view": "data-table" }],
+                "sidebar_sections": [{ "id": "s", "title": "S", "source": "/api/x" }],
+                "store_tabs": [{ "id": "t", "title": "T" }]
+            }
+        }))));
+        // Non-companion runnable kinds never promote.
+        assert!(!manifest_declares_destination(&manifest(json!({
+            "runnables": [{ "id": "t", "name": "T", "kind": "tool" }]
+        }))));
+
+        assert!(is_top_level_route("/drafts"));
+        assert!(is_top_level_route(" /mission-control "));
+        assert!(!is_top_level_route("/library/memory"));
+        assert!(!is_top_level_route("drafts"));
+        assert!(!is_top_level_route("/"));
+    }
+
+    /// The rule against the manifests we actually ship. These twelve ids are the
+    /// whole argument: seven items claim a destination WITHOUT a companion runnable
+    /// (four via `dock_panels`, three via a top-level route) and were filed as
+    /// plugins by the old companion-only test; four document parsers each ship a
+    /// Python sidecar and are still plugins; and `@ryu/memory` targets a sub-path of
+    /// a shell-owned surface and is still a plugin.
+    #[test]
+    fn catalog_taxonomy_classifies_shipped_manifests_by_destination() {
+        let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let by_id = |id: &str| -> &crate::plugin_manifest::PluginManifest {
+            builtins
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("built-in manifest `{id}` is not compiled in"))
+        };
+
+        for id in [
+            // dock_panels, `panel: "native"`.
+            "@ryu/browser",
+            "@ryu/crm",
+            "@ryu/ugc",
+            "@ryu/simulator",
+            // a top-level `sidebar_buttons[].target` the shell mints a route from.
+            "@ryu/dashboards",
+            "@ryu/drafts",
+            "@ryu/mission-control",
+        ] {
+            let m = by_id(id);
+            assert!(
+                !m.runnables.iter().any(|r| r.kind.as_str() == "companion"),
+                "{id} is the interesting case only while it has NO companion runnable"
+            );
+            assert!(
+                manifest_declares_destination(m),
+                "{id} declares a destination and must classify as an app"
+            );
+            assert_eq!(plugin_manifest_to_entry(m)["type"], "app", "{id}");
+        }
+
+        for id in [
+            // Four interchangeable `document.parse` providers, each with a sidecar.
+            "@ryu/docling",
+            "@ryu/markitdown",
+            "@ryu/mineru",
+            "@ryu/unstructured",
+            // Targets `/library/memory`; `/library` is the shell's.
+            "@ryu/memory",
+        ] {
+            let m = by_id(id);
+            assert!(
+                !manifest_declares_destination(m),
+                "{id} claims no destination and must classify as a plugin"
+            );
+            assert_eq!(plugin_manifest_to_entry(m)["type"], "plugin", "{id}");
+        }
+    }
+
+    /// The publisher check on a first-party catalog card. Two independent breaks put
+    /// it out: the card projector dropped the fields a hosted listing carries, and a
+    /// built-in's manifest entry (which never set them) wins the whole-entry dedupe,
+    /// so the hosted card that DID carry `orgVerified` was discarded outright.
+    #[test]
+    fn catalog_card_carries_org_verification() {
+        // A compiled-in manifest is vouched for by Core itself.
+        let builtins = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let m = builtins
+            .iter()
+            .find(|m| m.id == "@ryu/calendar")
+            .expect("built-in manifest `@ryu/calendar` is compiled in");
+        let e = plugin_manifest_to_entry(m);
+        assert_eq!(e["org_verified"], json!(true));
+        assert_eq!(e["org_verified_tier"], json!("official"));
+
+        // A manifest Core does NOT ship stays unbadged — the check is provenance,
+        // never the `@ryu/` string, which anything writing to `~/.ryu/plugins` can
+        // put in a manifest.
+        let sideloaded = PluginManifest {
+            id: "@ryu/definitely-not-shipped".to_owned(),
+            name: "Impostor".to_owned(),
+            version: "1.0.0".to_owned(),
+            ..Default::default()
+        };
+        let e = plugin_manifest_to_entry(&sideloaded);
+        assert!(e.get("org_verified").is_none());
+        assert!(e.get("org_verified_tier").is_none());
+
+        // A remote card's own verification survives the projector — including a
+        // `false` (a revoked check must propagate), while absent stays absent so a
+        // source that never computes it is not flattened to "not verified".
+        let verified = json!({
+            "id": "acme/widget",
+            "org_verified": true,
+            "org_verified_tier": "partner",
+        });
+        let e = plugin_marketplace_item_to_entry(&verified, "ryu-marketplace").unwrap();
+        assert_eq!(e["org_verified"], json!(true));
+        assert_eq!(e["org_verified_tier"], json!("partner"));
+
+        let revoked = json!({ "id": "acme/widget", "org_verified": false });
+        let e = plugin_marketplace_item_to_entry(&revoked, "ryu-marketplace").unwrap();
+        assert_eq!(e["org_verified"], json!(false));
+
+        let unknown = json!({ "id": "acme/widget" });
+        let e = plugin_marketplace_item_to_entry(&unknown, "ryu-marketplace").unwrap();
+        assert!(e.get("org_verified").is_none());
     }
 
     #[test]
@@ -31258,6 +32210,32 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn a_reaction_is_attributed_to_the_person_not_the_tenant() {
+        // The deliberate divergence from `memory_owner_user_id` above: a reaction
+        // row is keyed `(message_id, user_id, emoji)`, so collapsing every signed-in
+        // caller onto the `local` sentinel would merge two people's reactions into
+        // one. A verified caller keeps their own id even on an unbound node.
+        assert_eq!(
+            reaction_user_id(&Some(caller("alice", Some("org1")))),
+            "alice"
+        );
+        // Anonymous (loopback / node-token single-tenant) → the local sentinel.
+        assert_eq!(reaction_user_id(&None), memory::LOCAL_USER);
+    }
+
+    #[test]
+    fn a_reaction_emoji_is_trimmed_bounded_and_never_empty() {
+        // It lands in a TEXT PRIMARY KEY column with no other constraint, so the
+        // route is the only bound on it.
+        assert_eq!(normalize_reaction_emoji(" 🎉 ").unwrap(), "🎉");
+        assert!(normalize_reaction_emoji("").is_err());
+        assert!(normalize_reaction_emoji("   ").is_err());
+        // A ZWJ family sequence with modifiers is well under the cap.
+        assert!(normalize_reaction_emoji("👩🏽‍👩🏻‍👧🏼‍👦🏾").is_ok());
+        assert!(normalize_reaction_emoji(&"a".repeat(MAX_REACTION_EMOJI_BYTES + 1)).is_err());
+    }
+
+    #[test]
     fn memory_access_is_unrestricted_on_an_unbound_node() {
         // Even a user-scoped fact owned by someone else is readable — an unbound
         // node has exactly one principal, so the per-user gate does not apply.
@@ -31453,6 +32431,38 @@ mod pure_helper_tests {
         assert_eq!(
             out[0]["spec"]["install"]["http"]["path"], "/api/workflows/catalog/install"
         );
+    }
+
+    /// The other half of the same move: "New workflow" was a hardcoded row in the
+    /// desktop's create menu, so it showed (and 404'd) with Workflows uninstalled.
+    /// It is now the app's own contribution, which is what makes it disappear with
+    /// the app — the enabled gate is the contributions loop itself, so what has to
+    /// be asserted here is that the declaration exists and points somewhere real.
+    #[test]
+    fn the_workflows_app_registers_its_create_action() {
+        let manifest = crate::plugin_manifest::PluginManifestLoader::load()
+            .into_iter()
+            .find(|m| m.id == "@ryu/workflows")
+            .expect("the Workflows manifest is compiled in");
+        let contributes = manifest
+            .contributes
+            .as_ref()
+            .expect("Workflows contributes");
+        assert_eq!(
+            contributes.create_actions.len(),
+            1,
+            "Workflows registers exactly one create-menu row"
+        );
+        let action = &contributes.create_actions[0];
+        assert_eq!(action["label"], "New workflow");
+        assert_eq!(
+            action["target"], "/workflows/new",
+            "the row must open the route the app actually serves"
+        );
+        // And it survives the chokepoint that rejects a row which does nothing.
+        manifest
+            .validate()
+            .expect("the packaged Workflows manifest validates");
     }
 
     // ── Settings tabs (contributes.settings_tabs) ────────────────────────────
@@ -32487,5 +33497,88 @@ mod output_styles_route_tests {
             listed["selected"].is_null(),
             "the refusal persisted nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod acp_selections_query_tests {
+    use super::parse_acp_selections;
+
+    // The `?selections=` param carries the caller's config-option picks into the
+    // ACP probe, so an agent whose option SET depends on them (opencode advertises
+    // its reasoning `effort` option only while the model has effort levels) is
+    // probed as the session the user actually configured.
+
+    #[test]
+    fn parses_a_json_object_of_picks() {
+        let got = parse_acp_selections(Some(r#"{"model":"xai/grok-4.6","effort":"high"}"#));
+        assert_eq!(got.get("model").map(String::as_str), Some("xai/grok-4.6"));
+        assert_eq!(got.get("effort").map(String::as_str), Some("high"));
+    }
+
+    #[test]
+    fn absent_or_unparseable_degrades_to_no_selections() {
+        // A bad param must fall back to the plain `session/new` answer rather than
+        // failing the request — the pickers are worth more than the strictness.
+        assert!(parse_acp_selections(None).is_empty());
+        assert!(parse_acp_selections(Some("not json")).is_empty());
+        assert!(
+            parse_acp_selections(Some(r#"{"model":{"nested":true}}"#)).is_empty(),
+            "values must be plain strings (ACP value ids)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod llamacpp_acceleration_tests {
+    use super::llamacpp_variant_alias;
+    use crate::sidecar::active_engine::is_local_engine;
+    use crate::sidecar::providers::llamacpp::variant::{LlamaVariant, AUTO};
+
+    // "Run llama.cpp on the CPU" is offered as an engine you can swap to, but it
+    // is not a second resident engine — it is the same engine with a pinned
+    // build. These tests hold that seam in place.
+
+    #[test]
+    fn cpu_alias_maps_to_the_cpu_build() {
+        assert_eq!(llamacpp_variant_alias("llamacpp-cpu"), Some("cpu"));
+        assert_eq!(llamacpp_variant_alias("LlamaCpp-CPU"), Some("cpu"));
+    }
+
+    #[test]
+    fn every_alias_names_a_real_choice() {
+        for alias in [
+            "llamacpp-cpu",
+            "llamacpp-metal",
+            "llamacpp-cuda",
+            "llamacpp-vulkan",
+            "llamacpp-auto",
+            "llamacpp-gpu",
+        ] {
+            let value = llamacpp_variant_alias(alias)
+                .unwrap_or_else(|| panic!("{alias} must resolve to a variant"));
+            assert!(
+                value == AUTO || LlamaVariant::parse(value).is_some(),
+                "{alias} resolved to '{value}', which is neither `auto` nor a build"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_engine_names_are_not_aliases() {
+        // A real engine must fall through untouched to the ordinary swap path,
+        // or selecting Ollama would rewrite the llama.cpp build preference.
+        for name in ["llamacpp", "ollama", "vllm", "mlx", ""] {
+            assert_eq!(llamacpp_variant_alias(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn aliases_are_not_themselves_local_engines() {
+        // The point of the alias: no second manager, no second port, no second
+        // GGUF-serving engine for `pick_engine` to choose between.
+        for alias in ["llamacpp-cpu", "llamacpp-cuda", "llamacpp-vulkan"] {
+            assert!(!is_local_engine(alias), "{alias} must not be in LOCAL_ENGINES");
+        }
     }
 }

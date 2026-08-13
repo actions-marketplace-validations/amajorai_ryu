@@ -10,10 +10,19 @@
 // bare button that opened the OS file picker. A build can't catch that: both
 // spellings compile. Only clicking it can.
 //
-// Two mounts stand in for the two ends of the range:
+// Three mounts stand in for the range:
 //   - "minimal"  — attach only, the launchpad/builder-pane shape
 //   - "full"     — attach + temporary chat + a plugin toggle, the chat-page shape
-// Both must open the same popover; the second just carries more rows.
+//   - "compact"  — the same bar at chat-with-history density
+// All three must open the same popover; the second just carries more rows.
+//
+// The "compact" mount also pins the composer's TOPOLOGY. `compact` used to select
+// a second layout — the textarea wedged between the "+" and the trailing controls
+// on one line — so the chat page and the launchpad were structurally different
+// composers behind one boolean, and the "+" and agent selector sat on the wrong
+// side of the bar once a chat had history. It is a density on the textarea block
+// now: the controls row is stacked BELOW the textarea on every surface. That is a
+// layout fact only a laid-out browser can assert, so it is asserted here.
 //
 // Hermetic by construction: `InputBar` is presentational, so no Core node, no
 // Tauri, and none of the desktop's context tree is involved.
@@ -65,6 +74,27 @@ function Story() {
 							onToggle: (_f, next) => setFlag(next),
 						},
 					]}
+					status="ready"
+				/>
+			</section>
+
+			{/* Chat-with-history density. `leftActions` stands in for the desktop's
+			    agent selector (the real one is `useComposerAgentControls`, which needs
+			    the app's context tree); what matters here is that whatever a host puts
+			    in that slot lands in the SAME stacked row as the "+", under the
+			    textarea — not on the opposite side of a single-row bar. */}
+			<section className="flex flex-col gap-2" data-testid="compact">
+				<h2 className="font-medium text-sm">Compact (chat with history)</h2>
+				<InputBar
+					compact
+					leftActions={
+						<button data-testid="agent-trigger" type="button">
+							Ryu
+						</button>
+					}
+					onAttach={() => setAttachCount((n) => n + 1)}
+					onSend={noop}
+					onStop={noop}
 					status="ready"
 				/>
 			</section>

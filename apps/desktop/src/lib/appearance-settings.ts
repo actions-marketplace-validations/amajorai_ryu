@@ -29,6 +29,12 @@ import { setInvertedBackgrounds } from "@/src/hooks/useInvertedBackgrounds.ts";
 import { setPersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { setPointerCursor } from "@/src/hooks/usePointerCursor.ts";
 import {
+	DEFAULT_SEASONAL_EFFECTS,
+	DEFAULT_SEASONAL_THEME,
+	SEASONAL_EFFECTS_KEY,
+	setSeasonalThemeSetting,
+} from "@/src/hooks/useSeasonalEffects.ts";
+import {
 	DEFAULT_SIDEBAR_MODE,
 	setSidebarMode,
 } from "@/src/hooks/useSidebarMode.ts";
@@ -59,13 +65,19 @@ import {
 	UI_FONTS,
 } from "@/src/hooks/useThemePreset.ts";
 import { resetUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
+import {
+	DEFAULT_INTERFACE_LEVEL,
+	setInterfaceLevel,
+} from "@/src/lib/interface-level.ts";
 import { registerSetting, resetCategory } from "@/src/lib/settings-registry.ts";
 import { DEFAULT_DARK_ID, DEFAULT_LIGHT_ID } from "@/src/lib/themes/presets.ts";
+import { DEFAULT_TIMEZONE, resetTimezone } from "@/src/lib/timezone.ts";
 
 /** localStorage / toggle keys owned by Appearance. Use these in the tab too. */
 export const APPEARANCE_KEYS = {
 	sidebarOverflowPopover: "ryu:sidebar-overflow-popover",
 	groupToolUses: "ryu:group-tool-uses",
+	hideToolDetail: "ryu:hide-tool-detail",
 	expandFileEdits: "ryu:expand-file-edits",
 	expandCommands: "ryu:expand-commands",
 	expandCodeBlocks: "ryu:expand-code-blocks",
@@ -73,6 +85,10 @@ export const APPEARANCE_KEYS = {
 	openChatAtBottom: "ryu:open-chat-at-bottom",
 	animationsEnabled: "ryu:animations-enabled",
 	streamAnimation: "ryu:stream-animation",
+	inferenceStats: "ryu:inference-stats",
+	// Re-exported from useSeasonalEffects so the seasonal switch reads its key
+	// from the same place as every other Appearance toggle.
+	seasonalEffects: SEASONAL_EFFECTS_KEY,
 } as const;
 
 /** Defaults for Appearance toggles / presets (local UI sync after reset). */
@@ -92,17 +108,30 @@ export const APPEARANCE_DEFAULTS = {
 	friendlyNames: DEFAULT_FRIENDLY_MODE,
 	pointerCursor: false,
 	chromeShadows: true,
-	// Blurred dialog backdrops are the shared default (see
+	// Flat transparent dialog backdrops are the shared default (see
 	// @ryu/ui hooks/use-dialog-overlay-blur.ts); Reset must restore that, not
-	// the flat look.
-	dialogOverlayBlur: true,
+	// the dimmed + blurred look. Keep this in step with
+	// DEFAULT_DIALOG_OVERLAY_BLUR — two defaults that disagree is the bug.
+	dialogOverlayBlur: false,
 	invertedBackgrounds: false,
 	sidebarMode: DEFAULT_SIDEBAR_MODE,
 	sidebarVariant: DEFAULT_SIDEBAR_VARIANT,
 	agentRowStyle: DEFAULT_AGENT_ROW_STYLE,
+	interfaceLevel: DEFAULT_INTERFACE_LEVEL,
 	groupChatsByDate: DEFAULT_CHAT_DATE_GROUPING,
 	sidebarOverflowPopover: false,
 	groupToolUses: true,
+	// Detail level "None". OFF as the SHIPPED default — must stay in step with
+	// DEFAULT_PREFS.hideToolDetail in
+	// packages/blocks/src/desktop/agent-elements/chat-display-prefs.tsx and the
+	// usePersistedToggle default in ChatDisplayPrefsProvider.tsx.
+	//
+	// A fresh install nevertheless starts at "None", because Interface level
+	// defaults to Simple and `seedInterfaceLevel()` writes this key on first run
+	// (`src/lib/interface-level.ts`). That is a SEEDED value, not a changed
+	// default: it only ever writes a key nobody has written, so this three-way
+	// chain still describes what an unseeded consumer falls back to.
+	hideToolDetail: false,
 	expandFileEdits: false,
 	expandCommands: false,
 	expandCodeBlocks: false,
@@ -110,6 +139,16 @@ export const APPEARANCE_DEFAULTS = {
 	openChatAtBottom: true,
 	animationsEnabled: true,
 	streamAnimation: true,
+	// OFF by default: token counts, tokens/sec and first-response time are a
+	// developer readout, and most turns run against agents that report no usage at
+	// all. Must stay in step with DEFAULT_PREFS.inferenceStats in
+	// packages/blocks/src/desktop/agent-elements/chat-display-prefs.tsx — two
+	// defaults that disagree means the switch and the transcript disagree until
+	// the user touches it.
+	inferenceStats: false,
+	seasonalEffects: DEFAULT_SEASONAL_EFFECTS,
+	seasonalTheme: DEFAULT_SEASONAL_THEME,
+	timezone: DEFAULT_TIMEZONE,
 } as const;
 
 type ThemeModeSetter = ((mode: string) => void) | null;
@@ -280,6 +319,23 @@ function registerAppearanceSettings(): void {
 		reset: () => setAgentRowStyle(APPEARANCE_DEFAULTS.agentRowStyle),
 	});
 
+	// Restores the level ONLY — deliberately not the transcript prefs the level
+	// implies, even though picking a level in the account menu does write those.
+	// `resetCategory` runs every registered reset, and `appearance.hide-tool-detail`
+	// (below) writes that same key from `APPEARANCE_DEFAULTS`; a level reset that
+	// also wrote it would make the final state depend on registration ORDER, which
+	// is the kind of bug that only shows up once someone reorders this file. Each
+	// pref is restored by the one entry that owns it.
+	registerSetting({
+		id: "appearance.interface-level",
+		category: "appearance",
+		label: "Interface level",
+		reset: () =>
+			setInterfaceLevel(APPEARANCE_DEFAULTS.interfaceLevel, {
+				applyPrefs: false,
+			}),
+	});
+
 	registerSetting({
 		id: "appearance.group-chats-by-date",
 		category: "appearance",
@@ -306,6 +362,17 @@ function registerAppearanceSettings(): void {
 			setPersistedToggle(
 				APPEARANCE_KEYS.groupToolUses,
 				APPEARANCE_DEFAULTS.groupToolUses
+			),
+	});
+
+	registerSetting({
+		id: "appearance.hide-tool-detail",
+		category: "appearance",
+		label: "Hide tool detail",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.hideToolDetail,
+				APPEARANCE_DEFAULTS.hideToolDetail
 			),
 	});
 
@@ -387,6 +454,35 @@ function registerAppearanceSettings(): void {
 	});
 
 	registerSetting({
+		id: "appearance.seasonal-effects",
+		category: "appearance",
+		label: "Seasonal effects",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.seasonalEffects,
+				APPEARANCE_DEFAULTS.seasonalEffects
+			),
+	});
+
+	registerSetting({
+		id: "appearance.seasonal-theme",
+		category: "appearance",
+		label: "Season",
+		reset: () => setSeasonalThemeSetting(APPEARANCE_DEFAULTS.seasonalTheme),
+	});
+
+	registerSetting({
+		id: "appearance.inference-stats",
+		category: "appearance",
+		label: "Inference stats",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.inferenceStats,
+				APPEARANCE_DEFAULTS.inferenceStats
+			),
+	});
+
+	registerSetting({
 		id: "appearance.background-customization",
 		category: "appearance",
 		label: "Background customization",
@@ -405,6 +501,13 @@ function registerAppearanceSettings(): void {
 		category: "appearance",
 		label: "Diff view",
 		reset: () => resetDiffViewPrefs(),
+	});
+
+	registerSetting({
+		id: "appearance.timezone",
+		category: "appearance",
+		label: "Time zone",
+		reset: () => resetTimezone(),
 	});
 
 	registerSetting({

@@ -20,6 +20,14 @@
 //!   "proof of work" primitive that the `proof` plugin builds on.
 //! - `host.storage.{get,set,delete,keys}(key, value?)` → the plugin's own
 //!   namespaced KV ([`crate::plugin_storage`]), grant `storage:kv`.
+//! - `host.spaces.{ensureSpace,createDoc,getDoc,updateDoc,listDocs,deleteDoc}` →
+//!   the plugin's OWN Space documents (`kind = app:<plugin id>`, so it can never
+//!   read or write a page/database/whiteboard or another app's doc), grant
+//!   `spaces:docs`. `ensureSpace({name})` is what makes the rest reachable from a
+//!   hook at all: every other method needs a `space_id`, ids are uuids, and a
+//!   headless caller has no route parameter to read one from. Writes go through
+//!   the ordinary document path, so a hook's ledger is flattened, re-embedded and
+//!   retrievable like anything else in the Space.
 //! - `host.log(...)` → captured logs.
 //!
 //! The hook returns a **directive** the chat path applies:
@@ -897,6 +905,14 @@ const host = {{
     delete: (k, ns) => tools.host.storage_delete({{ key: String(k), namespace: ns }}),
     keys: (ns) => tools.host.storage_keys({{ namespace: ns }}),
   }},
+  spaces: {{
+    ensureSpace: (a) => tools.host.spaces_ensure_space(a ?? {{}}),
+    createDoc: (a) => tools.host.spaces_create_doc(a ?? {{}}),
+    getDoc: (a) => tools.host.spaces_get_doc(a ?? {{}}),
+    updateDoc: (a) => tools.host.spaces_update_doc(a ?? {{}}),
+    listDocs: (a) => tools.host.spaces_list_docs(a ?? {{}}),
+    deleteDoc: (a) => tools.host.spaces_delete_doc(a ?? {{}}),
+  }},
   crypto: {{
     seal: (v) => tools.host.crypto_seal({{ value: typeof v === "string" ? v : JSON.stringify(v) }}),
     open: (v) => tools.host.crypto_open({{ value: String(v) }}),
@@ -1380,7 +1396,7 @@ mod tests {
             ..Default::default()
         };
         let directive =
-            run_fixture("double-check", ctx, serde_json::json!("Wrong: 2+2 is 4.")).await;
+            run_fixture("@ryu/double-check", ctx, serde_json::json!("Wrong: 2+2 is 4.")).await;
         assert_eq!(
             directive,
             HookDirective::Note {
@@ -1403,7 +1419,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("double-check", ctx, serde_json::json!("unused")).await;
+        let directive = run_fixture("@ryu/double-check", ctx, serde_json::json!("unused")).await;
         assert_eq!(directive, HookDirective::None);
     }
 
@@ -1421,7 +1437,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("goal", ctx, serde_json::Value::Null).await;
+        let directive = run_fixture("@ryu/goal", ctx, serde_json::Value::Null).await;
         assert_eq!(
             directive,
             HookDirective::Continue {
@@ -1446,7 +1462,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("proof", ctx, serde_json::Value::Null).await;
+        let directive = run_fixture("@ryu/proof", ctx, serde_json::Value::Null).await;
         assert_eq!(
             directive,
             HookDirective::Continue {
@@ -1469,7 +1485,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("proof", ctx, serde_json::Value::Null).await;
+        let directive = run_fixture("@ryu/proof", ctx, serde_json::Value::Null).await;
         assert_eq!(
             directive,
             HookDirective::Note {
@@ -1541,7 +1557,7 @@ mod tests {
             ..Default::default()
         };
         let directive = run_fixture(
-            "security-guidance",
+            "@ryu/security-guidance",
             ctx,
             serde_json::json!("Use yaml.safe_load; yaml.load allows arbitrary code execution."),
         )
@@ -1569,7 +1585,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let directive = run_fixture("security-guidance", ctx, serde_json::json!("unused")).await;
+        let directive =
+            run_fixture("@ryu/security-guidance", ctx, serde_json::json!("unused")).await;
         assert_eq!(directive, HookDirective::None);
     }
 

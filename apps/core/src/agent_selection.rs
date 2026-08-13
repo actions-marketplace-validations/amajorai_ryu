@@ -61,6 +61,47 @@ use crate::server::preferences::PreferencesStore;
 /// inherits, not a per-desktop preference.
 pub const GLOBAL_SELECTION_PREF: &str = "default-agent-selection";
 
+/// Pi provider id owning the bundled llama.cpp models. The gateway's built-in
+/// prefix rules route `gemma*` ids here (see `pi_config::default_gateway_model`),
+/// so this is the provider that pairs with [`crate::registry::DEFAULT_LOCAL_CHAT_MODEL_ID`].
+const LOCAL_PROVIDER_ID: &str = "local";
+
+/// What the node-wide default resolves to when nothing has been written yet: the
+/// flagship Pi agent on the bundled local Gemma chat model.
+///
+/// A READ default, not a seeded preference. Seeding writes a value that is then
+/// indistinguishable from a deliberate user choice — it survives a "reset to
+/// defaults", and it freezes the model id of the day into every profile ever
+/// created. Reading through instead means the pair tracks
+/// `DEFAULT_LOCAL_CHAT_MODEL_ID` (and its `RYU_LOCAL_CHAT_MODEL_ID` override)
+/// forever, and clearing the preference genuinely returns to the default.
+///
+/// Safe as a default because both halves are always present on a fresh install:
+/// `ryu` is the always-installed flagship, and llama.cpp plus this GGUF are
+/// fetched unconditionally on first run (see `mesh_host::MESH_PREINSTALL_DEFAULT`
+/// for the same argument stated from the other side).
+pub fn builtin_default_selection() -> AgentSelection {
+    AgentSelection {
+        agent_id: FLAGSHIP_AGENT_ID.to_owned(),
+        provider: LOCAL_PROVIDER_ID.to_owned(),
+        model: crate::registry::ProviderRegistry::load()
+            .local_chat_model
+            .id,
+        ..Default::default()
+    }
+}
+
+/// The node-wide default selection: what is stored, else
+/// [`builtin_default_selection`].
+pub async fn load_global(prefs: &PreferencesStore) -> AgentSelection {
+    let stored = AgentSelection::load(prefs, GLOBAL_SELECTION_PREF).await;
+    if stored.is_empty() {
+        builtin_default_selection()
+    } else {
+        stored
+    }
+}
+
 /// The flagship agent id (mirrors [`crate::registry::DEFAULT_AGENT_ID`]). It is
 /// the one agent Core can resolve to a concrete model, because Core owns its
 /// Pi config.
@@ -245,8 +286,7 @@ pub async fn resolve_side_model(
     let feature = AgentSelection::load(prefs, feature_key).await;
     let mut resolved = side_model_from(&feature);
     if resolved.is_none() {
-        let global = AgentSelection::load(prefs, GLOBAL_SELECTION_PREF).await;
-        resolved = side_model_from(&global);
+        resolved = side_model_from(&load_global(prefs).await);
     }
     let mut resolved = resolved?;
     if resolved.effort.is_empty() {
@@ -270,7 +310,10 @@ pub async fn resolve_agent(prefs: &PreferencesStore, feature_key: &str) -> Optio
     if !feature.agent_id.is_empty() {
         return Some(feature.agent_id);
     }
-    default_agent_id()
+    // The snapshot first (it is what a written preference refreshes), then the
+    // built-in pair — so an unconfigured node still names the flagship rather
+    // than handing every caller back its own ad-hoc default.
+    default_agent_id().or_else(|| Some(builtin_default_selection().agent_id))
 }
 
 /// In-process snapshot of the node-wide default's `agent_id`.

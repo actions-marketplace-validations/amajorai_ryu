@@ -92,7 +92,9 @@ export function AutoScrollText({
 			observer.disconnect();
 			animation?.cancel();
 		};
-	}, []);
+		// `title` is the content: a new string re-measures the marquee. The
+		// ResizeObserver alone misses a text swap that keeps the same box width.
+	}, [title]);
 
 	const setPaused = (paused: boolean) => {
 		for (const anim of textRef.current?.getAnimations() ?? []) {

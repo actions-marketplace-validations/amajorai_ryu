@@ -58,11 +58,11 @@ export const SETTINGS_SECTION_LABELS: Record<string, string> = {
 	// App dialog
 	general: "General",
 	appearance: "Appearance",
-	keyboard: "Keyboard shortcuts",
+	keyboard: "Keyboard Shortcuts",
 	updates: "Updates",
 	voice: "Voice",
 	developer: "Developer",
-	sync: "Settings sync",
+	sync: "Settings Sync",
 	account: "Account",
 	sessions: "Sessions",
 	"authorized-apps": "Authorized Apps",
@@ -160,6 +160,14 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		label: "Per-tab node override",
 	},
 	{
+		id: "general.tabs.split-layout-presets",
+		dialog: "app",
+		section: "general",
+		group: "Pane layouts",
+		label: "Pane layout presets",
+		keywords: "split view panes layout preset arrangement save equalize",
+	},
+	{
 		id: "general.chats.auto-import-agent-threads",
 		dialog: "app",
 		section: "general",
@@ -197,6 +205,14 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		group: "System",
 		label: "Start hidden",
 		keywords: "minimized background tray",
+	},
+	{
+		id: "general.system.close-to-tray",
+		dialog: "app",
+		section: "general",
+		group: "System",
+		label: "Stay in tray on close",
+		keywords: "close window quit background keep running menu bar",
 	},
 	{
 		id: "general.system.hide-tray-icon",
@@ -334,6 +350,23 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		keywords: "blur fade word by word streamdown",
 	},
 	{
+		id: "appearance.seasonal.effects",
+		dialog: "app",
+		section: "appearance",
+		group: "Seasonal effects",
+		label: "Seasonal effects",
+		keywords: "snow snowfall christmas halloween holiday confetti festive",
+	},
+	{
+		id: "appearance.seasonal.season",
+		dialog: "app",
+		section: "appearance",
+		group: "Seasonal effects",
+		label: "Season",
+		keywords:
+			"snow christmas halloween valentine easter lunar new year st patrick preview",
+	},
+	{
 		id: "appearance.interface.friendly-names",
 		dialog: "app",
 		section: "appearance",
@@ -412,7 +445,11 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		section: "appearance",
 		group: "Chat",
 		label: "Detail level",
-		keywords: "verbosity compact",
+		// "none" and its synonyms live here rather than as their own row: a
+		// search result reading just "None" says nothing, and the row a user
+		// wants when they search "hide tool calls" is this ladder.
+		keywords:
+			"verbosity compact none hide tool calls file edits messaging plain",
 	},
 	{
 		id: "appearance.chat.group-tool-uses",
@@ -679,32 +716,32 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		id: "sync.settings-sync.sync-my-settings-across-machines",
 		dialog: "app",
 		section: "sync",
-		group: "Settings sync",
-		label: "Sync my settings across machines",
+		group: "Settings Sync",
+		label: "Sync My Settings Across Machines",
 		keywords: "sync cloud devices machines follow me backup settings sync",
 	},
 	{
 		id: "sync.conflict-handling",
 		dialog: "app",
 		section: "sync",
-		group: "When the same setting changed in two places",
-		label: "Conflict handling",
+		group: "When The Same Setting Changed In Two Places",
+		label: "Conflict Handling",
 		keywords: "conflict ask download upload newer cloud copy",
 	},
 	{
 		id: "sync.last-sync",
 		dialog: "app",
 		section: "sync",
-		group: "Settings sync",
-		label: "Last sync",
+		group: "Settings Sync",
+		label: "Last Sync",
 		keywords: "sync now pending upload status",
 	},
 	{
 		id: "sync.delete-cloud-copy",
 		dialog: "app",
 		section: "sync",
-		group: "Cloud copy",
-		label: "Delete my synced settings",
+		group: "Cloud Copy",
+		label: "Delete My Synced Settings",
 		keywords: "delete forget cloud copy remove synced",
 	},
 
@@ -714,7 +751,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "app",
 		section: "keyboard",
 		group: "",
-		label: "Keyboard shortcuts",
+		label: "Keyboard Shortcuts",
 		keywords: "hotkey keybinding chord rebind accelerator shortcut keys",
 	},
 	{
@@ -722,7 +759,7 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "app",
 		section: "keyboard",
 		group: "Global",
-		label: "Global shortcuts",
+		label: "Global Shortcuts",
 		keywords: "system wide os accelerator island push to talk",
 	},
 
@@ -872,6 +909,18 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		section: "developer",
 		group: "Tauri MCP bridge",
 		label: "Agent connection",
+	},
+	{
+		// Rendered only on canary/nightly builds, but indexed unconditionally: the
+		// index is a static list and the search is how a user finds the switch that
+		// turns a destructive setting back OFF.
+		id: "developer.daily-data-reset.wipe-this-data-folder-at-midnight",
+		dialog: "app",
+		section: "developer",
+		group: "Daily data reset",
+		label: "Wipe this data folder at midnight",
+		keywords:
+			"canary nightly wipe clear erase fresh install daily reset data folder",
 	},
 
 	// --- Account / sessions ---

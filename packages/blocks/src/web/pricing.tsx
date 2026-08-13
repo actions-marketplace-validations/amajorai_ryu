@@ -76,7 +76,7 @@ export interface CloudHostingTier {
 	readonly diskGb: number;
 	/** Canonical tier id (BASE / 2X / 3X). */
 	readonly id: string;
-	/** True for the BASE node bundled free with the Max plan. */
+	/** True for the BASE node bundled free with every recurring plan. */
 	readonly includedWithMax: boolean;
 	readonly memoryGb: number;
 	/** Monthly add-on price on top of Max (USD). 0 for the included BASE node. */
@@ -316,7 +316,7 @@ export function PricingAudienceToggle({
 				onValueChange={(val) => onAudienceChange(val as PricingAudience)}
 				value={audience}
 			>
-				<TabsList variant="pills">
+				<TabsList variant="pills-lg">
 					<TabsTrigger value="individual">Individual</TabsTrigger>
 					<TabsTrigger value="business">Business &amp; Enterprise</TabsTrigger>
 				</TabsList>
@@ -700,6 +700,16 @@ export function ProPlanCard({
 						<Server className="mr-2 size-4" />
 						<span>Space data limited only by your disk</span>
 					</li>
+					{/* The free base node ships with EVERY recurring plan (Pro, Max and
+					    Teams — `planIncludesBaseNode` in @ryu/auth/lib/base-node is the
+					    enforced predicate). This bullet and the entitlement must move
+					    together: advertising it without the gate 402s the buyer, and
+					    widening the gate without the bullet gives away compute nobody
+					    was told about. */}
+					<li className="flex items-center">
+						<Cloud className="mr-2 size-4" />
+						<span>Free managed cloud node (2 vCPU · 4 GB)</span>
+					</li>
 					<li className="flex items-center">
 						<Key className="mr-2 size-4" />
 						<span>Use your own API keys (optional)</span>
@@ -872,6 +882,11 @@ export function TeamsPlanCard({
 						<Mail className="mr-2 size-4" />
 						<span>Unlimited Agent Inboxes · 20 GB storage</span>
 					</li>
+					{/* Same free base node as Pro and Max — see the note on the Pro card. */}
+					<li className="flex items-center">
+						<Server className="mr-2 size-4" />
+						<span>Free managed cloud node (2 vCPU · 4 GB)</span>
+					</li>
 				</ul>
 				<CloudUpgradePanel
 					loadingPlan={loadingPlan}
@@ -900,13 +915,16 @@ export function TeamsPlanCard({
 
 /**
  * Enterprise plan — the "contact sales" tier, rendered as a FULL-WIDTH horizontal
- * band BELOW the four self-serve plans (spanning all columns), not a fifth column.
+ * band BELOW the self-serve plans (spanning all columns), not a fifth column.
  * No self-serve checkout: the CTA links to the sales/contact page. Uses the
  * `enterprise` PlanBadge + gradient border (both already supported).
+ *
+ * Its `max-w-4xl` MUST track the plan grid's: a wider band overhangs the cards
+ * above it on both sides, which reads as a misaligned page rather than a band.
  */
 export function EnterprisePlanCard() {
 	return (
-		<div className="mx-auto mb-12 max-w-7xl">
+		<div className="mx-auto mb-12 max-w-4xl">
 			<PricingCardBorder variant="enterprise">
 				<div className="flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between md:gap-10">
 					<div className="md:max-w-xs">
@@ -1085,7 +1103,8 @@ export interface PricingCloudLocation {
  * Ryu Cloud dynamic instance picker — managed nodes (Core + Gateway hosted for
  * you). Reads a live catalog (specs + live $/mo × markup + regional
  * availability) injected by the page; the user picks a location and a node.
- * The base node ships free with Max (shown "Included with Max", never a
+ * The base node ships free with every recurring plan (shown "Included with
+ * your plan", never a
  * checkout); every other node is an ad-hoc cloud-instance subscription. The USER
  * only ever sees CPU / RAM / SSD + a perf label + price — never the Hetzner type
  * name. Presentational: the page fetches the catalog and wires the handlers.
@@ -1227,7 +1246,7 @@ export function PricingInstancePicker({
 							<CardFooter>
 								{isIncluded ? (
 									<Button className="w-full" disabled variant="outline">
-										Included with Max
+										Included with your plan
 									</Button>
 								) : (
 									<Button

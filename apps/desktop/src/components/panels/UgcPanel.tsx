@@ -77,6 +77,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
+import { formatDate as formatDateInZone } from "@/src/lib/timezone.ts";
 
 /** The app that owns this panel. Feature detection keys off it, so a disabled
  *  app renders an enable hint instead of hammering a sidecar that is not there. */
@@ -286,7 +287,7 @@ function formatDate(iso: string | null | undefined): string {
 	if (Number.isNaN(parsed.getTime())) {
 		return iso;
 	}
-	return parsed.toLocaleDateString();
+	return formatDateInZone(parsed);
 }
 
 /** Accepts `12`, `12.5`, `$12.50`. Returns integer cents, or null when the text

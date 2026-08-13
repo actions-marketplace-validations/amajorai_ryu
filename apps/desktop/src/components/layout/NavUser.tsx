@@ -1,6 +1,5 @@
 import { settingsApi, useSubscription } from "@ryu/settings";
 import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
-import { FadeOverflowText } from "@ryu/ui/components/fade-overflow-text";
 import { NavBeamCta } from "@ryu/ui/components/border-beam";
 import {
 	ContextMenu,
@@ -23,6 +22,7 @@ import {
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
+import { FadeOverflowText } from "@ryu/ui/components/fade-overflow-text";
 import { PlanBadge, type PlanTier } from "@ryu/ui/components/plan-badge";
 import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar";
 import { toast } from "@ryu/ui/components/sileo";
@@ -70,12 +70,14 @@ import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { fetchEntitlementStatus } from "@/src/lib/api/billing.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
+import { formatDate as formatDateInZone } from "@/src/lib/timezone.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { useAppStore } from "../../store/useAppStore.ts";
 import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { CreateMenu } from "./CreateMenu.tsx";
+import { InterfaceLevelSubmenu } from "./InterfaceLevelSubmenu.tsx";
 import { UpdatesSubmenu } from "./UpdatesSubmenu.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
@@ -149,7 +151,7 @@ function formatDate(value: string | null | undefined): string {
 	if (Number.isNaN(date.getTime())) {
 		return "Not scheduled";
 	}
-	return date.toLocaleDateString(undefined, {
+	return formatDateInZone(date, {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
@@ -496,6 +498,10 @@ export function NavUser({
 												</DropdownMenuItem>
 												<UpdatesSubmenu />
 											</DropdownMenuGroup>
+											{/* Sits with Theme, not under Settings: the audience the
+											    Simple level exists for is the audience that never opens
+											    the settings dialog. */}
+											<InterfaceLevelSubmenu />
 											<DropdownMenuSub>
 												<DropdownMenuSubTrigger>
 													<Sun className="mr-2 size-4" />

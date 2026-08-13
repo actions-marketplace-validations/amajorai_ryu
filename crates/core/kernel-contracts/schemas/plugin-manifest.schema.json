@@ -391,6 +391,14 @@
           },
           "type": "array"
         },
+        "create_actions": {
+          "default": [],
+          "description": "\"New X\" rows the app contributes to the shell's create menu (the sidebar\nfooter \"+\"). See [`CreateActionContribution`].\n\nThis exists because the create menu's only app seam used to be\n`sidebar_sections[].spec.create` — section-scoped, so an app that\ncontributes no sidebar section could not put a row there at all. The shell\ntherefore hardcoded rows for apps it happened to know about, and those rows\nstayed in the menu when the app was not installed, leading straight to an\nerror page. A create action is its own contribution precisely so the row\nappears and disappears with the app.\n\n**Stored raw, validated at the chokepoint** — same rule as\n[`Contributes::context_menu_items`].",
+          "items": {
+            "$ref": "#/$defs/CreateActionContribution"
+          },
+          "type": "array"
+        },
         "data_categories": {
           "default": [],
           "description": "**Deletable data categories** the app owns — one \"Delete all X\" row in\nSettings → Danger Zone (see [`DataCategoryContribution`]).\n\nThe danger zone used to be two hardcoded lists that had to be edited\ntogether: a `DataCategory` enum in Core and a `CATEGORIES` array carrying the\nuser-facing copy in the closed desktop source. Monitors and Meetings are\napp-owned data, so both lists named apps — which meant a node where Monitors\nwas never enabled still offered to delete monitors, and the count was always\n0. Declaring the category here makes the owning app the single source of both\nits existence and its wording, and makes the row appear and disappear with\nthe app instead of with a client-side feature-detect.\n\n# Core-interpreted, so a typed struct — and NOT on the contributions endpoint\n\nCore has to resolve the id to something that can actually count and delete\nthe rows, so per this type's own doc comment this gets a typed struct rather\nthan opaque JSON, and it is gathered at its consumption site\n(`GET /api/data/counts`, which serves each category's descriptor next to its\nlive count) rather than at `GET /api/plugins/contributions` — the same\ndisposition as [`Contributes::tool_filters`] and [`Contributes::lsp_servers`].\n\n# Declaration, not implementation\n\nA declared category is served only when Core knows how to clear it; an id\nCore does not implement is skipped with a warn rather than being offered as a\nbutton that 400s. That split is deliberate and not a stepping stone to a\ngeneric HTTP truncate: clearing monitors has to tear down each monitor's\nbacking scheduler job, and clearing meetings has to broadcast on the meetings\nSSE stream, so a blind `DELETE /monitors` would leave jobs ticking forever.\nThe manifest owns *whether the row exists and what it says*; Core owns *what\ndeleting actually entails*.",
@@ -567,6 +575,61 @@
       },
       "required": [
         "id"
+      ],
+      "type": "object"
+    },
+    "CreateActionContribution": {
+      "description": "One \"New X\" row a plugin contributes to the shell's create menu (see\n[`Contributes::create_actions`]).",
+      "properties": {
+        "args": true,
+        "capability": {
+          "description": "Granted capability to invoke instead of navigating, plus static `args` —\nfor a create that is an action rather than a destination. Dispatched\nthrough the same host seam as a context-menu row.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive. The desktop's\ncreate menu draws no icons today (its rows are label-only by design), so\nthis is read and ignored there — it exists for shells that do.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this row within the plugin.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Row label, written as the user reads it — \"New workflow\", not \"Workflow\".",
+          "type": "string"
+        },
+        "order": {
+          "description": "Sort position among contributed rows (ascending).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "In-app route the shell opens, e.g. `/workflows/new`. Must be a path, not a\nURL: this is a navigation inside the shell, and accepting a scheme here\nwould turn a create row into an arbitrary-link affordance.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Title for the tab `target` opens. Falls back to `label`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label"
       ],
       "type": "object"
     },
@@ -1394,6 +1457,13 @@
             }
           ],
           "description": "WHAT this provider acts on, when the capability controls a machine or an\nenvironment rather than answering a query.\n\nExists because \"swap the provider\" quietly means two different things.\nSwapping `web.search` from exa to tavily changes who answers; the question is\nthe same. Swapping `computer.control` from ghost to bytebot changes **which\ncomputer gets typed on** — ghost drives the machine Ryu runs on, bytebot\ndrives the desktop `bytebotd` runs on (a containerized Linux desktop in the\nshipped product). A picker that renders those two swaps identically is\ntelling the user something false, and until this field existed the\ndistinction lived only in a prose `description` that nothing structured\ncould read.\n\nAbsent = not applicable or unspecified. That is the honest default for the\ncapabilities where locality is meaningless (`web.search`, `memory`, `rag`),\nand it is deliberately NOT [`ProviderTarget::LocalMachine`]: defaulting to\n\"this machine\" would silently mislabel every future hosted provider that\nforgets to declare it."
+        },
+        "title": {
+          "description": "The human name of the **capability** (not of this provider): `\"Search\"` for\n`web.search`, `\"Document Parsing\"` for `document.parse`. What a layer picker\nputs above the provider list.\n\nDeclared here, on the provider, because the capability itself is not a\nmanifest — it exists only as the string its providers agree on — and there is\nnowhere else to hang the name. So every provider of a capability should carry\nthe same `title`, and the layer keeps its name when the default provider is\nuninstalled.\n\nDeliberately NOT unanimity-checked the way [`Self::selectable`] is: forcing\nsix independent `web.search` manifests to spell one cosmetic string\nbyte-identically or fail to load trades a real capability for a label. Core\npicks one with the same ladder the binder uses (declared default, else\nlowest plugin id) and disagreement costs at most a differently-worded header.\n\nAbsent = the client falls back to its own naming (a built-in table, else the\ncapability's last dotted segment). No server-side humaniser derives it from\nthe id — that route reads `news.crud` as \"News Crud\".",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tools": {
           "additionalProperties": {
@@ -2399,7 +2469,7 @@
       ]
     },
     "banner": {
-      "description": "Detail-page hero banner spec ({colors,style,seed}); opaque passthrough (Ryu ext)."
+      "description": "Detail-page hero banner spec; opaque passthrough (Ryu ext).\n\nThe banner is the listing's OWN background, not its icon enlarged. Declared\nor not, the hero always paints something: with no `banner` the detail page\nderives its wash from `icon_dither`, so an app that never thinks about this\nkey still opens on its own colour rather than a grey slab. Declaring one is\nhow an author says \"my hero is not just my icon, bigger\".\n\nAccepted keys, all optional — the render layer picks the first that paints\nand falls back down the list, so an unknown or malformed value degrades to\nthe derived wash rather than failing:\n\n- `background` — a flat CSS background (a colour, a `linear-gradient(…)`).\n- `imageUrl` — a raster banner, painted `object-cover`. http(s) only.\n- `colors: [String]` — two or more stops, ramped 135°.\n- `style: \"gradient\" | \"dither\" | \"flat\" | \"image\"` — how to treat the\n  above; `dither` adds the noise overlay, `flat`/`image` select `background`\n  / `imageUrl` explicitly.\n- `seed: Number` — the dither noise seed, so two apps sharing a palette do\n  not share a texture.\n\nKept as raw JSON like `icon_dither`, for the same reason: this is\nPUBLISHER-supplied and reaches a CSS background, so it must never fail the\nmanifest parse, and the client validates before painting (`safeHttpUrl` for\n`imageUrl`; the flat string is trusted exactly as far as `icon_background`\nalready is). Core does not read any of these keys — it copies the whole\nvalue onto the catalog entry — so a new one needs no Core release."
     },
     "capabilities": {
       "description": "Human-readable capability strings (Ryu extension). When absent the detail\nbuilder DERIVES these from `permission_grants` via\n[`crate::schema::capabilities_from_grants`]; declared values are used verbatim.",

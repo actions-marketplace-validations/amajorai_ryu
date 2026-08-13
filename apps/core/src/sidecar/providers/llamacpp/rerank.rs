@@ -111,13 +111,12 @@ impl LlamaCppRerankManager {
         self
     }
 
+    /// The installed `llama-server`. Resolved through the shared variant
+    /// resolver, so this tier always runs the SAME build as the chat engine —
+    /// the binary lives inside a per-variant directory (`~/.ryu/bin/llamacpp/`)
+    /// next to that backend's own `ggml-*` libraries.
     fn binary_path() -> std::path::PathBuf {
-        let name = if cfg!(target_os = "windows") {
-            "llama-server.exe"
-        } else {
-            "llama-server"
-        };
-        crate::paths::ryu_dir().join("bin").join(name)
+        super::variant::server_path()
     }
 
     /// Classify a reachable reranker port: is the server that answered the child we

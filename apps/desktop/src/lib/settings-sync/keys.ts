@@ -126,6 +126,12 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Animate streaming chat text",
 		group: "appearance",
 	},
+	{
+		key: "ryu:seasonal-effects",
+		label: "Seasonal effects",
+		group: "appearance",
+	},
+	{ key: "ryu:seasonal-theme", label: "Season", group: "appearance" },
 
 	// --- Layout & sizing ---
 	{ key: "ryu_spacing", label: "Zoom (spacing)", group: "layout" },
@@ -180,6 +186,17 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "Search overflow in a popover",
 		group: "layout",
 	},
+	// Saved PANE SHAPES, not the live layout: a preset is id-free and path-free
+	// (`lib/splitPresets.ts`), so "one tall pane beside two stacked" means the
+	// same thing on every machine. The open tabs and their arrangement
+	// (`ryu_session_tabs`) stay machine-local, exclusion 2. If a preset ever
+	// grows a workspace or folder field, it stops being portable and this row
+	// has to go.
+	{
+		key: "ryu_split_presets",
+		label: "Split layout presets",
+		group: "layout",
+	},
 	{
 		key: "ryu:home-section-order",
 		label: "Home section order",
@@ -219,11 +236,6 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 	{
 		key: "ryu_startup_behavior",
 		label: "What opens on startup",
-		group: "behavior",
-	},
-	{
-		key: "ryu.settings.advanced",
-		label: "Show advanced settings",
 		group: "behavior",
 	},
 	{ key: "ryu:timezone", label: "Time zone", group: "behavior" },
@@ -267,6 +279,11 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 	{
 		key: "ryu:open-chat-at-bottom",
 		label: "Open chats at the latest message",
+		group: "chat",
+	},
+	{
+		key: "ryu:inference-stats",
+		label: "Inference stats",
 		group: "chat",
 	},
 	{
@@ -314,5 +331,5 @@ export const SYNC_GROUP_LABELS: Record<SyncGroup, string> = {
 	layout: "Layout",
 	behavior: "Behavior",
 	chat: "Chat",
-	shortcuts: "Keyboard shortcuts",
+	shortcuts: "Keyboard Shortcuts",
 };

@@ -6,6 +6,7 @@ import {
 	CheckListIcon,
 	ComputerTerminal01Icon,
 	DashboardSquare01Icon,
+	File01Icon,
 	FileCodeIcon,
 	FolderOpenIcon,
 	Globe02Icon,
@@ -58,7 +59,15 @@ import type {
 	MouseEvent as ReactMouseEvent,
 	ReactNode,
 } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	createContext,
+	useCallback,
+	useContext,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { MessageList } from "@/components/agent-elements/message-list.tsx";
 import { ArtifactRenderer } from "@/src/components/chat/ArtifactRenderer.tsx";
 import {
@@ -81,18 +90,32 @@ import {
 	dockPanelsFor,
 	dockTabKind,
 	findDockPanel,
+	isDockableRoutePath,
 	isPinnableDockTabKind,
 	isPluginTabKind,
+	isRouteTabKind,
 	nativeDockPanelKey,
+	routeTabKind,
+	routeTabPath,
 } from "@/src/components/panels/dock-panels.ts";
 import { MissionControlPanel } from "@/src/components/panels/MissionControlPanel.tsx";
 import { useProjectDockSlots } from "@/src/components/panels/project-dock-context.tsx";
-import { SubagentAvatar } from "@/src/components/panels/subagent-identity.tsx";
+import {
+	SubagentAvatar,
+	subagentName,
+} from "@/src/components/panels/subagent-identity.tsx";
 import { UgcPanel } from "@/src/components/panels/UgcPanel.tsx";
 import {
+	CurrentTabIdProvider,
+	IsActiveTabProvider,
+	TabsContext,
 	useCurrentTabId,
 	useIsActiveTab,
+	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
+import { TitleBarProvider } from "@/src/contexts/TitleBarContext.tsx";
+import { useAppShellPath } from "@/src/contributions/app-shell-routes.ts";
+import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import {
@@ -113,8 +136,13 @@ import {
 } from "@/src/hooks/useSidebarVariant.ts";
 import { useTitleBarClearsContent } from "@/src/hooks/useTitleBarClearsContent.ts";
 import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
+import {
+	MISSION_CONTROL_BUTTON_ID,
+	MISSION_CONTROL_PLUGIN_ID,
+} from "@/src/lib/api/mission-control.ts";
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
+import { pageRoute, SIDE_PANEL_PAGES } from "@/src/lib/page-routes.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
 import {
@@ -122,6 +150,7 @@ import {
 	useProjectDockStore,
 	visibleProjectDockTabs,
 } from "@/src/store/useProjectDockStore.ts";
+import { useSidePanelRouteStore } from "@/src/store/useSidePanelRouteStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 // ── Panel layout icons — same visual language as SidebarToggleIcon ────────────
@@ -530,6 +559,13 @@ function EditorButtonGroup({ folder }: { folder?: string | null }) {
 // `./dock-panels.ts` for the placement/order/resolution rules.
 type TabKind = DockTabKind;
 
+/** True inside a page hosted BY a dock (see {@link DockRoutePage}). The one
+ *  consumer is {@link WorkspacePanels} itself, which renders its children bare in
+ *  that case — a page like `/chat` mounts a `WorkspacePanels` of its own, and a
+ *  dock nested in a dock would recurse without end (and be unusable long before
+ *  that). */
+const DockRouteHostContext = createContext(false);
+
 interface PanelTab {
 	kind: TabKind;
 	label: string;
@@ -575,6 +611,20 @@ const RIGHT_TAB_TYPES: TabTypeDef[] = [
 	// chat, so the "+" menu is its single entry point.
 	{ kind: "mission", label: "Mission Control", icon: Radar01Icon },
 ];
+
+/** The main-tab PAGES offered in the right dock's "+" menu, as tab types.
+ *  Derived from the shared page-key allowlist so the dock can never offer a page
+ *  that a `ryu://open/<page>` link could not also reach. Kept OUT of
+ *  `RIGHT_TAB_TYPES`: the launchpad renders that list as cards, and fifteen page
+ *  cards would bury the four panels the dock is actually for — the pages live in
+ *  a submenu instead. */
+const PAGE_TAB_TYPES: TabTypeDef[] = SIDE_PANEL_PAGES.flatMap((p) => {
+	const path = pageRoute(p.page);
+	if (!(path && isDockableRoutePath(path))) {
+		return [];
+	}
+	return [{ kind: routeTabKind(path), label: p.label, icon: File01Icon }];
+});
 
 /** The glyph of each shell-owned tab kind. The programmatic panels
  *  (cowork/subagent/artifact/inspector) are opened by the chat rather than the
@@ -691,12 +741,16 @@ function usePanelTabs(initial: PanelTab[]) {
 	};
 }
 
-/** How a tab's glyph is drawn: a bundled Hugeicons element (built-in + `native`
- *  panels — no network, identical to before) or a contributed icon id resolved
- *  through the shared `Icon` (third-party panels). */
+/** How a tab's glyph is drawn: a subagent's generative avatar (the tab shows ONE
+ *  identity, so a shared robot glyph tells the user nothing), a bundled
+ *  Hugeicons element (built-in + `native` panels — no network, identical to
+ *  before), or a contributed icon id resolved through the shared `Icon`
+ *  (third-party panels). */
 interface TabIconSpec {
 	glyph?: typeof ComputerTerminal01Icon;
 	iconId?: string;
+	/** A subagent id — drawn as that subagent's own dither avatar. */
+	seed?: string;
 }
 
 function TabIcon({
@@ -710,6 +764,13 @@ function TabIcon({
 	size?: number;
 	spec: TabIconSpec;
 }) {
+	if (spec.seed) {
+		// `animate={false}`: the strip remounts this on every tab change, and the
+		// avatar's stock 600ms entrance would replay each time.
+		return (
+			<SubagentAvatar animate={false} className={className} seed={spec.seed} />
+		);
+	}
 	if (spec.glyph) {
 		return <HugeiconsIcon className={className} icon={spec.glyph} />;
 	}
@@ -747,6 +808,10 @@ interface PanelTabBarProps {
 	onTogglePin?: (uid: string) => void;
 	otherPanelIcon: typeof Cancel01Icon;
 	otherPanelLabel: string;
+	/** Main-tab PAGES offered under a "Pages" submenu of "+". Separate from
+	 *  `addTypes` because that list also feeds the launchpad's cards, where a long
+	 *  page list would bury the dock's own panels. Omitted = no submenu. */
+	pageTypes?: TabTypeDef[];
 	/** When set, pin is offered but disabled (e.g. no project folder open). */
 	pinDisabledReason?: string;
 	tabs: PanelTab[];
@@ -766,6 +831,7 @@ function PanelTabBar({
 	otherPanelLabel,
 	onAdd,
 	addTypes,
+	pageTypes,
 	iconForKind,
 	onClosePanel,
 }: PanelTabBarProps) {
@@ -929,6 +995,33 @@ function PanelTabBar({
 							{t.label}
 						</DropdownMenuItem>
 					))}
+					{pageTypes && pageTypes.length > 0 ? (
+						<DropdownMenuSub>
+							<DropdownMenuSubTrigger className="gap-2.5 text-xs">
+								<HugeiconsIcon
+									className="size-3.5 shrink-0"
+									icon={File01Icon}
+								/>
+								Pages
+							</DropdownMenuSubTrigger>
+							<DropdownMenuSubContent>
+								{pageTypes.map((t) => (
+									<DropdownMenuItem
+										className="gap-2.5 text-xs"
+										key={t.kind}
+										onClick={() => onAdd(t.kind)}
+									>
+										<TabIcon
+											className="size-3.5 shrink-0"
+											size={14}
+											spec={tabTypeIcon(t)}
+										/>
+										{t.label}
+									</DropdownMenuItem>
+								))}
+							</DropdownMenuSubContent>
+						</DropdownMenuSub>
+					) : null}
 				</DropdownMenuContent>
 			</DropdownMenu>
 
@@ -2336,6 +2429,20 @@ export interface SubagentView {
 	label: string;
 }
 
+/** What to say when the rebuilt transcript holds nothing but the prompt. The
+ *  three cases are genuinely different and the failed one must not be described
+ *  as a clean finish: an errored Task usually carries no extractable output
+ *  text, so it lands in exactly the same empty shape as a silent success. */
+function emptyNote(running: boolean, errored: boolean): string {
+	if (running) {
+		return "No steps reported yet — not every agent narrates what its subagent is doing. The answer lands here when the task finishes.";
+	}
+	if (errored) {
+		return "This subagent's task ended in an error, with no output to show.";
+	}
+	return "This subagent finished without returning any output.";
+}
+
 // The clicked subagent's chat, rebuilt live from the run's message stream (so a
 // still-running subagent's steps keep streaming in) and rendered read-only with
 // the same MessageList as the main transcript.
@@ -2352,13 +2459,36 @@ function SubagentTranscriptPanel({
 	);
 	const active = view ? subagents.find((s) => s.id === view.id) : undefined;
 
+	// The rebuilt transcript ALWAYS carries an assistant message, even before the
+	// subagent has produced anything — and on ACP (Claude Code / Codex) it stays
+	// empty for the whole run, because nothing there emits the `details.ryuSteps`
+	// marker that mints child tool parts. Rendering it produced a blank bubble
+	// under the prompt for minutes. Dropping the empty message instead leaves the
+	// prompt as the last turn, which is exactly the shape `MessageList` shows its
+	// "Thinking" row under (see planning-visibility.ts) once we pass `streaming`.
+	const messages = useMemo(() => {
+		const transcript = active?.transcript ?? [];
+		const last = transcript.at(-1) as { parts?: unknown[] } | undefined;
+		return (last?.parts?.length ?? 0) === 0
+			? transcript.slice(0, -1)
+			: transcript;
+	}, [active]);
+
 	if (!active) {
+		// Fires when the tab outlives its stream — e.g. the conversation was
+		// switched while the tab stayed open. Keep it.
 		return (
 			<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
 				This subagent's activity is no longer available.
 			</div>
 		);
 	}
+
+	const running = active.status === "running";
+	// The slice above fired, i.e. nothing beyond the prompt exists yet. Compared
+	// against the transcript's own length rather than a hardcoded 2, so this can't
+	// silently invert if `toSubagentSummary` ever emits a different message count.
+	const empty = messages.length < active.transcript.length;
 
 	return (
 		<div className="flex h-full flex-col">
@@ -2369,13 +2499,32 @@ function SubagentTranscriptPanel({
 						<span className="truncate font-medium text-foreground text-sm">
 							{active.name}
 						</span>
-						<span className="shrink-0 truncate text-muted-foreground/70 text-xs">
-							{active.label}
-						</span>
+						{/* Only a declared `subagent_type` earns the chip — an untyped
+						    spawn used to render the bare word "Agent". */}
+						{active.label && (
+							<span className="shrink-0 truncate text-muted-foreground/70 text-xs">
+								{active.label}
+							</span>
+						)}
+						{running && (
+							<span
+								className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+								title="Running"
+							/>
+						)}
 					</div>
 					{active.subtitle && (
 						<div className="truncate text-muted-foreground text-xs">
 							{active.subtitle}
+						</div>
+					)}
+					{/* The live current step, mirroring the pinned summary's row. Gated on
+					    a real step count and not on `activity` being truthy: with no
+					    steps `latestActivity` returns the literal "Starting…", which on
+					    ACP would sit there unchanged for the entire run. */}
+					{running && active.steps > 0 && (
+						<div className="truncate text-muted-foreground/80 text-xs">
+							{active.activity}
 						</div>
 					)}
 				</div>
@@ -2383,10 +2532,20 @@ function SubagentTranscriptPanel({
 			<div className="min-h-0 flex-1 overflow-hidden">
 				<MessageList
 					initialScrollBehavior="top"
-					messages={active.transcript}
-					status="ready"
+					messages={messages}
+					// `streaming` while the subagent runs, so the list shows its planning
+					// shimmer instead of a dead pane. Safe on a rebuilt (non-live) list:
+					// `MessageScroller`'s autoScroll is unconditional and keyed off
+					// `initialScrollBehavior`, never off `status` — this flag only drives
+					// what renders.
+					status={running ? "streaming" : "ready"}
 				/>
 			</div>
+			{empty && (
+				<div className="shrink-0 border-border/60 border-t px-3 py-2 text-muted-foreground text-xs">
+					{emptyNote(running, active.errored)}
+				</div>
+			)}
 		</div>
 	);
 }
@@ -2496,6 +2655,98 @@ function PluginDockTabContent({
 	);
 }
 
+/**
+ * A main-tab PAGE hosted in a dock: the same `RouteOutlet` a window tab renders,
+ * given a synthetic tab record.
+ *
+ * Three providers wrap it, and each one closes a specific way a dock-hosted page
+ * would otherwise reach out and rewrite the WINDOW tab hosting it:
+ *
+ *   - `DockRouteHostContext` — read by {@link WorkspacePanels}, which renders
+ *     bare children inside one. `/chat` is a hostable page, and ChatPage's root
+ *     IS a `WorkspacePanels`; without this the dock would mount a dock inside
+ *     itself, forever. A chat in the panel therefore shows the conversation with
+ *     no docks of its own, which is also the right shape for a side panel.
+ *   - `IsActiveTabProvider isActive={false}` — `useTitleBar` (TitleBarContext)
+ *     writes the page's title into the titlebar AND into the tab strip's label,
+ *     gated on exactly this flag. A page in the panel is not what the window tab
+ *     is showing, so it must not rename it. Same for the assistant's page-context
+ *     hooks and ChatPage's "mirror my conversation into the sidebar highlight".
+ *   - `CurrentTabIdProvider` with the dock tab's own uid — ChatPage writes its
+ *     conversation id and busy flag back to `useCurrentTabId()`. Pointed at the
+ *     host window tab that would clobber the host chat's binding (a dedup match
+ *     landing on the wrong thread, per `tab-conversation.ts`); pointed at a uid no
+ *     window tab has, both writes are no-ops by construction.
+ *
+ * `TitleBarProvider` is nested for the same reason as the second bullet — belt
+ * and braces, so a page that pushes titlebar actions writes into a throwaway
+ * store rather than the shell's.
+ */
+function DockRoutePage({
+	kind,
+	label,
+	uid,
+}: {
+	kind: TabKind;
+	label: string;
+	uid: string;
+}) {
+	const path = routeTabPath(kind);
+	const parentTabs = useTabsContext();
+	const routeTab = useMemo(
+		() => ({ id: uid, path, title: label }),
+		[uid, path, label]
+	);
+	// Neuter every verb that MUTATES AN EXISTING TAB, at one seam, for the whole
+	// subtree.
+	//
+	// Pointing `useCurrentTabId` at a uid no window tab has is enough for the
+	// id-keyed writers (`bindTabConversation`, `updateTabBusy`, `updateTabTitle`),
+	// but `updateTabsIconWhere` takes a PREDICATE — no tab id is involved, so it
+	// patches every open tab that matches. Two pages reachable from this dock call
+	// it: `SpaceDocEditorPage` (on a doc's own path) and `PluginHostPanel` (on an
+	// app's, e.g. the Inbox), so a page shown in the side panel would rewrite the
+	// glyphs of real window tabs. Overriding the context is what makes the fix
+	// total rather than a list of pages someone has to keep updating — a page
+	// added later inherits the guard.
+	//
+	// NAVIGATION is deliberately left intact: clicking a doc inside a dock-hosted
+	// Library should still open it as a window tab, which is what `openTab` does.
+	const scopedTabs = useMemo(
+		() => ({
+			...parentTabs,
+			bindTabConversation: () => undefined,
+			updateTabBusy: () => undefined,
+			updateTabIcon: () => undefined,
+			updateTabsIconWhere: () => undefined,
+			updateTabTitle: () => undefined,
+		}),
+		[parentTabs]
+	);
+	if (!isDockableRoutePath(path)) {
+		return (
+			<DockPanelPlaceholder text="This page can't be opened in a panel." />
+		);
+	}
+	return (
+		<DockRouteHostContext.Provider value={true}>
+			{/* Providing (not consuming) a narrowed context value — the one sanctioned
+			    reason app code touches `TabsContext` directly. */}
+			<TabsContext.Provider value={scopedTabs}>
+				<CurrentTabIdProvider tabId={uid}>
+					<IsActiveTabProvider isActive={false}>
+						<TitleBarProvider>
+							<div className="h-full min-h-0 overflow-auto">
+								<RouteOutlet onClose={() => undefined} tab={routeTab} />
+							</div>
+						</TitleBarProvider>
+					</IsActiveTabProvider>
+				</CurrentTabIdProvider>
+			</TabsContext.Provider>
+		</DockRouteHostContext.Provider>
+	);
+}
+
 function TabContent({
 	tab,
 	folder,
@@ -2525,6 +2776,9 @@ function TabContent({
 				tabKind={tab.kind}
 			/>
 		);
+	}
+	if (isRouteTabKind(tab.kind)) {
+		return <DockRoutePage kind={tab.kind} label={tab.label} uid={tab.uid} />;
 	}
 	if (tab.kind === "terminal") {
 		return <SimpleTerminal cwd={folder} />;
@@ -2725,12 +2979,10 @@ export function PanelToggleButtons({
 }: PanelToggleButtonsProps) {
 	return (
 		<>
-			{folder ? (
-				<>
-					<EditorButtonGroup folder={folder} />
-					<div className="h-4 w-px bg-border/60" />
-				</>
-			) : null}
+			{/* No rule between the "Open in <editor>" group and the panel toggles —
+			    the actions bar already reads as one cluster from its own rounded
+			    background, and the divider only cut it in half. */}
+			{folder ? <EditorButtonGroup folder={folder} /> : null}
 			{onPinnedSummaryToggle ? (
 				<Tooltip>
 					<TooltipTrigger
@@ -2853,7 +3105,24 @@ const PANEL_GUTTER = 12;
 // panel auto-demotes to a floating overlay instead (stops pushing content).
 const MIN_CHAT_WIDTH = 520;
 
-export function WorkspacePanels({
+/**
+ * The workspace docks around a page's content.
+ *
+ * Inside a page that is ITSELF hosted in a dock ({@link DockRoutePage}), this
+ * renders the content bare: `/chat` is a hostable page and ChatPage's root is a
+ * `WorkspacePanels`, so without the short-circuit the dock would mount a dock
+ * inside itself, recursively. The check lives in a wrapper rather than an early
+ * return because the implementation opens with a dozen hooks.
+ */
+export function WorkspacePanels(props: WorkspacePanelsProps) {
+	const hostedInDock = useContext(DockRouteHostContext);
+	if (hostedInDock) {
+		return <>{props.children}</>;
+	}
+	return <WorkspacePanelsImpl {...props} />;
+}
+
+function WorkspacePanelsImpl({
 	children,
 	folder,
 	cowork,
@@ -2987,27 +3256,56 @@ export function WorkspacePanels({
 		],
 		[dockPanels]
 	);
+	// The Mission Control panel is shell infrastructure (it needs the per-chat
+	// `cowork` prop, so it can never be a contributed `dock_panels` entry — see
+	// `isPinnableDockTabKind`), but the FEATURE belongs to the default-OFF
+	// `@ryu/mission-control` app: the digest it renders comes from that app's
+	// sidecar. Offering the tab when no enabled app claims the app's shell path
+	// gave a "+" menu row whose only outcome was an empty panel. Resolving the
+	// same path the app's PAGE half mounts at keeps both halves on one fact.
+	const missionPath = useAppShellPath(
+		MISSION_CONTROL_PLUGIN_ID,
+		MISSION_CONTROL_BUTTON_ID
+	);
 	const rightTabTypes = useMemo(
 		() => [
-			...RIGHT_TAB_TYPES,
+			// Only the OFFERING is gated. `BUILTIN_TAB_ICONS.mission` and the
+			// renderer stay unconditional so an already-open tab survives a
+			// contributions blip, exactly like the contributed-panel path.
+			...RIGHT_TAB_TYPES.filter(
+				(type) => type.kind !== "mission" || missionPath !== null
+			),
 			...dockPanelsFor(dockPanels, "right").map(contributedTabType),
 		],
-		[dockPanels]
+		[dockPanels, missionPath]
 	);
+	// The subagent currently pinned to the right panel's subagent tab (if any).
+	// DECLARED ABOVE `iconForKind`: that callback's dep array reads it at render
+	// time, so leaving it below would be a TDZ ReferenceError, not a stale value.
+	const [subagentView, setSubagentView] = useState<SubagentView | null>(null);
 	// Icon for an OPEN tab (the strip), which may be a kind absent from either
 	// add-menu — a programmatic panel, or a contributed one whose app just left.
 	const iconForKind = useCallback(
 		(kind: TabKind): TabIconSpec => {
+			// The subagent tab hosts ONE subagent, so it wears that subagent's own
+			// avatar — the same glyph the pinned summary's row and the transcript
+			// header show — instead of a generic robot every subagent shares. The
+			// dep below is what re-renders the strip when the tab is re-pointed at
+			// another subagent (the tab is reused by kind, never stacked).
+			if (kind === "subagent" && subagentView) {
+				return { seed: subagentView.id };
+			}
 			if (isPluginTabKind(kind)) {
 				const panel = findDockPanel(dockPanels, kind);
 				return panel ? tabTypeIcon(contributedTabType(panel)) : {};
 			}
+			if (isRouteTabKind(kind)) {
+				return { glyph: File01Icon };
+			}
 			return { glyph: BUILTIN_TAB_ICONS[kind] };
 		},
-		[dockPanels]
+		[dockPanels, subagentView]
 	);
-	// The subagent currently pinned to the right panel's subagent tab (if any).
-	const [subagentView, setSubagentView] = useState<SubagentView | null>(null);
 	// The artifact currently pinned to the right panel's artifact tab (if any).
 	const [artifactView, setArtifactView] = useState<Artifact | null>(null);
 	// The raw message part currently pinned to the right panel's inspector tab.
@@ -3025,7 +3323,12 @@ export function WorkspacePanels({
 			return;
 		}
 		setSubagentView({ id: subagentRequest.id, label: subagentRequest.label });
-		openRightTabRef.current("subagent", subagentRequest.label);
+		// Title the tab with the subagent's friendly NAME ("Atlas"), not its
+		// `subagent_type`: the type is empty for every Task spawn that omits it (all
+		// of Claude Code / Codex over ACP), which used to leave the pill blank. The
+		// name is `subagentName(id)` — pure and deterministic, so deriving it here
+		// matches what the row and the transcript header show, with no extra prop.
+		openRightTabRef.current("subagent", subagentName(subagentRequest.id));
 	}, [subagentRequest]);
 
 	// Same one-tab-reuse + nonce-refocus flow for rendered/canvas artifacts.
@@ -3058,6 +3361,46 @@ export function WorkspacePanels({
 		}
 		openRightTabRef.current("context", "Context");
 	}, [contextRequest]);
+
+	// Same flow for a PAGE raised in the right dock — but sourced from a store
+	// rather than a prop, because its callers are all over the shell (a command, a
+	// tab menu, an agent-facing seam) and none of them own this component.
+	//
+	// Two guards, both load-bearing. Only the FOCUSED window tab consumes a
+	// request: every open chat mounts its own docks, so without this one click
+	// would open the page in all of them. And the request is CLEARED on consumption
+	// so a background tab brought forward later doesn't replay a stale one.
+	const pendingRoute = useSidePanelRouteStore((s) => s.pending);
+	const clearPendingRoute = useSidePanelRouteStore((s) => s.clear);
+	const isFocusedWindowTab = useIsActiveTab();
+	useEffect(() => {
+		if (!(pendingRoute && isFocusedWindowTab)) {
+			return;
+		}
+		clearPendingRoute();
+		// A page pinned to the PROJECT dock is already showing this exact page (the
+		// kind carries the path), so focus it rather than stacking a chat-local
+		// second copy of the same thing beside it.
+		const pinnedSame = visibleRightProject.find(
+			(t) => t.kind === pendingRoute.kind
+		);
+		if (pinnedSame) {
+			setRightActiveUid(pinnedSame.uid);
+		} else {
+			openRightTabRef.current(pendingRoute.kind as TabKind, pendingRoute.label);
+		}
+		if (!rightOpen) {
+			onRightOpenChange(true);
+		}
+	}, [
+		pendingRoute,
+		isFocusedWindowTab,
+		clearPendingRoute,
+		visibleRightProject,
+		rightOpen,
+		onRightOpenChange,
+	]);
+
 	const [bottomHeight, setBottomHeight] = useState(260);
 	const [rightWidth, setRightWidth] = useState(340);
 
@@ -3136,7 +3479,13 @@ export function WorkspacePanels({
 		bottomLocal.addTab(kind, label);
 	};
 	const addRightTab = (kind: TabKind) => {
-		const label = rightTabTypes.find((t) => t.kind === kind)?.label ?? kind;
+		// Pages are offered from the "+" menu's submenu, so their labels live in
+		// `PAGE_TAB_TYPES` rather than in `rightTabTypes` — without them in the
+		// lookup a page tab would be titled with its raw `route:/…` kind.
+		const label =
+			rightTabTypes.find((t) => t.kind === kind)?.label ??
+			PAGE_TAB_TYPES.find((t) => t.kind === kind)?.label ??
+			kind;
 		if (folder && isPinnableDockTabKind(kind)) {
 			const entry = addToProject("right", kind, label, visibleRightProject);
 			if (entry) {
@@ -3355,6 +3704,7 @@ export function WorkspacePanels({
 				onTogglePin={onTogglePin}
 				otherPanelIcon={ArrowDown01Icon}
 				otherPanelLabel="bottom panel"
+				pageTypes={PAGE_TAB_TYPES}
 				pinDisabledReason={pinDisabledReason}
 				tabs={rightTabs}
 			/>

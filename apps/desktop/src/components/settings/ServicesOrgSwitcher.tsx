@@ -4,14 +4,20 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
+// The `.tsx` extension is required: `@ryu/ui` resolves through an `exports`
+// wildcard that is matched literally, so an extensionless specifier resolves to
+// nothing. See the header of `entity-avatar.tsx`.
+import { EntityAvatar } from "@ryu/ui/components/entity-avatar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2, Check, ChevronsUpDown, User } from "lucide-react";
+import { Check, ChevronsUpDown, User } from "lucide-react";
+import { useSession } from "@/lib/auth-client.ts";
 import {
 	getActiveOrgId,
 	hasOrgAuth,
 	listOrgs,
+	type OrgListEntry,
 	setActiveOrg,
 } from "@/src/lib/api/orgs.ts";
 
@@ -42,6 +48,7 @@ const ACTIVE_ORG_KEY = ["settings", "orgs", "active"] as const;
 export function ServicesOrgSwitcher() {
 	const queryClient = useQueryClient();
 	const authed = hasOrgAuth();
+	const { data: session } = useSession();
 
 	const orgsQuery = useQuery({
 		enabled: authed,
@@ -81,6 +88,29 @@ export function ServicesOrgSwitcher() {
 	const activeId = activeQuery.data ?? orgs[0]?.id ?? null;
 	const active = orgs.find((org) => org.id === activeId) ?? orgs[0];
 
+	// The web dashboard's own rule, mirrored rather than re-invented (see
+	// `apps/web/src/components/organizations/org-switcher.tsx`): a personal
+	// workspace IS the user, so it wears the user's own avatar; a real org wears
+	// its uploaded logo; and anything without one falls back to the generative
+	// dither avatar seeded by ID, so renaming an org does not change its picture.
+	// The point of routing through `EntityAvatar` at all is that fallback — the
+	// stock building glyph this replaced was identical for every workspace, which
+	// is the one thing a workspace picker must not be.
+	//
+	// `?? org.logo` in the personal branch is insurance against the one hole
+	// `resolvePersonalOrgId` documents: a user invited into a company org BEFORE
+	// they ever signed in has no personal org, so their earliest membership — and
+	// therefore their `isPersonal` — is that company. Falling through to the logo
+	// means a misclassification degrades to showing the company's real picture
+	// rather than suppressing it in favour of a personal avatar.
+	const avatarFor = (org: OrgListEntry) =>
+		org.isPersonal
+			? {
+					seed: session?.user?.id ?? org.id,
+					src: session?.user?.image ?? org.logo,
+				}
+			: { seed: org.id, src: org.logo };
+
 	return (
 		<div className="px-2 pb-1">
 			<DropdownMenu>
@@ -88,7 +118,14 @@ export function ServicesOrgSwitcher() {
 					className="flex w-full items-center gap-2 rounded-md border bg-background px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-60"
 					disabled={switchMutation.isPending}
 				>
-					<Building2 className="size-3.5 shrink-0 text-muted-foreground" />
+					{active ? (
+						<EntityAvatar
+							className="size-4 shrink-0"
+							name={active.name}
+							size="sm"
+							{...avatarFor(active)}
+						/>
+					) : null}
 					<span className="min-w-0 flex-1 truncate">
 						{active?.name ?? "Workspace"}
 					</span>
@@ -112,9 +149,15 @@ export function ServicesOrgSwitcher() {
 							    this person DO — an org they are a plain member of shows the
 							    same billing screen with every control disabled — so it is
 							    worth the line it costs. */}
-							<span className="mr-2 flex size-4 shrink-0 items-center justify-center">
+							<span className="mr-1 flex size-4 shrink-0 items-center justify-center">
 								{org.id === activeId ? <Check className="size-3.5" /> : null}
 							</span>
+							<EntityAvatar
+								className="size-4 shrink-0"
+								name={org.name}
+								size="sm"
+								{...avatarFor(org)}
+							/>
 							<span className="min-w-0 flex-1 truncate">{org.name}</span>
 							{org.role ? (
 								<span className="ml-2 shrink-0 text-muted-foreground text-xs">

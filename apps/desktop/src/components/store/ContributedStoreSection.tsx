@@ -146,7 +146,7 @@ function AppOffState({
 			<div className="flex items-center gap-2">
 				<InstallProgressButton installing={busy} onClick={handleEnable}>
 					<HugeiconsIcon className="size-4" icon={Download01Icon} />
-					{tab.app_installed ? "Enable" : "Install"}
+					{tab.app_installed ? "Enable" : "Add"}
 				</InstallProgressButton>
 				{openSettings ? (
 					<Button onClick={openSettings} size="sm" variant="outline">
@@ -365,7 +365,7 @@ function ContributedDetailGraph({
 	);
 }
 
-/** Install affordance in the detail pane: a button until installed, then a
+/** Add affordance in the detail pane: a button until installed, then a
  *  non-interactive "Added" pill (a contributed catalog declares no uninstall, so
  *  surfacing one would be a promise the spec cannot keep). */
 function InstallAction({
@@ -389,15 +389,15 @@ function InstallAction({
 			onClick={onInstall}
 		>
 			<HugeiconsIcon className="size-4" icon={Download01Icon} />
-			{label ?? "Install"}
+			{label ?? "Add"}
 		</InstallProgressButton>
 	);
 }
 
-/** Card-level install affordance — same rule as the detail pane's, and the same
- *  verb: a spec that calls its action "Use" must not say "Install" on the card and
+/** Card-level add affordance — same rule as the detail pane's, and the same
+ *  verb: a spec that calls its action "Use" must not say "Add" on the card and
  *  "Use" in the detail pane for the same item. `StoreItemAction` hardcodes
- *  "Install", so a declared label takes the plain button instead. */
+ *  "Add", so a declared label takes the plain button instead. */
 function CardAction({
 	installed,
 	busy,
@@ -416,7 +416,7 @@ function CardAction({
 			</Button>
 		);
 	}
-	if (label && label !== "Install") {
+	if (label && label !== "Add" && label !== "Install") {
 		return (
 			<Button disabled={busy} onClick={onInstall} size="sm" variant="outline">
 				{label}
@@ -592,7 +592,7 @@ export default function ContributedStoreSection({
 				}
 				const payload: unknown = await resp.json().catch(() => ({}));
 				setInstalledIds((prev) => new Set(prev).add(item.id));
-				toast.success(install.successMessage ?? "Installed", {
+				toast.success(install.successMessage ?? "Added", {
 					description: `${item.title} is ready.`,
 				});
 				await queryClient.invalidateQueries({

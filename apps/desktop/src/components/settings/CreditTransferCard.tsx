@@ -24,8 +24,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
 	fetchTransferable,
 	hasOrgAuth,
+	type OrgSummary,
 	transferCredits,
 } from "@/src/lib/api/orgs.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 /**
  * Move credits from one workspace to another.
@@ -64,6 +66,16 @@ function formatUsd(microUsd: number): string {
 	}
 }
 
+/**
+ * The one place a workspace is named, so the closed trigger and the open list
+ * cannot disagree. Base UI resolves the trigger's text from the root's `items`
+ * prop alone — it never reads the `<SelectItem>` children — so without feeding
+ * it these labels the trigger would print the raw org id (a cuid).
+ */
+function orgLabel(org: OrgSummary): string {
+	return `${org.name}${org.isPersonal ? " (personal)" : ""}`;
+}
+
 function formatExpiry(iso: string | null): string | null {
 	if (!iso) {
 		return null;
@@ -72,7 +84,7 @@ function formatExpiry(iso: string | null): string | null {
 	if (Number.isNaN(at.getTime())) {
 		return null;
 	}
-	return `expires ${at.toLocaleDateString(undefined, {
+	return `expires ${formatDate(at, {
 		month: "short",
 		day: "numeric",
 		year: "numeric",
@@ -105,6 +117,14 @@ export function CreditTransferCard() {
 	const destinations = useMemo(
 		() => orgs.filter((org) => org.id !== resolvedSource),
 		[orgs, resolvedSource]
+	);
+	const sourceItems = useMemo(
+		() => sendableOrgs.map((org) => ({ value: org.id, label: orgLabel(org) })),
+		[sendableOrgs]
+	);
+	const destItems = useMemo(
+		() => destinations.map((org) => ({ value: org.id, label: orgLabel(org) })),
+		[destinations]
 	);
 
 	// Adopt the server's chosen source (the personal workspace) once, so the
@@ -185,6 +205,7 @@ export function CreditTransferCard() {
 					<div className="min-w-0 flex-1 space-y-1.5">
 						<Label htmlFor="transfer-source">From</Label>
 						<Select
+							items={sourceItems}
 							onValueChange={(value: string | null) => {
 								// A CLEAR IS IGNORED, not written through. Null would refetch
 								// under the default key, the server would answer with the
@@ -206,10 +227,9 @@ export function CreditTransferCard() {
 								<SelectValue placeholder="Select a workspace" />
 							</SelectTrigger>
 							<SelectContent>
-								{sendableOrgs.map((org) => (
-									<SelectItem key={org.id} value={org.id}>
-										{org.name}
-										{org.isPersonal ? " (personal)" : ""}
+								{sourceItems.map((option) => (
+									<SelectItem key={option.value} value={option.value}>
+										{option.label}
 									</SelectItem>
 								))}
 							</SelectContent>
@@ -219,6 +239,7 @@ export function CreditTransferCard() {
 					<div className="min-w-0 flex-1 space-y-1.5">
 						<Label htmlFor="transfer-dest">To</Label>
 						<Select
+							items={destItems}
 							onValueChange={(value: string | null) => setDestOrgId(value)}
 							value={destOrgId ?? ""}
 						>
@@ -226,10 +247,9 @@ export function CreditTransferCard() {
 								<SelectValue placeholder="Select a workspace" />
 							</SelectTrigger>
 							<SelectContent>
-								{destinations.map((org) => (
-									<SelectItem key={org.id} value={org.id}>
-										{org.name}
-										{org.isPersonal ? " (personal)" : ""}
+								{destItems.map((option) => (
+									<SelectItem key={option.value} value={option.value}>
+										{option.label}
 									</SelectItem>
 								))}
 							</SelectContent>

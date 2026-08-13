@@ -42,6 +42,7 @@ import {
 	type PluginCatalogSource,
 	searchPluginCatalog,
 } from "@/src/lib/api/plugins.ts";
+import { beginInstall, endInstall } from "@/src/store/useInstallStore.ts";
 import { useDebouncedValue } from "./use-debounced-value.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
@@ -80,9 +81,18 @@ export interface UseAppsCatalogResult {
 	error: string | null;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
-	install: () => Promise<void>;
+	/** Add a listing. Pass the id explicitly from a card (the selection is a
+	 *  PREVIEW concern); omit it to act on the current selection. */
+	install: (id?: string) => Promise<void>;
 	installFromUrl: (url: string) => Promise<void>;
-	installing: boolean;
+	/** The id whose add is in flight for THIS hook instance, else null.
+	 *
+	 *  It used to be a bare boolean, which carried no identity: the detail panel
+	 *  showed "Adding…" for whatever happened to be SELECTED, so changing the
+	 *  selection mid-add moved the spinner to an item nobody had added. Surfaces
+	 *  that need the cross-instance truth (the Store mounts this hook twice) read
+	 *  the shared install store instead — see `useInstallStore`. */
+	installing: string | null;
 	items: AppCatalogItem[];
 	/** Enable/disable currently running for the selected app. */
 	lifecyclePending: boolean;
@@ -101,6 +111,10 @@ export interface UseAppsCatalogResult {
 
 const SEARCH_DEBOUNCE_MS = 300;
 const PAGE_LIMIT = 40;
+/** How long an action may wait on the installed-state refresh before the button
+ *  is allowed to go idle anyway. `/api/apps` is a local Core read, so this is a
+ *  backstop against a wedged fetch — never the normal path. */
+const INSTALLED_REFRESH_DEADLINE_MS = 10_000;
 
 /** Sources the picker must not offer.
  *
@@ -300,19 +314,43 @@ export function useAppsCatalog(
 		enabled: selectedId !== null,
 	});
 
-	const revalidate = useCallback(
+	// The authoritative installed/enabled refresh — the ONE query whose result
+	// decides what the button says next (Add → Enable). Awaited by the mutations,
+	// so the busy flag survives exactly until the new state is on screen and the
+	// button never flickers back to "Add" for a frame.
+	//
+	// Bounded, because awaiting a refetch from a mutation is precisely what used to
+	// wedge this: `onSettled` returned a `Promise.all` over THREE invalidations,
+	// and react-query holds `isPending` until `onSettled` resolves. Two of those
+	// three refetch the infinite catalog query — for BOTH mounted sections, since
+	// the 3-element key prefix matches the first-party feed AND the community one —
+	// so adding a first-party app waited on a GitHub-topic browse it had nothing to
+	// do with, over fetches that carry no abort signal. That is why an add sat on
+	// "Installing" long after Core had finished.
+	const revalidateInstalledState = useCallback(
 		() =>
-			Promise.all([
+			Promise.race([
 				qc.invalidateQueries({ queryKey: ["apps", "list", url] }),
-				qc.invalidateQueries({ queryKey: ["plugins", "catalog", url] }),
-				// A plugin's enabled state drives its declarative contributions
-				// (companion routes + slash commands). Invalidate so enabling/disabling
-				// from the Store adds/removes its /plugin/<id> route + palette command
-				// WITHOUT a reload — the composer/palette query key is prefix-matched.
-				qc.invalidateQueries({ queryKey: ["plugin-contributions"] }),
-			]),
+				new Promise<void>((resolve) => {
+					setTimeout(resolve, INSTALLED_REFRESH_DEADLINE_MS);
+				}),
+			]).catch(() => undefined),
 		[qc, url]
 	);
+
+	// Everything the action changed that is BROWSE state, not action state. Fired
+	// and forgotten by design — a stale shelf is a cosmetic lag, and nothing here
+	// can decide whether the action finished, so nothing here may hold the button.
+	const revalidateBrowse = useCallback(() => {
+		Promise.all([
+			qc.invalidateQueries({ queryKey: ["plugins", "catalog", url] }),
+			// A plugin's enabled state drives its declarative contributions
+			// (companion routes + slash commands). Invalidate so enabling/disabling
+			// from the Store adds/removes its /plugin/<id> route + palette command
+			// WITHOUT a reload — the composer/palette query key is prefix-matched.
+			qc.invalidateQueries({ queryKey: ["plugin-contributions"] }),
+		]).catch(() => undefined);
+	}, [qc, url]);
 
 	const installMutation = useMutation({
 		mutationFn: async (item: AppCatalogItem): Promise<void> => {
@@ -340,29 +378,56 @@ export function useAppsCatalog(
 			}
 			await installApp({ url, token }, item.entry.id);
 		},
-		onSettled: revalidate,
+		// Both halves of the shared flag live on the mutation lifecycle, never in a
+		// component effect: a card that unmounts mid-add (scrolled out of a
+		// virtualized grid, or the section switched) must not strand its id as busy.
+		onMutate: (item) => beginInstall(item.entry.id),
+		onSettled: async (_data, _error, item) => {
+			revalidateBrowse();
+			await revalidateInstalledState();
+			endInstall(item.entry.id);
+		},
 	});
 
 	const installUrlMutation = useMutation({
 		mutationFn: (appUrl: string) => installAppFromUrl({ url, token }, appUrl),
-		onSettled: revalidate,
+		// No catalog id to key a card by — this one is driven from a URL field that
+		// owns its own busy state.
+		onSettled: async () => {
+			revalidateBrowse();
+			await revalidateInstalledState();
+		},
 	});
 
 	const lifecycleMutation = useMutation({
 		mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
 			enabled ? enableApp({ url, token }, id) : disableApp({ url, token }, id),
-		onSettled: revalidate,
+		// Enable/disable share the flag with add: the card's control is the same
+		// control, and the item is equally un-clickable during either.
+		onMutate: ({ id }) => beginInstall(id),
+		onSettled: async (_data, _error, { id }) => {
+			revalidateBrowse();
+			await revalidateInstalledState();
+			endInstall(id);
+		},
 	});
 
 	const select = useCallback((id: string) => setSelectedId(id), []);
 
-	const install = useCallback(async () => {
-		const item = items.find((it) => it.entry.id === selectedId);
-		if (!item) {
-			return;
-		}
-		await installMutation.mutateAsync(item);
-	}, [items, selectedId, installMutation]);
+	const install = useCallback(
+		async (id?: string) => {
+			// An explicit id is what a CARD passes: the card knows which row was
+			// clicked, and making it round-trip through the selection is how a
+			// mis-timed selection change could send the add to the wrong listing.
+			const wanted = id ?? selectedId;
+			const item = items.find((it) => it.entry.id === wanted);
+			if (!item) {
+				return;
+			}
+			await installMutation.mutateAsync(item);
+		},
+		[items, selectedId, installMutation]
+	);
 
 	const setEnabled = useCallback(
 		async (enabled: boolean) => {
@@ -407,7 +472,9 @@ export function useAppsCatalog(
 		detailError:
 			detailQuery.error instanceof Error ? detailQuery.error.message : null,
 		install,
-		installing: installMutation.isPending,
+		installing: installMutation.isPending
+			? (installMutation.variables?.entry.id ?? null)
+			: null,
 		setEnabled,
 		lifecyclePending: lifecycleMutation.isPending,
 		installFromUrl,

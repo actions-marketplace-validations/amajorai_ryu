@@ -1,12 +1,19 @@
 "use client";
 
+import { ViewIcon, ViewOffSlashIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
-import { Field, FieldError, FieldGroup } from "@ryu/ui/components/field";
+import {
+	Field,
+	FieldError,
+	FieldGroup,
+	FieldLabel,
+} from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import type { ReactNode, SVGProps } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /** Google brand mark, inlined so the block has no app-local SVG dependency. */
 function Google(props: SVGProps<SVGSVGElement>) {
@@ -81,6 +88,21 @@ export default function SignUpForm({
 	const [name, setName] = useState("");
 	const [email, setEmail] = useState("");
 	const [password, setPassword] = useState("");
+	const [showPassword, setShowPassword] = useState(false);
+	// See sign-in-form.tsx: an edited field is back in its default state, so its
+	// stale error is withheld until the next submit produces a fresh one.
+	const [edited, setEdited] = useState({
+		name: false,
+		email: false,
+		password: false,
+	});
+	useEffect(
+		() => setEdited({ name: false, email: false, password: false }),
+		[nameError, emailError, passwordError]
+	);
+	const visibleNameError = edited.name ? undefined : nameError;
+	const visibleEmailError = edited.email ? undefined : emailError;
+	const visiblePasswordError = edited.password ? undefined : passwordError;
 
 	return (
 		<div className="mx-auto flex w-full max-w-md flex-col gap-6">
@@ -107,50 +129,114 @@ export default function SignUpForm({
 					}}
 				>
 					<FieldGroup>
-						<Field data-invalid={Boolean(nameError)}>
+						{/* Labels are visually hidden, not absent — the placeholder is the
+						    visual treatment, but it is not an accessible name. */}
+						<Field data-invalid={Boolean(visibleNameError)}>
+							<FieldLabel className="sr-only" htmlFor="name">
+								Full name
+							</FieldLabel>
 							<Input
-								aria-invalid={Boolean(nameError)}
+								aria-describedby={visibleNameError ? "name-error" : undefined}
+								aria-invalid={Boolean(visibleNameError)}
+								autoComplete="name"
 								className="h-16 border-0 bg-muted shadow-none"
 								id="name"
 								name="name"
-								onChange={(e) => setName(e.target.value)}
+								onChange={(e) => {
+									setName(e.target.value);
+									setEdited((s) => ({ ...s, name: true }));
+								}}
 								placeholder="Name"
 								value={name}
 							/>
-							{nameError ? (
-								<FieldError errors={[{ message: nameError }]} />
+							{visibleNameError ? (
+								<FieldError
+									errors={[{ message: visibleNameError }]}
+									id="name-error"
+								/>
 							) : null}
 						</Field>
 
-						<Field data-invalid={Boolean(emailError)}>
+						<Field data-invalid={Boolean(visibleEmailError)}>
+							<FieldLabel className="sr-only" htmlFor="email">
+								Email address
+							</FieldLabel>
 							<Input
-								aria-invalid={Boolean(emailError)}
+								aria-describedby={visibleEmailError ? "email-error" : undefined}
+								aria-invalid={Boolean(visibleEmailError)}
+								autoComplete="email"
 								className="h-16 border-0 bg-muted shadow-none"
 								id="email"
+								inputMode="email"
 								name="email"
-								onChange={(e) => setEmail(e.target.value)}
+								onChange={(e) => {
+									setEmail(e.target.value);
+									setEdited((s) => ({ ...s, email: true }));
+								}}
 								placeholder="Email Address"
 								type="email"
 								value={email}
 							/>
-							{emailError ? (
-								<FieldError errors={[{ message: emailError }]} />
+							{visibleEmailError ? (
+								<FieldError
+									errors={[{ message: visibleEmailError }]}
+									id="email-error"
+								/>
 							) : null}
 						</Field>
 
-						<Field data-invalid={Boolean(passwordError)}>
-							<Input
-								aria-invalid={Boolean(passwordError)}
-								className="h-16 border-0 bg-muted shadow-none"
-								id="password"
-								name="password"
-								onChange={(e) => setPassword(e.target.value)}
-								placeholder="Password"
-								type="password"
-								value={password}
-							/>
-							{passwordError ? (
-								<FieldError errors={[{ message: passwordError }]} />
+						<Field data-invalid={Boolean(visiblePasswordError)}>
+							<FieldLabel className="sr-only" htmlFor="password">
+								Password
+							</FieldLabel>
+							<div className="relative w-full">
+								<Input
+									aria-describedby={
+										visiblePasswordError
+											? "password-error password-hint"
+											: "password-hint"
+									}
+									aria-invalid={Boolean(visiblePasswordError)}
+									autoComplete="new-password"
+									className="h-16 border-0 bg-muted pr-14 shadow-none"
+									id="password"
+									name="password"
+									onChange={(e) => {
+										setPassword(e.target.value);
+										setEdited((s) => ({ ...s, password: true }));
+									}}
+									placeholder="Password"
+									type={showPassword ? "text" : "password"}
+									value={password}
+								/>
+								<Button
+									aria-label={showPassword ? "Hide password" : "Show password"}
+									aria-pressed={showPassword}
+									className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground"
+									onClick={() => setShowPassword((v) => !v)}
+									size="icon-sm"
+									type="button"
+									variant="ghost"
+								>
+									<HugeiconsIcon
+										icon={showPassword ? ViewOffSlashIcon : ViewIcon}
+										strokeWidth={2}
+									/>
+								</Button>
+							</div>
+							{/* The 8-character minimum is enforced on submit; stating it up
+							    front is cheaper than a round trip through an error. */}
+							<p
+								className="px-1 text-muted-foreground text-sm"
+								id="password-hint"
+							>
+								At least 8 characters.
+							</p>
+							{visiblePasswordError ? (
+								<FieldError
+									errors={[{ message: visiblePasswordError }]}
+									id="password-error"
+								/>
 							) : null}
 						</Field>
 					</FieldGroup>

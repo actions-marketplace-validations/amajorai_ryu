@@ -81,7 +81,10 @@ impl RyuCoreProcess {
 	}
 
 	/// Spawn the Ryu Core binary and begin forwarding its stdio to tracing.
-	/// First checks if an instance is already running on port 7980.
+	/// First checks if an instance is already running on THIS PROFILE's Core port
+	/// (`profile::core_port()` — 7980 release, 9980 canary). Never a literal: a
+	/// canary desktop that probed 7980 would find the stable Core, adopt it, and
+	/// drive `~/.ryu` while believing it was isolated.
 	pub async fn start(&mut self) -> Result<()> {
 		// Check if already running
 		if self.is_already_running().await {

@@ -70,6 +70,81 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		).toBeVisible();
 	});
 
+	// The compact composer's TOPOLOGY, not its "+" menu. `compact` used to select a
+	// second layout in which the textarea sat BETWEEN the "+" and the trailing
+	// controls on one line, so once a chat had history the "+" and the agent
+	// selector jumped out of the stacked controls row and landed on opposite sides
+	// of the bar. Both spellings compile and both render; only a laid-out browser
+	// can tell them apart, which is why this is pinned here.
+	test("compact keeps the + and the agent selector in one row BELOW the textarea", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("compact");
+		const plus = plusIn(page, "compact");
+		const agent = mount.getByTestId("agent-trigger");
+		const textarea = mount.locator("textarea");
+
+		await expect(plus).toBeVisible();
+		await expect(agent).toBeVisible();
+
+		const [plusBox, agentBox, textareaBox] = await Promise.all([
+			plus.boundingBox(),
+			agent.boundingBox(),
+			textarea.boundingBox(),
+		]);
+		if (!(plusBox && agentBox && textareaBox)) {
+			throw new Error("composer controls did not lay out");
+		}
+
+		// Same row: their vertical centres line up (the single-row layout put them
+		// on the same line as each other too, which is why the textarea test below
+		// is the one that actually distinguishes the two).
+		const plusCentre = plusBox.y + plusBox.height / 2;
+		const agentCentre = agentBox.y + agentBox.height / 2;
+		expect(Math.abs(plusCentre - agentCentre)).toBeLessThan(4);
+
+		// Stacked: the controls row starts below the textarea's bottom edge. In the
+		// deleted single-row layout the textarea shared their line, so this failed.
+		expect(plusBox.y).toBeGreaterThanOrEqual(
+			textareaBox.y + textareaBox.height
+		);
+
+		// Left-aligned, in order: "+" then the agent selector — the launchpad's
+		// arrangement, which compact used to invert (agent selector on the right).
+		expect(agentBox.x).toBeGreaterThan(plusBox.x);
+	});
+
+	// The roomy textarea block's vertical rhythm. It used to pin its content with
+	// `pt-3` against a 56px floor, which put a 22px line 12px from the top and left
+	// twice that below it — the caret sat visibly high in an apparently empty box.
+	// A padding value is a number a build cannot judge; the laid-out gap is.
+	test("the roomy textarea sits centred in its block, not pinned to the top", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const textarea = page.getByTestId("minimal").locator("textarea");
+		await expect(textarea).toBeVisible();
+		// The block is the textarea's own padded wrapper.
+		const block = textarea.locator("xpath=..");
+
+		const [textareaBox, blockBox] = await Promise.all([
+			textarea.boundingBox(),
+			block.boundingBox(),
+		]);
+		if (!(textareaBox && blockBox)) {
+			throw new Error("composer textarea did not lay out");
+		}
+
+		const above = textareaBox.y - blockBox.y;
+		const below =
+			blockBox.y + blockBox.height - (textareaBox.y + textareaBox.height);
+		// Symmetric within a pixel of rounding; the old fixed pad was ~10px out.
+		expect(Math.abs(above - below)).toBeLessThanOrEqual(2);
+		// And the block still keeps its roomy floor.
+		expect(blockBox.height).toBeGreaterThanOrEqual(55);
+	});
+
 	test("a menu row drives its host toggle", async ({ page }) => {
 		await page.goto(STORY_URL);
 		await expect(page.getByTestId("ghost-state")).toHaveText("off");

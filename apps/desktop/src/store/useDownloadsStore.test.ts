@@ -228,6 +228,54 @@ describe("selectInstallProgress", () => {
 		expect(sel(s as never)).toEqual({ active: true, percent: 50 });
 	});
 
+	// The exact-id path. It exists because the plugin buttons could never match by
+	// name: Core labels a plugin row with the plugin ID while the card knows only
+	// the display name, so every plugin add fell through to the sole-candidate
+	// fallback and borrowed whatever else happened to be downloading.
+	test("an exact taskId wins over both the name match and the fallback", () => {
+		const s = stateFrom([
+			task({
+				id: "plugin:@ryu/crm",
+				kind: "other",
+				state: "active",
+				label: "@ryu/crm",
+				received_bytes: 25,
+				total_bytes: 100,
+			}),
+			task({ id: "b", kind: "other", state: "active", label: "Harbor CRM" }),
+		]);
+		const sel = selectInstallProgress(
+			["tool", "other"],
+			"Harbor CRM",
+			"plugin:@ryu/crm"
+		);
+		expect(sel(s as never)).toEqual({ active: true, percent: 25 });
+	});
+
+	test("a taskId row in a terminal state reports inactive, not the next best guess", () => {
+		const s = stateFrom([
+			task({ id: "plugin:x", kind: "other", state: "completed", label: "x" }),
+			task({ id: "other", kind: "other", state: "active", label: "x" }),
+		]);
+		const sel = selectInstallProgress(["other"], "x", "plugin:x");
+		expect(sel(s as never)).toEqual({ active: false, percent: null });
+	});
+
+	test("an unknown taskId degrades to the label/fallback heuristics", () => {
+		const s = stateFrom([
+			task({
+				id: "a",
+				kind: "model",
+				state: "active",
+				label: "gemma",
+				received_bytes: 10,
+				total_bytes: 20,
+			}),
+		]);
+		const sel = selectInstallProgress(["model"], "gemma", "plugin:nope");
+		expect(sel(s as never)).toEqual({ active: true, percent: 50 });
+	});
+
 	test("does NOT fall back when several tasks of the kind and none match by name", () => {
 		const s = stateFrom([
 			task({ id: "a", kind: "model", state: "active", label: "one" }),

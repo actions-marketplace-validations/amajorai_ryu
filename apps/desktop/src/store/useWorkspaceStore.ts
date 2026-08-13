@@ -2,6 +2,7 @@ import { isDitherColor } from "@ryu/ui/components/dither-kit/palette";
 import type { GlyphDitherValue, GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { create } from "zustand";
 import { listDirectory } from "@/src/lib/api/workspace.ts";
+import { sameFolder } from "@/src/lib/folder-path.ts";
 import { isLocalNode, useNodeStore } from "./useNodeStore.ts";
 
 const STORAGE_KEY = "ryu_workspace_folder";
@@ -334,11 +335,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 		}
 		localStorage.setItem(STORAGE_KEY, path);
 		set((state) => {
-			const deduped = state.recentFolders.filter((p) => p !== path);
+			// Compared by `folderKey`, not raw equality: the same directory reaches
+			// this store spelled three different ways (picker, Core, an imported
+			// thread's cwd), and raw equality let those pile up as separate recents.
+			const deduped = state.recentFolders.filter((p) => !sameFolder(p, path));
 			const next = [path, ...deduped].slice(0, MAX_RECENTS);
 			saveRecents(next);
 			// (Re)importing a folder un-hides it if it was previously removed.
-			const removed = state.removedProjects.filter((p) => p !== path);
+			const removed = state.removedProjects.filter((p) => !sameFolder(p, path));
 			if (removed.length !== state.removedProjects.length) {
 				saveRemoved(removed);
 			}
@@ -348,8 +352,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
 	addProjectFolder: (path) => {
 		set((state) => {
-			const alreadyKnown = state.recentFolders.includes(path);
-			const wasRemoved = state.removedProjects.includes(path);
+			const alreadyKnown = state.recentFolders.some((p) => sameFolder(p, path));
+			const wasRemoved = state.removedProjects.some((p) => sameFolder(p, path));
 			// Nothing to do if it's already a known, non-removed project.
 			if (alreadyKnown && !wasRemoved) {
 				return state;
@@ -360,7 +364,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 			if (!alreadyKnown) {
 				saveRecents(next);
 			}
-			const removed = state.removedProjects.filter((p) => p !== path);
+			const removed = state.removedProjects.filter((p) => !sameFolder(p, path));
 			if (wasRemoved) {
 				saveRemoved(removed);
 			}
@@ -422,9 +426,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
 	removeRecentFolder: (path) => {
 		set((state) => {
-			const next = state.recentFolders.filter((p) => p !== path);
+			const next = state.recentFolders.filter((p) => !sameFolder(p, path));
 			saveRecents(next);
-			const folder = state.folder === path ? null : state.folder;
+			const folder =
+				state.folder && sameFolder(state.folder, path) ? null : state.folder;
 			if (folder === null) {
 				localStorage.removeItem(STORAGE_KEY);
 			}
@@ -434,13 +439,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
 	removeProject: (path) => {
 		set((state) => {
-			const next = state.recentFolders.filter((p) => p !== path);
+			const next = state.recentFolders.filter((p) => !sameFolder(p, path));
 			saveRecents(next);
-			const removed = state.removedProjects.includes(path)
+			const removed = state.removedProjects.some((p) => sameFolder(p, path))
 				? state.removedProjects
 				: [...state.removedProjects, path];
 			saveRemoved(removed);
-			const folder = state.folder === path ? null : state.folder;
+			const folder =
+				state.folder && sameFolder(state.folder, path) ? null : state.folder;
 			if (folder === null) {
 				localStorage.removeItem(STORAGE_KEY);
 			}

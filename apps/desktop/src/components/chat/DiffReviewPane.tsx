@@ -23,18 +23,16 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
 	invalidateGitStatus,
+	invalidateWorktreeDiff,
 	invalidateWorktreeStatus,
+	useWorktreeDiff,
 } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import type {
-	ApplyResult,
-	FileSummary,
-	WorktreeDiff,
-} from "@/src/lib/api/git.ts";
-import { applyWorktree, fetchWorktreeDiff } from "@/src/lib/api/git.ts";
+import type { ApplyResult, FileSummary } from "@/src/lib/api/git.ts";
+import { applyWorktree } from "@/src/lib/api/git.ts";
 
 interface DiffReviewPaneProps {
 	runId: string;
@@ -146,26 +144,12 @@ type ApplyState =
 // ── Main pane ─────────────────────────────────────────────────────────────────
 
 export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
-	const [diff, setDiff] = useState<WorktreeDiff | null>(null);
+	// The shared query, not a one-shot fetch on mount: this pane used to show
+	// whatever the diff was the first time it rendered, for as long as it stayed
+	// mounted — including after the change had been committed outside the app.
+	const diff = useWorktreeDiff(target, runId);
 	const [expanded, setExpanded] = useState(false);
 	const [applyState, setApplyState] = useState<ApplyState>({ status: "idle" });
-	const abortRef = useRef<AbortController | null>(null);
-
-	useEffect(() => {
-		abortRef.current?.abort();
-		const controller = new AbortController();
-		abortRef.current = controller;
-
-		fetchWorktreeDiff(target, runId, controller.signal).then((d) => {
-			if (!controller.signal.aborted) {
-				setDiff(d);
-			}
-		});
-
-		return () => {
-			controller.abort();
-		};
-	}, [target, runId]);
 
 	const handleApply = async (mode: "merge" | "pr") => {
 		setApplyState({ status: "loading", mode });
@@ -179,6 +163,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 				// merges into, so refresh every git surface rather than this pane.
 				invalidateGitStatus();
 				invalidateWorktreeStatus(runId);
+				invalidateWorktreeDiff(runId);
 				if (result.pr_url) {
 					setApplyState({ status: "pr", prUrl: result.pr_url });
 				} else {
@@ -199,7 +184,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 	};
 
 	// Render nothing until the diff is fetched or when there are no changes.
-	if (!diff?.has_changes) {
+	if (!diff.has_changes) {
 		return null;
 	}
 

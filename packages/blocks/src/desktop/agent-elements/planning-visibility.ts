@@ -24,7 +24,10 @@ export function shouldShowPlanning({
 	lastMessageIsUser,
 	lastTurnHasAssistant,
 	isStreaming,
-	lastAssistantHasContent,
+	// Kept in the input shape (it is what the label switch upstream keys off, and
+	// dropping it would silently change every caller) but no longer read here —
+	// see the return below for why visibility stopped depending on it.
+	lastAssistantHasContent: _lastAssistantHasContent,
 }: PlanningVisibilityInput): boolean {
 	if (!hasMessages) {
 		return false;
@@ -44,7 +47,16 @@ export function shouldShowPlanning({
 	if (lastMessageIsUser && !lastTurnHasAssistant) {
 		return isStreaming;
 	}
-	// Assistant turn opened but nothing rendered yet — keep the row until the
-	// first content lands, then let the message itself take over.
-	return isStreaming && !lastAssistantHasContent;
+	// The row also stays up AFTER the first content lands. It is a live status
+	// line ("Thinking" → "Working" → "Typing"), not a pre-content placeholder:
+	// hiding it the moment a tool part or a token arrived meant the two states
+	// that actually say what the agent is doing could never be shown, and a
+	// transcript mid-tool-call looked idle.
+	//
+	// `lastAssistantHasContent` stays in the signature (and is still what the
+	// label switch keys off upstream) — the visibility rule simply no longer
+	// depends on it. Everything remains gated on `isStreaming`, which is the
+	// guard that matters: a chat whose run died reloads at `status: "ready"` and
+	// still shows nothing, so the permanent-spinner failure above cannot return.
+	return isStreaming;
 }

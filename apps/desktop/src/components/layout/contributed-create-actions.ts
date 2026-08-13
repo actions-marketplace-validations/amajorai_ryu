@@ -5,17 +5,23 @@
 // arrives through this seam so an app can add "New meeting" / "New space"
 // without a line of shell code.
 //
-// The seam is `contributes.sidebar_sections[].spec.create` — the same
-// declaration `DynamicSidebarSection` already renders as that section's own "+"
-// button. An app that owns a sidebar section therefore gets its create row in
-// the menu for free, and disabling the app removes it, because
-// `usePluginContributions` only ever serves ENABLED plugins.
+// There are TWO seams, because they answer different questions:
 //
-// Note what this is NOT: a general "new-item action" contribution. `spec.create`
-// is section-scoped (POST, then open the created row through the section's own
-// `itemTarget`), so an app that contributes no sidebar section cannot put a row
-// here. Closing that gap needs a dedicated `contributes.create_actions` member
-// in Core, which is a kernel change, not a client one.
+//   1. `contributes.create_actions` — the general one. A standalone "New X" row:
+//      open a route, or invoke a granted capability. Use this for an app whose
+//      create is a destination (Workflows: "New workflow" → `/workflows/new`).
+//
+//   2. `contributes.sidebar_sections[].spec.create` — the section-scoped one, the
+//      same declaration `DynamicSidebarSection` renders as that section's own "+"
+//      button. POST, then open the created row through the section's `itemTarget`.
+//      An app that owns a sidebar section gets its menu row from this for free.
+//
+// Seam 1 exists because seam 2 could not serve an app that contributes no sidebar
+// section — which is why "New workflow" and "Build with AI" were hardcoded into
+// CreateMenu, and therefore stayed in the menu with Workflows uninstalled and
+// navigated to an error page. Both seams are served by `usePluginContributions`,
+// which only ever returns ENABLED plugins, so a row now appears and disappears
+// with its app.
 //
 // The runner below is deliberately a separate copy of AppSidebar's, not a shared
 // helper: the section's own button re-fetches its list afterwards (it owns that
@@ -32,7 +38,11 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { apiUrl, makeHeaders, toTarget } from "@/src/lib/api/client.ts";
-import type { PluginSidebarSection } from "@/src/lib/api/plugins.ts";
+import {
+	type PluginCreateAction,
+	type PluginSidebarSection,
+	pluginHostInvoke,
+} from "@/src/lib/api/plugins.ts";
 
 /** One row of the create menu. Label only — the menu renders no icons and no
  *  descriptions, so a contribution's `create.icon` is read but never drawn. */
@@ -48,9 +58,31 @@ export interface CreateMenuAction {
  * menu doesn't reshuffle when Core happens to return the sections differently.
  */
 export function useContributedCreateActions(): CreateMenuAction[] {
-	const { sidebar_sections } = usePluginContributions();
+	const { create_actions, sidebar_sections } = usePluginContributions();
 	const node = useActiveNode();
 	const { openTab } = useTabsContext();
+
+	// Seam 1: a standalone create row. `target` navigates; `capability` dispatches
+	// through the owning plugin's granted host seam, the same way a contributed
+	// context-menu row does. Core rejects a manifest declaring neither, so the
+	// no-op branch here is defence against an older/newer Core, not a real state.
+	const runStandalone = useCallback(
+		(action: PluginCreateAction) => {
+			if (action.target) {
+				openTab(action.target, { title: action.title ?? action.label });
+				return;
+			}
+			if (action.capability) {
+				void pluginHostInvoke(
+					toTarget(node),
+					action.plugin,
+					action.capability,
+					action.args ?? {}
+				);
+			}
+		},
+		[node, openTab]
+	);
 
 	const run = useCallback(
 		async (section: PluginSidebarSection) => {
@@ -98,7 +130,27 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 		[node, openTab]
 	);
 
-	return useMemo(() => {
+	// Standalone rows first, then the section-scoped ones. Both families sort by
+	// their own `order`, and the two lists are concatenated rather than merged and
+	// re-sorted: an app's dedicated create row is the more direct declaration of
+	// intent, and interleaving it with another app's section create by numeric
+	// order would make the menu's shape depend on two apps' unrelated hints.
+	const standaloneRows = useMemo(
+		() =>
+			[...create_actions]
+				.sort(
+					(a, b) =>
+						(a.order ?? 0) - (b.order ?? 0) || a.label.localeCompare(b.label)
+				)
+				.map((action) => ({
+					id: `contrib:${action.plugin}:${action.id}`,
+					label: action.label,
+					onSelect: () => runStandalone(action),
+				})),
+		[create_actions, runStandalone]
+	);
+
+	const sectionRows = useMemo(() => {
 		const seen = new Set<string>();
 		return sidebar_sections
 			.filter((section) => {
@@ -126,4 +178,9 @@ export function useContributedCreateActions(): CreateMenuAction[] {
 				},
 			}));
 	}, [sidebar_sections, run]);
+
+	return useMemo(
+		() => [...standaloneRows, ...sectionRows],
+		[standaloneRows, sectionRows]
+	);
 }

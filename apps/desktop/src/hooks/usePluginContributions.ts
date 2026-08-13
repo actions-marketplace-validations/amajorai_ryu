@@ -40,6 +40,7 @@ const EMPTY: PluginContributions = {
 	message_actions: [],
 	output_styles: [],
 	context_menu_items: [],
+	create_actions: [],
 	slash_commands: [],
 	turn_hooks: [],
 	hook_events: [],

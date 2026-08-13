@@ -744,7 +744,7 @@ export default function ProfileSettings({
 			/>
 
 			<Tabs onValueChange={onTabChange} value={activeTab}>
-				<TabsList variant="pills">
+				<TabsList variant="pills-lg">
 					<TabsTrigger value="profile">Profile</TabsTrigger>
 					{statsSlot ? <TabsTrigger value="stats">Stats</TabsTrigger> : null}
 					<TabsTrigger value="account">Account</TabsTrigger>

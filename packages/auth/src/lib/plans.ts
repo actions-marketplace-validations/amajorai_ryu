@@ -270,15 +270,22 @@ export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
 };
 
 /**
- * Max now INCLUDES one free "base" managed cloud node (the BASE cloud tier:
- * cx23 → 2 vCPU · 4 GB · 40 GB SSD). The compute cost is absorbed into the $59
- * Max price — there is no separate Polar product for BASE; holding an active Max
- * subscription is what grants it. Any larger instance is a dynamically-priced,
- * ad-hoc paid cloud-instance subscription on top. The entitlement layer reads
- * this flag to treat Max as granting BASE; any paid instance is gated by
- * `hasActiveCloudInstanceSub` in `plan-entitlement.ts`.
+ * The free "base" managed cloud node (the BASE cloud tier: cx23 → 2 vCPU · 4 GB
+ * · 40 GB SSD) is included with every RECURRING plan — Pro, Max and Teams. Its
+ * compute cost is absorbed into the plan price; there is no separate Polar
+ * product for BASE, so holding a qualifying subscription is what grants it. Any
+ * larger instance is a dynamically-priced, ad-hoc paid cloud-instance
+ * subscription on top, gated by `hasActiveCloudInstanceSub` in
+ * `plan-entitlement.ts`.
+ *
+ * The set + predicate live in the client-safe sibling `./base-node.ts`
+ * (`PLANS_INCLUDING_BASE_NODE` / `planIncludesBaseNode` / the copy label). They
+ * are NOT here on purpose: the pricing page and org dashboard are client trees
+ * and must not pull this catalog — every Polar product id and env-var name —
+ * into the browser to read one predicate. This replaced a
+ * `MAX_INCLUDES_BASE_CLOUD = true` constant that nothing ever imported, while
+ * two separate call sites hardcoded the literal `"max"` and drifted apart.
  */
-export const MAX_INCLUDES_BASE_CLOUD = true;
 
 /**
  * The plan catalog. Product id DEFAULTS reference the existing sandbox UUIDs in
@@ -355,8 +362,9 @@ export const PLANS: Record<PlanId, Plan> = {
 		managedInference: true,
 		// Ryu Max — $200/mo ($2000/yr, 2 months free) with $150 of AI usage. Perk:
 		// Unlimited Agent Inboxes · 10 GB storage · free managed cloud node
-		// (2 vCPU · 4 GB) — the BASE cloud tier, granted by an active Max
-		// subscription (MAX_INCLUDES_BASE_CLOUD above); any larger instance is a
+		// (2 vCPU · 4 GB) — the BASE cloud tier, granted by any active recurring
+		// subscription (`planIncludesBaseNode` in ./base-node.ts, which Pro and
+		// Teams also satisfy); any larger instance is a
 		// dynamically-priced, ad-hoc paid cloud-instance subscription on top. Max
 		// intentionally keeps the credit grant above the default 50% derivation used
 		// by Pro/Teams (here 75%: $150 of the $200 price); see docs/polar-products.md.

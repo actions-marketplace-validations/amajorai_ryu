@@ -2,37 +2,9 @@
 
 import { ChatDisplayPrefsProvider as Provider } from "@ryu/blocks/desktop/agent-elements/chat-display-prefs";
 import type { ReactNode } from "react";
-import { useSyncExternalStore } from "react";
+import { useMemo } from "react";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
-
-const REDUCE_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-
-function subscribeReduceMotion(cb: () => void): () => void {
-	if (typeof window === "undefined" || !window.matchMedia) {
-		return () => {
-			// nothing to unsubscribe from
-		};
-	}
-	const mql = window.matchMedia(REDUCE_MOTION_QUERY);
-	mql.addEventListener("change", cb);
-	return () => mql.removeEventListener("change", cb);
-}
-
-function readReduceMotion(): boolean {
-	if (typeof window === "undefined" || !window.matchMedia) {
-		return false;
-	}
-	return window.matchMedia(REDUCE_MOTION_QUERY).matches;
-}
-
-/** OS-level "reduce motion" accessibility preference, reactive to changes. */
-function usePrefersReducedMotion(): boolean {
-	return useSyncExternalStore(
-		subscribeReduceMotion,
-		readReduceMotion,
-		() => false
-	);
-}
+import { usePrefersReducedMotion } from "@/src/hooks/usePrefersReducedMotion.ts";
 
 /**
  * Desktop wrapper that reads the chat display prefs from localStorage (via
@@ -47,8 +19,14 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 		"ryu:expand-code-blocks",
 		false
 	);
+	// Detail level "None" — the transcript shows no tool calls and no file edits
+	// at all. Default FALSE; keep in step with APPEARANCE_DEFAULTS.hideToolDetail
+	// and DEFAULT_PREFS.hideToolDetail.
+	const [hideToolDetail] = usePersistedToggle("ryu:hide-tool-detail", false);
 	const [pinUserMessage] = usePersistedToggle("ryu:pin-user-message", true);
 	const [openAtBottom] = usePersistedToggle("ryu:open-chat-at-bottom", true);
+	// Default FALSE — keep in step with APPEARANCE_DEFAULTS.inferenceStats.
+	const [inferenceStats] = usePersistedToggle("ryu:inference-stats", false);
 
 	// Two-level motion control: a global master ("Enable animations") and a
 	// per-feature toggle ("Animate streaming text"). Global overrides individual,
@@ -65,19 +43,34 @@ export function ChatDisplayPrefs({ children }: { children: ReactNode }) {
 	const streamAnimation =
 		animationsEnabled && streamAnimationPref && !prefersReducedMotion;
 
-	return (
-		<Provider
-			value={{
-				groupToolUses,
-				expandFileEdits,
-				expandCommands,
-				expandCodeBlocks,
-				openAtBottom,
-				pinUserMessage,
-				streamAnimation,
-			}}
-		>
-			{children}
-		</Provider>
+	// All nine are stable primitives, so this object only changes when a
+	// preference actually changes. It must be memoised HERE as well as inside the
+	// blocks-level provider: a fresh literal at this level re-renders every chat
+	// consumer (context reads bypass `memo()`) on every render of Layout.
+	const prefs = useMemo(
+		() => ({
+			groupToolUses,
+			hideToolDetail,
+			expandFileEdits,
+			expandCommands,
+			expandCodeBlocks,
+			inferenceStats,
+			openAtBottom,
+			pinUserMessage,
+			streamAnimation,
+		}),
+		[
+			groupToolUses,
+			hideToolDetail,
+			expandFileEdits,
+			expandCommands,
+			expandCodeBlocks,
+			inferenceStats,
+			openAtBottom,
+			pinUserMessage,
+			streamAnimation,
+		]
 	);
+
+	return <Provider value={prefs}>{children}</Provider>;
 }

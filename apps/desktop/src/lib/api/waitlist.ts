@@ -56,3 +56,21 @@ export async function fetchWaitlistMe(): Promise<WaitlistMe | null> {
 	}
 	return (await resp.json()) as WaitlistMe;
 }
+
+/**
+ * Give the reserved handle back. Mirrors the web client's
+ * `releaseWaitlistUsername` — the same route, the same fire-and-forget shape —
+ * so "Change handle" on the desktop can actually release rather than only
+ * offering to overwrite.
+ */
+export async function releaseWaitlistUsername(): Promise<void> {
+	const token = localStorage.getItem(TOKEN_KEY);
+	const resp = await fetch(`${BACKEND_URL}/api/waitlist/username/release`, {
+		method: "POST",
+		credentials: "include",
+		headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+	});
+	if (!resp.ok) {
+		throw new Error(`Failed to release handle (${resp.status})`);
+	}
+}

@@ -20,7 +20,10 @@ import { Label } from "@ryu/ui/components/label";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { PlanBadge } from "@ryu/ui/components/plan-badge";
-import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
+import {
+	STAGGER_STEP_MS,
+	StaggerReveal,
+} from "@ryu/ui/components/stagger-reveal";
 import { TextSwap } from "@ryu/ui/components/text-swap";
 import { MetalFx } from "metal-fx";
 import { useTheme } from "next-themes";
@@ -70,6 +73,13 @@ export interface OnboardingViewProps {
 	/** Agents found on the user's system (detected on PATH), shown under the
 	 *  "Found on your system" header on the `agents` step and pre-selected. */
 	agents?: OnboardingAgentOption[];
+	/** A retry of the agent lookup is in flight (the notice shows a busy Retry). */
+	agentsRetrying?: boolean;
+	/** The agent lookup FAILED (node unreachable, unauthorized, timed out), so
+	 *  the rows on screen are the curated fallback and nothing could be detected.
+	 *  Shows an inline notice with a Retry instead of hiding the step — a failed
+	 *  lookup degrades this step's content, it never removes the step. */
+	agentsUnavailable?: boolean;
 	/** The single feature shown on the current `features` step (one per step). */
 	currentFeature?: OnboardingFeatureOption;
 	/** 1-based position of the current feature step (e.g. 2 of 4). */
@@ -122,6 +132,8 @@ export interface OnboardingViewProps {
 	onDownloadDesktop?: () => void;
 	/** Keep the current feature on and advance to the next step. */
 	onEnableFeature?: () => void;
+	/** Re-run the agent lookup from the `agents` step's failure notice. */
+	onRetryAgents?: () => void;
 	onSkipAgents?: () => void;
 	/** Turn the current feature off (hides its sidebar section) and advance. */
 	onSkipFeature?: () => void;
@@ -147,6 +159,16 @@ export interface OnboardingViewProps {
 	 *  copy, swapped in place via TextSwap in the shell. */
 	title: string;
 }
+
+/**
+ * Where a step's content picks the cascade back up. The shell's own reveal
+ * spends two slots — the orb, then the header — so the first content line lands
+ * on slot three and every line under it keeps the same 40ms rhythm. Exported
+ * because the desktop-only steps (theme / preferences / privacy) mirror this
+ * shell rather than rendering through it, and a second hand-picked delay there
+ * is how the two halves of onboarding drift apart.
+ */
+export const ONBOARDING_CONTENT_DELAY_MS = 2 * STAGGER_STEP_MS;
 
 function OnboardingShell({
 	title,
@@ -186,8 +208,16 @@ function OnboardingShell({
 						subtitle={subtitle ? <TextSwap>{subtitle}</TextSwap> : undefined}
 						title={<TextSwap>{title}</TextSwap>}
 					/>
-					{children}
 				</StaggerReveal>
+				{/* Deliberately OUTSIDE that reveal. Each step runs its own
+				    `StaggerReveal` at `ONBOARDING_CONTENT_DELAY_MS` so its rows cascade
+				    one after another instead of arriving as one block; revealing the
+				    step's container here as well would compound the two — the travel
+				    and the blur would both be applied twice to the same rows. Keeping
+				    the step's own reveal inside the step is also what makes each
+				    STEP re-animate: the shell never unmounts across phases, so a
+				    cascade owned by it would only ever play on the first screen. */}
+				{children}
 			</div>
 		</div>
 	);
@@ -351,48 +381,86 @@ function AgentSection({
 
 function AgentPicker({
 	agents = [],
+	agentsRetrying,
+	agentsUnavailable,
 	suggestedAgents = [],
 	selected,
+	onRetryAgents,
 	onToggleAgent,
 	onSkipAgents,
 	onContinueAgents,
 }: Pick<
 	OnboardingViewProps,
 	| "agents"
+	| "agentsRetrying"
+	| "agentsUnavailable"
 	| "suggestedAgents"
 	| "selected"
+	| "onRetryAgents"
 	| "onToggleAgent"
 	| "onSkipAgents"
 	| "onContinueAgents"
 >) {
 	const selectedCount = selected?.size ?? 0;
+	// Nothing to offer: every curated agent is already added (the lists exclude
+	// added ones). The step still shows — it is a step, not a query result — but a
+	// header over a blank area reads as broken, so it says why it is empty.
+	const isEmpty = agents.length === 0 && suggestedAgents.length === 0;
 	return (
 		<div className="flex w-full max-w-md flex-col gap-3">
-			{/* The shell owns scrolling (see OnboardingShell). Nesting a max-height
-			    scroller here fought the page scroll and left the list feeling stuck. */}
-			<div className="flex flex-col gap-4">
-				<AgentSection
-					agents={agents}
-					onToggleAgent={onToggleAgent}
-					selected={selected}
-					title="Found on your system"
-				/>
-				<AgentSection
-					agents={suggestedAgents}
-					onToggleAgent={onToggleAgent}
-					selected={selected}
-					title="Suggested"
-				/>
-			</div>
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS}>
+				{/* The shell owns scrolling (see OnboardingShell). Nesting a max-height
+				    scroller here fought the page scroll and left the list feeling stuck. */}
+				<div className="flex flex-col gap-4">
+					{agentsUnavailable ? (
+						<div className="flex items-center gap-3 rounded-4xl bg-card p-3">
+							<p className="flex-1 text-muted-foreground text-xs">
+								Couldn't check what's already installed on this device. You can
+								still pick from the list below.
+							</p>
+							<Button
+								disabled={agentsRetrying}
+								onClick={onRetryAgents}
+								size="sm"
+								type="button"
+								variant="outline"
+							>
+								{agentsRetrying ? "Checking…" : "Retry"}
+							</Button>
+						</div>
+					) : null}
+					<AgentSection
+						agents={agents}
+						onToggleAgent={onToggleAgent}
+						selected={selected}
+						title="Found on your system"
+					/>
+					<AgentSection
+						agents={suggestedAgents}
+						onToggleAgent={onToggleAgent}
+						selected={selected}
+						title="Suggested"
+					/>
+					{isEmpty ? (
+						<p
+							className="text-muted-foreground text-xs"
+							data-testid="agents-empty"
+						>
+							Every agent we suggest is already set up on this device. You can
+							add more any time from the Store.
+						</p>
+					) : null}
+				</div>
 
-			<div className="sticky bottom-0 mt-2 flex items-center justify-end gap-2 bg-background/80 py-2 backdrop-blur-sm">
-				<Button onClick={onSkipAgents} size="sm" variant="ghost">
-					Skip
-				</Button>
-				<Button onClick={onContinueAgents} size="lg" variant="mono">
-					{selectedCount > 0 ? `Add ${selectedCount} & continue` : "Continue"}
-				</Button>
-			</div>
+				<div className="sticky bottom-0 mt-2 flex items-center justify-end gap-2 bg-background/80 py-2 backdrop-blur-sm">
+					<Button onClick={onSkipAgents} size="sm" variant="ghost">
+						Skip
+					</Button>
+					<Button onClick={onContinueAgents} size="lg" variant="mono">
+						{selectedCount > 0 ? `Add ${selectedCount} & continue` : "Continue"}
+					</Button>
+				</div>
+			</StaggerReveal>
 		</div>
 	);
 }
@@ -419,32 +487,40 @@ function FeatureStep({
 	}
 	return (
 		<div className="flex w-full max-w-md flex-col gap-4">
-			{featureStepIndex && featureStepTotal ? (
-				<p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-					Feature {featureStepIndex} of {featureStepTotal}
+			{/* Keyed on the feature index: every feature is the same component in the
+			    same slot, so without a key React reuses the reveal that has already
+			    played and features 2..n would snap in with no cascade at all. */}
+			<StaggerReveal
+				key={featureStepIndex}
+				startDelay={ONBOARDING_CONTENT_DELAY_MS}
+			>
+				{featureStepIndex && featureStepTotal ? (
+					<p className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+						Feature {featureStepIndex} of {featureStepTotal}
+					</p>
+				) : null}
+
+				<div className="rounded-lg bg-muted/40 p-4 text-left">
+					<p className="font-semibold text-lg">{currentFeature.name}</p>
+					<p className="mt-1 text-muted-foreground text-sm">
+						{currentFeature.description}
+					</p>
+				</div>
+
+				<p className="text-muted-foreground text-xs">
+					Turn it off and it's simply hidden from the sidebar. You can turn it
+					back on anytime in Settings → Features.
 				</p>
-			) : null}
 
-			<div className="rounded-lg bg-muted/40 p-4 text-left">
-				<p className="font-semibold text-lg">{currentFeature.name}</p>
-				<p className="mt-1 text-muted-foreground text-sm">
-					{currentFeature.description}
-				</p>
-			</div>
-
-			<p className="text-muted-foreground text-xs">
-				Turn it off and it's simply hidden from the sidebar. You can turn it
-				back on anytime in Settings → Features.
-			</p>
-
-			<div className="mt-1 flex items-center justify-end gap-2">
-				<Button onClick={onSkipFeature} size="sm" variant="ghost">
-					Not now
-				</Button>
-				<Button onClick={onEnableFeature} size="lg" variant="mono">
-					Enable
-				</Button>
-			</div>
+				<div className="mt-1 flex items-center justify-end gap-2">
+					<Button onClick={onSkipFeature} size="sm" variant="ghost">
+						Not now
+					</Button>
+					<Button onClick={onEnableFeature} size="lg" variant="mono">
+						Enable
+					</Button>
+				</div>
+			</StaggerReveal>
 		</div>
 	);
 }
@@ -608,52 +684,54 @@ function ChooseStep({
 
 	return (
 		<div className="grid w-full max-w-2xl grid-cols-2 gap-3">
-			<div className={`${card} col-span-2`}>
-				<div className="flex items-center gap-2">
-					<p className="font-semibold text-lg">Use Ryu Cloud</p>
-					{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS}>
+				<div className={`${card} col-span-2`}>
+					<div className="flex items-center gap-2">
+						<p className="font-semibold text-lg">Use Ryu Cloud</p>
+						{showProBadge ? <PlanBadge plan="pro" size="sm" /> : null}
+					</div>
+					<p className="mt-1 text-muted-foreground text-sm">
+						We host AI for you in the cloud, always on, on your own server. More
+						secure than running it on your computer.
+					</p>
+					{showProBadge ? (
+						<MetalFx
+							className="mt-3 w-full"
+							preset="chromatic"
+							strength={0.9}
+							theme={metalTheme}
+							variant="button"
+						>
+							{managedButton}
+						</MetalFx>
+					) : (
+						<div className="mt-3">{managedButton}</div>
+					)}
 				</div>
-				<p className="mt-1 text-muted-foreground text-sm">
-					We host AI for you in the cloud, always on, on your own server. More
-					secure than running it on your computer.
-				</p>
-				{showProBadge ? (
-					<MetalFx
-						className="mt-3 w-full"
-						preset="chromatic"
-						strength={0.9}
-						theme={metalTheme}
-						variant="button"
-					>
-						{managedButton}
-					</MetalFx>
-				) : (
-					<div className="mt-3">{managedButton}</div>
-				)}
-			</div>
 
-			{localCard}
+				{localCard}
 
-			{/* Third path: neither install nor buy — point the app at a Core someone
-			    else already runs (a teammate's machine, a company server, a node on
-			    the mesh). Nothing is installed on this device. */}
-			<div className={cell}>
-				<p className="font-semibold text-lg">Connect to an existing node</p>
-				<p className="mt-1 text-muted-foreground text-sm">
-					Already have a Ryu node running on your team's server, or another
-					machine? Point this app at it. Nothing is installed here.
-				</p>
-				<div className="mt-auto pt-3">
-					<Button
-						className="w-full"
-						onClick={onChooseRemote}
-						size="lg"
-						variant="outline"
-					>
-						Connect
-					</Button>
+				{/* Third path: neither install nor buy — point the app at a Core someone
+				    else already runs (a teammate's machine, a company server, a node on
+				    the mesh). Nothing is installed on this device. */}
+				<div className={cell}>
+					<p className="font-semibold text-lg">Connect to an existing node</p>
+					<p className="mt-1 text-muted-foreground text-sm">
+						Already have a Ryu node running on your team's server, or another
+						machine? Point this app at it. Nothing is installed here.
+					</p>
+					<div className="mt-auto pt-3">
+						<Button
+							className="w-full"
+							onClick={onChooseRemote}
+							size="lg"
+							variant="outline"
+						>
+							Connect
+						</Button>
+					</div>
 				</div>
-			</div>
+			</StaggerReveal>
 		</div>
 	);
 }
@@ -689,61 +767,63 @@ function ConnectStep({
 				submit();
 			}}
 		>
-			<div className="flex flex-col gap-2">
-				<Label htmlFor="onboarding-node-url">Node address</Label>
-				<Input
-					autoComplete="off"
-					autoFocus
-					id="onboarding-node-url"
-					onChange={(e) => setUrl(e.target.value)}
-					placeholder="http://192.168.1.20:7980"
-					spellCheck={false}
-					value={url}
-				/>
-				<p className="text-muted-foreground text-xs">
-					The address of the machine running Ryu Core, including the port.
-				</p>
-			</div>
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS}>
+				<div className="flex flex-col gap-2">
+					<Label htmlFor="onboarding-node-url">Node address</Label>
+					<Input
+						autoComplete="off"
+						autoFocus
+						id="onboarding-node-url"
+						onChange={(e) => setUrl(e.target.value)}
+						placeholder="http://192.168.1.20:7980"
+						spellCheck={false}
+						value={url}
+					/>
+					<p className="text-muted-foreground text-xs">
+						The address of the machine running Ryu Core, including the port.
+					</p>
+				</div>
 
-			<div className="flex flex-col gap-2">
-				<Label htmlFor="onboarding-node-token">Access token (optional)</Label>
-				<Input
-					autoComplete="off"
-					id="onboarding-node-token"
-					onChange={(e) => setToken(e.target.value)}
-					placeholder="Leave empty if the node has no token"
-					spellCheck={false}
-					type="password"
-					value={token}
-				/>
-				<p className="text-muted-foreground text-xs">
-					Whoever runs the node can read it from their Ryu settings.
-				</p>
-			</div>
+				<div className="flex flex-col gap-2">
+					<Label htmlFor="onboarding-node-token">Access token (optional)</Label>
+					<Input
+						autoComplete="off"
+						id="onboarding-node-token"
+						onChange={(e) => setToken(e.target.value)}
+						placeholder="Leave empty if the node has no token"
+						spellCheck={false}
+						type="password"
+						value={token}
+					/>
+					<p className="text-muted-foreground text-xs">
+						Whoever runs the node can read it from their Ryu settings.
+					</p>
+				</div>
 
-			{remoteError ? (
-				<p className="text-destructive text-sm">{remoteError}</p>
-			) : null}
+				{remoteError ? (
+					<p className="text-destructive text-sm">{remoteError}</p>
+				) : null}
 
-			<div className="mt-1 flex items-center justify-end gap-2">
-				<Button
-					disabled={remoteChecking}
-					onClick={onBackFromConnect}
-					size="sm"
-					type="button"
-					variant="ghost"
-				>
-					Back
-				</Button>
-				<Button
-					disabled={remoteChecking || trimmedUrl === ""}
-					size="lg"
-					type="submit"
-					variant="mono"
-				>
-					{remoteChecking ? "Connecting…" : "Connect"}
-				</Button>
-			</div>
+				<div className="mt-1 flex items-center justify-end gap-2">
+					<Button
+						disabled={remoteChecking}
+						onClick={onBackFromConnect}
+						size="sm"
+						type="button"
+						variant="ghost"
+					>
+						Back
+					</Button>
+					<Button
+						disabled={remoteChecking || trimmedUrl === ""}
+						size="lg"
+						type="submit"
+						variant="mono"
+					>
+						{remoteChecking ? "Connecting…" : "Connect"}
+					</Button>
+				</div>
+			</StaggerReveal>
 		</form>
 	);
 }
@@ -759,31 +839,35 @@ function MicStep({
 >) {
 	return (
 		<div className="flex w-full max-w-md flex-col gap-4">
-			<p className="text-muted-foreground text-sm">
-				Ryu can listen when you want to talk to your agents. You can always
-				change this later in Settings.
-			</p>
+			{/* `wrap`: `micPrompt` is whatever the container hands in, so there is no
+			    guarantee it forwards className/style to its own root. */}
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
+				<p className="text-muted-foreground text-sm">
+					Ryu can listen when you want to talk to your agents. You can always
+					change this later in Settings.
+				</p>
 
-			{micPrompt}
+				{micPrompt}
 
-			<div className="mt-2 flex items-center justify-end gap-2">
-				<Button
-					disabled={micSubmitting}
-					onClick={onSkipMic}
-					size="sm"
-					variant="ghost"
-				>
-					Skip
-				</Button>
-				<Button
-					disabled={micSubmitting}
-					onClick={onContinueMic}
-					size="lg"
-					variant="mono"
-				>
-					{micSubmitting ? "Requesting…" : "Allow"}
-				</Button>
-			</div>
+				<div className="mt-2 flex items-center justify-end gap-2">
+					<Button
+						disabled={micSubmitting}
+						onClick={onSkipMic}
+						size="sm"
+						variant="ghost"
+					>
+						Skip
+					</Button>
+					<Button
+						disabled={micSubmitting}
+						onClick={onContinueMic}
+						size="lg"
+						variant="mono"
+					>
+						{micSubmitting ? "Requesting…" : "Allow"}
+					</Button>
+				</div>
+			</StaggerReveal>
 		</div>
 	);
 }
@@ -846,9 +930,14 @@ export function OnboardingView(props: OnboardingViewProps) {
 		);
 	}
 
+	// The auto-advancing steps (starting / installing / finishing / done). The
+	// shell no longer reveals its children, so the bar needs its own reveal or it
+	// would be the one thing on screen that hard-cuts in.
 	return (
 		<OnboardingShell subtitle={headerSubtitle} title={headerTitle}>
-			<ProgressBar done={step === "done"} value={props.progress} />
+			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
+				<ProgressBar done={step === "done"} value={props.progress} />
+			</StaggerReveal>
 		</OnboardingShell>
 	);
 }

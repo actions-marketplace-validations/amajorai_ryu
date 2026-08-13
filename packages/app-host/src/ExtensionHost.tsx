@@ -17,6 +17,27 @@
 //   - After the verified handshake the host creates a MessageChannel, transfers
 //     `port2` into the frame, and runs all RPC over `port1`. Point-to-point ports
 //     sidestep the `targetOrigin: "*"` ambiguity a null-origin frame would force.
+//
+// ⚠️ THE FRAME'S CSP IS NOT THE ONLY CSP IT OBEYS. A document loaded from
+// `about:srcdoc` gets NO fresh policy container — it INHERITS the embedder's CSP,
+// and the inherited policy and the frame's own `<meta>` policy then apply as a
+// conjunction. So the bootstrap that posts `ryu-plugin-ready` runs only if the
+// EMBEDDING SHELL's `script-src` also permits inline script. It does not degrade:
+// the frame goes silent, no handshake ever lands, and every app sits on
+// "the sandboxed interface hasn't connected yet" forever.
+//
+// That is not hypothetical — setting `app.security.csp` to `script-src 'self'` in
+// `apps/desktop/src-tauri/tauri.conf.json` killed every companion, widget and
+// artifact frame in packaged builds (dev builds load from the vite devUrl, which
+// serves no CSP, so it looked fine right up to the installer). `apps/extension`
+// hit the same wall under MV3, where the page CSP cannot be loosened at all, and
+// had to move to a real sandbox page with `iframe src` — see
+// `apps/extension/entrypoints/sandbox/main.ts`.
+//
+// Before tightening a host surface's CSP, run `apps/desktop/e2e/companion-host.spec.ts`
+// — it mounts real app bundles under the shell policy read out of the Tauri config.
+// The full rationale for the shipped `script-src` / `script-src-elem` /
+// `script-src-attr` split lives in `docs/desktop-extension-host-spec.md` §3.1.
 
 import type { MutableRefObject } from "react";
 import { useEffect, useLayoutEffect, useRef } from "react";

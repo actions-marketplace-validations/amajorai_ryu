@@ -11,17 +11,30 @@
 
 :root {
 	--highlight: oklch(0.852 0.199 91.936);
-	--brand: oklch(0.623 0.214 259.815);
 }
 
 .dark {
 	--highlight: oklch(0.852 0.199 91.936);
-	--brand: oklch(0.707 0.165 254.624);
 }
 
+/* `--color-brand` deliberately has NO standalone `--brand` declaration.
+ *
+ * The vendored Plate defaults shipped their own blue here (oklch(0.623 0.214
+ * 259.815) = #2b7fff light / oklch(0.707 0.165 254.624) = #51a2ff dark —
+ * Tailwind blue-500/400), which was never rebased onto the Ryu brand. Because
+ * apps/desktop/src/index.css is the ONLY importer of this file repo-wide, that
+ * gave the desktop's editor surfaces (selection, focus ring, block selection,
+ * caret/drag overlay, comment avatars, table drop line, suggestion chrome) an
+ * off-brand blue no other app could reproduce.
+ *
+ * Mapping straight at `--primary` — the single brand-blue declaration site in
+ * globals.css / the theme presets — means it can never desync again, and the
+ * editor accent follows the user's active theme preset like the rest of the
+ * chrome does. `--highlight` is left alone: it is a marker yellow, not a brand
+ * colour. Guarded by the `--brand` case in packages/ui/src/theme/presets.test.ts. */
 @theme inline {
 	--color-highlight: var(--highlight);
-	--color-brand: var(--brand);
+	--color-brand: var(--primary);
 }
 
 /* Inlined `tailwind-scrollbar-hide` utility (editor scroll containers use it). */

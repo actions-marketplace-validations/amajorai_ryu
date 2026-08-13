@@ -78,7 +78,7 @@ function CollaborationViz() {
 			{/* Output badge */}
 			<div className="flex items-center justify-center gap-2">
 				<div className="animate-node-pulse rounded-full bg-muted/40 px-3 py-1 text-foreground/50 text-xs">
-					One shared context
+					One set of rules
 				</div>
 			</div>
 		</div>
@@ -87,11 +87,11 @@ function CollaborationViz() {
 
 function InfraViz() {
 	const infraLayers = [
-		"Deployment",
-		"Scaling",
-		"Monitoring",
-		"Rate Limits",
-		"Auth",
+		"Records",
+		"Spending limits",
+		"Approvals",
+		"Redaction",
+		"Access",
 		"Retries",
 	];
 
@@ -100,7 +100,7 @@ function InfraViz() {
 			{/* User-facing layer */}
 			<div className="rounded-lg bg-foreground px-3 py-2 text-center">
 				<span className="font-semibold text-background text-xs tracking-wide">
-					Your Agent Code
+					The work your firm does
 				</span>
 			</div>
 
@@ -196,21 +196,21 @@ function ScaleViz() {
 const panels = [
 	{
 		viz: <CollaborationViz />,
-		title: "People and agents share the work.",
+		title: "Your people stay in charge.",
 		description:
-			"Agents and people work from the same context, with humans in the loop where judgment matters.",
+			"The work runs from the same rules your team follows, and stops for a person wherever judgment is needed.",
 	},
 	{
 		viz: <InfraViz />,
-		title: "The plumbing is already there.",
+		title: "None of the plumbing is your problem.",
 		description:
-			"Routing, firewall, PII redaction, budgets, retries, and audit sit around the agent instead of inside every project.",
+			"Limits, records, retries and redaction are already built. You do not hire anyone to keep it running.",
 	},
 	{
 		viz: <ScaleViz />,
-		title: "Start local. Expand as needed.",
+		title: "Your files stay where you want them.",
 		description:
-			"Run the same control layer on a laptop, your own servers, or managed cloud without rearchitecting.",
+			"Run it on a laptop, on the office server, or let us run it for you. Same rules either way, and you can move it back.",
 	},
 ];
 
@@ -221,11 +221,11 @@ export default function Mission() {
 				<StaggerLines className="mb-10">
 					<SectionTitle
 						className="max-w-xl"
-						title="The missing layer between an agent demo and production."
+						title="The part nobody sells you, and the part that decides it."
 					/>
 					<p className={sectionSubtitleClass}>
-						Ryu gives people and agents one interface, one context, and one
-						control layer.
+						Your team, your rules, and your files in one place, with the work
+						running against them.
 					</p>
 				</StaggerLines>
 

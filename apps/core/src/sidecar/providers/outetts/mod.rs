@@ -27,13 +27,12 @@ use crate::win_process::NoWindow;
 /// Per-process counter giving each synthesis a unique temp output path.
 static TTS_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// `llama-tts` ships in the same llama.cpp release archive as `llama-server`
+/// and is installed beside it, inside the resident build's own directory — so
+/// it resolves through the engine's variant resolver, not a bare `~/.ryu/bin`
+/// path (which is where the pre-variant layout put it).
 fn binary_path() -> std::path::PathBuf {
-    let name = if cfg!(target_os = "windows") {
-        "llama-tts.exe"
-    } else {
-        "llama-tts"
-    };
-    crate::paths::ryu_dir().join("bin").join(name)
+    crate::sidecar::providers::llamacpp::variant::tts_path()
 }
 
 /// Lifecycle manager for the OuteTTS (llama-tts) text-to-speech engine.

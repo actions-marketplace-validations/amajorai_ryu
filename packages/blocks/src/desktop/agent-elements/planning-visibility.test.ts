@@ -51,7 +51,10 @@ describe("shouldShowPlanning", () => {
 		).toBe(true);
 	});
 
-	test("assistant content rendered — the message takes over", () => {
+	// The row is a live status line, not a pre-content placeholder: it stays up
+	// once content lands so it can say "Working" / "Typing" instead of vanishing
+	// the moment the agent starts doing the thing worth reporting.
+	test("assistant content rendered — the row stays while streaming", () => {
 		expect(
 			shouldShowPlanning({
 				...base,
@@ -59,7 +62,7 @@ describe("shouldShowPlanning", () => {
 				isStreaming: true,
 				lastAssistantHasContent: true,
 			})
-		).toBe(false);
+		).toBe(true);
 	});
 
 	test("settled turn shows nothing", () => {

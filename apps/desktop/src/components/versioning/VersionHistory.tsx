@@ -13,6 +13,7 @@ import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useState } from "react";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 /** Metadata for one saved version (no diffable body — fetched lazily). */
 export interface VersionMeta {
@@ -236,7 +237,7 @@ export function VersionHistory({
 											</Badge>
 										) : null}
 										<span className="text-muted-foreground text-xs">
-											{new Date(v.createdAt).toLocaleString()}
+											{formatDateTime(v.createdAt)}
 										</span>
 										<div className="ml-auto flex items-center gap-1">
 											<Button

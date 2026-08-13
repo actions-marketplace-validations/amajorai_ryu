@@ -24,6 +24,7 @@
     {
       "capability": "browser.control",
       "version": "1.0.0",
+      "title": "Browser",
       "grant": "browser:control",
       "selectable": true,
       "target": "local-machine",

@@ -42,6 +42,7 @@ import {
 	getSandboxDefaultRunBudgetMicroUsd,
 	setSandboxDefaultRunBudgetMicroUsd,
 } from "@/src/lib/api/preferences.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import {
 	SettingsCard,
@@ -780,14 +781,11 @@ export function BillingTab() {
 								isLifetime && lifetime ? (
 									<>
 										Updates included until{" "}
-										{new Date(lifetime.updatesExpiresAt).toLocaleDateString(
-											undefined,
-											{
-												year: "numeric",
-												month: "long",
-												day: "numeric",
-											}
-										)}
+										{formatDate(lifetime.updatesExpiresAt, {
+											year: "numeric",
+											month: "long",
+											day: "numeric",
+										})}
 										{lifetime.expired && (
 											<span className="mt-1 block font-medium text-destructive">
 												Updates expired. Buy lifetime access again at the
@@ -826,14 +824,11 @@ export function BillingTab() {
 									<span className="capitalize">{invoice.status}</span>
 								}
 								key={invoice.id}
-								title={new Date(invoice.createdAt).toLocaleDateString(
-									undefined,
-									{
-										year: "numeric",
-										month: "short",
-										day: "numeric",
-									}
-								)}
+								title={formatDate(invoice.createdAt, {
+									year: "numeric",
+									month: "short",
+									day: "numeric",
+								})}
 							/>
 						))}
 					</SettingsGroup>

@@ -550,3 +550,78 @@ div[data-tauri-decorum-tb] .decorum-tb-btn {
 		transform: none;
 	}
 }
+
+/*
+ * Seasonal effects — the falling holiday particles in the titlebar
+ * (components/layout/SeasonalEffects.tsx). ONE keyframe for the whole field:
+ * each particle carries its own drift as `--ryu-seasonal-wind` plus an inline
+ * duration/delay, so nothing has to inject per-particle keyframes at runtime.
+ *
+ * The component already refuses to render under reduce-motion, but the rule
+ * below is the belt-and-braces: a purely decorative animation must never be the
+ * thing that slips past an accessibility preference.
+ */
+/*
+ * Christmas falls as a text glyph ("*") rather than an emoji, so it needs a
+ * color — and a hardcoded white one is invisible on a light theme, which is
+ * exactly the bug the harness story exists to catch. These two tokens carry the
+ * light/dark values instead; the season config points at them.
+ */
+:root {
+	--ryu-seasonal-snow: #6f8fb5;
+	--ryu-seasonal-glow: transparent;
+}
+.dark {
+	--ryu-seasonal-snow: #fff;
+	--ryu-seasonal-glow: rgba(255, 255, 255, 0.8);
+}
+
+@keyframes ryu-seasonal-fall {
+	0% {
+		transform: translateY(-20%) translateX(0) rotate(0deg);
+	}
+	100% {
+		transform: translateY(120%) translateX(var(--ryu-seasonal-wind, 0px))
+			rotate(360deg);
+	}
+}
+.ryu-seasonal-particle {
+	animation-name: ryu-seasonal-fall;
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
+	will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+	.ryu-seasonal-particle {
+		display: none;
+	}
+}
+
+/*
+ * The sidebar's "Research Preview" pill is a speech-bubble shape: fully rounded
+ * on three corners, square on the bottom-left. `BorderBeam` only accepts a
+ * single scalar radius — it emits `border-radius: Npx` plus
+ * `clip-path: inset(0 round Npx)` on its ::before (inner glow), ::after
+ * (traveling stroke) and `[data-beam-bloom]` layers — so the gradient traced a
+ * fully rounded outline around a notched shell, and the notch read as a bug.
+ * Re-cut all four layers to the same per-corner radius here.
+ *
+ * `!important` is load-bearing, not lazy: the generated rules are
+ * `[data-beam="<id>"][data-active]::after` (specificity 0,2,0), which a bare
+ * class selector loses to no matter where the injected <style> lands. Both the
+ * beam wrapper and the shell inside it take this class so the radius has one
+ * definition rather than three inline copies.
+ */
+.beam-notch-bl,
+.beam-notch-bl::before,
+.beam-notch-bl::after,
+.beam-notch-bl [data-beam-bloom] {
+	border-radius: 999px 999px 999px 0 !important;
+}
+.beam-notch-bl::before,
+.beam-notch-bl::after,
+.beam-notch-bl [data-beam-bloom] {
+	/* Without this the parent's `overflow: hidden` still leaves the layer's own
+	   rounded clip behind, so the corner stays soft even with the radius fixed. */
+	clip-path: inset(0 round 999px 999px 999px 0) !important;
+}

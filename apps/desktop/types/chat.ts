@@ -9,6 +9,14 @@ export interface Agent {
 export interface Message {
 	content: string;
 	id: string;
+	/**
+	 * This assistant turn was cut off mid-stream and never finalized — the node
+	 * died while it was still being written, so `content`/`parts` hold only what
+	 * had been flushed. Stamped by Core's boot reconciliation (nothing can mark it
+	 * live: a process that dies never gets to say so), and rendered as an explicit
+	 * "cut off" marker rather than passing a truncated reply off as a whole one.
+	 */
+	interrupted?: boolean;
 	/** The message this one replied to (its parent in the version tree). */
 	parentMessageId?: string;
 	/**
@@ -61,7 +69,10 @@ export interface Conversation {
 	participants?: string[];
 	/** Server-backed pin (shared with coordinator threads). */
 	pinned?: boolean;
-	/** Run lifecycle status: "running" | "completed" | "failed" | undefined. */
+	/** Run lifecycle status: "running" | "completed" | "failed" | "interrupted" |
+	 * undefined. "interrupted" is stamped by Core's boot reconciliation on a run
+	 * the node died in the middle of; it is TERMINAL, so "is this live?" checks
+	 * must keep testing for "running" specifically. */
 	runStatus?: string;
 	title: string;
 	updatedAt: number;

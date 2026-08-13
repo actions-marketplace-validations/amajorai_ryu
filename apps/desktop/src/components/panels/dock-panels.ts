@@ -41,12 +41,68 @@ export type BuiltinTabKind =
  *  collapsing to bare `string`. */
 export type PluginTabKind = `plugin:${string}`;
 
-/** What a dock tab is: a shell-owned panel or an app-contributed one. */
-export type DockTabKind = BuiltinTabKind | PluginTabKind;
+/**
+ * A MAIN-TAB PAGE hosted in a dock: `route:<path>`, where the path is the same
+ * one a window tab carries (`/library/space`, `/store`, `/chat`, …) and resolves
+ * through the same contribution registry (`RouteOutlet`).
+ *
+ * The path rides INSIDE the kind rather than in a separate field for two
+ * reasons. It keeps `PanelTab`/`ProjectDockTab` a single-discriminant shape, so
+ * the persisted project-dock rows (which only carry `kind`/`label`/`side`)
+ * restore a pinned page with no schema change; and it makes
+ * `usePanelTabs.openTab`'s reuse-by-kind dedup per-PAGE for free — raising the
+ * same page twice re-focuses its tab instead of stacking a second copy.
+ */
+export type RouteTabKind = `route:${string}`;
+
+/** What a dock tab is: a shell-owned panel, an app-contributed one, or a page. */
+export type DockTabKind = BuiltinTabKind | PluginTabKind | RouteTabKind;
 
 /** True when the tab is an app-contributed panel rather than a built-in. */
 export function isPluginTabKind(kind: DockTabKind): kind is PluginTabKind {
 	return kind.startsWith("plugin:");
+}
+
+/** True when the tab hosts a main-tab page (see {@link RouteTabKind}). */
+export function isRouteTabKind(kind: DockTabKind): kind is RouteTabKind {
+	return kind.startsWith("route:");
+}
+
+/** The tab kind hosting `path` as a dock page. */
+export function routeTabKind(path: string): RouteTabKind {
+	return `route:${path}`;
+}
+
+/** The route path a page tab is showing (`""` for a non-page kind). */
+export function routeTabPath(kind: DockTabKind): string {
+	return isRouteTabKind(kind) ? kind.slice("route:".length) : "";
+}
+
+/** The empty-split-pane picker. Spelled out rather than imported from
+ *  `lib/splitPresets.ts` to keep this module free of the split-tree graph — it is
+ *  the pure, unit-tested half of the dock. `dock-panels.test.ts` asserts the two
+ *  agree. */
+const PANE_CHOOSER_ROUTE = "/pane";
+
+/**
+ * Whether `path` may be hosted in a dock.
+ *
+ * A page in the dock is mounted through the same `RouteOutlet` a window tab uses,
+ * so the only genuinely unsafe input is a path that is not a route at all. Two
+ * paths are refused: the empty-pane CHOOSER, whose whole job is to replace itself
+ * with a window tab (it has no meaning inside a dock), and anything not rooted at
+ * `/` — a relative or scheme-bearing string is never a tab route, and treating one
+ * as a route would hand the registry's pattern matchers attacker-shaped input.
+ *
+ * `/chat` is deliberately ALLOWED: `WorkspacePanels` renders its docks only when
+ * it is not itself inside one (see `DockRouteHost`), so a chat hosted in the panel
+ * draws the conversation without a nested dock, and the mount cannot recurse.
+ */
+export function isDockableRoutePath(path: string): boolean {
+	if (!path.startsWith("/") || path.startsWith("//")) {
+		return false;
+	}
+	return path !== PANE_CHOOSER_ROUTE;
 }
 
 /**
@@ -69,6 +125,14 @@ export function isPluginTabKind(kind: DockTabKind): kind is PluginTabKind {
  */
 export function isPinnableDockTabKind(kind: DockTabKind): boolean {
 	if (isPluginTabKind(kind)) {
+		return true;
+	}
+	// A PAGE is workspace-level, not conversation-level — the Spaces library or
+	// the Store shows the same thing in every chat of the folder — so it pins like
+	// a terminal. The one page that carries per-chat state is `/chat`, and it
+	// carries its OWN (its conversation id), not the host chat's, so sharing the
+	// live instance across the folder is still correct.
+	if (isRouteTabKind(kind)) {
 		return true;
 	}
 	return kind === "terminal" || kind === "files" || kind === "codereview";

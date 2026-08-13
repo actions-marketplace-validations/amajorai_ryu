@@ -25,6 +25,7 @@ import {
 	WARP_OPACITY_DARK,
 	WARP_OPACITY_LIGHT,
 } from "../pass-card-shell.tsx";
+import { EDGE_METAL_STOPS } from "../pass-edge.ts";
 import type { PassFormat } from "./formats.ts";
 import { PASS_LOOP_SECONDS } from "./formats.ts";
 import {
@@ -278,15 +279,18 @@ export class PassScene {
 		if (!ctx) {
 			throw new Error("Pass studio needs a 2D canvas context");
 		}
-		// The same ramp `EDGE_METAL` describes: dark shoulders, a bright middle —
-		// how a rolled metal edge catches light.
+		// The card's ramp, READ FROM the shared stops rather than re-typed here.
+		// This gradient used to be a hand-copied duplicate of `EDGE_METAL`, and
+		// when the DOM ramp was retuned — from a symmetric bright/dark/bright sweep
+		// to a single specular one, precisely because the dark band across the
+		// middle made one card read as two joined at the waist — the copy stayed on
+		// the old stops. Every exported still and loop therefore kept the exact
+		// look the retune existed to remove, while the comment above them claimed
+		// they were "the same ramp".
 		const metal = ctx.createLinearGradient(0, 0, 0, canvas.height);
-		metal.addColorStop(0, "#6e6e78");
-		metal.addColorStop(0.18, "#babac4");
-		metal.addColorStop(0.34, "#f4f4f8");
-		metal.addColorStop(0.52, "#9a9aa6");
-		metal.addColorStop(0.7, "#d8d8e0");
-		metal.addColorStop(1, "#7c7c86");
+		for (const stop of EDGE_METAL_STOPS) {
+			metal.addColorStop(stop.at / 100, stop.color);
+		}
 		ctx.fillStyle = metal;
 		ctx.beginPath();
 		ctx.roundRect(rect.x, rect.y, rect.width, rect.height, rect.radius);

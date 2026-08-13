@@ -58,13 +58,13 @@ const noop = () => {
 export function installStateBadge(state: EngineInstallState) {
 	switch (state) {
 		case "installed":
-			return <Badge variant="secondary">Installed</Badge>;
+			return <Badge variant="secondary">Added</Badge>;
 		case "installing":
-			return <Badge variant="secondary">Installing…</Badge>;
+			return <Badge variant="secondary">Adding…</Badge>;
 		case "failed":
-			return <Badge variant="destructive">Install failed</Badge>;
+			return <Badge variant="destructive">Couldn't add</Badge>;
 		default:
-			return <Badge variant="secondary">Not installed</Badge>;
+			return <Badge variant="secondary">Not added</Badge>;
 	}
 }
 
@@ -185,9 +185,9 @@ export function EngineCardShell({
 	);
 }
 
-/** Install / uninstall button shared by both card variants. When an installed
+/** Add / Remove button shared by both card variants. When an installed
  *  engine is behind the registry's latest version, an "Update" button appears
- *  next to Uninstall — updating is just a re-install to latest (idempotent),
+ *  next to Remove — updating is just a re-install to latest (idempotent),
  *  mirroring the Fleet service-row pattern (`SidecarActions` in `fleet.tsx`). */
 export function EngineInstallButton({
 	installState,
@@ -246,7 +246,7 @@ export function EngineInstallButton({
 					) : (
 						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
 					)}
-					Uninstall
+					Remove
 				</Button>
 			</div>
 		);
@@ -260,7 +260,7 @@ export function EngineInstallButton({
 			percent={percent}
 		>
 			<HugeiconsIcon className="size-4" icon={Download01Icon} />
-			Install
+			Add
 		</InstallProgressButton>
 	);
 }

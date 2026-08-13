@@ -122,8 +122,6 @@
     {
       "capability": "reasoning.check",
       "version": "1.0.0",
-      "selectable": true,
-      "default": true,
       "sidecar": "reasoning",
       "route": "/check",
       "grant": "reasoning:check"

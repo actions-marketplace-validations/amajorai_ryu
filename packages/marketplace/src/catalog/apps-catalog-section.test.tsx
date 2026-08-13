@@ -46,7 +46,7 @@ function makeAppsState(): AppsCatalogState {
 		hasNextPage: false,
 		install: () => Promise.resolve(),
 		installFromUrl: () => Promise.resolve(),
-		installing: false,
+		installing: null,
 		items: [SAMPLE_ITEM],
 		lifecyclePending: false,
 		loading: false,
@@ -133,9 +133,9 @@ describe("CatalogHost seam — Apps section", () => {
 		expect(html).toContain("A sample plugin.");
 	});
 
-	test("with an install layer, list rows show the Install action (desktop)", () => {
+	test("with an install layer, list rows show the Add action (desktop)", () => {
 		const html = render(MOCK_INSTALL);
-		expect(html).toContain("Install");
+		expect(html).toContain("Add");
 		expect(html).not.toContain("Open Sample Plugin in Ryu");
 	});
 
@@ -144,11 +144,11 @@ describe("CatalogHost seam — Apps section", () => {
 		expect(html).toContain("Details");
 	});
 
-	test("StoreItemAction shows Install when not installed and no affordance", () => {
+	test("StoreItemAction shows Add when not installed and no affordance", () => {
 		const html = renderToStaticMarkup(
 			<StoreItemAction installed={false} onInstall={() => undefined} />
 		);
-		expect(html).toContain("Install");
+		expect(html).toContain("Add");
 		expect(html).not.toContain("Open Sample Plugin in Ryu");
 	});
 
@@ -161,7 +161,7 @@ describe("CatalogHost seam — Apps section", () => {
 		);
 		expect(html).toContain("Open Sample Plugin in Ryu");
 		// No desktop install button when the surface is read-only.
-		expect(html).not.toContain("Install<");
+		expect(html).not.toContain("Add<");
 	});
 
 	// The Settings route only ever renders when the surface resolved a destination

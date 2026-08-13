@@ -45,6 +45,11 @@ import { useTheme } from "next-themes";
 import type { CSSProperties } from "react";
 import { Fragment, useCallback, useEffect, useState } from "react";
 import {
+	getCurrentSeason,
+	getSeasonDisplayEmoji,
+	SEASONS,
+} from "@/src/components/layout/SeasonalEffects.tsx";
+import {
 	setAgentRowStyle,
 	useAgentRowStyle,
 } from "@/src/hooks/useAgentRowStyle.ts";
@@ -80,6 +85,13 @@ import {
 	setPointerCursor,
 	usePointerCursor,
 } from "@/src/hooks/usePointerCursor.ts";
+import {
+	previewSeasonalTheme,
+	type SeasonalThemeSetting,
+	setSeasonalThemeSetting,
+	usePreviewSeasonalTheme,
+	useSeasonalThemeSetting,
+} from "@/src/hooks/useSeasonalEffects.ts";
 import { useSidebarMode } from "@/src/hooks/useSidebarMode.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import {
@@ -121,6 +133,7 @@ import {
 	bindAppearanceThemeMode,
 	resetAppearanceSettings,
 } from "@/src/lib/appearance-settings.ts";
+import { LEVEL_RAMP_CLASS, levelFillColor } from "@/src/lib/level-ramp.ts";
 import {
 	PIERRE_DARK_THEMES,
 	PIERRE_LIGHT_THEMES,
@@ -142,6 +155,14 @@ import {
 	variantToCustomTokens,
 } from "@/src/lib/themes/presets.ts";
 import { themeManifestJson } from "@/src/lib/themes/publish.ts";
+import {
+	deriveToolDetailPreset,
+	TOOL_DETAIL_PRESETS,
+	TOOL_DETAIL_STEPS,
+	type ToolDetailStepId,
+	type ToolDetailValue,
+	toolDetailStepIndex,
+} from "@/src/lib/tool-detail-ladder.ts";
 import { BackgroundCustomizationSettings } from "./BackgroundCustomizationSettings.tsx";
 import {
 	SettingsCard,
@@ -149,6 +170,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "./shared/settings-items.tsx";
+import { TimezoneSetting } from "./TimezoneSetting.tsx";
 
 const MODES = [
 	{
@@ -622,7 +644,14 @@ function ThemePanel({
 									<span>{selected.label}</span>
 								</span>
 							) : (
-								<SelectValue />
+								// The stored id resolves to no known variant — its theme
+								// plugin was uninstalled, or the preset was renamed. A bare
+								// <SelectValue /> here would print that dead id verbatim,
+								// because Base UI resolves the closed trigger from the root's
+								// `items` prop and this root has none (the list is grouped).
+								<span className="text-muted-foreground italic">
+									Select a theme
+								</span>
 							)}
 						</SelectTrigger>
 						<SelectContent>
@@ -767,86 +796,14 @@ function ThemePanel({
 	);
 }
 
-// The "Tool detail" knob is a stepped preset over the four transcript-density
-// toggles (group / expand file edits / expand commands / expand code blocks):
-// one simple choice that most users never outgrow, with the individual toggles
-// tucked into "Advanced" for anyone who wants to fine-grain. The preset is
-// DERIVED from the toggles (no separate storage), so editing an individual
-// toggle in Advanced simply lands on whichever preset matches — or "custom" when
-// none does. Ordered by how much each surfaces: compact (all collapsed) →
-// minimal (diffs open) → detailed (everything open, calls listed individually).
-// `pinUserMessage` is intentionally NOT part of this — it is scroll behaviour,
-// not detail.
-//
-// `code` was added after the fact and only Detailed turns it on, so the two
-// levels a user is most likely to be sitting on (Compact is the default, Minimal
-// the common step up) keep matching their preset across the upgrade. Someone
-// already on Detailed lands on "custom" once — the slider still shows where they
-// are and one nudge puts them back on a named level, which is why nothing
-// silently rewrites their toggles to make the label tidy.
-const TOOL_DETAIL_PRESETS = {
-	compact: { group: true, edits: false, commands: false, code: false },
-	minimal: { group: true, edits: true, commands: false, code: false },
-	detailed: { group: false, edits: true, commands: true, code: true },
-} as const;
-
-/** The slider's detents, in the order they are rendered (least → most detail). */
-const TOOL_DETAIL_STEPS = [
-	{ id: "compact", label: "Compact" },
-	{ id: "minimal", label: "Minimal" },
-	{ id: "detailed", label: "Detailed" },
-] as const;
-
-type ToolDetailPresetId = keyof typeof TOOL_DETAIL_PRESETS;
-type ToolDetailValue = ToolDetailPresetId | "custom";
-
-function deriveToolDetailPreset(
-	group: boolean,
-	edits: boolean,
-	commands: boolean,
-	code: boolean
-): ToolDetailValue {
-	for (const [id, preset] of Object.entries(TOOL_DETAIL_PRESETS)) {
-		if (
-			preset.group === group &&
-			preset.edits === edits &&
-			preset.commands === commands &&
-			preset.code === code
-		) {
-			return id as ToolDetailPresetId;
-		}
-	}
-	return "custom";
-}
-
-/**
- * Where the slider thumb sits for a given value. "custom" has no detent of its
- * own — it parks on the nearest level BY COUNT of what is expanded, so a
- * hand-tuned combo reads as roughly-this-much-detail instead of snapping the
- * user's toggles to a preset just to have somewhere to point.
- */
-function toolDetailStepIndex(
-	value: ToolDetailValue,
-	group: boolean,
-	edits: boolean,
-	commands: boolean,
-	code: boolean
-): number {
-	if (value !== "custom") {
-		return TOOL_DETAIL_STEPS.findIndex((s) => s.id === value);
-	}
-	const expanded = [!group, edits, commands, code].filter(Boolean).length;
-	return Math.min(
-		TOOL_DETAIL_STEPS.length - 1,
-		Math.round((expanded / 4) * (TOOL_DETAIL_STEPS.length - 1))
-	);
-}
-
 /**
  * The stepped Detail level control — the same `RangeSlider` the composer's
  * reasoning-effort picker uses (`EffortSliderRow`), so a level ladder reads the
  * same everywhere in the app: one detent per level, the active level named above
- * the track, every level captioned below it.
+ * the track, every level captioned below it, painted with the shared cool → hot
+ * fill ramp (`level-ramp.ts`). `LEVEL_RAMP_CLASS` on the wrapper is load-bearing:
+ * it declares the variable the ramp's top stop resolves against, and without it
+ * the whole `color-mix` is invalid and the fill silently vanishes.
  *
  * "Custom" is shown as the value label with the thumb parked on the nearest
  * level; the slider stays live, so moving it commits that level and clears the
@@ -867,13 +824,14 @@ function ToolDetailSlider({
 			: (TOOL_DETAIL_STEPS.find((s) => s.id === preset)?.label ?? "");
 
 	return (
-		<div className="flex w-[220px] flex-col gap-1.5">
+		<div className={cn("flex w-[220px] flex-col gap-1.5", LEVEL_RAMP_CLASS)}>
 			<div className="flex items-center justify-end">
 				<span className="truncate text-foreground text-xs">{activeLabel}</span>
 			</div>
 			<RangeSlider
 				aria-label="Detail level"
 				className="h-8"
+				fillColor={levelFillColor(step, TOOL_DETAIL_STEPS.length)}
 				formatValueText={(v) =>
 					TOOL_DETAIL_STEPS[Math.round(v)]?.label ?? String(v)
 				}
@@ -997,6 +955,106 @@ function FileTreePreview({
 	return <FileTree className="h-full w-full" model={model} style={style} />;
 }
 
+const SEASON_OPTIONS = [
+	{ value: "auto", label: "Automatic" },
+	...SEASONS.map((s) => ({
+		value: s.id,
+		label: `${getSeasonDisplayEmoji(s)} ${s.label}`,
+	})),
+];
+
+/**
+ * The seasonal titlebar effects: the on/off switch, which season to show, and a
+ * timed preview so a season can be seen without waiting for its date.
+ *
+ * Both rows follow the Motion master switch — falling particles are an
+ * animation, so "Enable animations" (and the OS reduce-motion preference, which
+ * overrides everything) must turn them off too.
+ */
+function SeasonalEffectsSettings() {
+	const [animationsEnabled] = usePersistedToggle(
+		APPEARANCE_KEYS.animationsEnabled,
+		APPEARANCE_DEFAULTS.animationsEnabled
+	);
+	const [seasonalEffects, setSeasonalEffects] = usePersistedToggle(
+		APPEARANCE_KEYS.seasonalEffects,
+		APPEARANCE_DEFAULTS.seasonalEffects
+	);
+	const seasonSetting = useSeasonalThemeSetting();
+	const previewing = usePreviewSeasonalTheme();
+
+	// Releasing on unmount matters: close Settings mid-preview and the titlebar
+	// would otherwise stay stuck on the previewed season until the timer fires.
+	useEffect(() => () => previewSeasonalTheme(null), []);
+
+	// A pinned season previews itself. "Automatic" previews whatever season is
+	// running today — and on the ~340 days a year when that is none, it falls
+	// back to Christmas rather than leaving the one button whose whole job is
+	// "show me the effect without waiting for December" permanently dead.
+	const previewTarget =
+		seasonSetting === "auto"
+			? (getCurrentSeason()?.id ?? "christmas")
+			: seasonSetting;
+
+	return (
+		<SettingsSection title="Seasonal effects">
+			<SettingsGroup>
+				<SettingsItem
+					actions={
+						<Switch
+							checked={seasonalEffects}
+							disabled={!animationsEnabled}
+							id="seasonal-effects-toggle"
+							onCheckedChange={setSeasonalEffects}
+						/>
+					}
+					description="Drift festive particles down the titlebar around holidays — snow in December, confetti on New Year's Eve, pumpkins through October. Requires “Enable animations” to be on, and never runs while your system asks for reduced motion."
+					title="Seasonal effects"
+				/>
+				<SettingsItem
+					actions={
+						<div className="flex items-center gap-2">
+							<Select
+								items={SEASON_OPTIONS}
+								onValueChange={(v) =>
+									setSeasonalThemeSetting(v as SeasonalThemeSetting)
+								}
+								value={seasonSetting}
+							>
+								<SelectTrigger
+									className="h-8 w-56 text-sm"
+									disabled={!(animationsEnabled && seasonalEffects)}
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{SEASON_OPTIONS.map((o) => (
+										<SelectItem key={o.value} value={o.value}>
+											{o.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+							<Button
+								disabled={!(animationsEnabled && previewTarget) || !!previewing}
+								onClick={() =>
+									previewTarget && previewSeasonalTheme(previewTarget)
+								}
+								size="sm"
+								variant="outline"
+							>
+								{previewing ? "Previewing…" : "Preview"}
+							</Button>
+						</div>
+					}
+					description="Automatic follows the calendar. Pin a season to keep it running all year. Preview shows the selected season in the titlebar for a few seconds — it works even while the switch above is off."
+					title="Season"
+				/>
+			</SettingsGroup>
+		</SettingsSection>
+	);
+}
+
 export function AppearanceTab() {
 	const { theme, setTheme } = useTheme();
 	// next-themes' setter lives in React; bind it so registry reset can call it.
@@ -1035,6 +1093,10 @@ export function AppearanceTab() {
 		APPEARANCE_KEYS.expandCodeBlocks,
 		APPEARANCE_DEFAULTS.expandCodeBlocks
 	);
+	const [hideToolDetail, setHideToolDetail] = usePersistedToggle(
+		APPEARANCE_KEYS.hideToolDetail,
+		APPEARANCE_DEFAULTS.hideToolDetail
+	);
 	const [pinUserMessage, setPinUserMessage] = usePersistedToggle(
 		APPEARANCE_KEYS.pinUserMessage,
 		APPEARANCE_DEFAULTS.pinUserMessage
@@ -1042,6 +1104,10 @@ export function AppearanceTab() {
 	const [openChatAtBottom, setOpenChatAtBottom] = usePersistedToggle(
 		APPEARANCE_KEYS.openChatAtBottom,
 		APPEARANCE_DEFAULTS.openChatAtBottom
+	);
+	const [inferenceStats, setInferenceStats] = usePersistedToggle(
+		APPEARANCE_KEYS.inferenceStats,
+		APPEARANCE_DEFAULTS.inferenceStats
 	);
 	const [animationsEnabled, setAnimationsEnabled] = usePersistedToggle(
 		APPEARANCE_KEYS.animationsEnabled,
@@ -1056,13 +1122,22 @@ export function AppearanceTab() {
 	const fileTreeThemeStyles = useFileTreeThemeStyles(fileTreePrefs);
 
 	const toolDetailPreset = deriveToolDetailPreset(
+		hideToolDetail,
 		groupToolUses,
 		expandFileEdits,
 		expandCommands,
 		expandCodeBlocks
 	);
-	const applyToolDetailPreset = useCallback(
-		(id: ToolDetailPresetId) => {
+	const applyToolDetailStep = useCallback(
+		(id: ToolDetailStepId) => {
+			// None writes ONLY the visibility flag: the four expansion toggles keep
+			// whatever the user had, so stepping back up restores their setup
+			// instead of a preset we picked for them.
+			if (id === "none") {
+				setHideToolDetail(true);
+				return;
+			}
+			setHideToolDetail(false);
 			const preset = TOOL_DETAIL_PRESETS[id];
 			setGroupToolUses(preset.group);
 			setExpandFileEdits(preset.edits);
@@ -1070,6 +1145,7 @@ export function AppearanceTab() {
 			setExpandCodeBlocks(preset.code);
 		},
 		[
+			setHideToolDetail,
 			setGroupToolUses,
 			setExpandFileEdits,
 			setExpandCommands,
@@ -1087,10 +1163,10 @@ export function AppearanceTab() {
 		(next: number) => {
 			const picked = TOOL_DETAIL_STEPS[Math.round(next)];
 			if (picked) {
-				applyToolDetailPreset(picked.id);
+				applyToolDetailStep(picked.id);
 			}
 		},
-		[applyToolDetailPreset]
+		[applyToolDetailStep]
 	);
 	// Auto-reveal Advanced when the current combo matches no preset, so a "custom"
 	// state is never hidden behind a collapsed section.
@@ -1677,6 +1753,8 @@ export function AppearanceTab() {
 				</SettingsGroup>
 			</SettingsSection>
 
+			<TimezoneSetting />
+
 			<SettingsSection title="Motion">
 				<SettingsGroup>
 					<SettingsItem
@@ -1704,6 +1782,8 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+
+			<SeasonalEffectsSettings />
 
 			<SettingsSection title="Interface">
 				<SettingsGroup>
@@ -1844,7 +1924,7 @@ export function AppearanceTab() {
 								step={toolDetailStep}
 							/>
 						}
-						description="How much of each reply the chat shows. Compact keeps every tool call collapsed to a row and caps long code blocks; Minimal opens file diffs but keeps command output and code capped; Detailed expands diffs, output and code blocks and lists every call individually. Fine-tune the pieces under Advanced."
+						description="How much of each reply the chat shows. None hides tool calls and file edits entirely, leaving a plain messaging view — failed steps still show, so nothing fails silently. Compact keeps every tool call collapsed to a row and caps long code blocks; Minimal opens file diffs but keeps command output and code capped; Detailed expands diffs, output and code blocks and lists every call individually. Fine-tune the pieces under Advanced."
 						title="Detail level"
 					/>
 				</SettingsGroup>
@@ -1864,11 +1944,25 @@ export function AppearanceTab() {
 						/>
 					</CollapsibleTrigger>
 					<CollapsibleContent className="pt-1">
+						{/* At None there are no tool rows left for the first three to
+						    expand, so they are disabled rather than left as switches
+						    that flip and change nothing. Their stored values are
+						    untouched — step the ladder back up and they apply again
+						    exactly as set. "Expand code blocks" stays live: it also
+						    governs fenced code in the assistant's own reply. */}
+						{hideToolDetail ? (
+							<p className="px-3.5 pb-1 text-muted-foreground text-xs">
+								Detail level is None, so the chat shows no tool calls to expand.
+								Raise the level to use these. Code blocks in replies are still
+								shown.
+							</p>
+						) : null}
 						<SettingsGroup>
 							<SettingsItem
 								actions={
 									<Switch
 										checked={groupToolUses}
+										disabled={hideToolDetail}
 										id="group-tool-uses-toggle"
 										onCheckedChange={setGroupToolUses}
 									/>
@@ -1880,6 +1974,7 @@ export function AppearanceTab() {
 								actions={
 									<Switch
 										checked={expandFileEdits}
+										disabled={hideToolDetail}
 										id="expand-file-edits-toggle"
 										onCheckedChange={setExpandFileEdits}
 									/>
@@ -1891,6 +1986,7 @@ export function AppearanceTab() {
 								actions={
 									<Switch
 										checked={expandCommands}
+										disabled={hideToolDetail}
 										id="expand-commands-toggle"
 										onCheckedChange={setExpandCommands}
 									/>
@@ -1900,6 +1996,9 @@ export function AppearanceTab() {
 							/>
 							<SettingsItem
 								actions={
+									// NOT disabled at None: this one reaches past tool rows
+									// into fenced code inside the assistant's own markdown
+									// (see markdown.tsx), which None still renders.
 									<Switch
 										checked={expandCodeBlocks}
 										id="expand-code-blocks-toggle"
@@ -1935,6 +2034,17 @@ export function AppearanceTab() {
 						}
 						description="Jump to the newest message when you open a chat. When off, the transcript stays wherever it loaded, near the start of the conversation."
 						title="Open chats at the latest message"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={inferenceStats}
+								id="inference-stats-toggle"
+								onCheckedChange={setInferenceStats}
+							/>
+						}
+						description="Show token counts, tokens per second and the time to the first response under each reply. Off by default: the numbers are a developer readout, and many agents report no token usage at all."
+						title="Inference stats"
 					/>
 				</SettingsGroup>
 			</SettingsSection>

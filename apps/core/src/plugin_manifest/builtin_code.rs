@@ -63,6 +63,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/ground.js",
         include_str!("../../../../apps-store/news/hooks/ground.js"),
     ),
+    // rlm
+    (
+        "@ryu/rlm",
+        "hooks/deep-read.js",
+        include_str!("../../../../apps-store/rlm/hooks/deep-read.js"),
+    ),
     // ── plugins-store ────────────────────────────────────────────────────────
     // advisor
     (
@@ -180,6 +186,22 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "@ryu/no-ai-slop",
         "hooks/review.js",
         include_str!("../../../../plugins-store/no-ai-slop/hooks/review.js"),
+    ),
+    // no-more-mistakes
+    (
+        "@ryu/no-more-mistakes",
+        "hooks/capture.js",
+        include_str!("../../../../plugins-store/no-more-mistakes/hooks/capture.js"),
+    ),
+    (
+        "@ryu/no-more-mistakes",
+        "hooks/brief.js",
+        include_str!("../../../../plugins-store/no-more-mistakes/hooks/brief.js"),
+    ),
+    (
+        "@ryu/no-more-mistakes",
+        "hooks/command.js",
+        include_str!("../../../../plugins-store/no-more-mistakes/hooks/command.js"),
     ),
     // parallel
     (
@@ -350,8 +372,18 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     // output-styles
     (
         "@ryu/output-styles",
+        "output-styles/bro.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/bro.md"),
+    ),
+    (
+        "@ryu/output-styles",
         "output-styles/eli5.md",
         include_str!("../../../../plugins-store/output-styles/output-styles/eli5.md"),
+    ),
+    (
+        "@ryu/output-styles",
+        "output-styles/gen-z.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/gen-z.md"),
     ),
     (
         "@ryu/output-styles",

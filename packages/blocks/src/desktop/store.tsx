@@ -33,8 +33,19 @@ import {
 import { Icon } from "@ryu/ui/components/icon.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+	type CSSProperties,
+	Fragment,
+	type ReactNode,
+	type RefObject,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+} from "react";
 
 export interface StoreSectionTab {
 	/**
@@ -87,6 +98,91 @@ const noop = () => {
 	// Default no-op handler for the presentational layer.
 };
 
+/** How much of each overflowing edge dissolves into the background. */
+const EDGE_FADE = "2rem";
+
+/**
+ * Edge fade for a HORIZONTAL scroller: the clipped side dissolves instead of
+ * being cut off mid-pill, and only while that side actually has more to show.
+ *
+ * Measured in JS rather than with a `@utility` + scroll-driven animation because
+ * this block is consumed by more than one app (the desktop shell and the e2e
+ * harness/storyboard each build their own stylesheet). A utility defined in one
+ * app's CSS silently no-ops in every other consumer — `scroll-fade-x`
+ * (packages/ui/src/components/attachment.tsx) is exactly that: referenced once,
+ * defined in no stylesheet, dead. Owning the mask here cannot rot that way.
+ *
+ * Unlike the label fade in `overflow-tooltip.tsx` there is no inline-box trap to
+ * dodge: the element measured here is the scroll container itself and it is a
+ * flex box, so `scrollWidth`/`clientWidth` are real numbers, not the 0/0 an
+ * inline non-replaced box reports.
+ */
+function useScrollFadeX(): {
+	ref: RefObject<HTMLDivElement | null>;
+	/** Which edges are faded — mirrored onto `data-fade` so the state is
+	 *  inspectable (and assertable) without parsing a serialized gradient. */
+	state: "both" | "end" | "none" | "start";
+	style: CSSProperties | undefined;
+} {
+	const ref = useRef<HTMLDivElement>(null);
+	const [edges, setEdges] = useState({ end: false, start: false });
+
+	const measure = useCallback(() => {
+		const el = ref.current;
+		if (!el) {
+			return;
+		}
+		const max = el.scrollWidth - el.clientWidth;
+		// 1px slack: fractional layout widths otherwise leave a permanent
+		// sub-pixel "there is more" on a strip that fits exactly.
+		setEdges({
+			end: max - el.scrollLeft > 1,
+			start: el.scrollLeft > 1,
+		});
+	}, []);
+
+	// Layout effect so the first paint already carries the correct mask; a
+	// passive effect flashes an unfaded strip for a frame on a long list.
+	useLayoutEffect(() => {
+		const el = ref.current;
+		if (!el) {
+			return;
+		}
+		measure();
+		el.addEventListener("scroll", measure, { passive: true });
+		const observer = new ResizeObserver(measure);
+		// The container gives the AVAILABLE width; its content row gives the
+		// CONTENT width. A tab list that grows (an app registers a section) resizes
+		// only the second, so both have to be watched.
+		observer.observe(el);
+		for (const child of Array.from(el.children)) {
+			observer.observe(child);
+		}
+		return () => {
+			el.removeEventListener("scroll", measure);
+			observer.disconnect();
+		};
+	}, [measure]);
+
+	if (!(edges.start || edges.end)) {
+		return { ref, state: "none", style: undefined };
+	}
+	const gradient = `linear-gradient(to right, ${
+		edges.start ? `transparent 0, #000 ${EDGE_FADE}` : "#000 0"
+	}, ${edges.end ? `#000 calc(100% - ${EDGE_FADE}), transparent 100%` : "#000 100%"})`;
+	let state: "both" | "end" | "start" = "start";
+	if (edges.start && edges.end) {
+		state = "both";
+	} else if (edges.end) {
+		state = "end";
+	}
+	return {
+		ref,
+		state,
+		style: { maskImage: gradient, WebkitMaskImage: gradient },
+	};
+}
+
 /**
  * The section tabs for a multi-section shell (the Store, the Library), rendered
  * INLINE at the top of the page as an ordinary element.
@@ -100,6 +196,24 @@ const noop = () => {
  * scroll with a long list instead of wrapping into a floating blob, and the
  * controls that used to hide inside them (search, source, filters) are ordinary
  * toolbar buttons beside the content they act on.
+ *
+ * The one thing that DID come back to the bottom of the page is the Store's
+ * global search field (`StoreBottomSearch`) — a single bare input, not a bar of
+ * chrome, and the shell pads its content column by the bar's height so the last
+ * row stays reachable. That was the old bar's actual sin; being at the bottom
+ * was not.
+ *
+ * The strip is the shared `pills` tab variant (`@ryu/ui/components/tabs.tsx`)
+ * rather than hand-rolled buttons, so it wears the same active pill as every
+ * other tab strip in the app and inherits Base UI's roving arrow-key navigation.
+ * `pills`, not `pills-lg`: this is an open-ended, horizontally scrolling section
+ * nav under a page title, not the primary control of the surface, and a
+ * 56px-tall pill × a dozen sections reads as a toolbar, not a nav. The list is
+ * forced `flex-nowrap` inside its own `overflow-x-auto` box because the variant
+ * ships `flex-wrap` — wrapping would turn a long strip back into the multi-row
+ * blob the inline design replaced. Both scrolled edges fade
+ * ({@link useScrollFadeX}), so a clipped pill reads as "there is more" instead
+ * of a truncation.
  *
  * A thin divider is drawn wherever `group` changes, so clusters still read as
  * clusters without a second component.
@@ -115,46 +229,126 @@ export function StoreSectionTabs({
 	onSelect?: (value: string) => void;
 	sections: StoreSectionTab[];
 }) {
+	const fade = useScrollFadeX();
+	return (
+		<Tabs
+			className={cn("w-full min-w-0", className)}
+			onValueChange={(value) => onSelect(String(value))}
+			value={active}
+		>
+			<div
+				className="scrollbar-none w-full min-w-0 overflow-x-auto"
+				data-fade={fade.state}
+				data-slot="store-section-tabs-scroller"
+				ref={fade.ref}
+				style={fade.style}
+			>
+				<TabsList aria-label="Sections" className="flex-nowrap" variant="pills">
+					{sections.map((s, i) => {
+						const prev = i > 0 ? sections[i - 1] : undefined;
+						const showDivider = Boolean(prev && prev.group !== s.group);
+						return (
+							<Fragment key={s.value}>
+								{showDivider ? (
+									<span
+										aria-hidden
+										className="mx-1 h-4 w-px shrink-0 self-center bg-border"
+									/>
+								) : null}
+								<TabsTrigger className="shrink-0 gap-1.5" value={s.value}>
+									<SectionTabIcon icon={s.icon} iconNode={s.iconNode} />
+									<span className="whitespace-nowrap">{s.label}</span>
+								</TabsTrigger>
+							</Fragment>
+						);
+					})}
+				</TabsList>
+			</div>
+		</Tabs>
+	);
+}
+
+/**
+ * The Store's GLOBAL search: one bare input pinned to the bottom of the page.
+ *
+ * Deliberately chrome-free — no border, ring, shadow or card — so it reads as a
+ * line you type on rather than a widget bolted over the content. It is
+ * `absolute`, not `fixed`: these pages render inside split panes, so a
+ * viewport-fixed bar would escape its pane, slide under the shell's fixed
+ * sidebar, and paint twice when two panes both show the Store. The caller mounts
+ * it in a `relative` page root and pads its scrolling column by this bar's
+ * height.
+ *
+ * The strip behind the input is opaque `bg-background` (the retired floating bar
+ * was translucent `bg-muted/70`): a bare input over content scrolling underneath
+ * is unreadable, and an opaque strip is the least chrome that still keeps the
+ * text legible.
+ *
+ * It carries NO `z-index` on purpose. Being positioned is already enough to paint
+ * over the page's in-flow content, and the one thing that shares this corner is
+ * the shell's split-pane badge (`Layout.tsx` → `PaneBadge`, `absolute bottom-2
+ * left-2 z-10`) — the pill naming the pane plus its actions. Neither the pane box
+ * nor the page root opens a stacking context (both are positioned with
+ * `z-index: auto`), so a `z-30` here outranked that badge and an opaque strip
+ * simply erased it in split view. Below `z-10` the badge wins explicitly, the way
+ * it already floats over the chat composer, and its pointer-proximity fade keeps
+ * the input underneath reachable. Do not "restore" a z-index to fix a stacking
+ * bug elsewhere: nothing in the padded content column paints into this strip.
+ */
+export function StoreBottomSearch({
+	value,
+	onChange,
+	placeholder = "Search…",
+	className,
+}: {
+	className?: string;
+	onChange: (value: string) => void;
+	placeholder?: string;
+	value: string;
+}) {
 	return (
 		<div
-			aria-label="Sections"
 			className={cn(
-				"scrollbar-none flex w-full items-center gap-1 overflow-x-auto",
+				"absolute inset-x-0 bottom-0 bg-background px-4 pb-3",
 				className
 			)}
-			role="tablist"
 		>
-			{sections.map((s, i) => {
-				const isActive = s.value === active;
-				const prev = i > 0 ? sections[i - 1] : undefined;
-				const showDivider = Boolean(prev && prev.group !== s.group);
-				return (
-					<Fragment key={s.value}>
-						{showDivider ? (
-							<span
-								aria-hidden
-								className="mx-1 h-4 w-px shrink-0 self-center bg-border"
-							/>
-						) : null}
-						<button
-							aria-selected={isActive}
-							className={cn(
-								"flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 font-medium text-muted-foreground text-sm outline-none transition-colors",
-								"hover:bg-accent hover:text-foreground",
-								"focus-visible:ring-2 focus-visible:ring-ring",
-								isActive && "bg-accent text-foreground"
-							)}
-							data-active={isActive}
-							onClick={() => onSelect(s.value)}
-							role="tab"
-							type="button"
-						>
-							<SectionTabIcon icon={s.icon} iconNode={s.iconNode} />
-							<span className="whitespace-nowrap">{s.label}</span>
-						</button>
-					</Fragment>
-				);
-			})}
+			<div className="mx-auto flex w-full max-w-4xl items-center gap-2">
+				<HugeiconsIcon
+					aria-hidden
+					className="size-4 shrink-0 text-muted-foreground"
+					icon={Search01Icon}
+				/>
+				<input
+					aria-label={placeholder}
+					// `type=search` for the semantics (role=searchbox), with the native
+					// WebKit clear glyph suppressed — the row already has an explicit
+					// Clear button, and two clear affordances in one field is chrome the
+					// bare-input brief exists to avoid.
+					className="h-9 w-full min-w-0 border-none bg-transparent text-sm outline-none placeholder:text-muted-foreground focus:outline-none focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
+					data-slot="store-bottom-search"
+					onChange={(e) => onChange(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Escape" && value.length > 0) {
+							onChange("");
+						}
+					}}
+					placeholder={placeholder}
+					type="search"
+					value={value}
+				/>
+				{value ? (
+					<Button
+						aria-label="Clear search"
+						className="shrink-0"
+						onClick={() => onChange("")}
+						size="sm"
+						variant="ghost"
+					>
+						<HugeiconsIcon className="size-3.5" icon={Cancel01Icon} />
+					</Button>
+				) : null}
+			</div>
 		</div>
 	);
 }
@@ -299,7 +493,7 @@ export function StoreItemAction({
 	onRetry = noop,
 }: {
 	state: StoreItemState;
-	/** Optional progress text shown while installing (e.g. "Installing 48%"). */
+	/** Optional progress text shown while installing (e.g. "Adding 48%"). */
 	progressLabel?: string;
 	onInstall?: () => void;
 	onUninstall?: () => void;
@@ -308,14 +502,14 @@ export function StoreItemAction({
 	if (state === "installing") {
 		return (
 			<span className="flex items-center gap-2 text-muted-foreground text-xs">
-				<Spinner className="size-3.5" /> {progressLabel ?? "Installing…"}
+				<Spinner className="size-3.5" /> {progressLabel ?? "Adding…"}
 			</span>
 		);
 	}
 	if (state === "installed") {
 		return (
 			<div className="flex items-center gap-2">
-				<Badge variant="secondary">Installed</Badge>
+				<Badge variant="secondary">Added</Badge>
 				<Button onClick={onUninstall} size="sm" variant="ghost">
 					Remove
 				</Button>
@@ -339,7 +533,7 @@ export function StoreItemAction({
 			size="sm"
 			variant="ghost"
 		>
-			Install
+			Add
 		</Button>
 	);
 }

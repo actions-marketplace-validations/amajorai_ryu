@@ -6,7 +6,7 @@
 //   - `POST /api/workspace/new-folder` `{ name }` (the composer's "Start from
 //     scratch" flow — Core creates ~/Documents/Ryu/<name> and returns its path).
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, apiUrl, makeHeaders, readJsonBody } from "./client.ts";
 
 export interface CreateFolderResult {
 	error?: string;
@@ -51,19 +51,11 @@ export async function listDirectory(
 	const resp = await fetch(apiUrl(target, `/api/workspace/list${query}`), {
 		headers: makeHeaders(target.token),
 	});
-	if (!resp.ok) {
-		let message = `list failed: ${resp.status}`;
-		try {
-			const json = (await resp.json()) as { error?: string };
-			if (json.error) {
-				message = json.error;
-			}
-		} catch {
-			// Non-JSON body — keep the status-based message.
-		}
-		throw new Error(message);
+	const { data, error } = await readJsonBody<DirectoryListing>(resp, "list");
+	if (error || !data) {
+		throw new Error(error ?? `list failed: ${resp.status}`);
 	}
-	return (await resp.json()) as DirectoryListing;
+	return data;
 }
 
 /**
@@ -79,19 +71,22 @@ export async function createProjectFolder(
 ): Promise<CreateFolderResult> {
 	const url = apiUrl(target, "/api/workspace/new-folder");
 	try {
+		// `makeHeaders` already carries the JSON content-type; adding a second,
+		// differently-cased key made `fetch` send `application/json, application/json`
+		// and Core answered 415 with a text/plain body.
 		const resp = await fetch(url, {
 			method: "POST",
-			headers: {
-				...makeHeaders(target.token),
-				"content-type": "application/json",
-			},
+			headers: makeHeaders(target.token),
 			body: JSON.stringify({ name }),
 		});
-		const json = (await resp.json()) as CreateFolderResult;
-		if (!resp.ok) {
-			return { error: json.error ?? `create failed: ${resp.status}` };
+		const { data, error } = await readJsonBody<CreateFolderResult>(
+			resp,
+			"create"
+		);
+		if (error) {
+			return { error };
 		}
-		return { path: json.path };
+		return { path: data?.path };
 	} catch (e) {
 		return { error: e instanceof Error ? e.message : "create failed" };
 	}

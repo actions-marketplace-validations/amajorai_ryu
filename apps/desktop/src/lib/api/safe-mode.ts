@@ -16,7 +16,7 @@
 //     already spawned still running, so the switch would report success while the
 //     CPU cost it exists to remove kept being paid.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "../tauri-ready.ts";
 import { ApiError, type ApiTarget, request } from "./client.ts";
 
 /** Which of the three resolution tiers turned Safe Mode on. */
@@ -126,7 +126,7 @@ export async function setSafeMode(
  */
 export async function readSafeModeSentinel(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("get_safe_mode_sentinel");
+		return await invokeWhenReady<boolean>("get_safe_mode_sentinel");
 	} catch {
 		// Not running under Tauri (webapp, harness) — no sentinel to speak of.
 		return false;
@@ -140,7 +140,7 @@ export async function readSafeModeSentinel(): Promise<boolean> {
  * this is for the process is usually already down.
  */
 export async function writeSafeModeSentinel(enabled: boolean): Promise<void> {
-	await invoke("set_safe_mode_sentinel", { enabled });
+	await invokeWhenReady("set_safe_mode_sentinel", { enabled });
 }
 
 /**

@@ -14,7 +14,15 @@ import {
 
 import { cn } from "../lib/utils.ts";
 
-const DEFAULT_STEP_MS = 40;
+/**
+ * The offset between two consecutive lines. Exported so a surface that splits
+ * its cascade across more than one `StaggerReveal` — a header block and the
+ * content block under it, say — can carry on counting in the same units rather
+ * than inventing a second rhythm.
+ */
+export const STAGGER_STEP_MS = 40;
+
+const DEFAULT_STEP_MS = STAGGER_STEP_MS;
 
 // transitions.dev "texts reveal", expressed in Tailwind so there is one source
 // of truth and no per-page CSS. Lines start translated-down + blurred +
@@ -32,6 +40,22 @@ interface StaggerRevealProps {
 	startDelay?: number;
 	/** Per-line stagger offset in ms. */
 	step?: number;
+	/**
+	 * Carry the reveal on a plain wrapper `<div>` per line instead of cloning it
+	 * onto the line itself.
+	 *
+	 * The default (clone) is right for lines that are DOM elements, but a line
+	 * that is a *component* only animates if it forwards BOTH `className` and
+	 * `style` to its own root — and one that forwards neither, or forwards
+	 * `className` to some inner node, fails silently: the line just appears. Turn
+	 * this on wherever the lines are components (settings cards, sliders,
+	 * selects) rather than auditing each one.
+	 *
+	 * The cost is one block-level element per line. That is invisible inside a
+	 * flex column, but it DOES swallow a child's own grid placement, so leave it
+	 * off when the lines are grid cells carrying `col-span-*`.
+	 */
+	wrap?: boolean;
 }
 
 interface StyledProps {
@@ -50,6 +74,7 @@ export function StaggerReveal({
 	children,
 	startDelay = 0,
 	step = DEFAULT_STEP_MS,
+	wrap = false,
 }: StaggerRevealProps) {
 	const [shown, setShown] = useState(false);
 
@@ -84,21 +109,27 @@ export function StaggerReveal({
 	}
 
 	return lines.map(({ node, key }, index) => {
+		const revealClass = cn(LINE_BASE, shown ? LINE_SHOWN : LINE_HIDDEN);
+		const revealStyle: CSSProperties = {
+			transitionDelay: shown ? `${startDelay + index * step}ms` : "0ms",
+		};
+
+		if (wrap) {
+			return (
+				<div className={revealClass} key={key} style={revealStyle}>
+					{node}
+				</div>
+			);
+		}
+
 		if (!isValidElement(node)) {
 			return node;
 		}
 		const element = node as ReactElement<StyledProps>;
 		return cloneElement(element, {
 			key,
-			className: cn(
-				LINE_BASE,
-				shown ? LINE_SHOWN : LINE_HIDDEN,
-				element.props.className
-			),
-			style: {
-				...element.props.style,
-				transitionDelay: shown ? `${startDelay + index * step}ms` : "0ms",
-			},
+			className: cn(revealClass, element.props.className),
+			style: { ...element.props.style, ...revealStyle },
 		});
 	});
 }

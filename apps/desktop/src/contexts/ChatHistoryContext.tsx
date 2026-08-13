@@ -17,12 +17,31 @@ import { useCoreRefresh } from "@/src/lib/core-refresh.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import type { Conversation, Message } from "@/types/chat.ts";
 
+/** Outcome of a history fetch. An empty thread and an unreachable node produce
+ * the same `messages: []`, and telling them apart is the whole difference
+ * between "this chat is new" and "this chat has not loaded" — see
+ * `loadMessagesResult`. */
+interface LoadMessagesResult {
+	messages: Message[];
+	status: "error" | "ok";
+}
+
 interface ChatHistoryContextValue {
 	activeConversationId: string | null;
 	conversations: Conversation[];
+	/** True while the first conversation-list fetch for this node is in flight.
+	 * Consumers must gate a skeleton on `conversations.length === 0` as well —
+	 * `refresh` re-runs on node/preview changes and must not flash over a list
+	 * that is already on screen. */
+	conversationsLoading: boolean;
 	/** Optimistically add a draft conversation locally; it is persisted in Core
-	 * by the chat stream once the first message is sent. */
-	createConversation: (id: string, agentId?: string, title?: string) => void;
+	 * by the chat stream once the first message is sent.
+	 *
+	 * Pass `folderPath` whenever a workspace folder is active — the sidebar
+	 * buckets rows by it, so a draft created without it lands in the loose
+	 * "Chats" list and only moves under its project when Core's row arrives
+	 * after the first turn. See {@link DraftInit}. */
+	createConversation: (id: string, init?: DraftInit) => void;
 	deleteConversation: (id: string) => void;
 	/** Edit a user message in place: creates a new version (sibling) carrying
 	 * `content` and switches the active branch to it. Returns the new message id
@@ -38,8 +57,15 @@ interface ChatHistoryContextValue {
 	forkConversation: (id: string, messageId: string) => Promise<string | null>;
 	getConversation: (id: string) => Conversation | undefined;
 	listConversations: () => Conversation[];
-	/** Fetch a conversation's full message history from Core. */
+	/** Fetch a conversation's full message history from Core. Returns `[]` for a
+	 * failed fetch as well as an empty thread — use `loadMessagesResult` when the
+	 * caller has to tell those apart. */
 	loadMessages: (id: string) => Promise<Message[]>;
+	/** `loadMessages` with the transport outcome kept: `status: "error"` means the
+	 * node could not be reached (or answered non-2xx), NOT that the conversation
+	 * is empty. The chat surface needs the distinction to show "still loading /
+	 * couldn't load" instead of the new-chat greeting. */
+	loadMessagesResult: (id: string) => Promise<LoadMessagesResult>;
 	/** Re-sync the conversation list from Core. */
 	refresh: () => void;
 	/** Prepare to regenerate an assistant message: points the active leaf at the
@@ -58,8 +84,24 @@ interface ChatHistoryContextValue {
 	 * reloads the active path to re-render the selected branch. */
 	selectVersion: (id: string, versionId: string) => Promise<boolean>;
 	setActiveConversationId: (id: string | null) => void;
+	/** Record which workspace folder a conversation is running in, locally.
+	 *
+	 * Local state only — Core stamps the same value itself from the turn's `cwd`
+	 * (`set_run_metadata`), so this is not a write-through, it just removes the
+	 * wait. Call it at send time with the folder the turn is about to run
+	 * against: a draft created before the user switched folders would otherwise
+	 * sit under the wrong project until the list refreshes. */
+	setConversationFolder: (id: string, folderPath?: string) => void;
 	/** Set or clear a conversation glyph (optimistic + Core write-through). */
 	setConversationGlyph: (id: string, icon: GlyphValue) => void;
+}
+
+/** The fields a caller may seed on an optimistic draft conversation. */
+interface DraftInit {
+	agentId?: string;
+	/** Workspace folder the chat belongs to — what the sidebar groups by. */
+	folderPath?: string;
+	title?: string;
 }
 
 const ChatHistoryContext = createContext<ChatHistoryContextValue | null>(null);
@@ -101,6 +143,9 @@ interface CoreMessage {
 	content: string;
 	created_at: number;
 	id: string;
+	/** Set by Core's boot reconciliation on an assistant turn the node died in
+	 * the middle of — its text/parts are whatever had been flushed. */
+	interrupted?: boolean;
 	parent_message_id?: string;
 	/**
 	 * Structured render parts (AI SDK reduced UIMessage `parts` array) captured
@@ -175,6 +220,10 @@ function summaryToConversation(summary: CoreConversationSummary): Conversation {
 export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	const activeNode = useNodeStore((s) => s.getActiveNode());
 	const [conversations, setConversations] = useState<Conversation[]>([]);
+	// Seeded `true`, not `false`: the very first render happens before `refresh`
+	// has even been called, and a list that reports "not loading, zero chats" in
+	// that window is what makes a booting app look like a fresh install.
+	const [conversationsLoading, setConversationsLoading] = useState(true);
 	const [activeConversationId, setActiveConversationId] = useState<
 		string | null
 	>(null);
@@ -188,6 +237,7 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	const refresh = useCallback(() => {
 		const { url, token } = activeNode;
 		const query = wantPreview ? "?preview=1" : "";
+		setConversationsLoading(true);
 		fetch(`${url}/api/conversations${query}`, { headers: authHeaders(token) })
 			.then((res) =>
 				res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))
@@ -221,6 +271,9 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 			})
 			.catch(() => {
 				// Core may be offline; keep whatever is in memory.
+			})
+			.finally(() => {
+				setConversationsLoading(false);
 			});
 	}, [activeNode, wantPreview]);
 
@@ -232,23 +285,42 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	// "Refresh all" — no manual "Try again" in the sidebar history.
 	useCoreRefresh(refresh);
 
-	const createConversation = useCallback(
-		(id: string, agentId?: string, title?: string) => {
-			setConversations((prev) => {
-				if (prev.some((c) => c.id === id)) {
-					return prev;
-				}
-				const now = Date.now();
-				const draft: Conversation = {
-					id,
-					agentId,
-					title: title ?? UNTITLED,
-					messages: [],
-					createdAt: now,
-					updatedAt: now,
-				};
-				return [draft, ...prev];
-			});
+	const createConversation = useCallback((id: string, init?: DraftInit) => {
+		setConversations((prev) => {
+			if (prev.some((c) => c.id === id)) {
+				return prev;
+			}
+			const now = Date.now();
+			const draft: Conversation = {
+				id,
+				agentId: init?.agentId,
+				title: init?.title ?? UNTITLED,
+				// The sidebar groups by this. Seeding it here is what puts a chat
+				// started inside a project under that project IMMEDIATELY, instead of
+				// showing up as a loose chat until Core's row (which carries the same
+				// folder, stamped from the turn's cwd) replaces the draft.
+				folderPath: init?.folderPath,
+				messages: [],
+				createdAt: now,
+				updatedAt: now,
+			};
+			return [draft, ...prev];
+		});
+	}, []);
+
+	const setConversationFolder = useCallback(
+		(id: string, folderPath?: string) => {
+			// No folder ⇒ nothing to record. Core's `set_run_metadata` COALESCEs, so a
+			// turn run with no cwd never clears a folder the conversation already has;
+			// mirroring that here keeps the two from disagreeing.
+			if (!folderPath) {
+				return;
+			}
+			setConversations((prev) =>
+				prev.map((c) =>
+					c.id === id && c.folderPath !== folderPath ? { ...c, folderPath } : c
+				)
+			);
 		},
 		[]
 	);
@@ -329,8 +401,8 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		[conversations]
 	);
 
-	const loadMessages = useCallback(
-		async (id: string): Promise<Message[]> => {
+	const loadMessagesResult = useCallback(
+		async (id: string): Promise<LoadMessagesResult> => {
 			const { url, token } = activeNode;
 			try {
 				const res = await fetch(
@@ -339,30 +411,51 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 						headers: authHeaders(token),
 					}
 				);
+				// 404 is an ANSWER, not a failure: the node is up and says this
+				// conversation is gone (deleted, or never persisted). That is the
+				// "does not exist" state, which correctly falls through to the
+				// new-chat surface — unlike an unreachable node, which must not.
+				if (res.status === 404) {
+					return { status: "ok", messages: [] };
+				}
 				if (!res.ok) {
-					return [];
+					return { status: "error", messages: [] };
 				}
 				const data: { messages?: CoreMessage[] } = await res.json();
-				return (data.messages ?? []).map((m) => ({
-					id: m.id,
-					role: m.role === "assistant" ? "assistant" : "user",
-					content: m.content,
-					// Carry through the structured parts when Core has them, so the
-					// chat page can rehydrate tool rows + cowork context instead of
-					// only flat text (see ChatPage's hydration).
-					parts:
-						Array.isArray(m.parts) && m.parts.length > 0 ? m.parts : undefined,
-					siblingIndex: m.sibling_index,
-					siblingCount: m.sibling_count,
-					siblingIds: m.sibling_ids,
-					parentMessageId: m.parent_message_id,
-					timestamp: m.created_at,
-				}));
+				return {
+					status: "ok",
+					messages: (data.messages ?? []).map((m) => ({
+						id: m.id,
+						role: m.role === "assistant" ? "assistant" : "user",
+						content: m.content,
+						// Carry through the structured parts when Core has them, so the
+						// chat page can rehydrate tool rows + cowork context instead of
+						// only flat text (see ChatPage's hydration).
+						parts:
+							Array.isArray(m.parts) && m.parts.length > 0
+								? m.parts
+								: undefined,
+						interrupted: m.interrupted === true,
+						siblingIndex: m.sibling_index,
+						siblingCount: m.sibling_count,
+						siblingIds: m.sibling_ids,
+						parentMessageId: m.parent_message_id,
+						timestamp: m.created_at,
+					})),
+				};
 			} catch {
-				return [];
+				return { status: "error", messages: [] };
 			}
 		},
 		[activeNode]
+	);
+
+	const loadMessages = useCallback(
+		async (id: string): Promise<Message[]> => {
+			const { messages } = await loadMessagesResult(id);
+			return messages;
+		},
+		[loadMessagesResult]
 	);
 
 	const forkConversation = useCallback(
@@ -472,15 +565,18 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 	const value: ChatHistoryContextValue = useMemo(
 		() => ({
 			conversations,
+			conversationsLoading,
 			activeConversationId,
 			createConversation,
 			getConversation,
 			deleteConversation,
 			renameConversation,
+			setConversationFolder,
 			setConversationGlyph,
 			setActiveConversationId,
 			listConversations,
 			loadMessages,
+			loadMessagesResult,
 			forkConversation,
 			editMessage,
 			regenerateMessage,
@@ -490,14 +586,17 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 		}),
 		[
 			conversations,
+			conversationsLoading,
 			activeConversationId,
 			createConversation,
 			getConversation,
 			deleteConversation,
 			renameConversation,
+			setConversationFolder,
 			setConversationGlyph,
 			listConversations,
 			loadMessages,
+			loadMessagesResult,
 			forkConversation,
 			editMessage,
 			regenerateMessage,

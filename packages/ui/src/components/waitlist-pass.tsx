@@ -287,6 +287,13 @@ export function WaitlistPass({
 	username,
 }: WaitlistPassProps) {
 	const displayName = name?.trim() || (username ? `@${username}` : "Member");
+	// When there is no name the hero falls back to the handle — which is right on
+	// the public `/pass` page, where there is no session to read a name from. What
+	// is never right is printing it TWICE: a card reading "@jay" over "@jay" looks
+	// like a rendering fault, and it is reachable on the live queue too, for the
+	// window where the session's name has not arrived yet. Suppress the handle
+	// line exactly when the hero already IS the handle.
+	const showHandle = Boolean(username) && displayName !== `@${username}`;
 	const memberSince = formatPassDate(joinedAt);
 	const showPosition =
 		typeof totalWaiting === "number" && totalWaiting > QUEUE_STATS_MIN;
@@ -369,7 +376,7 @@ export function WaitlistPass({
 					    under the name reads as a defect on a card whose whole job
 					    is to look like a finished object. The reserve field on the
 					    screen beside it is what prompts the claim. */}
-					{username ? (
+					{showHandle ? (
 						<AutoFitText
 							className="text-muted-foreground"
 							maxPx={HANDLE_MAX_PX}

@@ -108,6 +108,10 @@ interface BuiltinSectionSpec {
 export const BUILTIN_SECTIONS = [
 	{ key: "tabs", label: "Tabs", icon: GridIcon },
 	{ key: "agents", label: "Agents", icon: Target01Icon },
+	// Apps sits directly under Agents: an App surface is something the user opens
+	// and works in, so it belongs beside the other "things I use" sections rather
+	// than trailing the store-adjacent tail at the bottom.
+	{ key: "companions", label: "Apps", icon: GridIcon },
 	{ key: "teams", label: "Teams", icon: UserGroupIcon },
 	{ key: "projects", label: "Projects", icon: FolderOpenIcon },
 	{ key: "pinned", label: "Pinned", icon: PinIcon },
@@ -122,10 +126,11 @@ export const BUILTIN_SECTIONS = [
 	{ key: "tools", label: "Tools", icon: Wrench01Icon },
 	{ key: "engines", label: "Engines", icon: CpuIcon },
 	{ key: "archived", label: "Archived", icon: Archive01Icon },
-	// Apps and Plugins sit at the bottom of the default order — the primary
-	// "work" sections come first and the store-adjacent surfaces trail.
+	// Plugins sits at the bottom of the default order — the primary "work"
+	// sections come first and the store-adjacent surface trails. It is also
+	// default-HIDDEN (`DEFAULT_HIDDEN_SECTIONS` in `lib/features.ts`): a position
+	// here is the section's identity, not a promise that it renders.
 	{ key: "plugins", label: "Plugins", icon: PuzzleIcon },
-	{ key: "companions", label: "Apps", icon: GridIcon },
 ] as const satisfies readonly BuiltinSectionSpec[];
 
 /** The fixed, built-in sidebar sections (always present). */
@@ -195,6 +200,31 @@ const LEGACY_DEFAULT_SECTION_ORDERS: BuiltinSectionKey[][] = [
 		"tools",
 		"engines",
 		"archived",
+	],
+	// BEFORE `companions` (Apps) was promoted to sit directly under `agents`,
+	// leaving `plugins` alone at the bottom. Every install that ever launched the
+	// previous build has exactly this array persisted, so without this snapshot
+	// reconcileSectionOrder would read it as "customised", preserve it verbatim,
+	// and Apps would stay at the bottom for everyone but a fresh profile.
+	[
+		"tabs",
+		"agents",
+		"teams",
+		"projects",
+		"pinned",
+		"chats",
+		"spaces",
+		"channels",
+		"integrations",
+		"identities",
+		"workflows",
+		"skills",
+		"mcp",
+		"tools",
+		"engines",
+		"archived",
+		"plugins",
+		"companions",
 	],
 ];
 

@@ -68,17 +68,31 @@ export function SidebarPreviewTitle({
 export function SidebarPreviewMeta({
 	label,
 	value,
+	wrap = false,
 }: {
 	label: string;
 	value: ReactNode;
+	/**
+	 * Wrap the value over several lines instead of end-truncating it. For a
+	 * filesystem path the tail IS the useful half — end-truncation hides the leaf
+	 * and leaves only the shared prefix every row already has in common, which is
+	 * the exact reason the leaf-only version of this row was useless.
+	 */
+	wrap?: boolean;
 }) {
 	if (value === null || value === undefined || value === "") {
 		return null;
 	}
 	return (
-		<div className="flex min-w-0 items-baseline gap-2 text-xs">
+		<div
+			className={`flex min-w-0 gap-2 text-xs ${wrap ? "items-start" : "items-baseline"}`}
+		>
 			<span className="shrink-0 text-muted-foreground">{label}</span>
-			<span className="min-w-0 truncate text-foreground/90">{value}</span>
+			<span
+				className={`min-w-0 text-foreground/90 ${wrap ? "wrap-anywhere" : "truncate"}`}
+			>
+				{value}
+			</span>
 		</div>
 	);
 }

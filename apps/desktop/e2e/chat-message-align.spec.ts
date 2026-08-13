@@ -11,9 +11,13 @@
 //     they only agree because those numbers were matched on purpose. When the
 //     transcript was `max-w-[720px] px-4` it sat 16px inside the composer on
 //     each side, which reads as a gap to the right of the avatar.
-//  2. The user turn's hover toolbar starts at the column's LEFT edge, the same
-//     edge the assistant's own toolbar uses, rather than hugging the right
-//     margin under the bubble.
+//  2. The user turn's hover toolbar starts at the left edge of the BUBBLE, not
+//     at the left edge of the transcript column. The bubble is right-aligned and
+//     shrink-to-fit, so its left edge is content-derived: the toolbar only lands
+//     on it because it now lives inside the bubble's own column (`actions` on
+//     UserMessage). It used to be a sibling of the whole message with
+//     `justify-start`, which pinned it to the column edge — metres from a short
+//     bubble.
 //
 // Both are checked at a wide and a narrow viewport: the columns are centered at
 // wide widths and gutter-clamped at narrow ones, and only one of those is
@@ -55,15 +59,28 @@ async function edges(page: Page) {
 		// The composer's own centered column — the box whose edges the transcript
 		// is supposed to match.
 		const composer = document.querySelector("textarea")?.closest("div.mx-auto");
-		// First control in the user turn's hover toolbar.
-		const toolbarButton = row?.lastElementChild?.querySelector("button");
+		// The bubble itself, not the row: its left edge is the one the toolbar has
+		// to meet. Selected by `data-testid`, not `data-slot`: the bubble is a
+		// `BubbleContent` primitive now, and `data-slot="bubble-content"` is what
+		// the `muted` variant's `*:data-[slot=bubble-content]:bg-muted` selector
+		// paints through — so the slot belongs to the primitive and the test hook
+		// has to be its own attribute.
+		const bubble = row?.querySelector('[data-testid="user-message-bubble"]');
+		// First control in the user turn's hover toolbar. Selected by data-slot,
+		// not by position: the timestamp's tooltip trigger and the "Show more"
+		// control inside the bubble are both `button`s that come first in the DOM.
+		const toolbarButton = row?.querySelector(
+			'[data-slot="message-toolbar"] button'
+		);
 		return {
 			rowLeft: left(row),
 			avatarRight: right(avatar),
+			bubbleLeft: left(bubble),
 			composerLeft: left(composer),
 			composerRight: right(composer),
 			toolbarButtonLeft: left(toolbarButton),
 			hasAvatar: Boolean(avatar),
+			hasBubble: Boolean(bubble),
 			hasToolbarButton: Boolean(toolbarButton),
 		};
 	});
@@ -83,6 +100,7 @@ for (const size of [
 		// Guard the selectors: a silently-missing avatar would make every edge
 		// assertion below vacuously pass.
 		expect(m.hasAvatar).toBe(true);
+		expect(m.hasBubble).toBe(true);
 		expect(m.hasToolbarButton).toBe(true);
 
 		expect(Math.abs(m.avatarRight - m.composerRight)).toBeLessThanOrEqual(
@@ -91,9 +109,13 @@ for (const size of [
 		expect(Math.abs(m.rowLeft - m.composerLeft)).toBeLessThanOrEqual(
 			EDGE_SLACK_PX
 		);
-		// Left-aligned actions: the first button starts at the column's left edge,
-		// not somewhere out under the right-hand bubble.
-		expect(Math.abs(m.toolbarButtonLeft - m.rowLeft)).toBeLessThanOrEqual(
+		// The bubble is right-aligned, so its left edge is somewhere INSIDE the
+		// row. If it were flush with the row the assertion below would pass for
+		// the old (broken) layout too.
+		expect(m.bubbleLeft).toBeGreaterThan(m.rowLeft + EDGE_SLACK_PX);
+		// Left-aligned actions, under the bubble: the first toolbar button starts
+		// at the bubble's own left edge.
+		expect(Math.abs(m.toolbarButtonLeft - m.bubbleLeft)).toBeLessThanOrEqual(
 			EDGE_SLACK_PX
 		);
 	});

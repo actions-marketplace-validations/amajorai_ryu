@@ -121,6 +121,30 @@ pub const MEETINGS_PLUGIN_ID: &str = "@ryu/meetings";
 /// serves arrives through the generic ext-proxy `public_mount`.
 pub const SOCIAL_PLUGIN_ID: &str = "@ryu/social";
 
+/// The Subtitles app's plugin id — local transcription + translation of a video into
+/// a timed `.srt`/`.vtt`, over the `ryu-subtitles` sidecar (`apps-store/subtitles/`).
+///
+/// Same posture as [`SOCIAL_PLUGIN_ID`] directly above: a governance-shell leaf with a
+/// companion, no `requires` edge (it owns its sidecar and its own SQLite database),
+/// Core-tier via the [`CORE_PLUGINS`] row below so its sidecar spawns on the auto-run
+/// path, and therefore deliberately NOT declaring `sidecar:process` — the Gateway
+/// denies that grant at enable. Core links zero subtitle code; everything it serves
+/// arrives through the generic ext-proxy `public_mount`.
+pub const SUBTITLES_PLUGIN_ID: &str = "@ryu/subtitles";
+
+/// The Deep Read app's plugin id — Recursive Language Models over the `ryu-rlm`
+/// sidecar (`apps-store/rlm/`).
+///
+/// Same posture as [`SOCIAL_PLUGIN_ID`] above: a governance-shell leaf with a
+/// companion, no `requires` edge (it owns its sidecar and its own on-disk context
+/// store), Core-tier via the [`CORE_PLUGINS`] row below so its sidecar spawns on the
+/// auto-run path AND its `mcp_servers` block registers, and therefore deliberately
+/// NOT declaring `sidecar:process` — the Gateway denies that grant at enable. Core
+/// links zero RLM code; everything it serves arrives through the generic ext-proxy
+/// `public_mount`, and the one callback the sidecar makes is the generic
+/// `/api/host/model/complete` gated on `hook:side-model`.
+pub const RLM_PLUGIN_ID: &str = "@ryu/rlm";
+
 /// The Tuition app's plugin id — a single-learner tutor over the `ryu-tuition` sidecar
 /// (`apps-store/tuition/`).
 ///
@@ -134,6 +158,17 @@ pub const TUITION_PLUGIN_ID: &str = "@ryu/tuition";
 /// The Wire app's plugin id — a personal newsroom over the `ryu-news` sidecar
 /// (`apps-store/news/`). Same posture as [`TUITION_PLUGIN_ID`].
 pub const NEWS_PLUGIN_ID: &str = "@ryu/news";
+
+/// The Simulators app's plugin id — iOS `simctl` + Android `adb` control over the
+/// `ryu-simulator` sidecar (`apps-store/simulator/`).
+///
+/// Same posture as [`CRM_PLUGIN_ID`] below: a governance-shell leaf with NO companion
+/// bundle (`companion: null` — its desktop surface is a native dock panel over the
+/// generic ext-proxy), so it needs no `plugins::seed` row and no
+/// `seed::NOT_PRE_INSTALLED` row. Core-tier via the [`CORE_PLUGINS`] row below so its
+/// sidecar spawns on the auto-run path, and therefore deliberately NOT declaring
+/// `sidecar:process` — the Gateway denies that grant at enable.
+pub const SIMULATOR_PLUGIN_ID: &str = "@ryu/simulator";
 
 /// Harbor's plugin id — an object-first CRM over the `ryu-crm` sidecar
 /// (`apps-store/crm/`). Core-tier for the same reason as Outpost (its sidecar must
@@ -607,6 +642,13 @@ pub const CORE_PLUGINS: &[&str] = &[
     // `match` gate (every completed turn is the point), so it costs a sandbox spawn
     // per turn plus a sub-agent per answer that clears its prose floor.
     "@ryu/no-ai-slop",
+    // Turns a correction into a durable rule in a Space and briefs every later chat
+    // with the list. Absent from `CORE_DEFAULT_ON` for recap's reason: the capture
+    // hook has no `match` gate it could use (the pre-gate grammar cannot express
+    // "this message reads like a complaint", so the cheap gate is a regex sweep
+    // inside the hook), meaning a sandbox spawn per user turn plus a side-model call
+    // on each correction it does catch.
+    "@ryu/no-more-mistakes",
     // Agent-to-agent mailbox: every agent gets `agents__directory` / `agents__send` /
     // `agents__ask` / `agents__thread`, and a `pre_user_turn` hook delivers whatever
     // arrived for it. Off by default — the delivery hook cannot be `match`-gated (the
@@ -679,6 +721,23 @@ pub const CORE_PLUGINS: &[&str] = &[
     // the last thing that should arrive switched on. No `requires` edge — it owns its
     // sidecar and its own database.
     SOCIAL_PLUGIN_ID,
+    // Subtitles — same posture as Outpost: Core-tier and installable, neither
+    // default-on nor pre-installed (see `seed::NOT_PRE_INSTALLED`), because the
+    // `ryu-subtitles` binary is not on a normal install. Core-tier is what actually
+    // spawns that sidecar; a Community-tier app with a manifest sidecar installs,
+    // enables, and then silently never spawns, because `may_run_sidecar` would want
+    // the `sidecar:process` grant the Gateway denies at enable. No `requires` edge —
+    // it owns its sidecar and its own SQLite database.
+    SUBTITLES_PLUGIN_ID,
+    // Deep Read — same posture as Subtitles, and membership here is load-bearing for
+    // TWO reasons rather than one: Core-tier is what spawns the `ryu-rlm` sidecar, and
+    // it is also what lets the manifest's `mcp_servers` block register, which is the
+    // whole agent-facing surface of this app. A Community-tier app with both would
+    // install, enable, and then silently offer neither. Neither default-on nor
+    // pre-installed (see `seed::NOT_PRE_INSTALLED`) — the binary is not on a normal
+    // install, and an app that reads files from the user's home directory should not
+    // arrive switched on. No `requires` edge; it owns its sidecar and its context store.
+    RLM_PLUGIN_ID,
     // Harbor — same posture again: Core-tier and installable, neither default-on nor
     // pre-installed, because the `ryu-crm` binary is not on a normal install. No
     // `requires` edge; it owns its sidecar and its own SQLite database. Absent from
@@ -826,6 +885,44 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
     // demoted: it owns an out-of-process binary a normal install does not have.
     BLUEPRINT_PLUGIN_ID,
+    // Tuition and Wire — the same posture and the same REQUIREMENT as Reasoning and
+    // Blueprint directly above, and they shipped with this row MISSING for exactly
+    // the reason Reasoning did. Each declares a managed sidecar (`ryu-tuition` /
+    // `ryu-news`), and `may_run_sidecar` permits one at Community tier only against a
+    // Gateway-approved `sidecar:process` grant the Gateway DENIES at enable; each also
+    // declares an `mcp_servers` entry (`tuition__due`/`quiz`/`grade`…,
+    // `news__search`/`brief`…, the ids an agent or a workflow `mcp` node takes) gated
+    // the same way by `may_register_mcp_servers`. Without this line both apps install,
+    // enable, seed their grants and report themselves healthy — while the binary never
+    // spawns and the MCP tools never appear, with no error anywhere to say why.
+    //
+    // Neither declares `sidecar:process` or `mcp:server` in its own
+    // `permission_grants` (`tuition:crud`/`news:crud` + `hook:side-model` +
+    // `storage:kv` + `mcp:tuition`/`mcp:news`), which is what makes Core tier the
+    // correct fix rather than a grant: the Gateway validates and denies those two
+    // reserved grants at enable, so asking for them would break the enable instead.
+    //
+    // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
+    // demoted: each owns an out-of-process binary a normal install does not have. Both
+    // are already in `seed::NOT_PRE_INSTALLED`, so a fresh store lists neither.
+    TUITION_PLUGIN_ID,
+    NEWS_PLUGIN_ID,
+    // Simulators (iOS `simctl` + Android `adb` control). Core tier for the first half
+    // of the same argument — it declares a managed `ryu-simulator` sidecar, and
+    // `may_run_sidecar` permits one at Community tier only against the
+    // Gateway-approved `sidecar:process` grant the Gateway DENIES at enable, so this
+    // row is what decides whether the binary ever spawns. Its manifest declares no
+    // `mcp_servers`, so the MCP half does not apply; its only declared grant is
+    // `simulator:control`, the capability the desktop panel drives it through.
+    //
+    // Deliberately NOT in `CORE_DEFAULT_ON` — `lazy` + idle-stop keep it cold, but a
+    // toolchain-wrapping sidecar on a machine with no Xcode and no Android SDK is
+    // exactly the app nobody asked for (availability is a RUNTIME probe of
+    // `/capabilities`, so it cannot be decided here). Absent from
+    // `seed::NOT_PRE_INSTALLED` on purpose, for Harbor's reason: that list is for apps
+    // whose companion bundle was seeded and must be un-seeded, and this is a native
+    // dock-panel app (`companion: null`) that never had one.
+    SIMULATOR_PLUGIN_ID,
 ];
 
 /// The subset of [`CORE_PLUGINS`] that should be **enabled by default** on a
@@ -2302,6 +2399,107 @@ mod tests {
         );
     }
 
+    /// Only real toolkits may be reported as toolkits.
+    ///
+    /// The node dropdown's "Toolkits" list filtered on `selectable`, which is the
+    /// BINDER's tie-break flag: `plugins::binding::is_selectable` is a unanimity
+    /// check across a capability's providers, and unanimity over a set of one is
+    /// free. So four app-private capabilities — `news.crud`, `plan.review`,
+    /// `reasoning.check`, `tuition.crud` — appeared as swappable layers with a
+    /// single provider and nothing to swap to, purely because their manifests had
+    /// copied `"selectable": true` from a neighbour that needed it.
+    ///
+    /// The manifests were cleaned up, but the shape of the mistake is what recurs:
+    /// the next app copies the same block. `toolkit` is COMPUTED for that reason,
+    /// and this test asserts the computation over the real built-in set rather than
+    /// re-asserting the manifests, so a manifest re-adding the flag cannot re-open
+    /// the hole.
+    ///
+    /// ## What this test does NOT discriminate
+    ///
+    /// Stated plainly so the green is not read as more than it is: over the shipped
+    /// manifests the predicate's two arms agree everywhere. Every facade capability
+    /// also has ≥2 providers (`browser.control` and `computer.control` are the
+    /// minimum, at two each), and every non-facade capability has exactly one. A
+    /// `toolkit` implemented as only the facade check, or as only the ≥2 count,
+    /// would pass this test unchanged. The ≥2 arm is proven separately against a
+    /// synthetic manifest set by
+    /// `plugins::binding::tests::two_providers_make_a_non_facade_capability_a_toolkit`.
+    #[test]
+    fn only_facade_or_multi_provider_capabilities_are_reported_as_toolkits() {
+        /// Provided by exactly one app, for that app's own sidecar. None of these is
+        /// a layer anyone picks a provider for.
+        const APP_PRIVATE: &[&str] = &[
+            "news.crud",
+            "plan.review",
+            "reasoning.check",
+            "tuition.crud",
+        ];
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let described = crate::plugins::binding::describe_capabilities(
+            &manifests,
+            &manifests,
+            &crate::plugins::binding::BindingConfig::default(),
+        );
+
+        for cap in APP_PRIVATE {
+            let row = described
+                .iter()
+                .find(|c| &c.capability == cap)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "'{cap}' must still appear in the capability read model — this \
+                         test asserts it is reported as a NON-toolkit, and a capability \
+                         that vanished from BUILTIN_MANIFESTS would pass vacuously"
+                    )
+                });
+            assert!(
+                !row.toolkit,
+                "'{cap}' is one app's private wiring to its own sidecar and must not be \
+                 offered as a swappable layer. If a second app has legitimately started \
+                 providing it, this capability became a real toolkit and the entry \
+                 belongs off this list — check `providers`/`available` before deleting it."
+            );
+        }
+
+        let mut toolkits: Vec<&str> = Vec::new();
+        for row in &described {
+            if !row.toolkit {
+                continue;
+            }
+            toolkits.push(row.capability.as_str());
+            let provider_count = manifests
+                .iter()
+                .filter(|m| {
+                    m.provided_capabilities()
+                        .iter()
+                        .any(|p| p.capability == row.capability)
+                })
+                .count();
+            let facade = row.capability == crate::document_parse::CAP_DOCUMENT_PARSE
+                || crate::sidecar::mcp::capability_tools::verbs()
+                    .iter()
+                    .any(|v| v.capability == row.capability);
+            assert!(
+                facade || provider_count >= 2,
+                "'{}' is reported as a toolkit with {provider_count} provider(s) and no \
+                 host facade behind it. A toolkit has to be something a user can \
+                 meaningfully re-point: either Core serves it (canonical verbs, or the \
+                 document.parse route) so providers are interchangeable, or there are at \
+                 least two of them.",
+                row.capability
+            );
+        }
+
+        // Keeps the loop above from passing vacuously — an `is_toolkit` stuck at
+        // `false` would satisfy every assertion here and silently empty the picker.
+        assert!(
+            toolkits.contains(&"web.search") && toolkits.contains(&"document.parse"),
+            "the real layers must survive the filter; got {toolkits:?}"
+        );
+    }
+
     #[test]
     fn every_core_plugin_id_resolves_to_a_loaded_builtin_manifest() {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
@@ -2310,6 +2508,83 @@ mod tests {
                 manifests.iter().any(|m| &m.id == id),
                 "Core-tier plugin '{id}' has no loaded built-in manifest — tier_for('{id}') \
                  claims Core but nothing backs it"
+            );
+        }
+    }
+
+    /// The INVERSE of the test directly above, and the one that was missing while
+    /// four shipped apps were silently broken.
+    ///
+    /// `tier_for` derives tier from [`CORE_PLUGINS`] membership ALONE, and both
+    /// `sidecar::manifest_sidecar::may_run_sidecar` and
+    /// `sidecar::mcp::may_register_mcp_servers` auto-allow only at Core tier —
+    /// Community tier needs an approved `sidecar:process` / `mcp:server` grant, and
+    /// both live in a reserved namespace the Gateway DENIES at enable. So a built-in
+    /// manifest that declares a sidecar or an MCP server and is absent from
+    /// `CORE_PLUGINS` installs, enables, reports itself healthy — and its binary
+    /// never spawns while its MCP tools never appear, with no error anywhere.
+    ///
+    /// `every_core_plugin_id_resolves_to_a_loaded_builtin_manifest` only checks
+    /// CORE_PLUGINS → manifest, so it cannot see that failure. `@ryu/reasoning`
+    /// shipped with it, then `@ryu/news`, `@ryu/tuition` and `@ryu/simulator` shipped
+    /// with it again; this test is what makes the fourth time impossible.
+    #[test]
+    fn every_builtin_manifest_with_a_process_is_core_tier() {
+        /// Built-ins that declare a process and are Community-tier ON PURPOSE.
+        /// Membership here is a decision, not a convenience: both are reference
+        /// plugins whose whole point is to prove the third-party path works.
+        const DELIBERATELY_COMMUNITY: &[&str] = &[
+            // "the compression *service* is the plugin and Core only hosts the
+            // gateway transform, so it is install-then-enable from the marketplace
+            // exactly like a third-party compression plugin would be" — the
+            // `CORE_PLUGINS` doc comment. Consequence, accepted: it declares a
+            // `local` sidecar with EMPTY `permission_grants`, so at Community tier
+            // its sidecar cannot spawn either. That is the same shape as the bug
+            // this test guards; it is out of scope here and stays deliberate until
+            // someone decides otherwise.
+            "@ryu/headroom",
+            // "the REFERENCE third-party MCP widget plugin (a dev template) …
+            // deliberately OPT-IN" — its `BUILTIN_MANIFESTS` comment. A developer
+            // installing the example is meant to walk the Community grant path,
+            // which is precisely what it demonstrates.
+            "@ryu/sample-widget",
+        ];
+
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        for m in &manifests {
+            let declares_sidecar = !m.sidecars.is_empty();
+            let declares_mcp = !m.mcp_servers.is_empty();
+            if !(declares_sidecar || declares_mcp) || DELIBERATELY_COMMUNITY.contains(&m.id.as_str())
+            {
+                continue;
+            }
+            let what = match (declares_sidecar, declares_mcp) {
+                (true, true) => "a managed sidecar and `mcp_servers`",
+                (true, false) => "a managed sidecar",
+                _ => "`mcp_servers`",
+            };
+            assert!(
+                CORE_PLUGINS.contains(&m.id.as_str()),
+                "built-in manifest '{}' declares {what} but is absent from CORE_PLUGINS, so \
+                 tier_for('{}') is Community and the Gateway denies the `sidecar:process` / \
+                 `mcp:server` grant it would need — the app installs, enables and then \
+                 silently never spawns. Add it to CORE_PLUGINS, or to \
+                 DELIBERATELY_COMMUNITY with the reason it should stay opt-in.",
+                m.id,
+                m.id
+            );
+        }
+
+        // Non-vacuous: the loop must actually have inspected the shipped
+        // sidecar-owning apps, not skipped an empty or mis-parsed manifest set.
+        for id in ["@ryu/news", "@ryu/tuition", "@ryu/simulator"] {
+            let m = manifests
+                .iter()
+                .find(|m| m.id == id)
+                .unwrap_or_else(|| panic!("built-in manifest `{id}` is not compiled in"));
+            assert!(
+                !m.sidecars.is_empty(),
+                "{id} is only an interesting case while it declares a sidecar"
             );
         }
     }

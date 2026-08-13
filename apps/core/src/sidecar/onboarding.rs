@@ -56,6 +56,27 @@ const LLAMACPP_DERIVED_SIDECARS: &[&str] = &[
     crate::sidecar::providers::llamacpp::classify::CLASSIFY_SIDECAR_NAME,
 ];
 
+/// Whether [`SetupManager::seed_installed_from_disk`] may mark `name` installed
+/// from a `versions.json` row.
+///
+/// The mesh daemon is the ONE entry whose installed-ness is not decided by
+/// `versions.json`. It is in `startup_order`, so seeding it from a version row
+/// would make `start_all` try to start it on EVERY boot for anyone who ever
+/// installed the binaries — and `TailscaleManager::start` bails immediately when
+/// the mesh is off, so the only product of that is a failed-start error in the
+/// log of a user who never enabled the mesh. Before the downloader existed the
+/// row could not exist and the question never arose; now first run PRE-INSTALLS
+/// the client (`crate::mesh_host::MESH_PREINSTALL_PREF_KEY`), so a mesh-OFF
+/// machine has a tailscale row from boot 2 onward and this skip is what keeps a
+/// tailnet daemon from starting on a node nobody enabled.
+///
+/// `main()` marks the daemon from the authoritative signal
+/// (`ryu_mesh::is_enabled()`) right after the seed call; keep that the single
+/// source, and see also `POST /api/mesh/config`.
+pub(crate) fn seeds_from_version_store(name: &str) -> bool {
+    name != "tailscale"
+}
+
 /// Outcome of the `install_local_stack` routine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalStackStatus {
@@ -164,17 +185,9 @@ impl SetupManager {
         let store = crate::sidecar::download_manager::VersionStore::load();
         let mut status = self.status.write().await;
         for name in names {
-            // The mesh daemon is the ONE entry whose installed-ness is not decided
-            // by `versions.json`. It is in `startup_order`, so seeding it from a
-            // version row would make `start_all` try to start it on EVERY boot for
-            // anyone who ever installed the binaries — and `TailscaleManager::start`
-            // bails immediately when the mesh is off, so the only product of that
-            // is a failed-start error in the log of a user who never enabled the
-            // mesh. Before the downloader existed the row could not exist and the
-            // question never arose. `main()` marks it from the authoritative signal
-            // (`ryu_mesh::is_enabled()`) right after this call; keep that the single
-            // source, and see also `POST /api/mesh/config`.
-            if name == "tailscale" {
+            // The mesh daemon is seeded from the mesh pref, never from a version
+            // row — see [`seeds_from_version_store`].
+            if !seeds_from_version_store(name) {
                 continue;
             }
             // Use the raw `versions` map, not `installed_version()`: engine
@@ -1273,6 +1286,33 @@ mod onboarding_tests {
         let mut got = mgr.list_installed().await;
         got.sort();
         assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    // The invariant the mesh pre-install rests on: first run now stages the
+    // tailscale client on a mesh-OFF node, so `versions.json` has a tailscale row
+    // from boot 2 onward. If the seed ever consumed that row, `start_all` would
+    // spawn a tailnet daemon on machines whose owner never enabled the mesh —
+    // exactly the posture change the pre-install was designed NOT to make.
+    #[test]
+    fn version_store_seed_skips_the_mesh_daemon() {
+        assert!(
+            !seeds_from_version_store("tailscale"),
+            "a tailscale version row must never mark the mesh daemon installed — \
+             `main()` marks it from `ryu_mesh::is_enabled()` instead"
+        );
+        // Everything else still seeds, or a restart loses its installed engines.
+        for name in ["llamacpp", "whispercpp", "ollama", "ryutts", "parakeet"] {
+            assert!(seeds_from_version_store(name), "{name} must seed from disk");
+        }
+    }
+
+    // The same skip through the real seed path: no matter what this machine's
+    // `versions.json` holds, seeding must not mark the daemon installed.
+    #[tokio::test]
+    async fn seed_installed_from_disk_never_marks_tailscale() {
+        let mgr = SetupManager::new();
+        mgr.seed_installed_from_disk(&["tailscale".to_string()]).await;
+        assert!(!mgr.is_installed("tailscale").await);
     }
 
     #[tokio::test]

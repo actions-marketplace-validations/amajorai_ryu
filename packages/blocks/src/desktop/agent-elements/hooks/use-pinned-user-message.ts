@@ -22,6 +22,28 @@ function getUserMessageText(message: UIMessage): string {
 }
 
 /**
+ * How far BELOW the election line an anchor must fall before the pin is
+ * released, over and above the line itself.
+ *
+ * The pin bar is `sticky` but sits IN FLOW at the top of the scroller viewport,
+ * so mounting it pushes every anchor below it down by the bar's own height. With
+ * a single threshold, an anchor sitting within one bar-height of the line gets
+ * un-elected the instant the bar it just elected appears — which unmounts the
+ * bar, which lifts the anchor back over the line, which re-elects it. That
+ * ping-pong is synchronous inside the measuring effect, so React's nested-update
+ * counter runs away and the app dies with "Maximum update depth exceeded"
+ * (minified React error #185).
+ *
+ * Releasing therefore uses a strictly looser line than electing. The live bar is
+ * measured when it exists (see `PINNED_BAR_SLOT`); this constant is the floor
+ * used before the bar has laid out, sized to comfortably clear a collapsed bar.
+ */
+const PIN_RELEASE_SLACK = 96;
+
+/** `data-slot` stamped on the sticky pin bar wrapper by the message list. */
+const PINNED_BAR_SLOT = '[data-slot="pinned-user-message-bar"]';
+
+/**
  * Tracks which user message should appear in the sticky pin bar while scrolling
  * through a long assistant reply (Cursor-style). Returns the message to pin when
  * its bubble has scrolled above the viewport top; clears when it scrolls back
@@ -32,13 +54,19 @@ export function usePinnedUserMessage({
 	messages,
 	scrollerRef,
 	pinThreshold = 12,
+	pinReleaseSlack = PIN_RELEASE_SLACK,
 }: {
 	enabled: boolean;
 	messages: UIMessage[];
 	scrollerRef: RefObject<HTMLElement | null>;
 	pinThreshold?: number;
+	pinReleaseSlack?: number;
 }) {
 	const [pinnedId, setPinnedId] = useState<string | null>(null);
+	// Mirrors `pinnedId` so the measuring pass can read the current election
+	// without listing it as an effect dependency (which would re-register the
+	// scroll listener on every pin change).
+	const pinnedIdRef = useRef<string | null>(null);
 	const anchorRefs = useRef(new Map<string, HTMLElement>());
 
 	const registerAnchor = useCallback(
@@ -72,6 +100,7 @@ export function usePinnedUserMessage({
 
 	useEffect(() => {
 		if (!enabled) {
+			pinnedIdRef.current = null;
 			setPinnedId(null);
 			return;
 		}
@@ -82,7 +111,14 @@ export function usePinnedUserMessage({
 		}
 
 		const update = () => {
-			const viewportTop = viewport.getBoundingClientRect().top + pinThreshold;
+			const electTop = viewport.getBoundingClientRect().top + pinThreshold;
+			// Hysteresis: the already-elected anchor keeps its pin until it clears
+			// the line by more than the bar's own height, so the bar can never
+			// un-elect the anchor that mounted it. See PIN_RELEASE_SLACK.
+			const barHeight =
+				viewport.querySelector<HTMLElement>(PINNED_BAR_SLOT)?.offsetHeight ?? 0;
+			const releaseTop = electTop + Math.max(pinReleaseSlack, barHeight);
+			const previous = pinnedIdRef.current;
 			let candidate: string | null = null;
 
 			for (const msg of userMessages) {
@@ -95,24 +131,35 @@ export function usePinnedUserMessage({
 				if (!(text || hasParts)) {
 					continue;
 				}
-				if (el.getBoundingClientRect().bottom < viewportTop) {
+				const line = msg.id === previous ? releaseTop : electTop;
+				if (el.getBoundingClientRect().bottom < line) {
 					candidate = msg.id;
 				}
 			}
 
-			setPinnedId((prev) => (prev === candidate ? prev : candidate));
+			if (candidate === previous) {
+				return;
+			}
+			pinnedIdRef.current = candidate;
+			setPinnedId(candidate);
 		};
 
-		update();
+		// Deferred out of the effect body on purpose: a synchronous setState here
+		// counts toward React's nested-update budget, and this effect re-runs
+		// whenever the messages array changes identity. A RAF-scheduled write
+		// cannot nest, so a borderline measurement can no longer escalate into
+		// "Maximum update depth exceeded".
+		const frame = requestAnimationFrame(update);
 		viewport.addEventListener("scroll", update, { passive: true });
 		const ro = new ResizeObserver(update);
 		ro.observe(viewport);
 
 		return () => {
+			cancelAnimationFrame(frame);
 			viewport.removeEventListener("scroll", update);
 			ro.disconnect();
 		};
-	}, [enabled, userMessages, getViewport, pinThreshold]);
+	}, [enabled, userMessages, getViewport, pinThreshold, pinReleaseSlack]);
 
 	const scrollToPinned = useCallback(() => {
 		if (!pinnedId) {

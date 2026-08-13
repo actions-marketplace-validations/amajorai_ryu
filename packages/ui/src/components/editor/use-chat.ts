@@ -139,8 +139,15 @@ export const useChat = () => {
 	// change; `chat` is read fresh inside without being a dependency.
 	useEffect(() => {
 		editor.setOption(AIChatPlugin, "chat", chat as any);
+		// `chat` is deliberately NOT a dependency, and an exhaustive-deps autofix
+		// must not re-add it: doing so shipped React #185 in 0.1.11 (Sentry
+		// RUST-2D). The effect writes into a subscribed zustand store, so a fresh
+		// `chat` identity every render means the effect fires every render, the
+		// store's identity bail never hits, and the notify -> re-render -> write
+		// cycle runs until React's nested-update limit throws.
+		// biome-ignore lint/correctness/useExhaustiveDependencies: see above
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [chat.status, chat.messages, chat.error, editor.setOption, chat]);
+	}, [chat.status, chat.messages, chat.error, editor.setOption]);
 
 	return chat;
 };

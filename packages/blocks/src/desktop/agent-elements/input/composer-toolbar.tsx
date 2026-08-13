@@ -2,7 +2,6 @@
 
 import { Button } from "@ryu/ui/components/button";
 import { Wave } from "@ryu/ui/components/wave";
-import { cn } from "@ryu/ui/lib/utils";
 import {
 	IconLayersSubtract,
 	IconLoader2,
@@ -28,22 +27,6 @@ export interface ComposerToolbarProps {
 	 * host's `enableQueue` + streaming + has-input state.
 	 */
 	canQueue?: boolean;
-
-	/**
-	 * The composer's textarea, rendered BETWEEN the left ("+") and right
-	 * (model/mic/send) clusters when {@link compact} is on. Omit for the stacked
-	 * layout (textarea above, this toolbar below).
-	 */
-	center?: React.ReactNode;
-
-	/**
-	 * Single-row "compact" layout: the "+" sits to the left of the textarea
-	 * ({@link center}), which flexes to fill, and the trailing controls (model
-	 * selector, mic, send) sit to its right — the whole composer on one line.
-	 * Used on the chat page once a conversation has history. Defaults to the
-	 * stacked layout (textarea above, controls row below).
-	 */
-	compact?: boolean;
 
 	/**
 	 * Context-window usage for the persistent composer meter (a donut ring +
@@ -301,8 +284,6 @@ export function ComposerToolbar({
 	contextMeter,
 	contextMeterOnOpen,
 	voiceMode,
-	compact,
-	center,
 }: ComposerToolbarProps) {
 	let sendState: "idle" | "typing" | "streaming" = "idle";
 	if (isStreaming) {
@@ -331,12 +312,7 @@ export function ComposerToolbar({
 	});
 
 	const leftCluster = (
-		<div
-			className={cn(
-				"flex items-center gap-1",
-				compact ? "shrink-0" : "min-w-0"
-			)}
-		>
+		<div className="flex min-w-0 items-center gap-1">
 			{showPlusMenu && (
 				<GoalPlusButton
 					disabled={disabled}
@@ -354,7 +330,7 @@ export function ComposerToolbar({
 	);
 
 	const rightCluster = (
-		<div className={cn("flex items-center gap-1", compact && "shrink-0")}>
+		<div className="flex items-center gap-1">
 			{/* Context-window meter sits leftmost in the trailing cluster, just
 			    before the model selector — the window is a model attribute. */}
 			{contextMeter ? (
@@ -433,20 +409,12 @@ export function ComposerToolbar({
 		</div>
 	);
 
-	// Compact single-row layout: "+" · textarea (flexes) · model/mic/send, all on
-	// one line. `items-end` keeps the "+" and send pinned to the bottom as the
-	// textarea grows past one row (ChatGPT/Claude-style).
-	if (compact) {
-		return (
-			<div className="flex items-end gap-1.5 px-2 py-2">
-				{leftCluster}
-				{center}
-				{rightCluster}
-			</div>
-		);
-	}
-
-	// Stacked layout (default): controls row beneath the textarea.
+	// The ONE layout: controls row beneath the textarea, leading cluster left,
+	// trailing cluster right. A second, single-row arrangement used to live here
+	// (the textarea threaded in as a flexing `center` between the two clusters,
+	// selected by a `compact` prop) so the chat page and the launchpad rendered
+	// structurally different composers. Compact is a density on the textarea block
+	// now, not a topology, so this component has nothing to branch on.
 	return (
 		<div className="flex items-center justify-between gap-2 px-2 pt-0.5 pb-2">
 			{leftCluster}

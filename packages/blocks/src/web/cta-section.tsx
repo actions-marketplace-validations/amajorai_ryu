@@ -8,29 +8,43 @@ import { landingSubheadlineClass } from "./landing-typography.ts";
 import { SectionTitle } from "./section-title.tsx";
 import { StaggerLines } from "./stagger-lines.tsx";
 
-export default function CtaSection() {
+const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
+
+/**
+ * Six other pages close with this block (`/products`, `/compare`, `/for`,
+ * `/benchmark`, `/subscriptions`, `/community`), so the DEFAULT copy has to
+ * read correctly on all of them. The landing page's own pitch — the paperwork,
+ * the funding — is passed in as props rather than baked in here, or it leaks
+ * onto pages where it makes no sense.
+ */
+export default function CtaSection({
+	title = "Put the work your team hates on autopilot.",
+	subtitle = "Every action logged, every cost capped. Bring the tools you already pay for, or start with one we set up for you.",
+}: {
+	subtitle?: string;
+	title?: string;
+} = {}) {
 	return (
 		<section className="container mx-auto px-4 py-24">
 			<div className="mx-auto max-w-2xl text-center">
 				{/* Wraps only the title and its supporting line: the button row below is
 				    a flex layout and `.t-stagger-line` would force it to block. */}
 				<StaggerLines>
-					<SectionTitle title="Put your agents into production." />
+					<SectionTitle title={title} />
 					<p className={cn(landingSubheadlineClass, "mx-auto mt-4")}>
-						Bring the agents and tools you already run. Ryu keeps every call
-						governed with routing, redaction, budgets, and audit included.
+						{subtitle}
 					</p>
 				</StaggerLines>
 				<div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-					<DownloadMenu />
 					<Link
-						className={cn(buttonVariants({ variant: "ghost" }))}
-						href="https://cal.com/jiaweing/ryu-demo"
+						className={cn(buttonVariants({ variant: "default" }))}
+						href={DEMO_HREF}
 						rel="noopener noreferrer"
 						target="_blank"
 					>
-						Book a demo
+						Book a free consultation
 					</Link>
+					<DownloadMenu variant="ghost" />
 				</div>
 			</div>
 		</section>

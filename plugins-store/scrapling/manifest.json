@@ -26,6 +26,7 @@
     {
       "capability": "web.extract",
       "version": "1.0.0",
+      "title": "Extract",
       "selectable": true,
       "tools": {
         "web__extract": {

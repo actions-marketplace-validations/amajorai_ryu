@@ -79,12 +79,14 @@ const sidecarBins = [
 	"ugc",
 	"social",
 	"reasoning",
+	"rlm",
 	"tuition",
 	"news",
 	"blueprint",
 	"mission-control",
 	"crm",
 	"drafts",
+	"subtitles",
 ];
 
 // Build ALL sidecar bins in a SINGLE cargo invocation so the shared dependency

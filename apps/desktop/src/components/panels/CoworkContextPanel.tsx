@@ -62,11 +62,14 @@ import {
 	BouncyAccordion,
 	type BouncyAccordionItem,
 } from "@/src/components/ui/bouncy-accordion.tsx";
+import {
+	invalidateWorktreeDiff,
+	useWorktreeDiff,
+} from "@/src/hooks/useGitStatus.ts";
 import type { BtwEntry } from "@/src/lib/api/btw.ts";
 import { deleteBtw, listBtw } from "@/src/lib/api/btw.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { FileSummary } from "@/src/lib/api/git.ts";
-import { fetchWorktreeDiff } from "@/src/lib/api/git.ts";
 import type { Artifact, ArtifactKind } from "@/src/lib/artifacts.ts";
 import { extractArtifacts } from "@/src/lib/artifacts.ts";
 import {
@@ -426,13 +429,34 @@ export interface SubagentSummary {
 	 * panel row updates live instead of only at the end.
 	 */
 	activity: string;
+	/**
+	 * The spawn ended in `output-error`. Distinct from a merely empty result: an
+	 * errored Task usually carries no extractable output text either, so without
+	 * this a failure and a clean silent finish are indistinguishable downstream —
+	 * and the panel would tell the user a failed task "finished".
+	 */
+	errored: boolean;
 	/** The Task/Agent tool call id — stable key + the transcript's identity. */
 	id: string;
-	/** The subagent kind (`subagent_type`), e.g. "code-reviewer". */
+	/**
+	 * The subagent kind (`subagent_type`), e.g. "code-reviewer". EMPTY when the
+	 * spawn declared no type — which is every Claude-Code/Codex `Task` that omits
+	 * it, and every `tool-Agent` spawn. Display-only, and every consumer must
+	 * guard it: it used to default to the literal "Agent", which under a section
+	 * already titled "Subagents" printed "Atlas Agent" and said nothing.
+	 */
 	label: string;
 	/** A stable, friendly English name derived from `id`, e.g. "Atlas". */
 	name: string;
 	status: "running" | "done";
+	/**
+	 * How many tool steps of the subagent's own we could reconstruct. ZERO is the
+	 * common case, not an error: child steps exist only where the agent emits the
+	 * `details.ryuSteps` marker (today, the managed Pi agent), so a Claude-Code or
+	 * Codex subagent over ACP reports none. Consumers use this to tell "nothing to
+	 * show yet" apart from "this agent never narrates its steps".
+	 */
+	steps: number;
 	/** The one-line task description, if any. */
 	subtitle: string;
 	/** A reconstructed read-only transcript for the right panel's MessageList. */
@@ -585,10 +609,12 @@ function toSubagentSummary(
 	return {
 		id,
 		name: subagentName(id),
-		label: input?.subagent_type || "Agent",
+		label: input?.subagent_type || "",
 		subtitle,
 		status,
+		errored: task.state === "output-error",
 		activity,
+		steps: nested.length,
 		transcript,
 	};
 }
@@ -635,22 +661,25 @@ function SubagentsList({
 				return (
 					<li key={sub.id}>
 						<button
-							className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+							className={PANEL_ROW}
 							onClick={() => onOpen?.(sub)}
 							type="button"
 						>
-							<SubagentAvatar className="size-6" seed={sub.id} />
+							<SubagentAvatar className="size-5 shrink-0" seed={sub.id} />
 							<span className="flex min-w-0 flex-1 flex-col">
 								<span className="flex min-w-0 items-center gap-1.5">
-									<span className="truncate text-foreground text-sm">
-										{sub.name}
-									</span>
-									<span className="shrink-0 truncate text-muted-foreground/70 text-xs">
-										{sub.label}
-									</span>
+									<span className="truncate text-foreground">{sub.name}</span>
+									{/* Only a REAL `subagent_type` earns a chip. An untyped spawn
+									    leaves `label` empty rather than printing "Agent" under a
+									    section already titled "Subagents". */}
+									{sub.label && (
+										<span className="shrink-0 truncate text-[10px] text-muted-foreground/70">
+											{sub.label}
+										</span>
+									)}
 								</span>
 								{secondary && (
-									<span className="truncate text-muted-foreground text-xs">
+									<span className="truncate text-muted-foreground">
 										{secondary}
 									</span>
 								)}
@@ -701,19 +730,20 @@ function RenderedArtifactsList({
 			{artifacts.map((artifact) => (
 				<li key={artifact.id}>
 					<button
-						className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+						className={PANEL_ROW}
 						onClick={() => onOpen?.(artifact)}
 						type="button"
 					>
-						<HugeiconsIcon
-							aria-hidden
-							className="size-3.5 shrink-0 text-muted-foreground"
-							icon={ARTIFACT_KIND_ICON[artifact.kind]}
-						/>
-						<span className="min-w-0 flex-1 truncate text-foreground text-sm">
+						<span aria-hidden className={PANEL_ROW_ICON}>
+							<HugeiconsIcon
+								className="size-3.5"
+								icon={ARTIFACT_KIND_ICON[artifact.kind]}
+							/>
+						</span>
+						<span className="min-w-0 flex-1 truncate text-foreground">
 							{artifact.title}
 						</span>
-						<span className="shrink-0 text-[10px] text-muted-foreground/70 uppercase tracking-wide">
+						<span className={PANEL_ROW_BADGE}>
 							{ARTIFACT_KIND_LABEL[artifact.kind]}
 						</span>
 					</button>
@@ -729,14 +759,34 @@ function SectionIcon({ icon }: { icon: IconSvgElement }) {
 	return <HugeiconsIcon aria-hidden className="size-4" icon={icon} />;
 }
 
+// ── One row geometry for every subsection list ────────────────────────────────
+//
+// Sources, source items, Subagents, Rendered artifacts and Side chats were five
+// hand-rolled copies of the same row, and they disagreed: a bare 14px glyph in
+// one, a 24px avatar in another, so their labels started 10px apart; and every
+// one of them set `text-sm` (14px) UNDER a section title of `text-xs` (12px), an
+// inverted scale where the nested row shouted louder than its parent.
+//
+// PANEL_ROW_ICON is a fixed box, so a glyph row and an avatar row indent
+// identically — that box, not the glyph inside it, is what sets the indent.
+// PANEL_ROW_BADGE is the section title's own count pill, reused here so the
+// trailing slot has ONE treatment instead of three (a pill, a bare span and an
+// uppercase tracking chip).
+const PANEL_ROW =
+	"flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs transition-colors hover:bg-muted/50";
+const PANEL_ROW_STATIC =
+	"flex w-full min-w-0 items-center gap-2 px-1.5 py-1 text-xs";
+const PANEL_ROW_ICON =
+	"grid size-5 shrink-0 place-items-center text-muted-foreground";
+const PANEL_ROW_BADGE =
+	"shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums";
+
 function SectionTitle({ title, count }: { count?: number; title: string }) {
 	return (
 		<span className="flex items-center gap-2">
 			<span className="font-medium text-foreground text-xs">{title}</span>
 			{count !== undefined && count > 0 && (
-				<span className="rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums">
-					{count}
-				</span>
+				<span className={PANEL_ROW_BADGE}>{count}</span>
 			)}
 		</span>
 	);
@@ -851,27 +901,20 @@ function FileRow({ file }: { file: FileSummary }) {
 function SourceItemRow({ item }: { item: SourceItem }) {
 	const body = (
 		<>
-			<HugeiconsIcon
-				aria-hidden
-				className="size-3.5 shrink-0 text-muted-foreground"
-				icon={item.icon}
-			/>
+			<span aria-hidden className={PANEL_ROW_ICON}>
+				<HugeiconsIcon className="size-3.5" icon={item.icon} />
+			</span>
 			<span className="flex min-w-0 flex-1 flex-col">
-				<span className="truncate text-foreground text-sm">{item.label}</span>
+				<span className="truncate text-foreground">{item.label}</span>
 				{item.detail && item.detail !== item.label && (
-					<span className="truncate text-muted-foreground text-xs">
-						{item.detail}
-					</span>
+					<span className="truncate text-muted-foreground">{item.detail}</span>
 				)}
 			</span>
 		</>
 	);
 	if (!item.url) {
 		return (
-			<li
-				className="flex min-w-0 items-center gap-2 px-1.5 py-1"
-				title={item.detail ?? item.label}
-			>
+			<li className={PANEL_ROW_STATIC} title={item.detail ?? item.label}>
 				{body}
 			</li>
 		);
@@ -880,7 +923,7 @@ function SourceItemRow({ item }: { item: SourceItem }) {
 	return (
 		<li>
 			<button
-				className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+				className={PANEL_ROW}
 				onClick={() => {
 					Promise.resolve(openExternal(url)).catch(() => {
 						/* the link stays visible; nothing else to do */
@@ -903,13 +946,13 @@ function SourceGroup({ source }: { source: DerivedSource }) {
 
 	if (source.items.length === 0) {
 		return (
-			<li className="flex items-center gap-2 px-1.5 py-1 text-sm">
-				<HugeiconsIcon
-					aria-hidden
-					className="size-3.5 shrink-0 text-muted-foreground"
-					icon={source.icon}
-				/>
-				<span className="text-foreground">{source.label}</span>
+			<li className={PANEL_ROW_STATIC}>
+				<span aria-hidden className={PANEL_ROW_ICON}>
+					<HugeiconsIcon className="size-3.5" icon={source.icon} />
+				</span>
+				<span className="min-w-0 flex-1 truncate text-foreground">
+					{source.label}
+				</span>
 			</li>
 		);
 	}
@@ -919,29 +962,28 @@ function SourceGroup({ source }: { source: DerivedSource }) {
 			<button
 				aria-controls={contentId}
 				aria-expanded={open}
-				className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+				className={PANEL_ROW}
 				onClick={() => setOpen((prev) => !prev)}
 				type="button"
 			>
-				<HugeiconsIcon
-					aria-hidden
-					className="size-3.5 shrink-0 text-muted-foreground"
-					icon={source.icon}
-				/>
-				<span className="min-w-0 flex-1 truncate text-foreground text-sm">
+				<span aria-hidden className={PANEL_ROW_ICON}>
+					<HugeiconsIcon className="size-3.5" icon={source.icon} />
+				</span>
+				<span className="min-w-0 flex-1 truncate text-foreground">
 					{source.label}
 				</span>
-				<span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums">
-					{source.items.length}
+				<span className={PANEL_ROW_BADGE}>{source.items.length}</span>
+				{/* Boxed like the parent row's chevron, so both end on one optical
+				    column instead of the subsection's sitting 6px further in. */}
+				<span aria-hidden className={PANEL_ROW_ICON}>
+					<HugeiconsIcon
+						className={cn(
+							"size-3.5 transition-transform duration-200",
+							open && "rotate-180"
+						)}
+						icon={ArrowDown01Icon}
+					/>
 				</span>
-				<HugeiconsIcon
-					aria-hidden
-					className={cn(
-						"size-3.5 shrink-0 text-muted-foreground transition-transform duration-200",
-						open && "rotate-180"
-					)}
-					icon={ArrowDown01Icon}
-				/>
 			</button>
 			{open && (
 				<ul
@@ -988,19 +1030,17 @@ function SideChatsList({
 			{entries.map((entry) => (
 				<li className="group/side flex items-center gap-1" key={entry.id}>
 					<button
-						className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/50"
+						className={cn(PANEL_ROW, "w-auto flex-1")}
 						onClick={() => onOpen?.(entry)}
 						type="button"
 					>
-						<HugeiconsIcon
-							aria-hidden
-							className="size-3.5 shrink-0 text-muted-foreground"
-							icon={MessageQuestionIcon}
-						/>
-						<span className="min-w-0 flex-1 truncate text-foreground text-sm">
+						<span aria-hidden className={PANEL_ROW_ICON}>
+							<HugeiconsIcon className="size-3.5" icon={MessageQuestionIcon} />
+						</span>
+						<span className="min-w-0 flex-1 truncate text-foreground">
 							{entry.question}
 						</span>
-						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+						<span className={PANEL_ROW_BADGE}>
 							{compactAge(entry.created_at)}
 						</span>
 					</button>
@@ -1039,10 +1079,16 @@ export function CoworkContextPanel({
 	const subagents = useMemo(() => extractSubagents(messages), [messages]);
 	const artifacts = useMemo(() => extractArtifacts(messages), [messages]);
 
-	// Created files come from the run's worktree diff (server-persisted), so they
-	// survive reload. Refetched when the run changes or a stream completes.
-	const [createdFiles, setCreatedFiles] = useState<FileSummary[]>([]);
-	const [diffHasChanges, setDiffHasChanges] = useState(false);
+	// Created files come from the run's worktree diff, read live from Core through
+	// the shared query every git surface reads — the panel no longer keeps its own
+	// copy, which is how its file list could disagree with the Changes section
+	// rendered directly underneath it.
+	const diff = useWorktreeDiff(target, runId);
+	const createdFiles: FileSummary[] = useMemo(
+		() => diff.files.filter((f) => f.kind === "added"),
+		[diff.files]
+	);
+	const diffHasChanges = diff.has_changes;
 	// Side chats (persisted /btw asides) — lifted here so the section can hide
 	// itself entirely when there are none.
 	const [sideChats, setSideChats] = useState<BtwEntry[]>([]);
@@ -1050,26 +1096,15 @@ export function CoworkContextPanel({
 	const targetUrlRef = useRef(target);
 	targetUrlRef.current = target;
 
+	// A turn that just finished has written its files: invalidate so the diff is
+	// re-read once, at the transition, instead of on a timer. `chatStatus` is a
+	// TRIGGER, not something the body reads — it only flips on turn transitions
+	// (submitted/streaming/ready), never per stream tick.
 	useEffect(() => {
-		if (!runId) {
-			setCreatedFiles([]);
-			setDiffHasChanges(false);
-			return;
+		if (runId) {
+			invalidateWorktreeDiff(runId);
 		}
-		const controller = new AbortController();
-		fetchWorktreeDiff(targetUrlRef.current, runId, controller.signal)
-			.then((diff) => {
-				if (!controller.signal.aborted) {
-					setCreatedFiles(diff.files.filter((f) => f.kind === "added"));
-					setDiffHasChanges(diff.has_changes);
-				}
-			})
-			.catch(() => {
-				/* treated as "no artifacts" */
-			});
-		return () => controller.abort();
-		// Re-run when the chat goes idle so a just-finished run's files appear.
-	}, [runId]);
+	}, [runId, chatStatus]);
 
 	useEffect(() => {
 		if (!runId) {
@@ -1087,7 +1122,9 @@ export function CoworkContextPanel({
 				/* treated as "no side chats" */
 			});
 		return () => controller.abort();
-	}, [runId]);
+		// `sideChatsRefreshKey` is bumped by the composer after a `/btw` aside is
+		// persisted; without it the new aside never appears until the run changes.
+	}, [runId, sideChatsRefreshKey]);
 
 	const handleDeleteSideChat = useCallback((id: string) => {
 		setSideChats((prev) => prev.filter((e) => e.id !== id));
@@ -1191,9 +1228,12 @@ export function CoworkContextPanel({
 	return (
 		<div className="h-full overflow-y-auto p-2">
 			<BouncyAccordion
+				// No `description` size override: every section body now declares its
+				// own scale (the subsection rows are `text-xs`, DiffReviewPane and the
+				// progress/file lists `text-sm`), so a panel-wide `text-sm` here would
+				// only fight them.
 				classNames={{
 					item: "border border-border/60",
-					description: "text-sm",
 					title: "truncate",
 				}}
 				defaultValue={items[0]?.id ?? null}

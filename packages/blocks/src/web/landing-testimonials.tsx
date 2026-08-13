@@ -37,9 +37,9 @@ export default function LandingTestimonials() {
 						))}
 					</div>
 
-					<div className="mt-10">
+					<div className="mt-6">
 						<Signature
-							className="text-foreground"
+							className="h-auto max-w-full text-foreground"
 							fontSize={24}
 							inView
 							text="Jia Wei Ng"

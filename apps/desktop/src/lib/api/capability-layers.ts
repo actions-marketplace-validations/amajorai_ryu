@@ -112,6 +112,26 @@ export interface CapabilityLayer {
 	providers: CapabilityProvider[];
 	/** Whether many providers may be enabled at once and one is picked. */
 	selectable: boolean;
+	/**
+	 * The capability's own display name (`"Search"`, `"Document Parsing"`), declared
+	 * by its providers and picked by Core. `null` when nothing names it.
+	 *
+	 * App-supplied text, so a renderer must clamp it and must never treat it as
+	 * markup. It exists so the node dropdown stops carrying a closed
+	 * `{capability → label}` table: anything outside that table rendered as its raw
+	 * dotted id, which no third-party toolkit could ever escape.
+	 */
+	title: string | null;
+	/**
+	 * Whether this capability is a swappable **toolkit** the picker should list, as
+	 * opposed to one app's private wiring to its own sidecar.
+	 *
+	 * Computed by Core, never declared in a manifest. The picker used to filter on
+	 * {@link CapabilityLayer.selectable}, which is the binder's tie-break flag and is
+	 * trivially true for a capability with a single provider — so `news.crud`,
+	 * `plan.review`, `reasoning.check` and `tuition.crud` all showed up as toolkits.
+	 */
+	toolkit: boolean;
 }
 
 /** One stable facade verb the capability router currently serves. */
@@ -147,6 +167,8 @@ interface CapabilityLayerWire {
 	overridden?: boolean;
 	providers?: CapabilityProviderWire[];
 	selectable?: boolean;
+	title?: string;
+	toolkit?: boolean;
 }
 
 interface CapabilityVerbWire {
@@ -204,9 +226,12 @@ export function describeBindingFailure(
  * that checks only the first disables every provider of the second — which is what
  * shipped, greying out all four document parsers and leaving that layer unswappable.
  *
- * False is currently unreachable for every provider shipped in the repo, and that is
- * the point: it is the guard a third-party manifest declaring a capability it cannot
- * actually serve must trip, rather than binding and turning the layer off in silence.
+ * False is reachable today, and not only by a third-party manifest: the news and
+ * tuition apps each provide a capability with no `route` and no `tools`, so both come
+ * back unservable. Neither reaches this function any more — they are app-private
+ * wiring and no longer pass the picker's `toolkit` filter — but the guard is what a
+ * manifest declaring a capability it cannot actually serve must trip, rather than
+ * binding and turning the layer off in silence.
  */
 export function canServe(provider: CapabilityProvider): boolean {
 	return provider.servesVerbs || provider.servesRoute;
@@ -259,6 +284,17 @@ export async function fetchCapabilityLayers(
 				overridden: c.overridden ?? false,
 				providers: (c.providers ?? []).map(toProvider),
 				selectable: c.selectable ?? false,
+				// Trimmed, and blank becomes `null`: this is text an app wrote, and an
+				// empty header is worse than the caller's own fallback naming. An
+				// older Core simply sends nothing, which lands on the same rung.
+				title: c.title?.trim() ? c.title.trim() : null,
+				// Absent → `false`, deliberately NOT a fallback to `selectable`. Only
+				// Core can compute this (it needs the facade verb table and the whole
+				// known manifest set), and the "helpful" guess is exactly the bug this
+				// flag replaces: an older Core would go on reporting every app-private
+				// capability as a toolkit. Showing no layers is recoverable by
+				// updating Core; showing wrong ones is what shipped.
+				toolkit: c.toolkit ?? false,
 			})
 		),
 		verbs: (json.verbs ?? []).map(

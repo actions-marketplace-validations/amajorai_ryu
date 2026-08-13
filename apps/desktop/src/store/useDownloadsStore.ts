@@ -98,16 +98,41 @@ function isTrackable(state: DownloadState): boolean {
 
 /**
  * Build a selector for the live progress of an install identified by artifact
- * `kinds` + a `nameHint` (matched against the task label). Prefers a label-name
- * match; falls back to the single in-flight task of those kinds.
+ * `kinds` + a `nameHint` (matched against the task label).
+ *
+ * Resolution order, most precise first:
+ *
+ *  1. `taskId` — the EXACT download-center row, when the caller knows Core's id
+ *     scheme for it (plugins: `plugin:<id>`). Everything below is guesswork; this
+ *     is the answer. Plugin buttons in particular could never match by name —
+ *     Core labels a plugin row with the plugin ID (`@ryu/crm`) while the card
+ *     knew only the display name ("Harbor CRM") — so they always fell through to
+ *     the sole-in-flight fallback and borrowed an unrelated download's percent
+ *     whenever two things ran at once.
+ *  2. a label containing the normalized `nameHint`.
+ *  3. the single in-flight task of those kinds, if there is exactly one.
  */
 export function selectInstallProgress(
 	kinds: readonly DownloadKind[],
-	nameHint: string
+	nameHint: string,
+	taskId?: string
 ): (s: DownloadsState) => InstallProgress {
 	const wanted = new Set(kinds);
 	const hint = normalizeName(nameHint);
 	return (s) => {
+		const exact = taskId ? s.tasks[taskId] : undefined;
+		if (exact) {
+			// Deliberately NOT filtered by kind: the id names one row, and a caller
+			// that knows the id knows better than a kind guess. Terminal states report
+			// inactive rather than matching on to something else.
+			return {
+				active: isTrackable(exact.state),
+				percent:
+					exact.total_bytes && exact.total_bytes > 0
+						? Math.min(100, (exact.received_bytes / exact.total_bytes) * 100)
+						: null,
+			};
+		}
 		const candidates = Object.values(s.tasks).filter(
 			(t) => wanted.has(t.kind) && isTrackable(t.state)
 		);
@@ -131,13 +156,17 @@ export function selectInstallProgress(
 
 /**
  * Live progress for an install button. Pass the artifact kind(s) and a name hint
- * (the repo id, filename, engine/skill/agent name) found in the download label.
+ * (the repo id, filename, engine/skill/agent name) found in the download label —
+ * plus `taskId` when the surface knows the exact download-center row.
  */
 export function useInstallProgress(
 	kinds: readonly DownloadKind[],
-	nameHint: string
+	nameHint: string,
+	taskId?: string
 ): InstallProgress {
-	return useDownloadsStore(useShallow(selectInstallProgress(kinds, nameHint)));
+	return useDownloadsStore(
+		useShallow(selectInstallProgress(kinds, nameHint, taskId))
+	);
 }
 
 export function selectAggregate(s: DownloadsState): DownloadsAggregate {

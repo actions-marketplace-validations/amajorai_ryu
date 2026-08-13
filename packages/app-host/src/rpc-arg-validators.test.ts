@@ -53,6 +53,7 @@ import {
 	asSkillUpdateArg,
 	asSkillVersionRefArg,
 	asReasoningRequestArg,
+	asSubtitlesRequestArg,
 	asSocialRequestArg,
 	asSpacesListArg,
 	asSuggestionFeedbackArg,
@@ -867,6 +868,74 @@ describe("asReasoningRequestArg", () => {
 		});
 		expect(asReasoningRequestArg({ path: "/policies", method: "PATCH" })).toBeNull();
 		expect(asReasoningRequestArg({ path: "/policies", method: "get" })).toBeNull();
+	});
+});
+
+describe("asSubtitlesRequestArg", () => {
+	it("keeps a normal sub-path, defaults the method, forwards the body verbatim", () => {
+		expect(asSubtitlesRequestArg({ path: "/jobs" })).toEqual({
+			path: "/jobs",
+			method: "GET",
+		});
+		expect(
+			asSubtitlesRequestArg({
+				path: "/jobs",
+				method: "POST",
+				body: { source_path: "/Users/x/Movies/film.mkv" },
+			})
+		).toEqual({
+			path: "/jobs",
+			method: "POST",
+			body: { source_path: "/Users/x/Movies/film.mkv" },
+		});
+	});
+
+	it("keeps a query string, which the library browser depends on", () => {
+		expect(
+			asSubtitlesRequestArg({ path: "/library?dir=%2FUsers%2Fx%2FMovies" })
+		).toEqual({ path: "/library?dir=%2FUsers%2Fx%2FMovies", method: "GET" });
+	});
+
+	it("rejects a path that is not a rooted sub-path", () => {
+		expect(asSubtitlesRequestArg({ path: "https://evil.example/x" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: "//evil.example/x" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: "jobs" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: "/\\..\\settings" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: 42 })).toBeNull();
+		expect(asSubtitlesRequestArg(null)).toBeNull();
+	});
+
+	// The same regression the Outpost forwarder was fixed for. Sharing
+	// `resolveMountedRequestPath` is what makes these pass here without a second
+	// implementation having to relearn it.
+	it("rejects a climb out of the mount, literal and percent-encoded", () => {
+		for (const path of [
+			"/../plugins",
+			"/jobs/../../settings",
+			"/%2e%2e/settings",
+			"/%2E%2E/settings",
+			"/.%2e/settings",
+			"/%2e./settings",
+			"/jobs/%2e%2e/%2e%2e/conversations",
+		]) {
+			expect(asSubtitlesRequestArg({ path })).toBeNull();
+		}
+	});
+
+	it("returns the NORMALIZED path, so nothing downstream re-derives a different one", () => {
+		expect(asSubtitlesRequestArg({ path: "/jobs/%2e%2e/settings" })).toEqual({
+			path: "/settings",
+			method: "GET",
+		});
+	});
+
+	it("serves PUT (the settings verb) and refuses anything outside the set", () => {
+		expect(asSubtitlesRequestArg({ path: "/settings", method: "PUT" })).toEqual({
+			path: "/settings",
+			method: "PUT",
+		});
+		expect(asSubtitlesRequestArg({ path: "/jobs", method: "PATCH" })).toBeNull();
+		expect(asSubtitlesRequestArg({ path: "/jobs", method: "get" })).toBeNull();
 	});
 });
 

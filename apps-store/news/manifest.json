@@ -159,8 +159,6 @@
     {
       "capability": "news.crud",
       "version": "1.0.0",
-      "selectable": true,
-      "default": true,
       "sidecar": "news",
       "grant": "news:crud"
     }

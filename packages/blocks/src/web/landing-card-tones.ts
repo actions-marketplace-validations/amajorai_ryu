@@ -26,8 +26,7 @@ export const LANDING_CARD_TONES: Record<
 	LandingCardToneTokens
 > = {
 	orange: {
-		surface:
-			"bg-[#ffe0b3] dark:bg-[#3d2209]/80 dark:border dark:border-[#b45309]/30",
+		surface: "bg-[#ffe0b3] dark:bg-[#3d2209]/80",
 		eyebrow: "text-[#8a5318]/70 dark:text-[#fbbf24]/70",
 		title: "text-[#5c3608] dark:text-[#fbbf24]",
 		body: "text-[#6d4210]/85 dark:text-[#fcd34d]/85",
@@ -38,8 +37,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#5c3608] hover:bg-[#5c3608]/10 hover:text-[#5c3608] dark:text-[#fbbf24] dark:hover:bg-[#fbbf24]/10",
 	},
 	blue: {
-		surface:
-			"bg-[#dbeafe] dark:bg-[#172554]/80 dark:border dark:border-[#3b82f6]/30",
+		surface: "bg-[#dbeafe] dark:bg-[#172554]/80",
 		eyebrow: "text-[#1e3a5f]/65 dark:text-[#93c5fd]/65",
 		title: "text-[#1e3a5f] dark:text-[#93c5fd]",
 		body: "text-[#1e3a5f]/85 dark:text-[#bfdbfe]/85",
@@ -50,8 +48,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#1e3a5f] hover:bg-[#1e3a5f]/10 hover:text-[#1e3a5f] dark:text-[#93c5fd] dark:hover:bg-[#93c5fd]/10",
 	},
 	pink: {
-		surface:
-			"bg-[#fce7f3] dark:bg-[#500724]/80 dark:border dark:border-[#ec4899]/30",
+		surface: "bg-[#fce7f3] dark:bg-[#500724]/80",
 		eyebrow: "text-[#831843]/65 dark:text-[#f9a8d4]/65",
 		title: "text-[#831843] dark:text-[#f9a8d4]",
 		body: "text-[#9d174d]/85 dark:text-[#fbcfe8]/85",
@@ -62,8 +59,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#831843] hover:bg-[#831843]/10 hover:text-[#831843] dark:text-[#f9a8d4] dark:hover:bg-[#f9a8d4]/10",
 	},
 	purple: {
-		surface:
-			"bg-[#ede9fe] dark:bg-[#3b0764]/80 dark:border dark:border-[#a855f7]/30",
+		surface: "bg-[#ede9fe] dark:bg-[#3b0764]/80",
 		eyebrow: "text-[#4c1d95]/65 dark:text-[#c4b5fd]/65",
 		title: "text-[#4c1d95] dark:text-[#c4b5fd]",
 		body: "text-[#5b21b6]/85 dark:text-[#ddd6fe]/85",
@@ -74,8 +70,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#4c1d95] hover:bg-[#4c1d95]/10 hover:text-[#4c1d95] dark:text-[#c4b5fd] dark:hover:bg-[#c4b5fd]/10",
 	},
 	yellow: {
-		surface:
-			"bg-[#fef3c7] dark:bg-[#422006]/80 dark:border dark:border-[#eab308]/30",
+		surface: "bg-[#fef3c7] dark:bg-[#422006]/80",
 		eyebrow: "text-[#92400e]/65 dark:text-[#fcd34d]/65",
 		title: "text-[#78350f] dark:text-[#fcd34d]",
 		body: "text-[#92400e]/85 dark:text-[#fef08a]/85",
@@ -86,8 +81,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#78350f] hover:bg-[#78350f]/10 hover:text-[#78350f] dark:text-[#fcd34d] dark:hover:bg-[#fcd34d]/10",
 	},
 	green: {
-		surface:
-			"bg-[#dcfce7] dark:bg-[#052e16]/80 dark:border dark:border-[#22c55e]/30",
+		surface: "bg-[#dcfce7] dark:bg-[#052e16]/80",
 		eyebrow: "text-[#166534]/65 dark:text-[#86efac]/65",
 		title: "text-[#14532d] dark:text-[#86efac]",
 		body: "text-[#166534]/85 dark:text-[#bbf7d0]/85",
@@ -98,8 +92,7 @@ export const LANDING_CARD_TONES: Record<
 			"text-[#14532d] hover:bg-[#14532d]/10 hover:text-[#14532d] dark:text-[#86efac] dark:hover:bg-[#86efac]/10",
 	},
 	teal: {
-		surface:
-			"bg-[#ccfbf1] dark:bg-[#042f2e]/80 dark:border dark:border-[#14b8a6]/30",
+		surface: "bg-[#ccfbf1] dark:bg-[#042f2e]/80",
 		eyebrow: "text-[#115e59]/65 dark:text-[#5eead4]/65",
 		title: "text-[#134e4a] dark:text-[#5eead4]",
 		body: "text-[#115e59]/85 dark:text-[#99f6e4]/85",

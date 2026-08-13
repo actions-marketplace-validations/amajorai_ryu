@@ -34,6 +34,7 @@ import {
 	MAX_TOPUP_DOLLARS,
 	MIN_TOPUP_DOLLARS,
 } from "@/src/lib/api/credits.ts";
+import { formatDate, formatDateTime } from "@/src/lib/timezone.ts";
 
 /** A plan id → human label, for the included-pool line. */
 const PLAN_LABELS: Record<string, string> = {
@@ -75,7 +76,7 @@ function formatExpiry(iso: string | null): string | null {
 	if (Number.isNaN(at.getTime())) {
 		return null;
 	}
-	return `Expires ${at.toLocaleDateString(undefined, {
+	return `Expires ${formatDate(at, {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
@@ -163,7 +164,7 @@ export default function CreditsPage() {
 			isCredit: CREDIT_LEDGER_REASONS.includes(entry.reason),
 			delta: entry.delta,
 			balanceAfter: entry.balanceAfter,
-			createdAtLabel: new Date(entry.createdAt).toLocaleString(undefined, {
+			createdAtLabel: formatDateTime(entry.createdAt, {
 				year: "numeric",
 				month: "short",
 				day: "numeric",

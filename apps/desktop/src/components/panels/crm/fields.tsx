@@ -21,6 +21,10 @@ import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import { safeHref } from "@/src/components/panels/crm/url-safety.ts";
 import type { Field, SelectOption, ValueBag } from "@/src/lib/api/crm.ts";
+import {
+	formatDate as formatDateInZone,
+	formatDateTime as formatDateTimeInZone,
+} from "@/src/lib/timezone.ts";
 
 /** Shown wherever a value is absent. One constant so an empty cell, an empty
  *  detail row and an empty card line are visibly the same kind of nothing. */
@@ -48,12 +52,12 @@ export function formatCents(cents: number, currency = "USD"): string {
  *  precision it does not have. */
 function formatDate(raw: string): string {
 	const at = new Date(raw);
-	return Number.isNaN(at.getTime()) ? raw : at.toLocaleDateString();
+	return Number.isNaN(at.getTime()) ? raw : formatDateInZone(at);
 }
 
 function formatDatetime(raw: string): string {
 	const at = new Date(raw);
-	return Number.isNaN(at.getTime()) ? raw : at.toLocaleString();
+	return Number.isNaN(at.getTime()) ? raw : formatDateTimeInZone(at);
 }
 
 /** Look a select/status option up by its id.

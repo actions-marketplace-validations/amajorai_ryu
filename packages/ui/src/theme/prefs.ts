@@ -16,12 +16,18 @@ export const THEME_PREFS_VERSION = 1;
 
 export type ThemeMode = "light" | "dark" | "system";
 
-// The mode a surface renders in before the user has ever picked one. EVERY
-// reader of the persisted mode must fall back to this — a surface that defaults
-// to "system" while its provider defaults to "light" (or vice versa) renders a
-// fresh install with light-mode component variants over dark-preset tokens, and
-// the mismatch only clears once the user toggles the theme by hand.
-export const DEFAULT_THEME_MODE: ThemeMode = "light";
+// The mode a surface renders in before the user has ever picked one: follow the
+// OS. EVERY reader of the persisted mode must fall back to this — a surface that
+// defaults to "system" while its provider defaults to "light" (or vice versa)
+// renders a fresh install with light-mode component variants over dark-preset
+// tokens, and the mismatch only clears once the user toggles the theme by hand.
+//
+// "system" is only safe because every resolver consults `prefers-color-scheme`:
+// next-themes is mounted with `enableSystem` on both windows, the desktop's
+// `initTheme()`/`storedIsDark()` read the media query, and the island's
+// `use-island-theme` watches DARK_QUERY. Adding a resolver that cannot follow
+// the OS means picking a concrete default again, not special-casing it there.
+export const DEFAULT_THEME_MODE: ThemeMode = "system";
 
 export interface ThemePrefs {
 	codeFont?: string;

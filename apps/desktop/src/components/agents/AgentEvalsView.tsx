@@ -43,6 +43,7 @@ import {
 	fetchGatewayAudit,
 	runGatewayEvals,
 } from "@/src/lib/api/gateway.ts";
+import { formatTime } from "@/src/lib/timezone.ts";
 
 export interface AgentEvalsViewProps {
 	/** Agent the evals are scoped to (forwarded for per-agent budget tracking). */
@@ -231,7 +232,7 @@ export function AgentEvalsView({
 
 	const historyEntries: AuditRow[] = entries.map((e) => ({
 		id: e.id,
-		time: new Date(e.timestamp).toLocaleTimeString(),
+		time: formatTime(e.timestamp),
 		model: e.model ?? "—",
 		isError: Boolean(e.error),
 		tokens: (e.input_tokens ?? 0) + (e.output_tokens ?? 0),

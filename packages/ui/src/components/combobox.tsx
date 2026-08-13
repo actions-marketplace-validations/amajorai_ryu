@@ -96,6 +96,13 @@ function ComboboxInput({
 	);
 }
 
+/**
+ * The popup — and any `ComboboxInput` inside it — is unmounted when the combobox
+ * closes and mounted fresh on the next open. Tests that reopen and type must
+ * wait for the NEW input rather than reusing a handle from the previous open:
+ * driving the one on its way out filters a list that is about to disappear, and
+ * the popup then shows the stale query's results with no error anywhere.
+ */
 function ComboboxContent({
 	className,
 	side = "bottom",

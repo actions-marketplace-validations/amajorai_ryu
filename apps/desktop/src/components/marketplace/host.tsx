@@ -9,9 +9,11 @@
 import {
 	type MarketplaceHost,
 	MarketplaceHostProvider,
+	type MarketplaceLikesService,
 	type MarketplaceReviewsService,
 } from "@ryu/marketplace/host";
 import type { ReactNode } from "react";
+import { sileo } from "sileo";
 import { getActiveUserId } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useMyLicenses } from "@/src/hooks/useMyLicenses.ts";
@@ -19,10 +21,13 @@ import { useSellerReports } from "@/src/hooks/useSellerReports.ts";
 import { useSellerStatus } from "@/src/hooks/useSellerStatus.ts";
 import {
 	deleteReview,
+	fetchLikeCounts,
 	fetchReviews,
 	hasMarketplaceAuth,
+	likeItem,
 	postReview,
 	startPurchase,
+	unlikeItem,
 } from "@/src/lib/api/marketplace.ts";
 
 /** Ratings + reviews, backed by the control plane (:3000) with the Better-Auth
@@ -62,7 +67,29 @@ const desktopReviews: MarketplaceReviewsService = {
 	remove: ({ kind, id }) => deleteReview(kind, id),
 };
 
+/** The heart on a store card, backed by the control plane (:3000).
+ *
+ *  A SIGNED-OUT desktop still gets counts — the bulk read is public — so the
+ *  control renders with its real number and only the WRITE needs a session. A
+ *  signed-out click therefore prompts rather than failing silently: the desktop
+ *  cannot navigate to a hosted login, so the prompt is a toast pointing at the
+ *  account settings where sign-in lives. */
+const desktopLikes: MarketplaceLikesService = {
+	canLike: hasMarketplaceAuth,
+	fetchCounts: fetchLikeCounts,
+	like: likeItem,
+	unlike: unlikeItem,
+	onRequireAuth: () => {
+		sileo.info({
+			title: "Sign in to like items",
+			description:
+				"Likes are counted per account, so they need you signed in to your Ryu account.",
+		});
+	},
+};
+
 const desktopMarketplaceHost: MarketplaceHost = {
+	likes: desktopLikes,
 	openExternal,
 	reviews: desktopReviews,
 	startPurchase,

@@ -248,6 +248,8 @@ use utoipa::OpenApi;
         super::sidecar_restart,
         super::get_active_engine,
         super::set_active_engine,
+        super::get_llamacpp_acceleration,
+        super::set_llamacpp_acceleration,
         super::get_active_model,
         super::set_active_model,
         super::worktree_diff_handler,
@@ -324,9 +326,12 @@ use utoipa::OpenApi;
         super::composio_triggers,
         super::composio_webhook,
         // Conversations
+        super::add_message_reaction_handler,
         super::edit_message_handler,
         super::get_conversation_feedback_handler,
+        super::get_conversation_reactions_handler,
         super::regenerate_message_handler,
+        super::remove_message_reaction_handler,
         super::select_version_handler,
         super::set_message_feedback_handler,
         // Core

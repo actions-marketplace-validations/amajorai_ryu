@@ -8,12 +8,19 @@ import App from "./App.tsx";
 import "@fontsource-variable/geist";
 import "@fontsource-variable/inter";
 import "./index.css";
+import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
 import { installConsoleCapture } from "./lib/console-buffer.ts";
 import { queryClient } from "./lib/query-client.ts";
 
 // Dev-only: capture console output so the crash screen can offer a one-click
 // "Copy console" action. No-op in production builds.
 installConsoleCapture();
+
+// Before the first render, not in an App effect: the CSS base state is the
+// blurred backdrop (it has to be, for apps/web), while the desktop default is
+// OFF. Running this a frame later would flash a dimmed, blurred backdrop on any
+// dialog that mounts with the app — see @ryu/ui hooks/use-dialog-overlay-blur.ts.
+initDialogOverlayBlur();
 
 const root = document.getElementById("root");
 if (!root) {

@@ -49,8 +49,24 @@
 // the moment it lands. Agents spawned through a package runner (`npx -y …`) have
 // no such signal — the `npx` shim is unchanged when the package updates — so they
 // fall back to the TTL alone, which the background refresh keeps cheap.
+//
+// ── Why a key is not just the spawn command ──────────────────────────────────
+//
+// An agent's advertised option SET can depend on the values already selected in
+// the session — the ACP `session/set_config_option` response returns the whole
+// refreshed list precisely so a client can observe that. opencode is the live
+// example: it advertises an `effort` (reasoning) option only while the session's
+// model has effort levels, so the same binary answers differently depending on
+// which model was applied first. The probe therefore takes the selections it
+// applied, and they are part of the cache key — otherwise the first model probed
+// would pin the option set for every other model.
+//
+// [`invalidate`] consequently drops EVERY key for a spawn command, not one. An
+// auth transition invalidates what the agent advertises for all selections, and
+// clearing only the no-selection entry would leave the picker the user actually
+// has open serving a stale pre-login answer.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Duration, Utc};
@@ -137,6 +153,36 @@ pub struct Hit {
     pub stale: bool,
 }
 
+/// Separates the spawn command from the applied selections inside a cache key.
+/// A control character so it cannot occur in a shell spawn command, a config
+/// option id or a value — the three things a key is built from.
+const KEY_SEP: char = '\u{1}';
+
+/// The cache key for probing `spawn_cmd` with `selections` already applied.
+///
+/// No selections ⇒ the bare spawn command, so entries written by every existing
+/// caller (and every entry already on disk) keep their identity.
+#[must_use]
+pub fn cache_key(spawn_cmd: &str, selections: &BTreeMap<String, String>) -> String {
+    if selections.is_empty() {
+        return spawn_cmd.to_owned();
+    }
+    // `BTreeMap` ⇒ the ordering is the ids' sort order, so the same selections
+    // always produce the same key regardless of how the client sent them.
+    let applied = selections
+        .iter()
+        .map(|(id, value)| format!("{id}={value}"))
+        .collect::<Vec<_>>()
+        .join("\u{1f}");
+    format!("{spawn_cmd}{KEY_SEP}{applied}")
+}
+
+/// The spawn command a cache key was built from — the part every
+/// binary-fingerprint and invalidation decision is about.
+fn spawn_cmd_of(key: &str) -> &str {
+    key.split(KEY_SEP).next().unwrap_or(key)
+}
+
 /// The in-memory cache: every entry, successes and failures alike.
 fn entries() -> &'static Mutex<HashMap<String, Entry>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
@@ -158,9 +204,9 @@ fn refreshing() -> &'static Mutex<std::collections::HashSet<String>> {
     SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// The lock guarding probes of `spawn_cmd`. Hold it across the probe; re-check
-/// [`lookup`] after acquiring it, because the holder ahead of you has just
-/// written the answer you were about to spend 30s computing.
+/// The lock guarding probes of `key` (a [`cache_key`]). Hold it across the
+/// probe; re-check [`lookup`] after acquiring it, because the holder ahead of
+/// you has just written the answer you were about to spend 30s computing.
 pub fn probe_lock(spawn_cmd: &str) -> Arc<tokio::sync::Mutex<()>> {
     let mut map = match inflight().lock() {
         Ok(m) => m,
@@ -200,17 +246,18 @@ pub fn begin_refresh(spawn_cmd: &str) -> Option<RefreshSlot> {
     claimed.then(|| RefreshSlot(spawn_cmd.to_owned()))
 }
 
-/// The cached outcome for `spawn_cmd`, or `None` when there is nothing usable.
+/// The cached outcome for `key` (a [`cache_key`]), or `None` when there is
+/// nothing usable.
 ///
 /// An entry whose binary fingerprint no longer matches the agent on disk is
 /// dropped rather than returned: the agent was upgraded, so what it advertises
 /// may have changed and the cached answer is not merely old but wrong.
-pub fn lookup(spawn_cmd: &str) -> Option<Hit> {
-    let current = fingerprint(spawn_cmd);
+pub fn lookup(key: &str) -> Option<Hit> {
+    let current = fingerprint(spawn_cmd_of(key));
     let mut map = entries().lock().ok()?;
-    let entry = map.get(spawn_cmd)?;
+    let entry = map.get(key)?;
     if entry.fingerprint != current {
-        map.remove(spawn_cmd);
+        map.remove(key);
         return None;
     }
     Some(Hit {
@@ -221,10 +268,10 @@ pub fn lookup(spawn_cmd: &str) -> Option<Hit> {
 
 /// Record a probe outcome. Successes are also written to disk so the next Core
 /// start serves them without re-spawning the agent; failures stay in memory.
-pub fn store(spawn_cmd: &str, outcome: Result<&Value, &str>) {
+pub fn store(key: &str, outcome: Result<&Value, &str>) {
     let entry = Entry {
         cached_at: Utc::now(),
-        fingerprint: fingerprint(spawn_cmd),
+        fingerprint: fingerprint(spawn_cmd_of(key)),
         error: outcome.err().map(str::to_owned),
         value: outcome.ok().cloned(),
     };
@@ -233,7 +280,7 @@ pub fn store(spawn_cmd: &str, outcome: Result<&Value, &str>) {
         let Ok(mut map) = entries().lock() else {
             return;
         };
-        map.insert(spawn_cmd.to_owned(), entry);
+        map.insert(key.to_owned(), entry);
         if !persist {
             return;
         }
@@ -242,15 +289,29 @@ pub fn store(spawn_cmd: &str, outcome: Result<&Value, &str>) {
     save_to_disk(&snapshot);
 }
 
-/// Drop the cached outcome for `spawn_cmd` — used when an auth transition makes
-/// it definitively wrong (a login unlocks `session/new`; a logout re-locks it).
+/// Drop EVERY cached outcome for `spawn_cmd` — used when an auth transition
+/// makes them definitively wrong (a login unlocks `session/new`; a logout
+/// re-locks it).
+///
+/// Every key, not just the bare one: an agent is probed once per applied
+/// selection set (see the module header), and an auth transition invalidates all
+/// of them. Dropping only the no-selection entry would leave the composer — which
+/// reads a per-model key — serving its stale pre-login answer.
 pub fn invalidate(spawn_cmd: &str) {
     let snapshot = {
         let Ok(mut map) = entries().lock() else {
             return;
         };
-        if map.remove(spawn_cmd).is_none() {
+        let stale: Vec<String> = map
+            .keys()
+            .filter(|k| spawn_cmd_of(k) == spawn_cmd)
+            .cloned()
+            .collect();
+        if stale.is_empty() {
             return;
+        }
+        for key in stale {
+            map.remove(&key);
         }
         successes(&map)
     };
@@ -357,6 +418,62 @@ mod tests {
         // A truncated/hand-edited cache file must make the caller re-probe, not
         // render an agent with no pickers as if the agent had said so.
         assert!(entry(None, None, Duration::zero()).outcome().is_err());
+    }
+
+    #[test]
+    fn no_selections_keeps_the_bare_spawn_command_as_the_key() {
+        // Every existing caller — and every entry already on disk — keys on the
+        // spawn command alone, so the empty case must not change identity.
+        assert_eq!(cache_key("claude --acp", &BTreeMap::new()), "claude --acp");
+    }
+
+    #[test]
+    fn selections_key_is_by_value_and_order_independent() {
+        let mut a = BTreeMap::new();
+        a.insert("model".to_owned(), "xai/grok-4.6".to_owned());
+        a.insert("effort".to_owned(), "high".to_owned());
+        let mut b = BTreeMap::new();
+        b.insert("effort".to_owned(), "high".to_owned());
+        b.insert("model".to_owned(), "xai/grok-4.6".to_owned());
+        assert_eq!(cache_key("opencode acp", &a), cache_key("opencode acp", &b));
+
+        let mut other = BTreeMap::new();
+        other.insert("model".to_owned(), "opencode/big-pickle".to_owned());
+        assert_ne!(
+            cache_key("opencode acp", &a),
+            cache_key("opencode acp", &other),
+            "two models must not share one entry — the option SET differs"
+        );
+    }
+
+    #[test]
+    fn a_key_still_reports_the_spawn_command_it_was_built_from() {
+        let mut sel = BTreeMap::new();
+        sel.insert("model".to_owned(), "xai/grok-4.6".to_owned());
+        assert_eq!(spawn_cmd_of(&cache_key("opencode acp", &sel)), "opencode acp");
+        assert_eq!(spawn_cmd_of("opencode acp"), "opencode acp");
+    }
+
+    #[test]
+    fn invalidate_drops_every_selection_of_that_spawn_command() {
+        // An auth transition invalidates what the agent advertises for ALL
+        // selections. Clearing only the bare key would leave the composer — which
+        // reads a per-model key — serving its stale pre-login answer.
+        let mut sel = BTreeMap::new();
+        sel.insert("model".to_owned(), "xai/grok-4.6".to_owned());
+        let bare = "invalidate-test-agent --acp";
+        let keyed = cache_key(bare, &sel);
+        let other = "other-agent --acp";
+        store(bare, Ok(&Value::Null));
+        store(&keyed, Ok(&Value::Null));
+        store(other, Ok(&Value::Null));
+
+        invalidate(bare);
+
+        let map = entries().lock().expect("cache lock");
+        assert!(!map.contains_key(bare));
+        assert!(!map.contains_key(&keyed));
+        assert!(map.contains_key(other), "another agent must be untouched");
     }
 
     #[test]

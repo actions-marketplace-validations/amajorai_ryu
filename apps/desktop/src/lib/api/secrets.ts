@@ -9,7 +9,7 @@
 //                    localStorage.  Max ~2 500 bytes per entry (sufficient for any API key).
 //   Blockers:        keyring v4 requires Rust >= 1.88; project pins 1.77.2 — must upgrade
 //                    or relax rust-version before adopting v4.  No cross-device sync.
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "../tauri-ready.ts";
 
 /**
  * Write (or overwrite) a provider API key in the OS credential store.
@@ -17,17 +17,17 @@ import { invoke } from "@tauri-apps/api/core";
  * Rejects if `key` is empty.
  */
 export const setProviderKey = (provider: string, key: string): Promise<void> =>
-	invoke("set_provider_key", { provider, key });
+	invokeWhenReady("set_provider_key", { provider, key });
 
 /**
  * Read back a stored provider key.
  * Returns `null` when no key has been stored — callers must guard against this.
  */
 export const getProviderKey = (provider: string): Promise<string | null> =>
-	invoke("get_provider_key", { provider });
+	invokeWhenReady("get_provider_key", { provider });
 
 /**
  * Delete a stored provider key.  Idempotent — deleting a non-existent key is not an error.
  */
 export const deleteProviderKey = (provider: string): Promise<void> =>
-	invoke("delete_provider_key", { provider });
+	invokeWhenReady("delete_provider_key", { provider });

@@ -67,6 +67,7 @@
     {
       "capability": "web.crawl",
       "version": "1.0.0",
+      "title": "Crawl",
       "selectable": true,
       "tools": {
         "web__crawl": {

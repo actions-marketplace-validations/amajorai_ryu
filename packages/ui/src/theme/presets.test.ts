@@ -4,7 +4,9 @@
 // module is required to stay pure (no document/window/localStorage).
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	builtinVariants,
 	type CustomTokens,
@@ -300,6 +302,85 @@ function oklchToHex(token: string): string {
 		.join("")}`;
 }
 
+/** A `--brand: <value>;` (or `}`-terminated) declaration in a CSS source. */
+const BRAND_DECLARATION = /--brand:\s*([^;}]+)\s*[;}]/g;
+const HEX6 = /^#[0-9a-f]{6}$/i;
+const HEX3 = /^#[0-9a-f]{3}$/i;
+
+/** `#rgb` / `#rrggbb` / `oklch(L C H)` -> lowercase `#rrggbb`. */
+function colourToHex(value: string): string {
+	const v = value.trim();
+	if (HEX6.test(v)) {
+		return v.toLowerCase();
+	}
+	if (HEX3.test(v)) {
+		const [r, g, b] = v.slice(1).toLowerCase();
+		return `#${r}${r}${g}${g}${b}${b}`;
+	}
+	return oklchToHex(v);
+}
+
+const REPO_ROOT = join(
+	fileURLToPath(new URL(".", import.meta.url)),
+	"../../../.."
+);
+const NON_SOURCE_DIRS = new Set([
+	".next",
+	"build",
+	"dist",
+	"node_modules",
+	"out",
+	"target",
+]);
+
+function cssFilesUnder(dir: string): string[] {
+	const found: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return found; // root absent in this checkout — nothing to check
+	}
+
+	for (const entry of entries) {
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) {
+			if (!NON_SOURCE_DIRS.has(entry.name)) {
+				for (const nested of cssFilesUnder(full)) {
+					found.push(nested);
+				}
+			}
+		} else if (entry.name.endsWith(".css")) {
+			found.push(full);
+		}
+	}
+	return found;
+}
+
+/** Every hand-written CSS file under `packages/ui/src` and each app's `src`. */
+function sourceCssFiles(): string[] {
+	const roots = [join(REPO_ROOT, "packages/ui/src")];
+	try {
+		for (const app of readdirSync(join(REPO_ROOT, "apps"), {
+			withFileTypes: true,
+		})) {
+			if (app.isDirectory()) {
+				roots.push(join(REPO_ROOT, "apps", app.name, "src"));
+			}
+		}
+	} catch {
+		// no apps/ dir (mirrored checkout) — packages/ui alone still guards
+	}
+
+	const files: string[] = [];
+	for (const root of roots) {
+		for (const file of cssFilesUnder(root)) {
+			files.push(file);
+		}
+	}
+	return files;
+}
+
 describe("Ryu brand colour", () => {
 	const BRAND = "#0099ff";
 
@@ -375,5 +456,64 @@ describe("Ryu brand colour", () => {
 				});
 			}
 		}
+	});
+
+	// `--brand` is the Plate editor's accent, and it was a SECOND blue: the
+	// vendored Plate defaults (Tailwind blue-500 light / blue-400 dark) that
+	// nobody rebased onto the Ryu brand. Only apps/desktop imports editor.css,
+	// so the desktop's editor chrome — selection, focus ring, block selection,
+	// caret overlay, comment avatars, table drop line, suggestion chrome —
+	// painted a blue no other app could reproduce and no preset could reach.
+	//
+	// The fix removes the standalone declaration and maps `--color-brand`
+	// straight at `--primary`, so these two guards are structural, not
+	// chromatic: once it aliases the brand token, its resolved value is
+	// whatever preset the user has active (third-party presets legitimately
+	// carry their own `--primary`), and asserting a hex here would fight that.
+	// The colour itself is already pinned by the preset and globals.css cases
+	// above.
+	describe("editor.css `--brand`", () => {
+		const css = readFileSync(
+			new URL("../components/editor/editor.css", import.meta.url),
+			"utf8"
+		);
+
+		test("declares no standalone --brand of its own", () => {
+			expect(css.match(BRAND_DECLARATION)).toBeNull();
+		});
+
+		test("maps --color-brand at the brand token", () => {
+			expect(css).toContain("--color-brand: var(--primary);");
+		});
+	});
+
+	// Belt and braces for the whole design system: any *other* CSS that
+	// reintroduces a literal `--brand` has to spell the brand, in hex or in
+	// oklch. Scoped to the two source roots that ship UI (this package and the
+	// apps' own `src/`) rather than a repo-root walk, so an unrelated file
+	// elsewhere in the tree cannot fail this suite.
+	test("every --brand declaration in source CSS is the brand colour", () => {
+		const offenders: string[] = [];
+
+		for (const file of sourceCssFiles()) {
+			const source = readFileSync(file, "utf8");
+			for (const match of source.matchAll(BRAND_DECLARATION)) {
+				const value = match[1]?.trim() ?? "";
+				let hex: string;
+				try {
+					hex = colourToHex(value);
+				} catch {
+					offenders.push(`${relative(REPO_ROOT, file)}: --brand: ${value}`);
+					continue;
+				}
+				if (hex !== BRAND) {
+					offenders.push(
+						`${relative(REPO_ROOT, file)}: --brand: ${value} (= ${hex})`
+					);
+				}
+			}
+		}
+
+		expect(offenders).toEqual([]);
 	});
 });

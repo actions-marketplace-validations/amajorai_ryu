@@ -51,8 +51,10 @@
 // resolves. Kept as JSX-free `createElement` calls so the file is `.ts` (no
 // `.tsx`) and carries no JSX-runtime assumptions.
 
-import { createElement } from "react";
+import { createElement, type ReactNode } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
+import { CrashBoundary } from "@/src/components/CrashBoundary.tsx";
+import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
 import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
@@ -61,6 +63,7 @@ import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
 import FileEditorPage from "@/src/pages/FileEditorPage.tsx";
 import IdentitiesPage from "@/src/pages/IdentitiesPage.tsx";
 import LibraryPage from "@/src/pages/LibraryPage.tsx";
+import { PaneChooserPage } from "@/src/pages/PaneChooserPage.tsx";
 import PluginCompanionPage, {
 	CompanionUnavailable,
 } from "@/src/pages/PluginCompanionPage.tsx";
@@ -179,6 +182,40 @@ const companionAlias = (alias: string, mountContext?: unknown) =>
 // disabled — and both disappear the moment the owning manifest claims the path itself
 // (a `sidebar_buttons[].target`-style route claim; see the manifest follow-up).
 
+/**
+ * The chat surface's OWN crash boundary (#97).
+ *
+ * `CrashBoundary` used to exist only at the app root (`App.tsx`), so a render
+ * error anywhere in a chat took the whole renderer down with it and recovery
+ * remounted EVERY tab — a crash in one conversation cost the user the sidebar,
+ * the tab strip, the titlebar and every other open tab, all of which were
+ * perfectly healthy. Wrapping here narrows the blast radius to one tab's body:
+ * `RouteOutlet` is mounted *inside* `Layout`, so the shell chrome sits above
+ * this boundary and survives untouched.
+ *
+ * WRAPPED AT THE ROUTE RATHER THAN INSIDE `ChatPage` for three reasons: it
+ * catches crashes in ChatPage's own hooks and in `WorkspacePanels`, not just in
+ * the transcript below them; `tab.conversationId` — the reset key — is already
+ * in scope here and nowhere near the transcript; and the dock-hosted path
+ * (`WorkspacePanels` renders the same `RouteOutlet`) gets the boundary for free.
+ *
+ * KNOWN LIMIT, stated rather than papered over: the composer does NOT survive a
+ * transcript crash. `AgentChat` (@ryu/blocks) owns the message list and the
+ * composer together and `ChatSlots` exposes no `MessageList` seam, so the
+ * narrowest boundary reachable from this side still contains both. Fixing that
+ * properly means adding a `MessageList` slot to `ChatSlots` and wrapping only
+ * the list — an edit inside `packages/blocks`, whoever owns it.
+ *
+ * `resetKeys` is the conversation id: opening a different chat in the same tab
+ * is a different bug, so it clears the crash and hands the new conversation a
+ * fresh retry budget instead of inheriting a spent one. `undefined` (a brand-new
+ * chat that has not bound an id yet) is a legitimate key — `resetKeysChanged`
+ * compares by `Object.is`, so `undefined → "<id>"` reads as a change exactly
+ * once, when `ChatPage` binds the tab to its conversation.
+ */
+const chatBoundary = (tab: RouteTab, children: ReactNode) =>
+	createElement(CrashBoundary, { children, resetKeys: [tab.conversationId] });
+
 let seeded = false;
 
 /** Register all built-in routes exactly once. Idempotent. */
@@ -201,15 +238,18 @@ export function seedBuiltinRoutes(): void {
 	// pages: `@ryu/dashboards` declares its own path and `useAppShellRoutes`
 	// mints it from the feed.
 	exact("/chat", (tab) =>
-		createElement(ChatPage, {
-			initialAgent: tab.initialAgent,
-			initialGhost: tab.initialGhost,
-			initialImages: tab.initialImages as AttachedImage[] | undefined,
-			initialProject: tab.initialProject,
-			initialPrompt: tab.initialPrompt,
-			initialSubmit: tab.initialSubmit,
-			tabConversationId: tab.conversationId,
-		})
+		chatBoundary(
+			tab,
+			createElement(ChatPage, {
+				initialAgent: tab.initialAgent,
+				initialGhost: tab.initialGhost,
+				initialImages: tab.initialImages as AttachedImage[] | undefined,
+				initialProject: tab.initialProject,
+				initialPrompt: tab.initialPrompt,
+				initialSubmit: tab.initialSubmit,
+				tabConversationId: tab.conversationId,
+			})
+		)
 	);
 	// Agents/Spaces/Workflows no longer have standalone list pages — they're
 	// consolidated into the unified Library; the bare routes redirect there.
@@ -284,6 +324,10 @@ export function seedBuiltinRoutes(): void {
 	// convention can get there from "approvals".
 	exact("/inbox", () => companionAlias(APPROVALS_ALIAS));
 	exact("/downloads", () => createElement(DownloadsPage));
+	// An empty split pane: the picker that replaces itself with whatever the
+	// user chooses. Reached only by applying a layout preset (and by a session
+	// restore that revives one), never from the sidebar or the palette.
+	exact(PANE_CHOOSER_PATH, () => createElement(PaneChooserPage));
 	exact("/settings", () => createElement(SettingsPage));
 	// Apps + Extensions + Fleet all merged into the store's Installed section.
 	exact("/extensions", () =>
@@ -333,11 +377,14 @@ export function seedBuiltinRoutes(): void {
 	// target so a send can never land on the global default agent.
 	pattern(CHAT_MERGED_AGENT, (tab) => {
 		const agentId = tab.path.match(CHAT_MERGED_AGENT)?.[1];
-		return createElement(ChatPage, {
-			initialProject: tab.initialProject,
-			mergedAgentId: agentId ? decodeURIComponent(agentId) : undefined,
-			tabConversationId: tab.conversationId,
-		});
+		return chatBoundary(
+			tab,
+			createElement(ChatPage, {
+				initialProject: tab.initialProject,
+				mergedAgentId: agentId ? decodeURIComponent(agentId) : undefined,
+				tabConversationId: tab.conversationId,
+			})
+		);
 	});
 	// /library/<section> — open the Library on a specific collection tab.
 	pattern(LIBRARY_SECTION, (tab) =>

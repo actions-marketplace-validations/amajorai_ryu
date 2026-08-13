@@ -77,6 +77,22 @@ export interface Space {
 	 * see {@link SpaceMatch.distance}.
 	 */
 	retrievalMode: RetrievalMode;
+	/**
+	 * True for a Ryu-owned system Space (Artifacts, Meetings, Canvas, Uploads…) —
+	 * a node singleton that Core creates on demand and **refuses to delete**.
+	 *
+	 * `SpaceStore::delete_space` (`crates/core/spaces/src/lib.rs`) reads the
+	 * `system` column first and `bail!`s on `system = 1`, which `DELETE
+	 * /api/spaces/:id` turns into a 500 — so a delete offered on one of these can
+	 * only ever fail. On an org-bound node it fails earlier and differently (the
+	 * `require_resource_write` gate 403s an owner-less row), which is exactly why
+	 * the UI reads this flag rather than trying to predict the status code.
+	 *
+	 * Defaults to `false` when an older Core omits the field: the delete then
+	 * stays enabled and errors as it always did, which is strictly better than
+	 * greying out every Space against a node that cannot say.
+	 */
+	system: boolean;
 	/** Unix milliseconds. */
 	updatedAt: number;
 }
@@ -278,6 +294,9 @@ interface SpaceWire {
 	/** Optional only for tolerance against an older Core; current Core always
 	 *  serializes it (`spaces::Space.retrieval_mode`, no `skip_serializing_if`). */
 	retrieval_mode?: string;
+	/** `spaces::Space.system` — `#[serde(default)]` on the Rust side, so treat an
+	 *  absent field as "not a system space". See {@link Space.system}. */
+	system?: boolean;
 	updated_at: number;
 }
 
@@ -345,6 +364,7 @@ function toSpace(s: SpaceWire): Space {
 		documentCount: s.document_count,
 		icon: s.icon ?? null,
 		retrievalMode: toRetrievalMode(s.retrieval_mode),
+		system: s.system ?? false,
 	};
 }
 

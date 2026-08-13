@@ -173,13 +173,27 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 			result.push({ realm: "mcp", label: "MCP", items: mcp });
 		}
 
-		// One catalog fetch, split by kind: companion-UI plugins are "Apps", the
-		// rest are "Plugins" — mirroring the Store's two sections.
+		// One catalog fetch, split into the "Apps" vs "Plugins" realms exactly the
+		// way the Store's two sections do: prefer the explicit `type`
+		// discriminator, and fall back to the legacy "ships a Companion runnable"
+		// derivation only for an older wire that predates `type`.
+		//
+		// Preferring `type` is not a nicety — it is the whole rule. An app claims a
+		// UI DESTINATION, and Core's `manifest_declares_destination` reads three
+		// keys for that (a companion runnable, a `contributes.dock_panels` entry in
+		// any panel mode, or a top-level `contributes.sidebar_buttons[].target`).
+		// `kinds` carries only the first of the three, so deriving here filed
+		// Browser, Simulator, CRM, UGC, Dashboards, Drafts and Mission Control into
+		// the Plugins realm while the Store tabs — which do read `type` — showed
+		// them under Apps. Same rule, one source; see `isCompanionApp` in
+		// packages/marketplace/src/catalog/apps-catalog-section.tsx.
 		const pluginMatches = (appsQuery.data ?? []).filter((e) =>
 			matches(lower, e.name, e.description, e.kinds.join(" "), e.tags.join(" "))
 		);
+		const isApp = (e: (typeof pluginMatches)[number]) =>
+			e.type ? e.type === "app" : e.kinds.includes("companion");
 		const apps = pluginMatches
-			.filter((e) => e.kinds.includes("companion"))
+			.filter((e) => isApp(e))
 			.slice(0, PER_REALM_LIMIT)
 			.map<StoreSearchItem>((e) => ({
 				id: e.id,
@@ -191,7 +205,7 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 			result.push({ realm: "apps", label: "Apps", items: apps });
 		}
 		const plugins = pluginMatches
-			.filter((e) => !e.kinds.includes("companion"))
+			.filter((e) => !isApp(e))
 			.slice(0, PER_REALM_LIMIT)
 			.map<StoreSearchItem>((e) => ({
 				id: e.id,

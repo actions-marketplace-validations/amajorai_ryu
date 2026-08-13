@@ -31,6 +31,7 @@ import {
 } from "@ryu/ui/components/context-menu.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
+import ItemLikeButton from "../../likes/like-button.tsx";
 import { stabilityLabel } from "../stability.ts";
 import type { CardDither } from "../types.ts";
 import AppIcon from "./app-icon.tsx";
@@ -53,6 +54,8 @@ export default function StoreCatalogCard({
 	onClick,
 	action,
 	contextMenu,
+	likeNamespace,
+	likeSeed,
 }: {
 	/** Persist this card's icon bytes under `<id>@<version>` (see `iconCacheKey`),
 	 *  so it paints offline and re-fetches only when the app updates. Set it for
@@ -106,6 +109,20 @@ export default function StoreCatalogCard({
 	 *  `org_verified_tier` — props are camelCase regardless of the wire's casing. */
 	orgVerifiedTier?: string | null;
 	selected?: boolean;
+	/** The listing's NAMESPACE (`@ryu/crm`, `owner/repo`) — its public scoped id.
+	 *  Set it to give the row the heart control. Deliberately a separate prop from
+	 *  `seedId` (which only seeds the generative avatar) and NOT derived from any
+	 *  internal row id: likes are keyed on the namespace so a community/GitHub
+	 *  listing, which has no marketplace document at all, is likeable too.
+	 *
+	 *  Omitted ⇒ no heart, which is why the ~8 call sites that browse installed
+	 *  rows rather than listings are unchanged. */
+	likeNamespace?: string | null;
+	/** `likeCount` / `likedByMe` off the LIST response, when the surface's feed
+	 *  carries them. Seeding is what stops a grid flashing unliked→liked; a feed
+	 *  without them (the desktop's Core-adapter catalog) omits this and the shared
+	 *  provider resolves the page in one batched request instead. */
+	likeSeed?: { count: number; liked?: boolean | null } | null;
 	onClick: () => void;
 	/** The right-hand lifecycle control (see {@link StoreItemAction}). */
 	action?: ReactNode;
@@ -159,6 +176,17 @@ export default function StoreCatalogCard({
 					</span>
 				</span>
 			</button>
+			{/* The heart sits in the RIGHT-HAND cluster beside the action, never
+			    inside the text button: this row is deliberately not a single
+			    <button> (see the file header), and nesting one button in another
+			    is invalid HTML that browsers silently repair by dropping it. */}
+			{likeNamespace ? (
+				<ItemLikeButton
+					className="shrink-0"
+					namespace={likeNamespace}
+					seed={likeSeed}
+				/>
+			) : null}
 			{action ? <div className="shrink-0">{action}</div> : null}
 		</div>
 	);

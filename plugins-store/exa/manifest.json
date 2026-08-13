@@ -148,6 +148,7 @@
     {
       "capability": "web.search",
       "version": "1.0.0",
+      "title": "Search",
       "selectable": true,
       "default": true,
       "tools": {

@@ -4,11 +4,56 @@
 // `git status --porcelain` against a caller-supplied cwd. This is Core (it
 // reads what-is; no policy), returned over GET /api/git/status?cwd=<path>.
 
-use axum::{extract::Query, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{rejection::JsonRejection, FromRequest, Query, Request},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// A `Json<T>` body extractor whose REJECTIONS are JSON too.
+///
+/// Every hand-written exit in these handlers answers
+/// `{"success":false,"error":"…"}`, but axum's built-in `Json` rejects a bad
+/// request *before* the handler runs and renders that rejection as `text/plain`
+/// ("Expected request with `Content-Type: application/json`", "Failed to
+/// deserialize the JSON body…"). A client that reasonably assumed JSON — the
+/// desktop's git client did — then fed that prose to `JSON.parse` and showed the
+/// user `Unexpected token 'E', "Expected r"... is not valid JSON` instead of the
+/// actual reason. Wrapping the extractor keeps the status code axum chose (415,
+/// 422, …) and re-clothes the reason in the same JSON envelope as every other
+/// exit, so `/api/git/*` and `/api/workspace/new-folder` have no non-JSON path.
+pub struct JsonBody<T>(pub T);
+
+#[axum::async_trait]
+impl<T, S> FromRequest<S> for JsonBody<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(json_rejection_response(&rejection)),
+        }
+    }
+}
+
+/// Render a `JsonRejection` as `(its status, {"success":false,"error":<its text>})`.
+fn json_rejection_response(rejection: &JsonRejection) -> Response {
+    (
+        rejection.status(),
+        Json(json!({ "success": false, "error": rejection.body_text() })),
+    )
+        .into_response()
+}
 
 // The git engine (everything that shells `git`) lives in the `ryu-workspace`
 // crate; these handlers are the thin axum surface over it.
@@ -147,7 +192,7 @@ pub async fn git_branches(
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn git_checkout(Json(body): Json<GitCheckoutBody>) -> axum::response::Response {
+pub async fn git_checkout(JsonBody(body): JsonBody<GitCheckoutBody>) -> axum::response::Response {
     if body.cwd.is_empty() || body.branch.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -201,7 +246,7 @@ pub async fn git_checkout(Json(body): Json<GitCheckoutBody>) -> axum::response::
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn git_create_branch(Json(body): Json<GitCheckoutBody>) -> axum::response::Response {
+pub async fn git_create_branch(JsonBody(body): JsonBody<GitCheckoutBody>) -> axum::response::Response {
     if body.cwd.is_empty() || body.branch.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -254,7 +299,7 @@ pub async fn git_create_branch(Json(body): Json<GitCheckoutBody>) -> axum::respo
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn git_commit_push(Json(body): Json<GitCommitPushBody>) -> axum::response::Response {
+pub async fn git_commit_push(JsonBody(body): JsonBody<GitCommitPushBody>) -> axum::response::Response {
     if body.cwd.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -338,7 +383,7 @@ pub struct NewFolderBody {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn create_project_folder(Json(body): Json<NewFolderBody>) -> axum::response::Response {
+pub async fn create_project_folder(JsonBody(body): JsonBody<NewFolderBody>) -> axum::response::Response {
     let name = body.name.trim().to_string();
     if let Err(msg) = validate_folder_name(&name) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
@@ -705,7 +750,7 @@ mod tests {
                 cwd: cwd.to_string(),
                 branch: branch.to_string(),
             };
-            let (status, json) = body_json(git_checkout(Json(body)).await).await;
+            let (status, json) = body_json(git_checkout(JsonBody(body)).await).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert_eq!(json["success"], serde_json::json!(false));
         }
@@ -717,7 +762,7 @@ mod tests {
             cwd: NON_DIR.to_string(),
             branch: "main".to_string(),
         };
-        let (status, json) = body_json(git_checkout(Json(body)).await).await;
+        let (status, json) = body_json(git_checkout(JsonBody(body)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("not a directory"));
     }
@@ -728,14 +773,14 @@ mod tests {
             cwd: String::new(),
             branch: "feature".to_string(),
         };
-        let (status, _) = body_json(git_create_branch(Json(empty)).await).await;
+        let (status, _) = body_json(git_create_branch(JsonBody(empty)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         let non_dir = GitCheckoutBody {
             cwd: NON_DIR.to_string(),
             branch: "feature".to_string(),
         };
-        let (status, json) = body_json(git_create_branch(Json(non_dir)).await).await;
+        let (status, json) = body_json(git_create_branch(JsonBody(non_dir)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("not a directory"));
     }
@@ -748,7 +793,7 @@ mod tests {
             action: None,
             include_unstaged: true,
         };
-        let (status, _) = body_json(git_commit_push(Json(body)).await).await;
+        let (status, _) = body_json(git_commit_push(JsonBody(body)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
@@ -760,7 +805,7 @@ mod tests {
             action: None,
             include_unstaged: true,
         };
-        let (status, json) = body_json(git_commit_push(Json(body)).await).await;
+        let (status, json) = body_json(git_commit_push(JsonBody(body)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(json["error"].as_str().unwrap().contains("not a directory"));
     }
@@ -778,7 +823,7 @@ mod tests {
             action: Some("rm-rf".to_string()),
             include_unstaged: false,
         };
-        let (status, json) = body_json(git_commit_push(Json(body)).await).await;
+        let (status, json) = body_json(git_commit_push(JsonBody(body)).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json["error"].as_str().unwrap(), "invalid git action");
         let _ = std::fs::remove_dir_all(&base);
@@ -791,7 +836,7 @@ mod tests {
             let body = NewFolderBody {
                 name: bad.to_string(),
             };
-            let (status, json) = body_json(create_project_folder(Json(body)).await).await;
+            let (status, json) = body_json(create_project_folder(JsonBody(body)).await).await;
             assert_eq!(
                 status,
                 StatusCode::BAD_REQUEST,
@@ -799,5 +844,50 @@ mod tests {
             );
             assert!(json["error"].is_string());
         }
+    }
+
+    // ── Extractor rejections stay JSON ────────────────────────────────────────
+    //
+    // The reported bug was a plain-text axum rejection being fed to the desktop's
+    // `JSON.parse`. These drive `JsonBody` directly (no router needed) and assert
+    // that the two rejection shapes a client can trigger — wrong content type and
+    // an undeserializable body — still come back as `{success:false,error:"…"}`.
+
+    async fn reject_body(content_type: &str, body: &'static str) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/git/commit-push")
+            .header("content-type", content_type)
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = JsonBody::<GitCommitPushBody>::from_request(req, &())
+            .await
+            .err()
+            .expect("request should be rejected");
+        body_json(resp).await
+    }
+
+    #[tokio::test]
+    async fn json_body_rejects_wrong_content_type_with_json() {
+        // The exact trigger: `fetch` combined two Content-Type record entries into
+        // `application/json, application/json`, which axum's mime parse refuses.
+        let (status, json) =
+            reject_body("application/json, application/json", r#"{"cwd":"/tmp"}"#).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(json["success"], serde_json::json!(false));
+        assert!(
+            json["error"].as_str().unwrap().contains("Content-Type"),
+            "rejection reason must survive into the JSON body: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_body_rejects_malformed_body_with_json() {
+        // A body missing the required `cwd` never reaches the handler's own
+        // "cwd is required" branch — the deserializer rejects it first.
+        let (status, json) = reject_body("application/json", r#"{"message":"hi"}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json["success"], serde_json::json!(false));
+        assert!(json["error"].as_str().unwrap().contains("cwd"));
     }
 }

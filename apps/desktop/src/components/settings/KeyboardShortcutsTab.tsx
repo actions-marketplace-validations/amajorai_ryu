@@ -332,14 +332,14 @@ export function KeyboardShortcutsTab() {
 					<GlobalRow
 						defaultAccelerator={DEFAULT_ISLAND_COMMAND_SHORTCUT}
 						description="Open the island command bar from anywhere."
-						label="Summon command bar"
+						label="Summon Command Bar"
 						load={() => getIslandCommandShortcut(activeTarget())}
 						save={(acc) => setIslandCommandShortcut(activeTarget(), acc)}
 					/>
 					<GlobalRow
 						defaultAccelerator={DEFAULT_VOICE_PREFS.shortcut}
 						description="Hold to dictate a voice message into the island."
-						label="Push-to-talk"
+						label="Push-To-Talk"
 						load={() =>
 							getVoiceInputPrefs(activeTarget()).then((p) => p.shortcut)
 						}
@@ -355,7 +355,7 @@ export function KeyboardShortcutsTab() {
 					<GlobalRow
 						defaultAccelerator={DEFAULT_DICTATION_PREFS.shortcut}
 						description="Dictate into the focused app (Dictation plugin)."
-						label="System-wide dictation"
+						label="System-Wide Dictation"
 						load={() =>
 							getDictationPrefs(activeTarget()).then((p) => p.shortcut)
 						}
@@ -370,7 +370,7 @@ export function KeyboardShortcutsTab() {
 					<GlobalRow
 						defaultAccelerator={DEFAULT_DICTATION_PREFS.ask.shortcut}
 						description="Speak a question; paste the agent answer (Dictation → Agent ask)."
-						label="Agent ask"
+						label="Agent Ask"
 						load={() =>
 							getDictationPrefs(activeTarget()).then((p) => p.ask.shortcut)
 						}

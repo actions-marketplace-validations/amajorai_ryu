@@ -19,19 +19,21 @@ export const COMPOSER_SELECT_TRIGGER =
 export const WORKSPACE_SELECT_TRIGGER =
 	"h-7 gap-1.5 rounded-md px-1.5 font-medium text-[12px] leading-4 text-muted-foreground";
 
-// The workspace pickers' dropdown bodies. Codex keeps these tight: a modest
-// rounded-xl card (not the app's bulbous rounded-3xl), 4px padding, compact rows
-// at px-2/py-1.5 with a small 8px corner, and a quiet uppercase section label.
-// Everything aligns to px-2 so headers, rows, and dividers share one left edge
-// (our old popovers mixed px-3 rows with px-1.5 items, which read loose/ragged).
-export const WORKSPACE_SELECT_POPOVER =
-	"w-auto min-w-[200px] max-w-[300px] rounded-xl p-1";
-
-export const WORKSPACE_SELECT_ITEM =
-	"h-auto w-full items-center justify-start gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] font-medium";
-
-export const WORKSPACE_SELECT_LABEL =
-	"px-2 py-1 font-medium text-[11px] text-foreground/40";
+// The ONE width for every workspace picker menu body (folder · branch · run
+// mode), whether it is the inline picker's root menu, one of its submenus, or a
+// stacked row's menu in the pinned summary panel. It replaces a 220/256/260/280
+// spread that made the same three lists three different widths depending on
+// which trigger you came from. `DropdownMenuContent` sizes to `--anchor-width`,
+// so this floor is load-bearing: without it the menu would size itself to a
+// 28px-tall chip.
+//
+// Rows inside these menus carry no width class of their own — they take
+// `COMPOSER_SELECT_ITEM` (or the `DropdownMenuItem` primitive, which already
+// matches it), so the workspace pickers read identical to every other dropdown
+// in the app. There is deliberately no WORKSPACE_SELECT_ITEM/POPOVER/LABEL any
+// more: they were the second, near-identical copy of that styling, and having
+// two is what let the two picker families drift apart in the first place.
+export const WORKSPACE_MENU_CONTENT = "min-w-[280px]";
 
 // The cap + scroller is part of the shared look ON PURPOSE, because the lists
 // these popovers hold are not ours to bound: an ACP agent advertises its own

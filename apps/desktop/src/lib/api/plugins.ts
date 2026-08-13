@@ -16,7 +16,7 @@ import type {
 	ViewContribution,
 	ViewSource,
 } from "@ryu/app-host/views";
-import type { CardDither } from "@ryu/marketplace/catalog/types";
+import type { CardDither, CatalogBanner } from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
 	apiUrl,
@@ -523,6 +523,11 @@ export interface PluginContributions {
 	 *  tagged with `plugin`. The declarative replacement for hardcoded shell menu
 	 *  rows like "Make a skill from this chat". */
 	context_menu_items: PluginContextMenuItem[];
+	/** "New X" rows enabled plugins contribute to the create menu
+	 *  (`contributes.create_actions`), tagged with `plugin`. The declarative
+	 *  replacement for create rows the shell used to hardcode for apps that may
+	 *  not even be installed. */
+	create_actions: PluginCreateAction[];
 	/** App-registered workspace dock panels (bottom/right dock tabs), tagged with
 	 *  `plugin`. The declarative replacement for the shell's closed `TabKind` union. */
 	dock_panels: PluginDockPanel[];
@@ -825,6 +830,30 @@ export interface PluginContextMenuItem {
 	plugin: string;
 }
 
+/** A create-menu row an enabled plugin contributes
+ *  (`contributes.create_actions`), tagged with its owning `plugin`.
+ *
+ *  Exactly one of `target` (an in-app route to open) or `capability` (a granted
+ *  host capability to invoke) drives the row; Core rejects a manifest that
+ *  declares neither.
+ */
+export interface PluginCreateAction {
+	args?: Record<string, unknown>;
+	/** Capability invoked when the row is clicked, through the owning plugin's
+	 *  granted capability seam. */
+	capability?: string;
+	icon?: string;
+	id: string;
+	label: string;
+	order?: number;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	/** In-app route the shell opens (e.g. `/workflows/new`). */
+	target?: string;
+	/** Title for the opened tab. Defaults to `label`. */
+	title?: string;
+}
+
 /** A companion-surface descriptor contributed by an enabled plugin
  *  (`RunnableKind::Companion`). Mirrors Core's `AppCompanion`. `icon`/`shortcut`
  *  are omitted by serde when null, so they are optional here.
@@ -913,6 +942,7 @@ export async function getPluginContributions(
 		message_actions: json.message_actions ?? [],
 		output_styles: json.output_styles ?? [],
 		context_menu_items: json.context_menu_items ?? [],
+		create_actions: json.create_actions ?? [],
 		slash_commands: json.slash_commands ?? [],
 		turn_hooks: json.turn_hooks ?? [],
 		hook_events: json.hook_events ?? [],
@@ -1383,12 +1413,13 @@ export async function uninstallApp(
 
 // ── App catalog (browse remote registry + install-from-URL) ───────────────────
 
-/** Presentational banner descriptor for an app's hero region. */
-export interface CatalogBanner {
-	colors: string[];
-	seed?: number;
-	style?: "gradient" | "dither";
-}
+/** Presentational banner descriptor for an app's hero region.
+ *
+ *  Re-exported rather than re-declared: this file used to carry its own copy with a
+ *  REQUIRED `colors`, so the two drifted the moment the render layer learned
+ *  `background`/`imageUrl` — the wire carried those keys through fine (the entry is
+ *  verbatim JSON) while the desktop type could not express them. */
+export type { CatalogBanner };
 
 /** A single installable-app entry from Core's remote registry
  *  (`GET /api/plugins/catalog`). Pure discovery metadata — lifecycle state
@@ -1408,8 +1439,15 @@ export interface CatalogEntry {
 	descriptor_only?: boolean;
 	/** Publisher / developer name shown on the card + detail. */
 	developer?: string | null;
+	/** Icon-primitive glyph id painted inside the tile. Declared here as well as on
+	 *  `@ryu/marketplace`'s `CatalogEntry` because it is on the same wire and the
+	 *  Store's Home rows read it — without it those rows fell back to the
+	 *  generative placeholder and Home was the one tab whose icons were wrong. */
+	icon?: string | null;
 	/** Optional CSS background for the icon square (e.g. a gradient). */
 	icon_background?: string | null;
+	/** The listing's dithered icon wash, when it declares one. */
+	icon_dither?: CardDither | null;
 	/** Remote icon URL when provided by the catalog source. */
 	icon_url?: string | null;
 	id: string;

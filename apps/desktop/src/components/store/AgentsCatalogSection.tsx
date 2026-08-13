@@ -131,7 +131,7 @@ function InstallButton({
 				) : (
 					<HugeiconsIcon className="size-4" icon={Delete01Icon} />
 				)}
-				{locked ? "Built in" : "Uninstall"}
+				{locked ? "Built in" : "Remove"}
 			</Button>
 		);
 	}
@@ -151,7 +151,7 @@ function InstallButton({
 			percent={percent}
 		>
 			<HugeiconsIcon className="size-4" icon={Download01Icon} />
-			Install
+			Add
 		</InstallProgressButton>
 	);
 }
@@ -420,7 +420,7 @@ function AgentDetailPanel({
 			hero={
 				<ListingHero
 					badges={[
-						entry.added ? "Installed" : "Not installed",
+						entry.added ? "Added" : "Not added",
 						entry.recommended ? "Recommended" : null,
 						entry.available ? null : "Unavailable on this platform",
 						updateAvailable ? "Update available" : null,
@@ -461,7 +461,7 @@ function AgentDetailPanel({
 						{ label: "Transport", value: entry.transport ?? "—" },
 						{
 							label: "Status",
-							value: entry.added ? "Installed" : "Available",
+							value: entry.added ? "Added" : "Available",
 						},
 					]}
 				/>
@@ -473,7 +473,7 @@ function AgentDetailPanel({
 				</p>
 			</ListingSection>
 			{entry.installHint ? (
-				<ListingSection title="Installing">
+				<ListingSection title="Adding this agent">
 					<p className="text-muted-foreground text-sm">{entry.installHint}</p>
 				</ListingSection>
 			) : null}

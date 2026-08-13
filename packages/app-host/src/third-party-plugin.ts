@@ -398,6 +398,12 @@ export function thirdPartyPluginSrcdoc(
           open: function (a) { return call("social.open", [a || {}]); },
           openList: function () { return call("social.openList", []); }
         },
+        // Subtitles (needs grant subtitles:crud). ONE forwarder and no navigation verb —
+        // the companion IS the whole surface. Kept in step with the sibling bridge below
+        // for the same reason Outpost is.
+        subtitles: {
+          request: function (a) { return call("subtitles.request", [a || {}]); }
+        },
         // Automated Reasoning (needs grant reasoning:check). ONE forwarder and no
         // navigation verb — the companion IS the whole surface, so it never opens a
         // shell tab. Kept in step with the sibling bridge below for the same reason
@@ -405,6 +411,11 @@ export function thirdPartyPluginSrcdoc(
         // in only one is a verb whose availability depends on how the app was built.
         reasoning: {
           request: function (a) { return call("reasoning.request", [a || {}]); }
+        },
+        // Deep Read (needs grant rlm:query). Same ONE-forwarder shape as reasoning
+        // directly above, and kept in step with the sibling bridge below by hand.
+        rlm: {
+          request: function (a) { return call("rlm.request", [a || {}]); }
         },
         // Tuition (needs grant tuition:crud) and Wire (needs grant news:crud). Same
         // ONE-forwarder shape as reasoning directly above.
@@ -983,6 +994,18 @@ function htmlCompanionHeadFragment(
         open: function (a) { return call("social.open", [a || {}]); },
         openList: function () { return call("social.openList", []); }
       },
+      // Subtitles (needs grant subtitles:crud). The @ryu/subtitles companion picks a
+      // video, queues a local transcription + translation job, and reads the cue list
+      // back. ONE generic request forwarder rather than a verb per endpoint: the host
+      // re-issues { method, path, body } against Core's /api/subtitles public mount,
+      // which already answers any client holding the node token — so the forwarder
+      // widens nothing, and the gates stay the subtitles:crud grant plus Core's
+      // ext-proxy route allowlist. The host validates the path (leading slash, resolving
+      // under the mount, no host) before building the URL. No navigation verb: the
+      // companion never opens a shell tab.
+      subtitles: {
+        request: function (a) { return call("subtitles.request", [a || {}]); }
+      },
       // Automated Reasoning (needs grant reasoning:check). The @ryu/reasoning companion
       // authors formal policies and runs the solver playground. ONE generic request
       // forwarder rather than a verb per endpoint: the host re-issues { method, path,
@@ -993,6 +1016,14 @@ function htmlCompanionHeadFragment(
       // building the URL. No navigation verb: the companion never opens a shell tab.
       reasoning: {
         request: function (a) { return call("reasoning.request", [a || {}]); }
+      },
+      // Deep Read (needs grant rlm:query). The same ONE-forwarder shape as reasoning
+      // directly above: the frame supplies { method, path, body } and the host
+      // re-issues it against Core's /api/rlm public mount, which already answers any
+      // client holding the node token. The gates stay the rlm:query grant plus Core's
+      // ext-proxy route allowlist. Kept in step with the sibling bridge above BY HAND.
+      rlm: {
+        request: function (a) { return call("rlm.request", [a || {}]); }
       },
       // Tuition (needs grant tuition:crud) and Wire (needs grant news:crud). The same
       // ONE-forwarder shape as reasoning directly above: the frame supplies

@@ -37,6 +37,12 @@ import {
 } from "@ryu/ui/components/empty";
 import { Input } from "@ryu/ui/components/input";
 import { Spinner } from "@ryu/ui/components/spinner";
+import {
+	APP_ICON_TILE_CARD,
+	APP_ICON_TILE_CARD_GLYPH,
+	APP_ICON_TILE_CARD_SURFACE,
+} from "@ryu/ui/lib/app-icon-tile";
+import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 
 /** Mirrors the control plane's `MarketplaceKind`. `agent` is a user-published
@@ -125,7 +131,15 @@ export function TrustBadge({ status }: { status: MarketplaceVerification }) {
 	return null;
 }
 
-/** Item logo, or an initial-letter placeholder when no icon URL is set. */
+/** Item logo, or an initial-letter placeholder when no icon URL is set.
+ *
+ *  This paints the SAME square the free catalog's `AppIcon` paints — it just cannot
+ *  be that component: `@ryu/marketplace` (where `AppIcon` lives) depends on this
+ *  package, so importing it here would invert the dependency. The tile classes come
+ *  from the one file both sides read ({@link APP_ICON_TILE_CARD}) so the paid strip
+ *  card and the catalog card beside it cannot drift again — this one used to carry
+ *  a `border` that the catalog card never had, which is why the two read as
+ *  different components in the same list. */
 function MarketplaceCardLogo({
 	iconUrl,
 	name,
@@ -133,22 +147,27 @@ function MarketplaceCardLogo({
 	iconUrl?: string | null;
 	name: string;
 }) {
-	if (iconUrl) {
-		return (
-			<img
-				alt={`${name} logo`}
-				className="size-10 shrink-0 rounded-lg border object-cover"
-				loading="lazy"
-				src={iconUrl}
-			/>
-		);
-	}
 	return (
 		<span
-			aria-hidden="true"
-			className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted font-medium text-muted-foreground text-sm uppercase"
+			className={cn(
+				APP_ICON_TILE_CARD,
+				APP_ICON_TILE_CARD_SURFACE,
+				APP_ICON_TILE_CARD_GLYPH,
+				"size-10"
+			)}
 		>
-			{name.trim().charAt(0) || "?"}
+			{iconUrl ? (
+				<img
+					alt={`${name} logo`}
+					className="size-full object-cover"
+					loading="lazy"
+					src={iconUrl}
+				/>
+			) : (
+				<span aria-hidden="true" className="font-medium text-sm uppercase">
+					{name.trim().charAt(0) || "?"}
+				</span>
+			)}
 		</span>
 	);
 }

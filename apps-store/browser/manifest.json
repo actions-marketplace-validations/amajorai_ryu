@@ -406,6 +406,7 @@
     {
       "capability": "browser.control",
       "version": "1.0.0",
+      "title": "Browser",
       "sidecar": "browser",
       "route": "/",
       "grant": "browser:control",

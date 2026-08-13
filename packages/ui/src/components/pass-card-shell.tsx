@@ -24,6 +24,17 @@ import { hueFill } from "./dither-kit/pixel.ts";
 import { Logo } from "./logo.tsx";
 import { METAL_EDGE_RING_PX, MetalEdge } from "./metal-edge.tsx";
 import { ShaderBackground } from "./motion/shader-background.tsx";
+import {
+	CARD_HALF_THICKNESS_PX,
+	CARD_THICKNESS_PX,
+	edgeSliceFill,
+	sliceDepths,
+} from "./pass-edge.ts";
+
+// Re-exported rather than re-declared: `pass-studio/scene.ts` and the tier card
+// import the thickness from HERE, and the edge module is where it now lives
+// alongside the slice geometry and the material that fills it.
+export { CARD_THICKNESS_PX };
 
 /**
  * The card object itself — the laminated, two-sided, metal-ringed thing that
@@ -109,58 +120,20 @@ export const CARD_RADIUS_PX = 28;
 export const FACE_RADIUS_PX = CARD_RADIUS_PX - METAL_EDGE_RING_PX;
 
 /**
- * Card thickness. Two faces alone turn edge-on into a hairline — a sheet of
- * paper, not a card — so the pass is built as a solid: the faces sit half a
- * thickness apart along Z, and the gap between them is filled.
+ * The card's thickness, the depths its slices sit at, and the metal they are
+ * filled with all live in `pass-edge.ts` — see the header there for why they are
+ * not in this file. In short: the pass studio paints the same edge to a canvas
+ * and used to carry its own copy of the ramp, and none of the arithmetic that
+ * decides how the edge LOOKS was reachable from a test while it sat next to
+ * `motion` and a WebGL shader.
  *
  * The fill is a stack of copies of the card's own rounded silhouette, one every
  * half pixel of depth, rather than four rotated slabs along the straight edges.
- * Four
- * slabs cannot follow a 28px corner radius, so the corners came out hollow —
- * you could see through the card where it was rounded. A stack has no such
+ * Four slabs cannot follow a 28px corner radius, so the corners came out hollow
+ * — you could see through the card where it was rounded. A stack has no such
  * problem: every slice is the exact outline, so the extrusion is solid the whole
  * way round, corners included.
- *
- * Kept deliberately shallow. Each face carries its own metal ring, so at any
- * real depth you see BOTH rings at once, separated by the gap — which reads as
- * two cards stacked rather than as one thick one. A few pixels is enough to kill
- * the paper-thin look without opening that gap.
  */
-export const CARD_THICKNESS_PX = 6;
-const CARD_HALF_THICKNESS_PX = CARD_THICKNESS_PX / 2;
-/**
- * Spacing between slices, in px of depth.
- *
- * HALF a pixel, not one. At one-per-pixel the stack spanned z ∈ {2,1,0,−1,−2}
- * against faces sitting at ±3, so a full pixel of the card's thickness was
- * EMPTY on each side — edge-on you saw the page through a hairline gap between
- * the material and each face, which is the first half of "it looks like two
- * cards back to back". Half-pixel steps let the stack run to ±2.5 and leave a
- * sub-pixel gap the compositor blends away, without putting a slice in the
- * exact plane of a face (see the coplanar note in {@link CardExtrusion}).
- */
-const CARD_SLICE_STEP_PX = 0.5;
-/** Depth of the outermost slice: as close to a face as it can get without touching. */
-const CARD_OUTER_SLICE_PX = CARD_HALF_THICKNESS_PX - CARD_SLICE_STEP_PX;
-const CARD_SLICES =
-	Math.round(CARD_OUTER_SLICE_PX / CARD_SLICE_STEP_PX) * 2 + 1;
-
-/**
- * The material the card is milled from, as seen edge-on — the sheen ALONG the
- * card's length. A flat token fill read as cardboard, so the slices carry a
- * brushed-metal ramp instead. Fixed greys rather than theme tokens, because
- * metal is metal in both schemes; the same reason the ring's own presets are not
- * token-derived.
- *
- * ONE specular sweep, deliberately: bright in the upper third and falling away
- * from there. The ramp this replaced was symmetric — bright at 34%, DARK at 52%,
- * bright again at 70% — which put a grey band across the exact middle of the
- * edge and made one card read as two stacked and joined at the waist. A rolled
- * edge is lit by one light; it does not have two highlights with a shadow
- * between them.
- */
-const EDGE_METAL =
-	"linear-gradient(180deg, #55555f 0%, #9a9aa6 9%, #d6d6df 24%, #f6f6fa 39%, #dededf 58%, #b4b4c0 76%, #8a8a96 90%, #5b5b65 100%)";
 
 /**
  * How the card's thickness is finished. `"brushed"` is the static ramp above —
@@ -200,45 +173,44 @@ const LIVE_EDGE_RING_PX = 1;
 const LIVE_SLICE_RADIUS_PX = CARD_RADIUS_PX - LIVE_EDGE_RING_PX;
 
 /**
- * The card's thickness, as a stack of its own silhouette. Each slice sits a
+ * The card's thickness, as a stack of its own silhouette. Each slice sits half a
  * pixel further back than the last, spanning front face to back face, so any
  * edge-on view shows a continuous band of material instead of a hairline — and
- * because each slice is tinted for its own depth, that band is a specular ramp
- * across the thickness rather than one flat colour repeated.
+ * because each slice is tinted for its own depth (see `edgeSliceFill`), that
+ * band is a specular ramp across the thickness rather than one flat colour
+ * repeated.
  */
 function CardExtrusion({ edge, ringed }: { edge: PassEdge; ringed: boolean }) {
+	// The edge FINISH, which is not the same question as "does this plane carry
+	// the mid-plane ring" below. Keeping the two under one name is how the
+	// iridescence ends up on a single slice instead of across the whole core.
+	const iridescent = edge === "live" && ringed;
 	return (
 		<>
-			{Array.from({ length: CARD_SLICES }, (_, index) => {
-				// STRICTLY BETWEEN the faces: the outermost slices used to sit at
-				// ±CARD_HALF_THICKNESS_PX, i.e. in the exact plane of each face, and
-				// they are opaque across the whole box — including the transparent
-				// gutter the metal ring paints into. Coplanar opaque geometry inside a
-				// `preserve-3d` context has no defined winner, so which one you saw
-				// depended on the turn angle: the FRONT ring lost and only the back
-				// one showed, and a back-facing metal-fx instance is not repainted, so
-				// the ring that did show was a frozen frame. Hence "the border is only
-				// on the back, and it does not animate". Stopping HALF a pixel short
-				// on each side leaves both faces alone while still filling the
-				// thickness — see {@link CARD_SLICE_STEP_PX}.
-				const depth = CARD_OUTER_SLICE_PX - index * CARD_SLICE_STEP_PX;
+			{sliceDepths().map((depth) => {
 				// The material of the slice: the lengthwise brushed ramp, shaded for
 				// this slice's own depth so the stack reads as a rolled edge lit from
-				// one side. Under `"live"` the middle plane additionally carries a
-				// metal-fx ring, so the thickness catches the same animated shader as
-				// the faces rather than only a painted lookalike.
+				// one side rather than one flat colour repeated. That per-slice tint is
+				// the half of this component that has now been dropped twice — most
+				// recently by a merge that took the ramp and the geometry from the fix
+				// and left the shading behind — and it is the difference between one
+				// thick card and two thin ones stacked. `pass-edge.test.ts` guards it.
+				//
+				// Under `"live"` the middle plane additionally carries a metal-fx ring,
+				// so the thickness catches the same animated shader as the faces rather
+				// than only a painted lookalike.
 				//
 				// The brushed ramp stays on an UNRINGED card too. The thing an
 				// unclaimed pass withholds is the animated chrome BORDER, not the
 				// material it is milled from — a card whose edge went flat read as
 				// cardboard rather than as metal waiting to be finished.
-				const live = edge === "live" && ringed && depth === 0;
+				const live = iridescent && depth === 0;
 				const slice = (
 					<div
 						aria-hidden="true"
 						className="absolute inset-0"
 						style={{
-							backgroundImage: EDGE_METAL,
+							backgroundImage: edgeSliceFill(depth, iridescent),
 							// See `SLICE_RADIUS_PX`: the card's own radius, less the live
 							// ring's gutter on the one plane that has one.
 							borderRadius: `${live ? LIVE_SLICE_RADIUS_PX : SLICE_RADIUS_PX}px`,

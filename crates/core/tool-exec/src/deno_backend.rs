@@ -715,18 +715,29 @@ fn sanitize_error(e: &str) -> String {
     }
 }
 
-/// Strip control characters (except none — logs are plain text) so untrusted
-/// tool output / program logs cannot inject terminal/markup control sequences
-/// when they re-enter the model (security MED). Also strips LLM chat-template
-/// control tokens (`<|im_start|>`, `<|eot_id|>`, ...) so a poisoned tool result
-/// on the PTC plane cannot impersonate the transcript. NO boundary-wrapping here:
-/// `sanitize_tool_value` round-trips a JSON `Value`, so wrapping each string
-/// would corrupt structure — token-stripping only. Feeds `sanitize_tool_value`,
-/// `sanitize_error`, and `push_log`.
+/// Strip control characters so untrusted tool output / program logs cannot inject
+/// terminal/markup control sequences when they re-enter the model (security MED).
+/// Also strips LLM chat-template control tokens (`<|im_start|>`, `<|eot_id|>`, ...)
+/// so a poisoned tool result on the PTC plane cannot impersonate the transcript.
+/// NO boundary-wrapping here: `sanitize_tool_value` round-trips a JSON `Value`, so
+/// wrapping each string would corrupt structure — token-stripping only. Feeds
+/// `sanitize_tool_value`, `sanitize_error`, and `push_log`.
+///
+/// **`\n` and `\t` survive; everything else in C0/C1 does not.** The threat is a
+/// sequence that MOVES A CURSOR, repaints, or rings — `ESC`, `CR` (overwrites the
+/// line just drawn), `BEL`, `SO`/`SI`. A line feed does none of those: it is
+/// ordinary text layout, and it is what every multi-line result is made of. Sinking
+/// it too cost real output — a hook returning `"…:\n\n" + advice` had its paragraph
+/// break silently deleted on the way back (`live_advisor_slash_command_continues`),
+/// and every markdown/code/log value a sandboxed tool returns was flattened to one
+/// line for the same reason. Impersonating a turn boundary does not need a newline
+/// and is answered by [`crate::scrub_templates`], which matches the template tokens
+/// whether or not one precedes them, so keeping `\n` gives an attacker nothing the
+/// stripping was buying.
 fn strip_control(s: &str) -> String {
     let no_control: String = s
         .chars()
-        .filter(|c| !c.is_control() || *c == '\t')
+        .filter(|c| !c.is_control() || *c == '\t' || *c == '\n')
         .collect();
     crate::scrub_templates(&no_control)
 }
@@ -931,6 +942,20 @@ mod tests {
         assert_eq!(clean, "hello[31mworld");
         // Tabs survive.
         assert_eq!(strip_control("a\tb"), "a\tb");
+    }
+
+    /// A line feed is text layout, not a terminal command, and a sandboxed hook or
+    /// tool returning prose/markdown/code is mostly newlines. Stripping it flattened
+    /// every multi-line result to one line; a carriage return, which DOES repaint the
+    /// line already drawn, still goes.
+    #[test]
+    fn strip_control_keeps_newlines_and_drops_carriage_returns() {
+        assert_eq!(strip_control("para one\n\npara two"), "para one\n\npara two");
+        assert_eq!(strip_control("kept\r\ngone"), "kept\ngone");
+        assert_eq!(
+            sanitize_tool_value(&json!({ "text": "a\nb" }))["text"],
+            "a\nb"
+        );
     }
 
     #[test]

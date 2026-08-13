@@ -26,7 +26,40 @@ export interface Engine {
 export interface ActiveEngine {
 	active: string | null;
 	available: string[];
+	/** Which llama.cpp build is installed ("cpu" / "metal" / "cuda" / "vulkan"). */
+	llamacppVariant: string | null;
 	running: boolean;
+}
+
+/**
+ * One llama.cpp build the node could run. `available` is Core's answer for THIS
+ * machine — a GPU build on a machine with no usable graphics card comes back
+ * `available: false` with a plain-language `unavailableReason`, and Core refuses
+ * to install it even if asked directly.
+ */
+export interface AccelerationOption {
+	available: boolean;
+	description: string;
+	id: string;
+	label: string;
+	unavailableReason: string | null;
+}
+
+/**
+ * Which llama.cpp build runs. `selected` is the user's choice — `"auto"` by
+ * default, which is what almost everyone should stay on; `resolved` is what
+ * that actually means on this machine, so the UI can say "Automatic (using your
+ * graphics card)" without the user knowing what CUDA or Vulkan is.
+ */
+export interface LlamacppAcceleration {
+	gpuName: string | null;
+	hasGpu: boolean;
+	installed: string | null;
+	options: AccelerationOption[];
+	resolved: string;
+	resolvedLabel: string;
+	selected: string;
+	vram: string;
 }
 
 interface EngineWire {
@@ -74,12 +107,76 @@ export async function fetchActiveEngine(
 		active?: string | null;
 		running?: boolean;
 		available?: string[];
+		llamacpp_variant?: string | null;
 	}>(target, "/api/engine/active");
 	return {
 		active: json.active ?? null,
 		running: json.running ?? false,
 		available: json.available ?? [],
+		llamacppVariant: json.llamacpp_variant ?? null,
 	};
+}
+
+interface AccelerationOptionWire {
+	available?: boolean;
+	description?: string;
+	id: string;
+	label?: string;
+	unavailable_reason?: string | null;
+}
+
+/** Read the llama.cpp acceleration choice and what this machine supports. */
+export async function fetchLlamacppAcceleration(
+	target: ApiTarget
+): Promise<LlamacppAcceleration> {
+	const json = await request<{
+		selected?: string;
+		resolved?: string;
+		resolved_label?: string;
+		installed?: string | null;
+		has_gpu?: boolean;
+		gpu_name?: string | null;
+		vram?: string;
+		options?: AccelerationOptionWire[];
+	}>(target, "/api/engine/llamacpp/acceleration");
+	return {
+		selected: json.selected ?? "auto",
+		resolved: json.resolved ?? "cpu",
+		resolvedLabel: json.resolved_label ?? "CPU only",
+		installed: json.installed ?? null,
+		hasGpu: json.has_gpu ?? false,
+		gpuName: json.gpu_name ?? null,
+		vram: json.vram ?? "",
+		options: (json.options ?? []).map(
+			(o): AccelerationOption => ({
+				id: o.id,
+				label: o.label ?? o.id,
+				description: o.description ?? "",
+				available: o.available ?? false,
+				unavailableReason: o.unavailable_reason ?? null,
+			})
+		),
+	};
+}
+
+/**
+ * Pin the llama.cpp build, or pass `"auto"` to hand the choice back to
+ * hardware detection. Core installs the new build before returning, so a
+ * resolved promise means the engine really is running that backend.
+ */
+export async function setLlamacppAcceleration(
+	target: ApiTarget,
+	variant: string
+): Promise<void> {
+	const json = await request<{ success?: boolean; error?: string }>(
+		target,
+		"/api/engine/llamacpp/acceleration",
+		{ method: "POST", body: { variant } }
+	);
+	if (json.success === false) {
+		throw new Error(json.error ?? `Failed to switch to "${variant}"`);
+	}
+	track({ event: "engine_swapped", engine: `llamacpp-${variant}` });
 }
 
 /**

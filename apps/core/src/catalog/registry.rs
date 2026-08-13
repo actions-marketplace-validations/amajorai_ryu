@@ -274,7 +274,7 @@ pub fn static_registry() -> Vec<CatalogEntry> {
         CatalogEntry {
             name: "llamacpp",
             display_name: "LlamaCpp",
-            description: "Wide range of model support (default)",
+            description: "Wide range of model support · uses your GPU when you have one (default)",
             category: SidecarCategory::Provider,
             source: SidecarSource::Github {
                 repo: "ggml-org/llama.cpp",

@@ -14,73 +14,86 @@ export interface FAQItem {
 export const GENERAL_FAQ_ITEMS: FAQItem[] = [
 	{
 		id: "1",
-		title: "What is Ryu?",
+		title: "What does Ryu actually do for my firm?",
 		content: [
-			"Ryu is a local-first app and gateway for AI agents. It helps businesses run agents without stitching together models, tools, memory, budgets, and security from scratch.",
+			"We take a document-heavy workflow your team is spending its week on \u2014 translation jobs, claims files, working paper prep \u2014 and set it up to run with AI, configured around your document types, your rules and your approval steps.",
+			"Your people move from typing to reviewing, and every job comes with a record of what was done.",
 		],
 	},
 	{
 		id: "2",
-		title: "What's the difference between Ryu App and Ryu Gateway?",
+		title: "Do our client files leave the office?",
 		content: [
-			"Ryu App is where people use agents, manage workflows, connect tools, and review usage.",
-			"Ryu Gateway is the control layer behind those agents. It routes calls to local or cloud models, enforces budgets and policy, and keeps an audit trail. You can run it locally, self-host it, or use managed cloud.",
+			"Not unless you choose that. Ryu runs on your own machines, so the work can stay entirely inside the firm.",
+			"If a job does call an outside model, personal details are stripped out first by default, and you can see exactly which jobs did so.",
 		],
 	},
 	{
 		id: "3",
-		title: "Which AI models does Ryu support?",
+		title: "How do we know what it did?",
 		content: [
-			"Ryu supports OpenAI, Anthropic, Gemini, local models via Ollama or compatible runtimes, and 400+ models through supported providers. The router handles model switching, so your agent code does not change when you swap providers.",
+			"Every action is written down as it happens: what it read, what it produced, who approved it and what it cost. It reads as plain steps, not developer logs.",
+			"That is the record you show a client or a regulator when they ask why the file looks the way it does.",
 		],
 	},
 	{
 		id: "4",
-		title: "What is MCP and how does Ryu use it?",
+		title: "What does it cost, and can the bill run away from us?",
 		content: [
-			"MCP (Model Context Protocol) is an open standard for connecting AI models to external tools and data sources. Ryu ships with a registry of 250+ MCP tools - GitHub, Slack, Postgres, browsers, email, and more. Your agents get access instantly, no manual wiring required.",
+			"Plans start at $39 per person per month, and you set a spending ceiling per person and per team on top of that. Work stops at the ceiling rather than quietly billing past it.",
+			"Routine work runs on your own machines at no per-job cost, so the expensive models are only used when a job genuinely needs one.",
 		],
 	},
 	{
 		id: "5",
-		title: "How does Ryu help control AI spend?",
+		title: "Can we get government funding for this?",
 		content: [
-			"Ryu runs work locally when a local model is good enough, routes expensive calls only when needed, and gives each agent or team a budget. You can see which agents, tools, and models are spending money.",
+			"Singapore SMEs can apply for co-funding on this kind of deployment through the national grant schemes. Support levels, caps and eligibility are set by the administering agency, not by us.",
+			"We will walk through what your firm is likely to qualify for on the first call, before you commit to anything.",
 		],
 	},
 	{
 		id: "6",
-		title: "Can I use Ryu with agents I've already built?",
+		title: "What happens when our rules change?",
 		content: [
-			"Yes. Bring Claude Code, Codex, Gemini, OpenClaw, Ollama, or an agent you built. Ryu Gateway is OpenAI-compatible, so existing agents can point at it without a rewrite.",
+			"You update the rule in one place and both your team and the agents work off the new version from that point. Older versions are kept, so you can see what was in force on the day a job ran.",
+			"Corrections your reviewers make are kept too, which is why the work gets more accurate the longer you run it.",
 		],
 	},
 	{
 		id: "7",
-		title: "Is my data private?",
+		title: "Do we need someone technical on staff?",
 		content: [
-			"Ryu is local-first and has no telemetry by default. You can keep sensitive work fully on your machine, or route selected calls through cloud models with Gateway policy, redaction, budgets, and audit.",
+			"No. We set up the first workflow with you, and there is nothing to configure to keep it running. If you would rather not host it at all, we can run it for you under the same limits.",
 		],
 	},
 	{
 		id: "8",
-		title: "Who is Ryu for?",
+		title: "Can we keep using ChatGPT or Claude?",
 		content: [
-			"Ryu is built first for startups and SMEs that want agents across real business workflows without an AI infrastructure project. Consumers and power users can use the same app locally, but the main business product is team control, cost control, and rollout support.",
+			"Yes. Ryu runs any of them, plus Gemini, local models and agents you already built. We are not asking you to replace what your team likes \u2014 we make it safe to point at client files.",
 		],
 	},
 	{
 		id: "9",
-		title: "How much does Ryu cost?",
+		title: "Who is Ryu for?",
 		content: [
-			"Ryu has a free local-first path, paid Pro and Max plans for cloud features and credits, Teams for shared billing and roles, and Enterprise for managed rollout, custom policies, and deployment support.",
+			"Document-heavy firms in accounting, insurance, legal and translation \u2014 anywhere a person has to sign off on work built from sensitive client material.",
+			"The same app runs locally for individuals, but the product we sell and support is the firm deployment.",
 		],
 	},
 	{
 		id: "10",
+		title: "Which AI models does Ryu support?",
+		content: [
+			"OpenAI, Anthropic, Gemini, local models via Ollama or compatible runtimes, and 400+ models through supported providers. Switching models does not change how your workflow is set up.",
+		],
+	},
+	{
+		id: "11",
 		title: "Is Ryu open source?",
 		content: [
-			"Ryu follows an open-core model. Core and Gateway are the self-hostable foundation, while the desktop app, managed cloud, and business features are commercial.",
+			"Ryu follows an open-core model. The core and gateway are self-hostable, while the desktop app, managed cloud and business features are commercial. You keep the option to leave.",
 		],
 	},
 ];

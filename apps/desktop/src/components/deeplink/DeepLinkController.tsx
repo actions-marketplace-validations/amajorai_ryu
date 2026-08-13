@@ -5,46 +5,19 @@ import {
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { useEffect } from "react";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { pageRoute } from "@/src/lib/page-routes.ts";
 import { useDeepLinkStore } from "@/src/store/useDeepLinkStore.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
 import { DeepLinkConfirmDialog } from "./DeepLinkConfirmDialog.tsx";
 
 type OpenTab = ReturnType<typeof useTabsContext>["openTab"];
 
-// Maps the surface-agnostic page keys (`ryu://open/<page>`) to desktop tab
-// routes. An unknown key is ignored — a malicious or stale link can't navigate
-// somewhere unexpected. "apps"/"plugins" share the plugins route.
-const PAGE_ROUTES: Record<string, string> = {
-	chat: "/chat",
-	// Agents/Spaces/Workflows are consolidated into the unified Library; deep
-	// links open the matching Library tab.
-	agents: "/library/agent",
-	models: "/models",
-	skills: "/skills",
-	tools: "/tools",
-	spaces: "/library/space",
-	workflows: "/library/workflow",
-	// Channels/Identities browse in Library; manage pages are /channels/:id and
-	// /identities/profile/:id (see builtins.ts).
-	channels: "/library/channel",
-	identities: "/library/identity",
-	// `automations` was merged into Workflows; keep the alias pointing at the
-	// surviving surface so existing ryu://…automations deep links still resolve.
-	automations: "/library/workflow",
-	monitors: "/monitors",
-	// Approvals live inside the unified Inbox; the /approvals route resolves there.
-	approvals: "/approvals",
-	marketplace: "/marketplace",
-	settings: "/settings",
-	timeline: "/timeline",
-	fleet: "/fleet",
-	extensions: "/extensions",
-	apps: "/apps",
-	plugins: "/apps",
-	engines: "/engines",
-	store: "/store",
-	calendar: "/calendar",
-};
+// The page-key → tab-route map (`ryu://open/<page>`) lives in
+// `@/src/lib/page-routes.ts`: it is the allowlist BOTH this controller and the
+// workspace dock's page seam (`useSidePanelRouteStore`) check against, and one
+// copy is what keeps "reachable by deep link" and "openable in the side panel"
+// the same set. An unknown key is ignored here exactly as before — a malicious or
+// stale link can't navigate somewhere unexpected.
 
 // Only the main window handles deep links — tear-off ("tab-N") and companion
 // windows also render Layout, and registering the listener in each would
@@ -72,7 +45,10 @@ function navigateForIntent(intent: DeepLinkIntent, openTab: OpenTab): boolean {
 			useSettingsDialog.getState().openSettings("credits");
 			return true;
 		}
-		const route = PAGE_ROUTES[intent.page];
+		// Through `pageRoute`, not a bare index: an inbound link's page key is
+		// attacker-controlled, and a raw lookup resolves `toString`/`constructor`
+		// off the prototype to a truthy non-string.
+		const route = pageRoute(intent.page);
 		if (route) {
 			openTab(route);
 		}

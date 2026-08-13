@@ -264,6 +264,70 @@ describe("retrieval-mode wire spellings mirror Core", () => {
 	});
 });
 
+// ── `system`: the flag the sidebar greys "Delete space" out on ───────────────
+//
+// The Spaces sidebar disables its Delete item for `space.system` and explains
+// why in a tooltip (`SpaceSidebarRow`, apps/desktop/src/components/layout/
+// AppSidebar.tsx). That is a claim about Core, and an unusually load-bearing
+// one: get it wrong in the "false" direction and the user gets the action back
+// plus the failure toast it always produced; get it wrong in the "true"
+// direction and a perfectly deletable Space becomes undeletable from the UI.
+//
+// Two Rust facts hold the claim up, and they live in different crates:
+//
+//   1. `spaces::Space` still SERIALIZES `system` on every listed Space — with
+//      `#[serde(default)]`, which is what lets the client treat an absent field
+//      as `false` against an older node instead of greying out everything.
+//   2. `SpaceStore::delete_space` still REFUSES a system Space. The moment that
+//      bail goes away the disable is a lie and should be deleted with it.
+//
+// Note the org-bound path is deliberately NOT pinned here: on a bound node the
+// `require_resource_write` gate in `delete_space` (server/mod.rs) 403s an
+// owner-less system row before the store is ever reached, so the two paths fail
+// differently. The client reads the flag precisely so it does not have to
+// predict which of the two it would have hit.
+describe("the system-Space flag the delete action is gated on", () => {
+	it("is still serialized on every listed Space, with serde(default)", () => {
+		const spaceStruct = rustItemBody(spacesRs, SPACES_RS, "pub struct Space {");
+		expect(spaceStruct).toContain("pub system: bool");
+		// The attribute sits immediately above the field; `default` is what the
+		// client's `s.system ?? false` older-Core tolerance rests on, and a
+		// `skip_serializing_if` would make a system Space indistinguishable from a
+		// user one on the wire.
+		const beforeField = spaceStruct.slice(
+			0,
+			spaceStruct.indexOf("pub system: bool")
+		);
+		const attrs = beforeField.split("///").at(-1) ?? "";
+		expect(attrs).toContain("serde(default)");
+		expect(attrs).not.toContain("skip_serializing_if");
+	});
+
+	it("is still listed off the spaces table, so the wire value is the column", () => {
+		expect(
+			rustAnchor(
+				spacesRs,
+				SPACES_RS,
+				"pub async fn list_spaces(",
+				"s.retrieval_mode, s.system, s.icon"
+			)
+		).toBe(ANCHOR_PRESENT);
+	});
+
+	it("still makes Core REFUSE to delete a system Space", () => {
+		// Without this bail the disabled item is inventing a restriction. With it,
+		// an ENABLED item could only ever produce the "Couldn't delete this space"
+		// toast — which is the bug the disable exists to remove.
+		const del = rustItemBody(
+			spacesRs,
+			SPACES_RS,
+			"pub async fn delete_space(&self, space_id: &str)"
+		);
+		expect(squeeze(del)).toContain("if is_system == Some(1)");
+		expect(del).toContain("is a system space and cannot be deleted");
+	});
+});
+
 // ── The SCOPE of the mode, pinned in both directions ─────────────────────────
 //
 // The UI copy (`RETRIEVAL_MODE_SCOPE` in packages/blocks/src/desktop/spaces.tsx,

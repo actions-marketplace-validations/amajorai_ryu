@@ -82,17 +82,9 @@
     {
       "capability": "plan.review",
       "version": "1.0.0",
-      "selectable": true,
-      "default": true,
       "sidecar": "blueprint",
       "route": "/plans",
-      "grant": "blueprint:review",
-      "tools": {
-        "blueprint__plan_publish": { "tool": "blueprint__plan_publish" },
-        "blueprint__plan_status": { "tool": "blueprint__plan_status" },
-        "blueprint__plan_get": { "tool": "blueprint__plan_get" },
-        "blueprint__step_update": { "tool": "blueprint__step_update" }
-      }
+      "grant": "blueprint:review"
     }
   ],
   "permission_grants": ["blueprint:review", "mcp:blueprint"],

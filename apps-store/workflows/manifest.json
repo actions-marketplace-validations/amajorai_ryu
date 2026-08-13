@@ -89,6 +89,16 @@
     "icon": "workflow-square-01"
   },
   "contributes": {
+    "create_actions": [
+      {
+        "id": "workflows.new",
+        "label": "New workflow",
+        "icon": "workflow-square-01",
+        "target": "/workflows/new",
+        "title": "New workflow",
+        "order": 60
+      }
+    ],
     "store_tabs": [
       {
         "id": "workflows",

@@ -1,3 +1,5 @@
+import { Cancel01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { cva, type VariantProps } from "class-variance-authority";
 import type * as React from "react";
@@ -10,6 +12,15 @@ const alertVariants = cva(
 				default: "bg-card text-card-foreground",
 				destructive:
 					"bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
+				// The three remaining feedback tones. `--success`/`--warning`/`--info`
+				// have been in the token set (light and dark) since the palette was
+				// written; only `destructive` had ever been wired to a variant, so
+				// every non-error banner in the apps was hand-rolling its own colour.
+				success:
+					"bg-card text-success *:data-[slot=alert-description]:text-success/90 *:[svg]:text-current",
+				warning:
+					"bg-card text-warning *:data-[slot=alert-description]:text-warning/90 *:[svg]:text-current",
+				info: "bg-card text-info *:data-[slot=alert-description]:text-info/90 *:[svg]:text-current",
 			},
 		},
 		defaultVariants: {
@@ -72,4 +83,30 @@ function AlertAction({ className, ...props }: React.ComponentProps<"div">) {
 	);
 }
 
-export { Alert, AlertAction, AlertDescription, AlertTitle };
+/**
+ * Close affordance for a dismissable alert. Renders into the same top-right
+ * slot as `AlertAction` (which reserves the `pr-18` gutter), so a banner can
+ * carry either a CTA or a dismiss — or both, by nesting them in one action.
+ */
+function AlertDismiss({
+	className,
+	label = "Dismiss",
+	...props
+}: React.ComponentProps<"button"> & { label?: string }) {
+	return (
+		<button
+			aria-label={label}
+			className={cn(
+				"absolute top-2.5 right-3 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30",
+				className
+			)}
+			data-slot="alert-dismiss"
+			type="button"
+			{...props}
+		>
+			<HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
+		</button>
+	);
+}
+
+export { Alert, AlertAction, AlertDescription, AlertDismiss, AlertTitle };

@@ -4,6 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
+import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -93,18 +94,24 @@ import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
 import { useComposerDraftAutosave } from "@/src/hooks/useComposerDraftAutosave.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
+import {
+	invalidateGitStatus,
+	invalidateWorktreeDiff,
+	invalidateWorktreeStatus,
+} from "@/src/hooks/useGitStatus.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import {
 	isMergedHistoryId,
 	useMergedAgentThreads,
 } from "@/src/hooks/useMergedAgentThreads.ts";
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
+import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import { useSpaces } from "@/src/hooks/useSpaces.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
-import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import { AgentAvatar, AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
 import { respondPermission } from "@/src/lib/api/acp.ts";
 import type {
 	AgentSummary,
@@ -144,6 +151,14 @@ import {
 	widgetFollowUp,
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
+import { hydrateHistoryMessage } from "@/src/lib/chat-history-hydrate.ts";
+import {
+	conversationTargetDecision,
+	readLastUsedAgentId,
+	rememberLastUsedAgent,
+	seedComposerAgentId,
+	shouldAdoptNodeDefault,
+} from "@/src/lib/composer-target.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import { instrumentedFetch } from "@/src/lib/dev-metrics.ts";
 import {
@@ -165,13 +180,29 @@ import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
-// Stale run threshold: if a message was last updated more than 30 seconds ago
-// and its conversation is still flagged "running", treat it as interrupted.
-const STALE_THRESHOLD_MS = 30_000;
+// How often the focused chat tab re-probes `/api/chat/stream/resume/:id` while it
+// believes it is idle. The endpoint 404s in-memory when nothing is running, so
+// this is deliberately cheap; the interval only has to be short enough that Stop
+// appears promptly for a turn this tab did not start.
+const RESUME_POLL_MS = 15_000;
+
+// How long after an explicit Stop the resume probe stays quiet, so a turn Core
+// is still tearing down cannot re-arm the composer's Stop button.
+const RESUME_STOP_GRACE_MS = 5000;
+
+// Cool-down after a resumed reader detaches, so the "stream ended" → "ready"
+// transition cannot re-probe in a tight loop.
+const RESUME_REATTACH_GRACE_MS = 1500;
 
 // Idle gap after the last keystroke before we broadcast `typing:false` to the
 // conversation room (multi-user presence).
 const TYPING_IDLE_MS = 2500;
+
+// Hoisted so the identity is stable. Passed inline as `{}` this is a dependency
+// of the memo that builds every assistant message's element tree, so a fresh
+// object rebuilds the ENTIRE transcript (markdown, tool rows, citations) on
+// every render of this page.
+const EMPTY_TOOL_RENDERERS: Record<string, never> = {};
 
 /** Returns true when the selected agent uses ACP transport (never touches the gateway). */
 function isAcpAgent(
@@ -211,24 +242,6 @@ function isAcpAgent(
 		return false;
 	}
 	return true;
-}
-
-/**
- * Rehydrate a persisted history message into AI SDK `parts`. Core carries the
- * structured tool/text/file parts when it has them (assistant turns that ran
- * tools/media after parts capture existed), so a reloaded chat re-renders its tool
- * rows and the cowork context (Progress / Sources / Subagents) rather than
- * collapsing to flat text. When absent (user turns, or older messages) we fall
- * back to a single text part built from `content`.
- */
-function hydrateMessageParts(m: {
-	content: string;
-	parts?: unknown[];
-}): unknown[] {
-	if (Array.isArray(m.parts) && m.parts.length > 0) {
-		return m.parts;
-	}
-	return [{ type: "text", text: m.content }];
 }
 
 /**
@@ -649,12 +662,26 @@ export default function ChatPage({
 	} = useSystemStatusContext();
 
 	const { folder, setFolder } = useWorkspaceStore();
-	const [agentId, setAgentId] = useState<string | null>(
-		// The merged view is *about* one agent, so it pins the target: opening it
-		// must never inherit whichever agent happened to be the global default.
-		() =>
-			mergedAgentId ?? initialAgent ?? localStorage.getItem("ryu_default_agent")
+	// THIS TAB's composer target. Every chat tab stays mounted at once (Layout),
+	// so this is deliberately per-instance state: nothing outside this ChatPage
+	// may write it. The seed chain (merged-view pin → tab seed → last-used hint →
+	// node default → the conversation's own pinned agent) lives in
+	// `lib/composer-target.ts`; this initializer covers only its synchronous
+	// links, and the two effects below cover the async ones.
+	const [agentId, setAgentId] = useState<string | null>(() =>
+		seedComposerAgentId({
+			// The merged view is *about* one agent, so it pins the target: opening it
+			// must never inherit whichever agent happened to be picked last.
+			pinnedAgentId: mergedAgentId,
+			seededAgentId: initialAgent,
+			lastUsedAgentId: readLastUsedAgentId(),
+		})
 	);
+	// Read-only mirror for effects that must compare against the live target
+	// WITHOUT re-running when it changes — see the conversation-hydration effect,
+	// where depending on `agentId` is what reverted the user's own pick.
+	const agentIdRef = useRef(agentId);
+	agentIdRef.current = agentId;
 	// Persistent team selection from the composer target picker. When set, every
 	// turn fans out to the team's members (Core's `team_id` takes precedence over
 	// `agent_id`). Session-only — distinct from the transient `@team` mention ref.
@@ -693,15 +720,19 @@ export default function ChatPage({
 		[]
 	);
 
-	// "New agent…" in the composer's agent picker opens the create dialog rather
-	// than a whole editor tab.
+	// "Create new agent" in the composer's agent picker opens the create dialog
+	// rather than a whole editor tab.
 	const { openCreateAgent } = useCreateAgentDialog();
 
 	// Per-agent model selection for the composer model picker. Recomputed when
 	// the active agent changes; the chosen id is persisted per agent and sent in
 	// the chat body. The ref keeps the transport closure reading the live value.
+	//
+	// Seeded from THIS tab's own agent, not from the last-used one: a tab opened
+	// on a specific agent (merged view, launchpad seed) otherwise started on some
+	// other agent's model until the first pick.
 	const [selectedModel, setSelectedModel] = useState<string | null>(() =>
-		getAgentModel(localStorage.getItem("ryu_default_agent"))
+		getAgentModel(agentId)
 	);
 	const selectedModelRef = useRef(selectedModel);
 
@@ -876,6 +907,40 @@ export default function ChatPage({
 		};
 	}, [agentId, teamId, agents, teams]);
 
+	// Marks for the live status row. A team is the case where more than one agent
+	// is genuinely on the same turn, so it contributes one mark per member; a
+	// single agent contributes its own. Built from the same `agents`/`teams`
+	// lookups as the identity above rather than from the transcript, because a
+	// turn that has produced nothing yet carries no agent attribution at all —
+	// and that is exactly when this row is on screen.
+	const assistantPlanningAvatars = useMemo<React.ReactNode[]>(() => {
+		// `AgentAvatar` with an explicit 16px class, NOT the `<Avatar size="sm">`
+		// wrapper the transcript's per-turn identity uses: that component carries its
+		// own size class, which wins over whatever slot it is dropped into, so a row
+		// of them would not line up with the 16px status line they sit on. This is
+		// the same shape the sidebar's ChatRow draws its agent mark with.
+		const mark = (agent: (typeof agents)[number]) => (
+			<AgentAvatar
+				avatarUrl={agent.avatarUrl}
+				className="size-4 shrink-0 rounded-[3px] object-contain"
+				engine={engineForAgent(agent)}
+				key={agent.id}
+				size="16px"
+			/>
+		);
+		if (teamId) {
+			const team = teams.find((t) => t.id === teamId);
+			const members = (team?.members ?? [])
+				.map((id) => agents.find((a) => a.id === id))
+				.filter((a): a is (typeof agents)[number] => Boolean(a));
+			if (members.length > 0) {
+				return members.map(mark);
+			}
+		}
+		const agent = agents.find((a) => a.id === agentId);
+		return agent ? [mark(agent)] : [];
+	}, [agentId, teamId, agents, teams]);
+
 	const handleModelChange = useCallback(
 		(modelId: string) => {
 			setSelectedModel(modelId);
@@ -987,11 +1052,13 @@ export default function ChatPage({
 		createConversation,
 		getConversation,
 		loadMessages,
+		loadMessagesResult,
 		forkConversation,
 		editMessage,
 		regenerateMessage,
 		selectVersion,
 		seedTitleFromFirstMessage,
+		setConversationFolder,
 		refresh,
 	} = useChatHistoryContext();
 
@@ -1021,6 +1088,22 @@ export default function ChatPage({
 	const [convId, setConvId] = useState<string | null>(
 		tabConversationId ?? null
 	);
+
+	// Restore state for THIS tab's thread. Seeded `true` whenever the tab is
+	// restored onto an existing conversation: the first paint happens before the
+	// hydration effect below has even fired, and a tab that reports "not loading,
+	// no messages" in that window renders the new-chat greeting — the "all my
+	// chats are gone" screen the boot bug is actually about. A fresh chat has no
+	// conversation id and therefore never enters this state.
+	const [historyLoading, setHistoryLoading] = useState(
+		Boolean(tabConversationId)
+	);
+	// The fetch came back as a transport/HTTP failure. Distinct from "loaded and
+	// empty" — the thread exists, this node just could not be reached.
+	const [historyFailed, setHistoryFailed] = useState(false);
+	// Reload nonce: bumping it re-runs the hydration effect for the Try-again
+	// button without touching the auto-refresh paths.
+	const [historyReloadKey, setHistoryReloadKey] = useState(0);
 
 	// ── Merged agent view ────────────────────────────────────────────────────
 	// Older threads with this agent, rendered read-only above the live one. The
@@ -1981,6 +2064,17 @@ export default function ChatPage({
 	const commandsRef = useRef<SlashCommand[]>(composerCommands);
 	commandsRef.current = composerCommands;
 
+	// Whether anything is on screen right now, read inside the async hydration
+	// without making it a dependency: the point is what is true when the fetch
+	// RESOLVES, and depending on `messages` would re-run the fetch on every token.
+	const hasMessagesRef = useRef(false);
+	hasMessagesRef.current = messages.length > 0;
+
+	const retryHistoryLoad = useCallback(() => {
+		setHistoryFailed(false);
+		setHistoryReloadKey((n) => n + 1);
+	}, []);
+
 	// Hydrate the visible thread from Core's server-side store when switching
 	// conversations, so history survives restarts and is shared across clients.
 	// Switching `activeConversationId` changes `chatId`, which makes useChat
@@ -1995,11 +2089,37 @@ export default function ChatPage({
 	// server-side history.
 	useEffect(() => {
 		if (!convId) {
+			// A brand-new chat has nothing to wait for — the greeting is correct here.
+			setHistoryLoading(false);
+			setHistoryFailed(false);
 			return;
 		}
 		let cancelled = false;
-		loadMessages(convId).then((history) => {
-			if (cancelled || history.length === 0) {
+		// Only claim "loading" when there is nothing on screen. This effect also
+		// fires the moment the FIRST send adopts a conversation id, and blanking
+		// the just-sent message behind a skeleton would be worse than the bug.
+		if (!hasMessagesRef.current) {
+			setHistoryLoading(true);
+		}
+		loadMessagesResult(convId).then(({ status, messages: history }) => {
+			if (cancelled) {
+				return;
+			}
+			setHistoryLoading(false);
+			// A transport/HTTP failure is NOT an empty conversation. Leaving
+			// useChat's state alone and flagging the failure is what keeps a chat
+			// opened while Core is still booting from rendering as a new chat.
+			if (status === "error") {
+				setHistoryFailed(true);
+				return;
+			}
+			setHistoryFailed(false);
+			if (history.length === 0) {
+				return;
+			}
+			// The user typed while the fetch was in flight (first send adopting this
+			// id). Their message and its live reply outrank stale server history.
+			if (hasMessagesRef.current) {
 				return;
 			}
 			const now = Date.now();
@@ -2012,51 +2132,12 @@ export default function ChatPage({
 				}
 			}
 			setVersions(buildVersions(history));
-			setMessages(
-				history.map((m) => {
-					// #404: Mark stale assistant messages that were left in a "running"
-					// state from a previous session as interrupted. We detect this by
-					// checking whether the message has no content (or only whitespace)
-					// and was last stamped more than STALE_THRESHOLD_MS ago. The history
-					// item's `timestamp` carries the server-stamped send time (ms).
-					const stampedAt = m.timestamp;
-					const msSinceUpdate =
-						typeof stampedAt === "number"
-							? now - stampedAt
-							: Number.POSITIVE_INFINITY;
-					// A message that carries structured parts is a real completed turn,
-					// so it is never "stale running" — prefer its parts verbatim.
-					const hasParts = Array.isArray(m.parts) && m.parts.length > 0;
-					const isStaleRunning =
-						m.role === "assistant" &&
-						!hasParts &&
-						(!m.content || m.content.trim() === "") &&
-						msSinceUpdate > STALE_THRESHOLD_MS;
-
-					if (hasParts) {
-						return { id: m.id, role: m.role, parts: m.parts };
-					}
-
-					return {
-						id: m.id,
-						role: m.role,
-						parts: [
-							{
-								type: "text" as const,
-								text: isStaleRunning ? "⚠️ Interrupted" : m.content,
-							},
-						],
-						// Attach a metadata flag so the render pass can style interrupted
-						// messages differently (currently handled via the text above).
-						...(isStaleRunning ? { _interrupted: true } : {}),
-					};
-				})
-			);
+			setMessages(history.map((m) => hydrateHistoryMessage(m, now)));
 		});
 		return () => {
 			cancelled = true;
 		};
-	}, [convId, loadMessages, setMessages]);
+	}, [convId, loadMessagesResult, setMessages, historyReloadKey]);
 
 	// Re-hydrate messages when the user switches back to this tab. If the ACP
 	// agent is still running, reconnect to Core's live stream resume endpoint so
@@ -2103,6 +2184,194 @@ export default function ChatPage({
 	// re-activation and skip the `clearError()` that un-sticks an error-parked
 	// thread. Mount is the only pass that races the hydrator.
 	const didMountPass = useRef(false);
+	// True while a resume attempt (probe or attached reader) is outstanding. The
+	// probe is now armed from three places instead of one, and without this guard
+	// two of them can attach two readers to the same turn — which duplicates every
+	// delta and leaves an orphaned reader running.
+	const resumeInFlight = useRef(false);
+	// Epoch ms until which resume probing is suppressed (set by an explicit Stop).
+	const resumeSuppressedUntil = useRef(0);
+
+	/**
+	 * Probe `/api/chat/stream/resume/:id` and, if Core says a turn IS running,
+	 * attach to it — which is what makes `effectiveStatus` (and therefore the
+	 * composer's Stop button) report the truth.
+	 *
+	 * The 404-when-idle contract is what makes this safe to arm repeatedly: the
+	 * server side is one in-memory registry lookup, so a probe against an idle
+	 * conversation costs nothing. It is deliberately NOT derived from the
+	 * conversation's persisted `run_status` — Core never reconciles that field at
+	 * boot, so a crashed turn would leave the composer permanently showing Stop.
+	 *
+	 * `restore` also re-loads persisted history first (the tab-activation path,
+	 * which must repaint the thread and `clearError()` whether or not a turn is
+	 * live). `probe` touches nothing unless the probe actually attaches.
+	 */
+	const tryResume = useCallback(
+		// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: one SSE reader, kept whole
+		async (mode: "restore" | "probe", options?: { hydrate?: boolean }) => {
+			const conv = convIdRef.current;
+			if (!conv || resumeInFlight.current) {
+				return;
+			}
+			// An explicit Stop cancels the turn server-side, but Core takes a moment
+			// to tear the live stream down. Without this window the poll below would
+			// re-attach to the dying turn and flash Stop back on immediately after
+			// the user pressed it.
+			if (Date.now() < resumeSuppressedUntil.current) {
+				return;
+			}
+			resumeInFlight.current = true;
+			const controller = new AbortController();
+			resumeAbort.current = controller;
+			const hydrate = options?.hydrate ?? false;
+			let attached = false;
+			try {
+				let history: Awaited<ReturnType<typeof loadMessages>> = [];
+				if (mode === "restore") {
+					history = await loadMessages(conv);
+					if (controller.signal.aborted) {
+						return;
+					}
+					if (history.length > 0 && hydrate) {
+						setVersions(buildVersions(history));
+						// The SAME mapper the mount pass uses. These two used to
+						// disagree: this one mapped bare parts and dropped the
+						// interruption marker, so a turn that was cut off came back
+						// looking finished every time the tab was reopened.
+						const now = Date.now();
+						setMessages(history.map((m) => hydrateHistoryMessage(m, now)));
+					}
+					// Persisted state is on screen — take the chat out of `error` so the
+					// composer (and any queued messages) work again. No-op when ready.
+					if (hydrate) {
+						clearError();
+					}
+				}
+
+				// Try to reconnect to the running turn's live stream.
+				const resumeUrl = chatStreamResumeUrl(chatTargetRef.current, conv);
+				const headers = chatHeaders(chatTargetRef.current);
+				const resp = await fetch(resumeUrl, {
+					headers,
+					signal: controller.signal,
+				});
+				if (!(resp.ok && resp.body)) {
+					return; // 404 = no running turn
+				}
+				// A live turn IS attached — the composer must show Stop.
+				attached = true;
+				setResumeStreaming(true);
+				if (mode === "probe") {
+					// Only now is the history worth fetching: a bare probe must not cost
+					// a conversation read on every tick.
+					history = await loadMessages(conv);
+					if (controller.signal.aborted) {
+						return;
+					}
+				}
+				const reader = resp.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = "";
+				// Find the last assistant message id to append deltas to it,
+				// or create a new one if none exists yet.
+				const lastAssistant = history
+					.slice()
+					.reverse()
+					.find((m) => m.role === "assistant");
+				const targetMsgId = lastAssistant?.id ?? `resume-${Date.now()}`;
+				// Start with the persisted text and append new deltas.
+				let replyText = lastAssistant?.content ?? "";
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) {
+						break;
+					}
+					buffer += decoder.decode(value, { stream: true });
+					// Parse SSE frames (double-newline separated).
+					let sep = buffer.indexOf("\n\n");
+					while (sep !== -1) {
+						const frame = buffer.slice(0, sep);
+						buffer = buffer.slice(sep + 2);
+						for (const line of frame.split("\n")) {
+							if (!line.startsWith("data: ")) {
+								continue;
+							}
+							const raw = line.slice(6).trim();
+							if (raw === "[DONE]") {
+								continue;
+							}
+							try {
+								const parsed = JSON.parse(raw);
+								if (parsed.type === "text-delta" && parsed.delta) {
+									replyText += parsed.delta;
+									setMessages((prev) => {
+										const idx = prev.findIndex((m) => m.id === targetMsgId);
+										if (idx !== -1) {
+											const next = prev.slice();
+											// Merge, never replace: the reader understands only
+											// text-delta, so overwriting `parts` deleted the tool
+											// rows, Thinking traces and stats part of a turn it
+											// had merely reconnected to. The whole-message form
+											// also clears `_interrupted`, which a delta disproves
+											// — see mergeResumedReplyMessage.
+											next[idx] = mergeResumedReplyMessage(
+												next[idx],
+												replyText
+											);
+											return next;
+										}
+										return [
+											...prev,
+											{
+												id: targetMsgId,
+												role: "assistant" as const,
+												parts: [
+													{
+														type: "text" as const,
+														text: replyText,
+													},
+												],
+											},
+										];
+									});
+								}
+							} catch {
+								// Ignore malformed frames.
+							}
+						}
+						sep = buffer.indexOf("\n\n");
+					}
+				}
+				// Stream ended — re-fetch the final persisted state.
+				if (!controller.signal.aborted) {
+					const final_ = await loadMessages(conv);
+					if (final_.length > 0) {
+						const now = Date.now();
+						setMessages(final_.map((m) => hydrateHistoryMessage(m, now)));
+					}
+					refresh();
+				}
+			} catch {
+				// Resume failed (no live turn / network error) — persisted history is
+				// already loaded above, nothing more to do.
+			} finally {
+				resumeInFlight.current = false;
+				setResumeStreaming(false);
+				if (attached) {
+					// Detaching flips `effectiveStatus` back to "ready", which re-arms
+					// arm 2. Bound that cycle: if Core ever hands back a stream that
+					// closes immediately, this makes it a slow retry rather than a
+					// request storm.
+					resumeSuppressedUntil.current = Date.now() + RESUME_REATTACH_GRACE_MS;
+				}
+			}
+		},
+		[loadMessages, setMessages, refresh, clearError]
+	);
+
+	// Arm 1 — tab activation (and mount). The original, and the only one that
+	// re-hydrates history.
 	useEffect(() => {
 		const isMountPass = !didMountPass.current;
 		didMountPass.current = true;
@@ -2110,151 +2379,22 @@ export default function ChatPage({
 		prevIsActiveTab.current = isActiveTab;
 		const settled = status === "ready" || status === "error";
 		if (!wasActive && isActiveTab && settled && convId) {
-			// First, load persisted messages to restore history up to the
-			// incremental-flush point. Then attempt a live resume.
-			const controller = new AbortController();
-			resumeAbort.current?.abort();
-			resumeAbort.current = controller;
-
-			loadMessages(convId).then((history) => {
-				if (controller.signal.aborted) {
-					return;
-				}
-				if (history.length > 0 && !isMountPass) {
-					setVersions(buildVersions(history));
-					setMessages(
-						history.map((m) => ({
-							id: m.id,
-							role: m.role,
-							parts: hydrateMessageParts(m),
-						}))
-					);
-				}
-				// Persisted state is on screen — take the chat out of `error` so the
-				// composer (and any queued messages) work again. No-op when ready.
-				if (!isMountPass) {
-					clearError();
-				}
-				// Try to reconnect to the running turn's live stream.
-				const resumeUrl = chatStreamResumeUrl(chatTargetRef.current, convId);
-				const headers = chatHeaders(chatTargetRef.current);
-				fetch(resumeUrl, { headers, signal: controller.signal })
-					// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
-					.then(async (resp) => {
-						if (!(resp.ok && resp.body)) {
-							return; // 404 = no running turn
-						}
-						// A live turn IS attached — the composer must show Stop.
-						setResumeStreaming(true);
-						const reader = resp.body.getReader();
-						const decoder = new TextDecoder();
-						let buffer = "";
-						// Find the last assistant message id to append deltas to it,
-						// or create a new one if none exists yet.
-						const lastAssistant = history
-							.slice()
-							.reverse()
-							.find((m) => m.role === "assistant");
-						const targetMsgId = lastAssistant?.id ?? `resume-${Date.now()}`;
-						// Start with the persisted text and append new deltas.
-						let replyText = lastAssistant?.content ?? "";
-						for (;;) {
-							const { done, value } = await reader.read();
-							if (done) {
-								break;
-							}
-							buffer += decoder.decode(value, { stream: true });
-							// Parse SSE frames (double-newline separated).
-							let sep = buffer.indexOf("\n\n");
-							while (sep !== -1) {
-								const frame = buffer.slice(0, sep);
-								buffer = buffer.slice(sep + 2);
-								for (const line of frame.split("\n")) {
-									if (!line.startsWith("data: ")) {
-										continue;
-									}
-									const raw = line.slice(6).trim();
-									if (raw === "[DONE]") {
-										continue;
-									}
-									try {
-										const parsed = JSON.parse(raw);
-										if (parsed.type === "text-delta" && parsed.delta) {
-											replyText += parsed.delta;
-											setMessages((prev) => {
-												const idx = prev.findIndex((m) => m.id === targetMsgId);
-												if (idx !== -1) {
-													const next = prev.slice();
-													next[idx] = {
-														...next[idx],
-														parts: [
-															{
-																type: "text" as const,
-																text: replyText,
-															},
-														],
-													};
-													return next;
-												}
-												return [
-													...prev,
-													{
-														id: targetMsgId,
-														role: "assistant" as const,
-														parts: [
-															{
-																type: "text" as const,
-																text: replyText,
-															},
-														],
-													},
-												];
-											});
-										}
-									} catch {
-										// Ignore malformed frames.
-									}
-								}
-								sep = buffer.indexOf("\n\n");
-							}
-						}
-						// Stream ended — re-fetch the final persisted state.
-						if (!controller.signal.aborted) {
-							const final_ = await loadMessages(convId);
-							if (final_.length > 0) {
-								setMessages(
-									final_.map((m) => ({
-										id: m.id,
-										role: m.role,
-										parts: hydrateMessageParts(m),
-									}))
-								);
-							}
-							refresh();
-						}
-					})
-					.catch(() => {
-						// Resume failed (no live turn / network error) — persisted
-						// history is already loaded above, nothing more to do.
-					})
-					.finally(() => {
-						setResumeStreaming(false);
-					});
-			});
+			void tryResume("restore", { hydrate: !isMountPass });
 		}
-		return () => {
+	}, [isActiveTab, status, convId, tryResume]);
+
+	// Tear the reader down when the CONVERSATION changes (or the tab unmounts) —
+	// not on every re-run of the effects above. The old cleanup lived on the
+	// activation effect and fired on any dependency-identity churn, which aborted
+	// a genuinely live resumed reader mid-reply.
+	useEffect(
+		() => () => {
 			resumeAbort.current?.abort();
+			resumeInFlight.current = false;
 			setResumeStreaming(false);
-		};
-	}, [
-		isActiveTab,
-		status,
-		convId,
-		loadMessages,
-		setMessages,
-		refresh,
-		clearError,
-	]);
+		},
+		[convId]
+	);
 
 	// The turn state everything user-facing keys off. `status` alone reports
 	// "ready" through a whole resumed reply (that stream is ours, not useChat's),
@@ -2264,6 +2404,45 @@ export default function ChatPage({
 	// `status` stays the raw useChat value for the stream plumbing itself.
 	const effectiveStatus: typeof status =
 		resumeStreaming && status === "ready" ? "streaming" : status;
+
+	// Arm 2 — a stream of OURS just ended or errored. This is the case that made
+	// a runaway turn unstoppable: a local SSE that drops mid-turn puts useChat
+	// back at "ready"/"error" while Core keeps the turn running, and the one-shot
+	// activation probe never fires again because the tab never lost focus. Edge-
+	// triggered on the busy → settled transition, so dependency churn cannot turn
+	// it into a loop.
+	const prevSettledStatus = useRef<string>("ready");
+	useEffect(() => {
+		const previous = prevSettledStatus.current;
+		prevSettledStatus.current = effectiveStatus;
+		const wasBusy = previous === "streaming" || previous === "submitted";
+		const settledNow =
+			effectiveStatus === "ready" || effectiveStatus === "error";
+		if (wasBusy && settledNow && convId && isActiveTab) {
+			void tryResume("probe");
+		}
+	}, [effectiveStatus, convId, isActiveTab, tryResume]);
+
+	// Arm 3 — a slow poll for turns this tab never started: a queued/scheduled
+	// run, or the same conversation driven from another client. Only the focused
+	// workspace tab of a focused WINDOW polls, and only while it believes it is
+	// idle, so this is one cheap 404 every 15s for the chat the user is actually
+	// looking at — not one per open tab.
+	//
+	// `document.hasFocus()`, not `visibilityState`: in the Tauri shell the page
+	// stays "visible" while the window sits behind another app, so a visibility
+	// check would poll forever for a window nobody is looking at.
+	useEffect(() => {
+		if (!(convId && isActiveTab) || effectiveStatus !== "ready") {
+			return;
+		}
+		const id = window.setInterval(() => {
+			if (document.hasFocus()) {
+				void tryResume("probe");
+			}
+		}, RESUME_POLL_MS);
+		return () => window.clearInterval(id);
+	}, [convId, isActiveTab, effectiveStatus, tryResume]);
 
 	// ── Multi-user collaboration (Phase 2): live chat fan-out + presence ────────
 	// Join this conversation's realtime room (only once a real `convId` exists —
@@ -2504,9 +2683,20 @@ export default function ChatPage({
 			followUpAbort.current?.abort();
 			followUpAbort.current = null;
 		}
-		if (prevStatus.current === "streaming" && status === "ready") {
+		// Any transition INTO "ready", not only from "streaming": a turn that is
+		// answered without ever emitting a stream chunk goes submitted → ready, and
+		// gating on "streaming" meant such a turn never re-synced the sidebar — its
+		// row kept the draft's title and stayed in the loose Chats bucket for the
+		// rest of the session, even though Core had already stamped the folder.
+		if (prevStatus.current !== "ready" && status === "ready") {
 			refresh();
+			// The run has finished writing files, so this is the moment the working
+			// tree changed — re-read git now rather than waiting for the safety-net
+			// poll. Cheap: once per turn, not once per chunk.
+			invalidateGitStatus();
 			if (activeConversationId) {
+				invalidateWorktreeStatus(activeConversationId);
+				invalidateWorktreeDiff(activeConversationId);
 				setDiffConvId(activeConversationId);
 			}
 			// Auto read-back when enabled (Voice settings), unless a meeting is recording.
@@ -2701,6 +2891,10 @@ export default function ChatPage({
 				]);
 				return;
 			}
+			// The folder this turn is about to run in — read from the store, exactly
+			// as the transport body does a moment later, so the row the sidebar shows
+			// and the `cwd` Core stamps onto the conversation are the same value.
+			const sendFolder = useWorkspaceStore.getState().folder ?? undefined;
 			if (!convId) {
 				const newId = draftConvId.current;
 				// A ghost (temporary) chat is never registered in the sidebar history:
@@ -2708,10 +2902,25 @@ export default function ChatPage({
 				// The turn still streams (useChat keys off the local id) and Core
 				// persists nothing because the transport sends `persist: false`.
 				if (!ghostMode) {
-					createConversation(newId, agentId ?? undefined);
+					createConversation(newId, {
+						agentId: agentId ?? undefined,
+						folderPath: sendFolder,
+					});
 				}
 				setConvId(newId);
 				setActiveConversationId(newId);
+			}
+
+			// Chats started in a project belong to that project from their first
+			// message, not from whenever the list next refreshes. Core stamps the
+			// same folder from this turn's `cwd`; recording it locally is what keeps
+			// the row from sitting in the loose "Chats" bucket in the meantime — and
+			// it also catches a draft opened before the user switched folders.
+			if (!ghostMode) {
+				const folderTargetId = convIdRef.current ?? draftConvId.current;
+				if (folderTargetId) {
+					setConversationFolder(folderTargetId, sendFolder);
+				}
 			}
 
 			// Name the thread after what the user just asked, right now. Core derives
@@ -2772,6 +2981,7 @@ export default function ChatPage({
 			messages,
 			ghostMode,
 			createConversation,
+			setConversationFolder,
 			seedTitleFromFirstMessage,
 			setActiveConversationId,
 			sendMessage,
@@ -2902,6 +3112,7 @@ export default function ChatPage({
 		// not touch it, so abort that reader explicitly or Stop would look dead.
 		resumeAbort.current?.abort();
 		setResumeStreaming(false);
+		resumeSuppressedUntil.current = Date.now() + RESUME_STOP_GRACE_MS;
 		const conversationId = convIdRef.current ?? draftConvId.current;
 		cancelChat(chatTargetRef.current, conversationId).catch(() => {
 			// No live turn (or Core unreachable) — the SSE abort above still stands.
@@ -2929,6 +3140,8 @@ export default function ChatPage({
 				effectiveStatus === "streaming" || effectiveStatus === "submitted",
 			stop: handleStop,
 			startVoiceMode: voiceMode.start,
+			toggleBottomPanel: () => setBottomPanelOpen((v) => !v),
+			toggleRightPanel: () => setRightPanelOpen((v) => !v),
 		});
 		return () => clearHotkeyTargets(hotkeyOwner);
 	}, [
@@ -3152,13 +3365,8 @@ export default function ChatPage({
 			}
 			const history = await loadMessages(conv);
 			setVersions(buildVersions(history));
-			setMessages(
-				history.map((m) => ({
-					id: m.id,
-					role: m.role,
-					parts: hydrateMessageParts(m),
-				}))
-			);
+			const now = Date.now();
+			setMessages(history.map((m) => hydrateHistoryMessage(m, now)));
 		},
 		[activeConversationId, selectVersion, loadMessages, setMessages]
 	);
@@ -3284,14 +3492,16 @@ export default function ChatPage({
 	// does not destroy it. A no-op unless that app is enabled, and a blank composer
 	// deletes the draft — which is also how a SEND clears it, since submitting
 	// empties the text.
+	// Keyed on THIS tab's conversation: the draft and the auto-queue belong to the
+	// thread whose composer holds the text, not to whichever tab has focus.
 	const draftContext = useMemo(
 		() => ({
-			conversationId: activeConversationId ?? undefined,
+			conversationId: convId ?? undefined,
 			agentId: agentId ?? undefined,
 			model: effectiveModel ?? undefined,
 			folderPath: folder ?? undefined,
 		}),
-		[activeConversationId, agentId, effectiveModel, folder]
+		[convId, agentId, effectiveModel, folder]
 	);
 	const autosaveDraft = useComposerDraftAutosave(draftContext);
 	const maybeAutoQueue = useComposerAutoQueue(draftContext);
@@ -3407,23 +3617,51 @@ export default function ChatPage({
 		submitNow({ role: "user", content });
 	}, [initialSubmit, initialPrompt, initialImages, submitNow]);
 
+	// Adopt the composer target from the conversation THIS TAB is on — once per
+	// conversation. Keyed on the tab-local `convId`, never on the shared
+	// focused-tab `activeConversationId`: every chat tab stays mounted, so the
+	// shared id made every background tab re-target itself onto the focused tab's
+	// agent. That is the "set opencode in one pane and Claude in another and both
+	// collapse onto whichever tab is active" bug, and — because the effect also
+	// listed `agentId` as a dependency — the reason picking a different agent
+	// inside an existing thread snapped straight back to the thread's stored one.
+	// The pick is the user's; the conversation only seeds it.
+	const hydratedTargetConvRef = useRef<string | null>(null);
 	useEffect(() => {
-		const conv = activeConversationId
-			? getConversation(activeConversationId)
-			: undefined;
-		if (conv?.agentId) {
-			// An existing thread is agent-pinned (conversations carry an agentId,
-			// never a team) — drop any persistent team pick so the composer target
-			// matches the thread instead of silently fanning out to a team.
-			setTeamId(null);
-			if (conv.agentId !== agentId) {
-				setAgentId(conv.agentId);
-				// Keep the model picker in sync when the conversation pins its agent
-				// back (each thread owns its agent; the model follows the agent).
-				setSelectedModel(getAgentModel(conv.agentId));
-			}
+		const { hydrate, agentId: pinnedAgentId } = conversationTargetDecision({
+			conversationId: convId,
+			hydratedConversationId: hydratedTargetConvRef.current,
+			conversationAgentId: convId ? getConversation(convId)?.agentId : null,
+		});
+		if (!(hydrate && pinnedAgentId)) {
+			return;
 		}
-	}, [activeConversationId, getConversation, agentId]);
+		hydratedTargetConvRef.current = convId;
+		// An existing thread is agent-pinned (conversations carry an agentId, never
+		// a team) — drop any persistent team pick so the composer target matches
+		// the thread instead of silently fanning out to a team.
+		setTeamId(null);
+		if (pinnedAgentId !== agentIdRef.current) {
+			setAgentId(pinnedAgentId);
+			// Keep the model picker in sync when the conversation pins its agent
+			// back (each thread owns its agent; the model follows the agent).
+			setSelectedModel(getAgentModel(pinnedAgentId));
+		}
+	}, [convId, getConversation]);
+
+	// Last link in the seed chain: the node-wide default agent
+	// (`default-agent-selection`), which arrives asynchronously and so cannot sit
+	// in the `agentId` initializer. It only ever FILLS A HOLE — a composer that
+	// still has no agent at all — so a merged-view pin, a tab seed, the last-used
+	// hint, a conversation's pinned agent, or the user picking one while the
+	// preference was in flight all win over it.
+	const nodeDefaultAgentId = useNodeDefaultAgentId();
+	useEffect(() => {
+		if (shouldAdoptNodeDefault(agentIdRef.current, nodeDefaultAgentId)) {
+			setAgentId(nodeDefaultAgentId);
+			setSelectedModel(getAgentModel(nodeDefaultAgentId));
+		}
+	}, [nodeDefaultAgentId]);
 
 	// Attach the approval footer to the tool row an agent is actually BLOCKED on.
 	// The gate is a real `data-ryu-permission` request from Core (the ACP
@@ -3767,9 +4005,10 @@ export default function ChatPage({
 		// agent-swapping fallback rule may move the whole agent. Mirrors the turn
 		// path's own test (`conversation_id.is_none() || messages.len() <= 1`):
 		// zero RENDERED messages here is the same moment the server sees a single
-		// message — the turn it is about to run.
-		atConversationStart:
-			activeConversationId === null || processedMessages.length === 0,
+		// message — the turn it is about to run. Read from THIS tab's `convId`, not
+		// the shared focused-tab id, or a background tab reports the focused tab's
+		// thread state and its fallback notice describes the wrong turn.
+		atConversationStart: convId === null || processedMessages.length === 0,
 		teams,
 		agentId,
 		teamId,
@@ -3778,7 +4017,10 @@ export default function ChatPage({
 		onSelectAgent: (id) => {
 			setTeamId(null);
 			setAgentId(id);
-			localStorage.setItem("ryu_default_agent", id);
+			// The pick is authoritative for THIS tab only. Remembering it seeds the
+			// next brand-new chat; it must never reach back into another tab, which
+			// is why nothing reads this key except a fresh composer's initializer.
+			rememberLastUsedAgent(id);
 			setSelectedModel(getAgentModel(id));
 		},
 		modelOptions,
@@ -4149,6 +4391,7 @@ export default function ChatPage({
 						<AgentChat
 							assistantAvatar={assistantIdentity.avatar}
 							assistantName={assistantIdentity.name}
+							assistantPlanningAvatars={assistantPlanningAvatars}
 							attachments={{
 								images: attachedImages,
 								onAttach: handleAttach,
@@ -4200,6 +4443,22 @@ export default function ChatPage({
 									});
 								},
 							}}
+							// A restored tab must say "loading this conversation", never
+							// paint the new-chat greeting — that is what reads as "all my
+							// chats are gone" at boot. Both flags are false for a genuinely
+							// new chat (no conversation id), so the greeting is untouched
+							// there.
+							historyError={
+								historyFailed
+									? {
+											title: "Couldn't load this conversation",
+											description:
+												"This node didn't answer. Your messages are still on it — nothing has been lost.",
+											onRetry: retryHistoryLoad,
+										}
+									: undefined
+							}
+							historyLoading={historyLoading}
 							key={`${activeNode.url}-${chatId}`}
 							messageActions={contributedMessageActions}
 							messages={renderedMessages}
@@ -4231,7 +4490,7 @@ export default function ChatPage({
 							showCopyToolbar
 							slots={{ InputBar: councilInputBar }}
 							status={effectiveStatus}
-							toolRenderers={{}}
+							toolRenderers={EMPTY_TOOL_RENDERERS}
 							versions={versions}
 						/>
 					</WidgetHostContext.Provider>

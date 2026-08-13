@@ -101,11 +101,8 @@ const NAV_GROUPS: NavGroup[] = [
 		items: [
 			{ value: "general", label: "General" },
 			{ value: "appearance", label: "Appearance" },
-			{ value: "keyboard", label: "Keyboard shortcuts" },
-			{ value: "sync", label: "Settings sync" },
-			{ value: "updates", label: "Updates" },
+			{ value: "keyboard", label: "Keyboard Shortcuts" },
 			{ value: "voice", label: "Voice" },
-			{ value: "developer", label: "Developer" },
 		],
 	},
 	{
@@ -125,6 +122,20 @@ const NAV_GROUPS: NavGroup[] = [
 			{ value: "referrals", label: "Referrals" },
 			{ value: "teams", label: "Teams" },
 			{ value: "credits", label: "Credits" },
+		],
+	},
+	{
+		// The three tabs nobody opens in a normal week: the client updater, the
+		// developer tools, and cross-machine settings sync. Grouping them demotes
+		// them out of the first block, which is now only the settings a user
+		// actually tunes. Labels must stay byte-identical to
+		// SETTINGS_SECTION_LABELS (lib/settings-index.ts) or the sidebar and the
+		// search-result breadcrumb disagree about the same tab.
+		title: "Advanced",
+		items: [
+			{ value: "updates", label: "Updates" },
+			{ value: "developer", label: "Developer" },
+			{ value: "sync", label: "Settings Sync" },
 		],
 	},
 ];

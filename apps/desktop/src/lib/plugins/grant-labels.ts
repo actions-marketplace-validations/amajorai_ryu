@@ -21,6 +21,11 @@ const GRANT_META: Record<string, GrantMeta> = {
 		label: "Use AI models",
 		description: "Send prompts to a model to generate content on your behalf.",
 	},
+	"hook:run-self": {
+		label: "Run its own automations on demand",
+		description:
+			"Let you trigger this app's turn hooks yourself — for example a menu row that re-runs it on one chat. It gains no permission it does not already have; this only adds a way to start it.",
+	},
 	"hook:run-agent": {
 		label: "Run AI agents",
 		description:

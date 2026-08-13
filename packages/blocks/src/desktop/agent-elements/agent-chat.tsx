@@ -1,7 +1,9 @@
 ﻿"use client";
 
+import { Button } from "@ryu/ui/components/button";
+import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
 import { cn } from "@ryu/ui/lib/utils";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { deriveContextUsage } from "./context-usage.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
 import { InputBar } from "./input-bar.tsx";
@@ -38,6 +40,7 @@ export function AgentChat({
 	enableImagePreview,
 	assistantAvatar,
 	assistantName,
+	assistantPlanningAvatars,
 	currentUser,
 	seedDraft,
 	onDraftChange,
@@ -48,6 +51,8 @@ export function AgentChat({
 	emptySuggestionsPosition = "top",
 	emptyStateHeader,
 	emptyStateFooter,
+	historyLoading,
+	historyError,
 	questionTool,
 	historyNotice,
 	className,
@@ -90,8 +95,46 @@ export function AgentChat({
 		[messages, contextSize]
 	);
 
-	const isEmpty = !error && messages.length === 0;
+	// A failed request is shown as a synthetic trailing assistant message. Built
+	// in a memo rather than inline in the JSX because a fresh array literal there
+	// hands MessageList a new `messages` identity on EVERY render for as long as
+	// an error is on screen — which invalidates normalizeMessages /
+	// groupMessagesIntoTurns / the TOC continuously, and re-arms the pinned-message
+	// measuring effect every pass (the escalation path to React error #185).
+	const listMessages = useMemo(
+		() =>
+			error
+				? [
+						...messages,
+						{
+							id: "agent-chat-error",
+							role: "assistant",
+							parts: [
+								{
+									type: "error",
+									title: "Request failed",
+									message: error.message,
+								},
+							],
+						} as unknown as (typeof messages)[number],
+					]
+				: messages,
+		[error, messages]
+	);
+
+	// "Nothing in this thread" and "this thread has not arrived yet" are different
+	// facts, and only the first one may show the new-chat greeting. A restored tab
+	// paints before its history resolves, so deriving emptiness from the message
+	// count ALONE is what made every reopened conversation look like a brand-new
+	// chat at boot — the alarming "all my chats are gone" screen. `historyLoading`
+	// and `historyError` are only ever set for a thread that HAS a conversation
+	// id, so a real new chat still gets its greeting.
+	const isPlaceholder = Boolean(historyLoading || historyError);
+	const isEmpty = !(error || isPlaceholder) && messages.length === 0;
 	const isCenteredEmptyState = isEmpty && emptyStatePosition === "center";
+	// The placeholder replaces the transcript only while there is nothing to show;
+	// a re-fetch over an already-rendered thread must not blank it.
+	const showPlaceholder = isPlaceholder && !error && messages.length === 0;
 
 	const pendingQuestion = findPendingQuestion(messages, questionTool);
 	const suggestionConfig = resolveSuggestions(suggestions);
@@ -198,6 +241,66 @@ export function AgentChat({
 		/>
 	);
 
+	let transcriptNode: ReactNode;
+	if (isCenteredEmptyState) {
+		transcriptNode = (
+			<div className="flex min-h-0 flex-1 items-center justify-center px-4 py-4">
+				<div className="w-full max-w-[720px]">
+					{emptyStateHeader}
+					{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
+					{inputBarNode}
+					{emptySuggestionsPosition === "bottom" ? emptySuggestionsNode : null}
+					{emptyStateFooter}
+				</div>
+			</div>
+		);
+	} else if (showPlaceholder) {
+		transcriptNode = (
+			<HistoryPlaceholder
+				className={classNames?.messageList}
+				error={historyError}
+			/>
+		);
+	} else {
+		transcriptNode = (
+			<MessageList
+				assistantAvatar={assistantAvatar}
+				assistantName={assistantName}
+				assistantPlanningAvatars={assistantPlanningAvatars}
+				className={classNames?.messageList}
+				classNames={classNames}
+				contextSize={contextSize}
+				conversationKey={conversationKey}
+				currentUser={currentUser}
+				enableImagePreview={enableImagePreview}
+				feedback={feedback}
+				// Declared and destructured since the prop was introduced, but never
+				// actually handed to the transcript — so a surface that set it got
+				// nothing on screen. It renders as a `Marker` after the last message
+				// (see MessageListProps.historyNotice).
+				historyNotice={historyNotice}
+				initialScrollBehavior={initialScrollBehavior}
+				messageActions={messageActions}
+				messages={listMessages}
+				onBranch={onBranch}
+				onContributedMessageAction={onContributedMessageAction}
+				onEditMessage={onEditMessage}
+				onFeedback={onFeedback}
+				onOpenFile={onOpenFile}
+				onQuote={onQuote}
+				onRegenerateMessage={onRegenerateMessage}
+				onSelectVersion={onSelectVersion}
+				onSpeak={onSpeak}
+				showCopyToolbar={showCopyToolbar}
+				slots={slots}
+				status={status}
+				suppressQuestionTool={Boolean(pendingQuestion)}
+				toolRenderers={toolRenderers}
+				versions={versions}
+			/>
+		);
+	}
+
 	return (
 		<div
 			className={cn(
@@ -208,66 +311,7 @@ export function AgentChat({
 			ref={rootRef}
 			style={style}
 		>
-			{isCenteredEmptyState ? (
-				<div className="flex min-h-0 flex-1 items-center justify-center px-4 py-4">
-					<div className="w-full max-w-[720px]">
-						{emptyStateHeader}
-						{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
-						{inputBarNode}
-						{emptySuggestionsPosition === "bottom"
-							? emptySuggestionsNode
-							: null}
-						{emptyStateFooter}
-					</div>
-				</div>
-			) : (
-				<MessageList
-					assistantAvatar={assistantAvatar}
-					assistantName={assistantName}
-					className={classNames?.messageList}
-					classNames={classNames}
-					contextSize={contextSize}
-					conversationKey={conversationKey}
-					currentUser={currentUser}
-					enableImagePreview={enableImagePreview}
-					feedback={feedback}
-					initialScrollBehavior={initialScrollBehavior}
-					messageActions={messageActions}
-					messages={
-						error
-							? [
-									...messages,
-									{
-										id: "agent-chat-error",
-										role: "assistant",
-										parts: [
-											{
-												type: "error",
-												title: "Request failed",
-												message: error.message,
-											},
-										],
-									} as unknown as (typeof messages)[number],
-								]
-							: messages
-					}
-					onBranch={onBranch}
-					onContributedMessageAction={onContributedMessageAction}
-					onEditMessage={onEditMessage}
-					onFeedback={onFeedback}
-					onOpenFile={onOpenFile}
-					onQuote={onQuote}
-					onRegenerateMessage={onRegenerateMessage}
-					onSelectVersion={onSelectVersion}
-					onSpeak={onSpeak}
-					showCopyToolbar={showCopyToolbar}
-					slots={slots}
-					status={status}
-					suppressQuestionTool={Boolean(pendingQuestion)}
-					toolRenderers={toolRenderers}
-					versions={versions}
-				/>
-			)}
+			{transcriptNode}
 			{isCenteredEmptyState ? null : (
 				<>
 					{followUpsNode}
@@ -275,6 +319,80 @@ export function AgentChat({
 				</>
 			)}
 		</div>
+	);
+}
+
+/**
+ * What the transcript area shows while a restored thread's history is still in
+ * flight, or when it could not be fetched at all. Deliberately transcript-shaped
+ * rather than a spinner: the point is that this tab is a CONVERSATION that has
+ * not arrived, not an empty one. The composer stays mounted below it (rendered by
+ * the caller), so the tab never reads as dead.
+ */
+function HistoryPlaceholder({
+	className,
+	error,
+}: {
+	className?: string;
+	error?: {
+		description?: string;
+		onRetry?: () => void;
+		title: string;
+	};
+}) {
+	if (error) {
+		return (
+			<div
+				className={cn(
+					"flex min-h-0 flex-1 items-center justify-center px-4 py-4",
+					className
+				)}
+			>
+				<div className="max-w-[420px] text-center">
+					<p className="font-medium text-sm">{error.title}</p>
+					{error.description ? (
+						<p className="mt-1 text-muted-foreground text-sm">
+							{error.description}
+						</p>
+					) : null}
+					{error.onRetry ? (
+						<Button
+							className="mt-3"
+							onClick={error.onRetry}
+							size="sm"
+							variant="outline"
+						>
+							Try again
+						</Button>
+					) : null}
+				</div>
+			</div>
+		);
+	}
+	return (
+		<output
+			aria-busy="true"
+			aria-label="Loading conversation"
+			className={cn(
+				"flex min-h-0 flex-1 flex-col gap-6 overflow-hidden px-4 py-6",
+				className
+			)}
+		>
+			<div className="flex justify-end">
+				<Skeleton className="h-9 w-[45%] rounded-2xl" />
+			</div>
+			<div className="flex gap-3">
+				<Skeleton className="h-7 w-7 shrink-0 rounded-full" />
+				<div className="flex w-full flex-col gap-2">
+					<Skeleton className="h-4 w-[85%] rounded-md" />
+					<Skeleton className="h-4 w-[70%] rounded-md" />
+					<Skeleton className="h-4 w-[45%] rounded-md" />
+				</div>
+			</div>
+			<div className="flex justify-end">
+				<Skeleton className="h-9 w-[30%] rounded-2xl" />
+			</div>
+		</output>
 	);
 }
 

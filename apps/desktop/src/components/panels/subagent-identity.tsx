@@ -1,4 +1,5 @@
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
+import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 
 // Deterministic, offline identity for subagents (Task/Agent spawns): a stable
@@ -141,26 +142,41 @@ export function Identicon({
 }
 
 /**
- * A rounded avatar tile wrapping the identicon with a muted backdrop and a bit
- * of inset padding, matching the identicon whitespace convention.
+ * A circular avatar tile wrapping the generative dither glyph on a muted
+ * backdrop. Round, not a rounded square: every other dither surface in the app
+ * (the user menu, the chat's assistant/user avatars) clips its canvas to a
+ * circle via `AvatarFallback`, and `DitherAvatar` itself applies no radius — the
+ * caller is what clips it — so a squared subagent tile made this rail the only
+ * odd one out. `overflow-hidden` is what does the clipping; keep it.
  */
 export function SubagentAvatar({
 	seed,
 	className,
+	animate = true,
 }: {
+	/** Pass `false` where the avatar remounts constantly (a dock tab strip
+	 *  re-renders on every tab change): `DitherAvatar` replays a 600ms RAF
+	 *  entrance on each mount, which reads as flicker rather than as polish. */
+	animate?: boolean;
 	className?: string;
 	seed: string;
 }) {
 	return (
+		// `cn()` and not a raw template string, so a caller-passed radius or
+		// position actually overrides rather than colliding with ours (the dock tab
+		// strip passes `absolute size-3`).
 		<span
-			className={`flex shrink-0 items-center justify-center overflow-hidden rounded-[4px] bg-muted ${className ?? ""}`}
+			className={cn(
+				"flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted",
+				className
+			)}
 		>
 			{/* Dither Kit's generative avatar replaces the local 5x5 identicon: same
 			    deterministic-from-seed contract, far more variation (~1.5T combos),
 			    and it matches the dithered placeholders used for users/orgs/teams.
 			    The local `Identicon` stays exported for any caller that wants the
 			    flat SVG (no canvas). */}
-			<DitherAvatar className="size-full" name={seed} />
+			<DitherAvatar animate={animate} className="size-full" name={seed} />
 		</span>
 	);
 }

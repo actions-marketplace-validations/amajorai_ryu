@@ -50,6 +50,15 @@ import {
 	SettingsSection,
 } from "./shared/settings-items.tsx";
 
+// Base UI resolves the CLOSED trigger's text from the root's `items` prop only —
+// it never reads the rendered `<SelectItem>` children. Without this the trigger
+// prints the raw policy value ("ask") instead of "Ask me every time".
+const CONFLICT_POLICY_OPTIONS: { value: ConflictPolicy; label: string }[] = [
+	{ value: "ask", label: "Ask me every time" },
+	{ value: "download", label: "Always use the newer cloud copy" },
+	{ value: "upload", label: "Always keep this machine's copy" },
+];
+
 const PLATFORM_LABEL: Record<ReturnType<typeof currentPlatform>, string> = {
 	darwin: "macOS",
 	win32: "Windows",
@@ -129,7 +138,7 @@ export function SettingsSyncTab() {
 		<div className="space-y-6">
 			<SettingsSection
 				caption={`Your desktop app settings follow you to every machine you sign in on. Changes upload ${Math.round(DEBOUNCE_MS / 1000)} seconds after you stop making them, so a run of adjustments becomes one upload rather than dozens.`}
-				title="Settings sync"
+				title="Settings Sync"
 			>
 				<SettingsGroup>
 					<SettingsItem
@@ -141,7 +150,7 @@ export function SettingsSyncTab() {
 							/>
 						}
 						description="Node and gateway configuration, API keys, workspace folders and device-specific picks are never included — see the list below for exactly what travels."
-						title="Sync my settings across machines"
+						title="Sync My Settings Across Machines"
 					/>
 					<SettingsItem
 						actions={
@@ -167,19 +176,20 @@ export function SettingsSyncTab() {
 								? `${pending} change${pending === 1 ? "" : "s"} waiting to upload. Last synced ${relativeTime(lastSyncAt())}.`
 								: `Last synced ${relativeTime(lastSyncAt())}.`
 						}
-						title="Last sync"
+						title="Last Sync"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
 
 			<SettingsSection
 				caption="Asking is the default because silently dropping one side is how people lose a change they cannot see they lost. Pick a side only once you know which machine you want to be authoritative."
-				title="When the same setting changed in two places"
+				title="When The Same Setting Changed In Two Places"
 			>
 				<SettingsGroup>
 					<SettingsItem
 						actions={
 							<Select
+								items={CONFLICT_POLICY_OPTIONS}
 								onValueChange={(value) =>
 									setConflictPolicy(value as ConflictPolicy)
 								}
@@ -199,7 +209,7 @@ export function SettingsSyncTab() {
 								</SelectContent>
 							</Select>
 						}
-						title="Conflict handling"
+						title="Conflict Handling"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -275,7 +285,7 @@ export function SettingsSyncTab() {
 
 			<SettingsSection
 				caption="Everything else stays on this machine."
-				title="What gets synced"
+				title="What Gets Synced"
 			>
 				{[...grouped.entries()].map(([group, labels]) => (
 					<SettingsCard key={group}>
@@ -291,7 +301,7 @@ export function SettingsSyncTab() {
 
 			<SettingsSection
 				caption="Removes the copy held for your account. The settings on this machine are left exactly as they are."
-				title="Cloud copy"
+				title="Cloud Copy"
 			>
 				<SettingsGroup>
 					<SettingsItem
@@ -300,7 +310,7 @@ export function SettingsSyncTab() {
 								Delete cloud copy
 							</Button>
 						}
-						title="Delete my synced settings"
+						title="Delete My Synced Settings"
 					/>
 				</SettingsGroup>
 			</SettingsSection>

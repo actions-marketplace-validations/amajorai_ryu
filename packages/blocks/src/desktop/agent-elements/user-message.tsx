@@ -1,18 +1,26 @@
 ﻿import { Avatar, AvatarFallback, AvatarImage } from "@ryu/ui/components/avatar";
+import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";
 import { Button } from "@ryu/ui/components/button";
 import {
 	DitherAvatar,
 	ditherAvatarSeed,
 } from "@ryu/ui/components/dither-kit/avatar";
 import {
+	Message,
+	MessageAvatar,
+	MessageContent,
+	MessageHeader,
+} from "@ryu/ui/components/message";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
+import { formatDateTime, formatTime } from "@ryu/ui/lib/timezone.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { CollapsibleText } from "./collapsible-text.tsx";
 import { ImageLightbox } from "./image-lightbox.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
@@ -23,6 +31,14 @@ import {
 } from "./quote.tsx";
 
 export interface UserMessageProps {
+	/**
+	 * Hover actions (copy / edit / branch) for this turn, rendered directly under
+	 * the bubble INSIDE its column so they start on the bubble's own left edge.
+	 * Rendered as a sibling of the whole message they could only ever align to the
+	 * transcript column's edge, which is metres away from a short right-aligned
+	 * bubble. The surface owns the buttons; this component owns where they sit.
+	 */
+	actions?: ReactNode;
 	className?: string;
 	/** Current signed-in user info for displaying avatar/name on own messages. */
 	currentUser?: {
@@ -39,6 +55,22 @@ export interface UserMessageProps {
 	 * lightbox preview. Set to false to render images as plain thumbnails.
 	 */
 	enableImagePreview?: boolean;
+	/**
+	 * Where this row sits in its sender RUN — consecutive messages from the same
+	 * speaker with no reply and no day boundary between them. Computed by the
+	 * transcript across sibling scroll items (`userRunPositions` in
+	 * message-list.tsx), because a run spans turns and therefore cannot be a
+	 * wrapper element.
+	 *
+	 * It drives the whole messaging convention: the avatar and the timestamp are
+	 * drawn once, on the row that CLOSES the run, and a remote sender is named
+	 * once, on the row that OPENS it. Everything else about the row is unchanged,
+	 * including its hover toolbar and its edit affordance.
+	 *
+	 * Defaults to `"single"`, which is the ungrouped behaviour every other
+	 * surface (island, storyboard, subagent panel) gets for free.
+	 */
+	groupPosition?: "first" | "last" | "middle" | "single";
 	message: UIMessage;
 	onEditCancel?: () => void;
 	onEditSubmit?: (text: string) => void;
@@ -117,42 +149,31 @@ interface MessageAuthor {
 	name?: string;
 }
 
-function formatRelativeTime(date: Date): string {
-	const now = new Date();
-	const diffMs = now.getTime() - date.getTime();
-	const diffSeconds = Math.floor(diffMs / 1000);
-	const diffMinutes = Math.floor(diffSeconds / 60);
-	const diffHours = Math.floor(diffMinutes / 60);
-	const diffDays = Math.floor(diffHours / 24);
+/**
+ * A per-message stamp is CLOCK TIME, with the full date in its tooltip — the
+ * messaging shape, now that the DATE is carried by the day separators above
+ * each run (date-separator.tsx) instead of being repeated on every row.
+ *
+ * Both go through `@ryu/ui/lib/timezone.ts`, so they follow Appearance →
+ * "Date & time" like every other timestamp in the product. They replaced the
+ * last two zone-naive formatters in the transcript: a hand-rolled "5m ago"
+ * relative age and a hardcoded `en-GB` full stamp, neither of which could
+ * follow the setting.
+ *
+ * Exported so the assistant header in message-list.tsx renders the identical
+ * pair; two rows of the same turn showing different clock formats is exactly
+ * the drift a shared constant prevents. (The import goes this way — message-list
+ * already imports `UserMessage` from here, so the reverse would be a cycle.)
+ */
+export const MESSAGE_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
+	hour: "numeric",
+	minute: "2-digit",
+};
 
-	if (diffSeconds < 60) {
-		return "just now";
-	}
-	if (diffMinutes < 60) {
-		return `${diffMinutes}m ago`;
-	}
-	if (diffHours < 24) {
-		return `${diffHours}h ago`;
-	}
-	if (diffDays < 7) {
-		return `${diffDays}d ago`;
-	}
-	return date.toLocaleDateString("en-GB", {
-		day: "numeric",
-		month: "short",
-	});
-}
-
-function formatFullTimestamp(date: Date): string {
-	return date.toLocaleDateString("en-GB", {
-		day: "numeric",
-		month: "numeric",
-		year: "numeric",
-		hour: "numeric",
-		minute: "2-digit",
-		hour12: true,
-	});
-}
+export const MESSAGE_TOOLTIP_OPTIONS: Intl.DateTimeFormatOptions = {
+	dateStyle: "medium",
+	timeStyle: "short",
+};
 
 function getAuthor(message: UIMessage): MessageAuthor | null {
 	const metadata = (message as { metadata?: { author?: MessageAuthor } })
@@ -231,9 +252,16 @@ function UserMessageEditor({
 		}
 	};
 
+	// No width cap of its own: the field fills the bubble column, which already
+	// carries the message's max width. The old `max-w-[calc(95%-40px)]` was a
+	// second, different basis, so the editor was visibly wider than the bubble it
+	// replaced.
 	return (
 		<div className="flex w-full flex-col items-end gap-2">
-			<div className="w-full max-w-[calc(95%-40px)] rounded-2xl bg-muted px-3.5 py-2">
+			<div
+				className="w-full rounded-2xl bg-muted px-3.5 py-2"
+				data-slot="user-message-editor"
+			>
 				<textarea
 					className="w-full resize-none bg-transparent text-foreground text-sm leading-5 outline-none"
 					onChange={(event) => {
@@ -280,11 +308,13 @@ function UserMessageEditor({
 }
 
 export const UserMessage = memo(function UserMessage({
+	actions,
 	message,
 	className,
 	currentUser,
 	enableImagePreview = true,
 	editing = false,
+	groupPosition = "single",
 	onEditSubmit,
 	onEditCancel,
 }: UserMessageProps) {
@@ -292,15 +322,6 @@ export const UserMessage = memo(function UserMessage({
 	const textParts = message.parts?.filter(isTextPart) ?? [];
 	const text = textParts.map((p) => p.text).join("");
 
-	if (editing) {
-		return (
-			<UserMessageEditor
-				initialText={text}
-				onCancel={onEditCancel}
-				onSubmit={onEditSubmit}
-			/>
-		);
-	}
 	// A message sent with a quote carries it as a leading markdown blockquote;
 	// peel it back off so it renders as a styled QuoteBlock, not raw `> …` text.
 	const { quote, body } = splitLeadingQuote(text);
@@ -328,7 +349,10 @@ export const UserMessage = memo(function UserMessage({
 		}
 	}
 
-	if (!text && images.length === 0 && files.length === 0) {
+	// `editing` keeps an otherwise-empty message mounted: a turn that is only
+	// attachments still has an editor to show, and returning null here would
+	// unmount it mid-edit.
+	if (!(text || images.length > 0 || files.length > 0 || editing)) {
 		return null;
 	}
 
@@ -348,10 +372,10 @@ export const UserMessage = memo(function UserMessage({
 		<TooltipProvider delay={0}>
 			<Tooltip>
 				<TooltipTrigger className="text-muted-foreground/70 text-xs">
-					{formatRelativeTime(timestamp)}
+					{formatTime(timestamp, MESSAGE_TIME_OPTIONS)}
 				</TooltipTrigger>
 				<TooltipContent>
-					<p>{formatFullTimestamp(timestamp)}</p>
+					<p>{formatDateTime(timestamp, MESSAGE_TOOLTIP_OPTIONS)}</p>
 				</TooltipContent>
 			</Tooltip>
 		</TooltipProvider>
@@ -402,22 +426,55 @@ export const UserMessage = memo(function UserMessage({
 				</div>
 			)}
 			{text && (
-				<div className="max-w-[90%]">
-					<div className="rounded-2xl bg-muted px-3.5 py-1.5 text-foreground text-sm transition-colors">
+				// `Bubble` + `BubbleContent` (@ryu/ui/components/bubble), overridden
+				// back to the shipped geometry: the primitive defaults to
+				// `max-w-[80%] rounded-3xl py-2.5`, and all three of those are wrong
+				// here. The width cap belongs to the COLUMN below (`max-w-[90%]`), not
+				// to the bubble — that is what makes the bubble, its attachments and
+				// its hover toolbar agree on one left edge — so the bubble itself is
+				// uncapped.
+				//
+				// `bg-muted` is not set here: it comes from the `muted` variant's
+				// `*:data-[slot=bubble-content]:bg-muted` selector, which is why
+				// `data-slot` must stay the primitive's own and the e2e hook is a
+				// `data-testid` instead.
+				<Bubble
+					align={isOwnMessage ? "end" : "start"}
+					className="max-w-full"
+					variant="muted"
+				>
+					<BubbleContent
+						className="rounded-2xl px-3.5 py-1.5 text-foreground text-sm leading-5 transition-colors"
+						data-testid="user-message-bubble"
+					>
 						{quote && <QuoteBlock text={quote} />}
 						{body && (
 							<CollapsibleText
 								collapsedMaxHeightClass="max-h-[120px]"
 								contentClassName="wrap-break-word whitespace-pre-wrap leading-5"
+								contentKey={body}
 								fadeToClass="to-muted"
 							>
 								<p {...messageSelectableProps}>{body}</p>
 							</CollapsibleText>
 						)}
-					</div>
-				</div>
+					</BubbleContent>
+				</Bubble>
 			)}
 		</>
+	);
+
+	// Editing swaps the BODY only. Everything around it — avatar, timestamp, the
+	// column's width — is shared with the read-only bubble, so entering edit mode
+	// no longer makes the message jump or lose its chrome.
+	const BodyNode = editing ? (
+		<UserMessageEditor
+			initialText={text}
+			onCancel={onEditCancel}
+			onSubmit={onEditSubmit}
+		/>
+	) : (
+		MessageBubble
 	);
 
 	const AvatarNode = author ? (
@@ -432,34 +489,110 @@ export const UserMessage = memo(function UserMessage({
 		</Avatar>
 	) : null;
 
-	if (isOwnMessage) {
-		return (
-			<div className={cn("flex flex-col items-end gap-1", className)}>
-				{TimestampNode && (
-					<div className="flex h-4 items-center">{TimestampNode}</div>
-				)}
-				<div className="flex items-start gap-2">
-					{MessageBubble}
-					{AvatarNode}
-				</div>
-			</div>
-		);
-	}
+	// Messaging grouping: one avatar per RUN, on the row that closes it. The
+	// gutter on every OTHER row stays occupied — `Message` is `flex gap-2` and
+	// `MessageAvatar` is the only thing holding the 32px column open, so REMOVING
+	// it collapses the gutter and slides the bubble sideways. `chat-message-align`
+	// asserts the row's left edge against the composer to 1px, which is exactly
+	// the regression that would catch. `invisible` keeps the box, drops the paint.
+	const showAvatar = groupPosition === "single" || groupPosition === "last";
+	const AvatarSlot = AvatarNode ? (
+		<MessageAvatar
+			aria-hidden={showAvatar ? undefined : "true"}
+			// `self-start`, not the primitive's `self-end`: a turn can be metres
+			// tall (code blocks, tool cards), and a bottom-anchored avatar ends up
+			// far below the message it belongs to. Matches the assistant side.
+			className={cn(
+				"size-8 self-start bg-transparent",
+				showAvatar ? null : "invisible"
+			)}
+		>
+			{AvatarNode}
+		</MessageAvatar>
+	) : null;
 
-	return (
-		<div className={cn("flex flex-col items-start gap-1", className)}>
-			<div className="flex h-4 items-center gap-2">
-				{author && (
-					<span className="font-medium text-muted-foreground text-xs">
-						{author.name}
-					</span>
-				)}
-				{TimestampNode}
-			</div>
-			<div className="flex items-start gap-2">
-				{AvatarNode}
-				{MessageBubble}
-			</div>
+	// A remote sender is named once per run, on the row that OPENS it.
+	const showName =
+		!isOwnMessage &&
+		Boolean(author?.name) &&
+		(groupPosition === "single" || groupPosition === "first");
+	// The clock collapses with the avatar — same rows, same reason. This header
+	// sits ABOVE the bubble, so leaving it on every row puts a 16px band plus its
+	// gap between each pair of grouped messages: ~24px of chrome inside a run that
+	// is only 2px apart, which reads as three unrelated messages and undoes the
+	// grouping the run exists to express. Messaging clients all collapse it the
+	// same way, and the time it drops is never far off — a run has, by
+	// definition, no reply and no day boundary inside it, so the closing row's
+	// timestamp speaks for the whole block.
+	//
+	// The name is on the OPENING row and the time on the CLOSING one on purpose:
+	// a run of one carries both, and a longer run is introduced by who is talking
+	// and closed by when they stopped.
+	const showTimestamp =
+		Boolean(TimestampNode) &&
+		(groupPosition === "single" || groupPosition === "last");
+	// Gated as a whole — an empty `MessageHeader` still renders a 16px gapped row
+	// above the bubble, which is the very chrome this is removing.
+	const HeaderNode =
+		showName || showTimestamp ? (
+			<MessageHeader className="h-4 gap-2 px-0">
+				{showName && <span>{author?.name}</span>}
+				{showTimestamp && TimestampNode}
+			</MessageHeader>
+		) : null;
+
+	// One shrink-to-fit column holding the body and its actions. The width cap
+	// lives here rather than on the bubble so the toolbar inherits the bubble's
+	// edges instead of the transcript's — `w-fit` is what keeps it shrink-to-fit
+	// now that its parent is a flex COLUMN (`MessageContent`) rather than a row.
+	const BubbleColumn = (
+		<div
+			className={cn(
+				"flex w-fit min-w-0 max-w-[90%] flex-col gap-1",
+				isOwnMessage ? "items-end" : "items-start",
+				// A textarea has no content width to shrink to, so while editing the
+				// column takes the whole row and the 90% cap does the framing — which
+				// is the width the bubble had.
+				editing && "w-full"
+			)}
+		>
+			{BodyNode}
+			{actions ? (
+				// Taken out of flow (with a spacer keeping its 28px) so a SHORT message
+				// cannot make the toolbar the widest row in the column: that would move
+				// the column's left edge off the bubble again.
+				<div className="relative h-7 w-full">
+					<div className="absolute inset-y-0 left-0 flex items-center">
+						{actions}
+					</div>
+				</div>
+			) : null}
 		</div>
+	);
+
+	// `Message` (@ryu/ui/components/message) is a `flex w-full gap-2` row that
+	// flips to `flex-row-reverse` at `align="end"` — so the avatar is written
+	// FIRST in the DOM either way and lands on the right for one's own messages.
+	// `items-start` overrides the primitive's default stretch, which is what the
+	// hand-rolled row carried before this port.
+	//
+	// The header (name + clock) sits inside `MessageContent`, not above the whole
+	// row, so it aligns to the bubble column rather than to the transcript's
+	// edge. `items-end`/`items-start` on Content is what keeps `BubbleColumn`
+	// shrink-to-fit: the percentage cap then resolves against the row's known
+	// width, not against a parent the editor's textarea would get to decide.
+	return (
+		<Message
+			align={isOwnMessage ? "end" : "start"}
+			className={cn("items-start", className)}
+		>
+			{AvatarSlot}
+			<MessageContent
+				className={cn("gap-1", isOwnMessage ? "items-end" : "items-start")}
+			>
+				{HeaderNode}
+				{BubbleColumn}
+			</MessageContent>
+		</Message>
 	);
 });

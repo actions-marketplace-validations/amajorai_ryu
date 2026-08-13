@@ -22,6 +22,13 @@
 // `iconBackground`, else the muted default — except under the generative avatar,
 // which paints its own tile edge to edge.
 //
+// The TILE the art is painted on is a `variant`, not a second component: `card`
+// for every grid/row/sidebar square, `hero` for the large one that sits on a detail
+// hero's wash. The hero used to paint its own square inline in
+// `listing-detail-shell.tsx` and take the art as an opaque ReactNode, which made
+// every hero call site a bypass by construction — the two that DID pass an
+// `<AppIcon>` stacked both tiles, one inside the other.
+//
 // Step 4 is the reason a shared component matters more than it looks. An app with
 // no art of its own gets a deterministic tile derived from its id, so it still
 // reads as *that app* rather than as one repeated grey glyph — but only if every
@@ -32,13 +39,21 @@ import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { DitherGradient } from "@ryu/ui/components/dither-kit/gradient.tsx";
 import { Icon, iconToUrl } from "@ryu/ui/components/icon.tsx";
 import { useSvglIndex } from "@ryu/ui/components/svgl.ts";
+import {
+	APP_ICON_TILE_CARD,
+	APP_ICON_TILE_CARD_GLYPH,
+	APP_ICON_TILE_CARD_SURFACE,
+	APP_ICON_TILE_HERO,
+	APP_ICON_TILE_HERO_SURFACE,
+} from "@ryu/ui/lib/app-icon-tile.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { useCachedIconUrl } from "../icon-cache.ts";
 import { resolveCardIcon } from "../icon-url.ts";
 import type { CardDither } from "../types.ts";
 import BrandOrCoverImage from "./brand-image.tsx";
-import { ditherDissolves, normalizeDither } from "./dither.ts";
+import { ditherDissolves, normalizeDither, opaqueDither } from "./dither.ts";
+import { OPPOSITE_DIRECTION } from "./dither-banner.tsx";
 
 export interface AppIconProps {
 	/** Persist this icon's bytes under `<id>@<version>` (see
@@ -68,6 +83,19 @@ export interface AppIconProps {
 	/** Pixel size handed to the Icon primitive. Keep in step with `className`'s
 	 *  box: an Icon needs an explicit box, unlike a class-sized Hugeicons element. */
 	size?: number;
+	/** Which of the two tile treatments to paint — the small square in a grid, row,
+	 *  sidebar entry or tab strip (`card`, the default), or the large square that
+	 *  sits ON a detail hero's wash above its scrim (`hero`).
+	 *
+	 *  They are a variant rather than two components because only the TILE differs:
+	 *  the resolution order, the dither validation and the caching above are the
+	 *  same object painted at two sizes. And they cannot be merged, because the hero
+	 *  tile's backdrop is the listing's own author-supplied wash instead of a theme
+	 *  surface — so it fixes its glyph white (via {@link APP_ICON_TILE_HERO}) and
+	 *  must therefore force the wash OPAQUE, where the card follows the theme and
+	 *  leaves the wash exactly as declared. Painting the card treatment on a hero
+	 *  loses the glyph on the light end of every standard dissolving wash. */
+	variant?: "card" | "hero";
 }
 
 /**
@@ -89,8 +117,18 @@ export default function AppIcon({
 	name,
 	seedId,
 	size = 20,
+	variant = "card",
 }: AppIconProps) {
-	const safeDither = normalizeDither(dither);
+	const isHero = variant === "hero";
+	// The hero forces the spec opaque; the card paints it as declared. This is the
+	// legibility branch the treatment cannot ship without: every packaged manifest
+	// declares a wash that dissolves to transparent, and the hero tile's foreground
+	// is a fixed white it cannot adapt away from, so the dissolved end of a 5rem
+	// tile would swallow the glyph. `opaqueDither` re-ramps the listing's OWN hue,
+	// so the tile still carries the app's colour — it just covers its box.
+	const safeDither = isHero
+		? opaqueDither(normalizeDither(dither))
+		: normalizeDither(dither);
 	const svglIndex = useSvglIndex();
 	const {
 		iconId: resolvedIconId,
@@ -160,18 +198,30 @@ export default function AppIcon({
 	// standard spec dissolves to transparent, which leaves the square's far end as
 	// whatever is behind it — on a light surface that is nearly white, and a white
 	// glyph on it is invisible. `text-foreground` reads at both ends in both themes.
-	const glyphColor = safeDither
-		? ditherDissolves(safeDither)
-			? "text-foreground"
-			: "text-white"
-		: "text-muted-foreground";
+	//
+	// The hero has no such branch: its own tile constant fixes `text-white`, which
+	// is safe there precisely because the wash above was forced opaque.
+	let glyphColor = "";
+	if (!isHero) {
+		if (safeDither) {
+			glyphColor = ditherDissolves(safeDither)
+				? "text-foreground"
+				: "text-white";
+		} else {
+			glyphColor = APP_ICON_TILE_CARD_GLYPH;
+		}
+	}
 
 	return (
 		<span
 			className={cn(
-				"relative flex shrink-0 items-center justify-center overflow-hidden rounded-lg",
+				isHero ? APP_ICON_TILE_HERO : APP_ICON_TILE_CARD,
 				glyphColor,
-				isPlaceholder || safeDither || iconBackground ? "" : "bg-muted",
+				isPlaceholder || safeDither || iconBackground
+					? ""
+					: isHero
+						? APP_ICON_TILE_HERO_SURFACE
+						: APP_ICON_TILE_CARD_SURFACE,
 				className
 			)}
 			style={flatBackground}
@@ -182,7 +232,14 @@ export default function AppIcon({
 				<>
 					{safeDither ? (
 						<DitherGradient
-							direction={safeDither.direction}
+							// On a hero the tile washes in the OPPOSITE direction to the
+							// banner behind it, so it reads as a tile sitting ON the hero
+							// rather than as a hole punched through it.
+							direction={
+								isHero
+									? OPPOSITE_DIRECTION[safeDither.direction ?? "up"]
+									: safeDither.direction
+							}
 							from={safeDither.from}
 							to={safeDither.to}
 						/>

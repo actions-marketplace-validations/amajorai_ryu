@@ -2214,6 +2214,7 @@ mod tests {
             vram_bytes: vram,
             vram_human: String::new(),
             gpu_name: None,
+            gpu_vendor: None,
             unified_memory: false,
             os: "test".into(),
         }

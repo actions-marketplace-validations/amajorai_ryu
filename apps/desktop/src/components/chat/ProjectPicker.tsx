@@ -33,7 +33,8 @@ import { Spinner } from "@ryu/ui/components/spinner";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useState } from "react";
 import {
-	WORKSPACE_SELECT_ITEM,
+	COMPOSER_SELECT_ITEM,
+	WORKSPACE_MENU_CONTENT,
 	WORKSPACE_SELECT_TRIGGER,
 } from "@/components/agent-elements/input/composer-select.ts";
 import { ProjectGlyph } from "@/src/components/layout/ProjectIconDialog.tsx";
@@ -89,7 +90,7 @@ export function ProjectPicker() {
 
 				<DropdownMenuContent
 					align="start"
-					className="max-h-[60vh] w-64 overflow-y-auto"
+					className={cn(WORKSPACE_MENU_CONTENT, "max-h-[60vh] overflow-y-auto")}
 					side="top"
 					sideOffset={6}
 				>
@@ -315,7 +316,7 @@ export function ProjectPickerContent({
 			{folder && (
 				<button
 					className={cn(
-						WORKSPACE_SELECT_ITEM,
+						COMPOSER_SELECT_ITEM,
 						"flex cursor-pointer text-foreground/70 transition-colors hover:bg-foreground/10"
 					)}
 					onClick={() => {

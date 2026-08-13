@@ -144,7 +144,7 @@ export function ModelListRow({
 			<div className="flex items-center justify-between gap-2">
 				<span className="truncate font-medium text-sm">{model.repo}</span>
 				{model.installed ? (
-					<Badge variant="secondary">Installed</Badge>
+					<Badge variant="secondary">Added</Badge>
 				) : model.gated ? (
 					<HugeiconsIcon
 						className="size-3.5 shrink-0 text-amber-500"
@@ -184,21 +184,21 @@ export function QuantFileRow({
 	if (file.state === "installing") {
 		action = (
 			<span className="flex items-center gap-2 text-muted-foreground text-xs">
-				<Spinner className="size-3.5" /> {file.progressLabel ?? "Installing…"}
+				<Spinner className="size-3.5" /> {file.progressLabel ?? "Adding…"}
 			</span>
 		);
 	} else if (file.state === "installed") {
 		action = (
 			<Badge variant="secondary">
 				<HugeiconsIcon className="size-3.5" icon={CheckmarkCircle02Icon} />
-				Installed
+				Added
 			</Badge>
 		);
 	} else {
 		action = (
 			<Button disabled={tooBig} onClick={onInstall} size="sm" variant="ghost">
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				Install
+				Add
 			</Button>
 		);
 	}

@@ -92,6 +92,7 @@ import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
+import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { AssistantDock } from "../assistant/AssistantDock.tsx";
 import { AssistantPanel } from "../assistant/AssistantPanel.tsx";
 import {
@@ -101,6 +102,7 @@ import {
 import { AppSidebar, SidebarPanelContent } from "./AppSidebar.tsx";
 import { CommandPalette } from "./CommandPalette.tsx";
 import { SplitDropZones } from "./SplitDropZones.tsx";
+import { SaveSplitPresetDialog } from "./SplitPresetMenu.tsx";
 import {
 	computeSplitLayout,
 	paneNeedsTopClearance,
@@ -388,7 +390,10 @@ function LayoutContent({
 		setCrashRoute(
 			activeTab ? { path: activeTab.path, title: activeTab.title } : null
 		);
-	}, [activeTab]);
+		// The two fields, not the tab object: `tabs.find(...)` churns whenever the
+		// tabs array is rebuilt, which would re-stamp the crash route on every
+		// unrelated tab-state change.
+	}, [activeTab?.path, activeTab?.title]);
 
 	// The floating "Ask Ryu" dock would just overlap a full chat surface, so hide
 	// it whenever a `/chat` pane is currently visible (in a split, any visible
@@ -488,7 +493,12 @@ function LayoutContent({
 
 	const handleNewConversation = () => {
 		const id = `conv-${Date.now()}`;
-		createConversation(id);
+		// Born under whatever project is open, so the sidebar nests it right away.
+		// Read at call time (not subscribed) — this handler is a one-shot action,
+		// and the value that matters is the folder as it is when the user asks.
+		createConversation(id, {
+			folderPath: useWorkspaceStore.getState().folder ?? undefined,
+		});
 		setActiveConversationId(id);
 		openTab("/chat", { forceNew: true, conversationId: id, title: "New chat" });
 	};
@@ -553,6 +563,26 @@ function LayoutContent({
 	useHotkey("chat.voice-mode", () => {
 		useChatHotkeyTargets.getState().startVoiceMode?.();
 	});
+	// The docks are ChatPage-local state, so they arrive through the same slot as
+	// Stop. A no-op when the focused surface is not a chat, which is correct: the
+	// panels only exist there.
+	useHotkey("chat.toggle-bottom-panel", () => {
+		useChatHotkeyTargets.getState().toggleBottomPanel?.();
+	});
+	useHotkey("chat.toggle-right-panel", () => {
+		useChatHotkeyTargets.getState().toggleRightPanel?.();
+	});
+	// The floating Ryu chat. `open("floating")` explicitly, never the bare
+	// `open()`: that restores the LAST layout, and when that was `sidebar` the
+	// AssistantDock renders nothing — the key would look broken.
+	useHotkey("assistant.toggle", () => {
+		const { mode, open, close } = useAssistantStore.getState();
+		if (mode === "closed") {
+			open("floating");
+		} else {
+			close();
+		}
+	});
 	// allowInInput: the default binding (F11) is a bare key, which the dispatcher
 	// otherwise suppresses while a field has focus — i.e. most of the time, since
 	// the composer holds focus on the main surfaces.
@@ -579,6 +609,10 @@ function LayoutContent({
 	return (
 		<TabDndProvider>
 			<CommandPalette />
+			{/* One instance for every split menu that offers "Save layout as
+			    preset" — a context menu unmounts on click, so it cannot host its
+			    own dialog. */}
+			<SaveSplitPresetDialog />
 			<DeepLinkController />
 			<PrivacyDisclosure />
 			<SupportAccessBanner />

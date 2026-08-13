@@ -113,6 +113,10 @@ export interface ChatSlots {
 		>;
 	}>;
 	UserMessage: React.ComponentType<{
+		/** Hover actions for the turn (copy / edit / branch). A replacement
+		 *  UserMessage must render this inside the bubble's own column, otherwise
+		 *  the surface silently loses its toolbar. */
+		actions?: React.ReactNode;
 		message: UIMessage;
 		className?: string;
 	}>;
@@ -154,6 +158,9 @@ export interface AgentChatProps {
 	assistantAvatar?: React.ReactNode;
 	/** Display name shown above each assistant turn (agent or team name). */
 	assistantName?: string;
+	/** Marks for the agents working on the live turn, drawn side by side in the
+	 * status row. Defaults to `assistantAvatar` alone. */
+	assistantPlanningAvatars?: React.ReactNode[];
 	attachments?: {
 		onAttach?: () => void;
 		images?: {
@@ -209,6 +216,22 @@ export interface AgentChatProps {
 		items: SuggestionItem[];
 		onSelect: (item: SuggestionItem) => void;
 	};
+	/** This thread's persisted history could not be fetched — the node was
+	 * unreachable or answered an error. A THIRD state, distinct from both "empty"
+	 * and "has messages": the transcript area says so (with an optional retry)
+	 * instead of showing the new-chat greeting, which reads as "your chat is
+	 * gone". Ignored once there are messages to render. */
+	historyError?: {
+		description?: string;
+		onRetry?: () => void;
+		title: string;
+	};
+	/** This thread's persisted history is still being fetched. Suppresses the
+	 * empty state — a restored tab must never paint as a brand-new chat while its
+	 * messages are still in flight — and shows a skeleton transcript instead.
+	 * Must be false for a genuinely new chat (no conversation id), or the
+	 * greeting never appears. */
+	historyLoading?: boolean;
 	/** Non-model notice rendered in the checkpoint-line style after messages. */
 	historyNotice?: {
 		id: string;

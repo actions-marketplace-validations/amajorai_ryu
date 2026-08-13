@@ -9,8 +9,8 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
+	StoreBottomSearch,
 	StoreComingSoon,
-	StoreSearchButton,
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
@@ -166,7 +166,7 @@ const SECTIONS: {
 	// (shell); this section covers everything installed on the active node.
 	{
 		value: "installed",
-		label: "Installed",
+		label: "Added",
 		icon: Download01Icon,
 		group: "manage",
 	},
@@ -220,7 +220,7 @@ const SECTION_HEADERS: Record<
 	},
 	agents: {
 		title: "Agents",
-		subtitle: "Prebuilt agents you can install and start using in one click.",
+		subtitle: "Prebuilt agents you can add and start using in one click.",
 	},
 	engines: {
 		title: "Engines",
@@ -228,8 +228,8 @@ const SECTION_HEADERS: Record<
 			"Local inference runtimes for text, image, speech, and embeddings.",
 	},
 	installed: {
-		title: "Installed",
-		subtitle: "Everything installed on the active node, gathered in one place.",
+		title: "Added",
+		subtitle: "Everything added to the active node, gathered in one place.",
 	},
 	account: {
 		title: "Account",
@@ -387,22 +387,20 @@ export default function StorePage({
 		<DesktopMarketplaceHost>
 			<DesktopCatalogHost>
 				<StoreToolbarProvider value={setToolbar}>
-					<div className="flex h-full flex-col overflow-hidden pt-12">
-						{/* Page chrome, inline: the section title, the section tabs, and
-						    the store-wide search + the active section's filters. Aligned
-						    to the same centered column the card grids use, so the title,
-						    the tabs and the first card share a left edge. */}
+					<div className="relative flex h-full flex-col overflow-hidden pt-12">
+						{/* Page chrome, inline: the section title, the active section's
+						    filters, then the section tabs. Aligned to the same centered
+						    column the card grids use, so the title, the tabs and the first
+						    card share a left edge. The store-wide search is NOT here — it
+						    is the bare bottom input below; only per-section controls
+						    (filters, source) sit in this row, and the tab strip itself
+						    carries tabs and nothing else. */}
 						<div className="mx-auto w-full max-w-4xl shrink-0 px-4 pt-4">
 							<div className="flex items-center justify-between gap-3">
 								<p className="font-semibold text-lg">
 									{sectionHeader(section, activeContributedTab).title}
 								</p>
 								<div className="flex items-center gap-1">
-									<StoreSearchButton
-										onChange={setSearchQuery}
-										placeholder="Search the whole marketplace…"
-										value={searchQuery}
-									/>
 									{sectionFilters?.panel ? (
 										<Popover>
 											<PopoverTrigger
@@ -436,7 +434,12 @@ export default function StorePage({
 								sections={navSections}
 							/>
 						</div>
-						<div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+						{/* `pb-14` = the bottom search bar's height. The bar is positioned
+						    out of flow, so without this the last card row sits under it and
+						    cannot be reached: every section scrolls INSIDE this box (they
+						    are `h-full`/`flex-1 overflow-auto`), so padding it once shortens
+						    all of them instead of hunting each section. */}
+						<div className="min-h-0 min-w-0 flex-1 overflow-hidden pb-14">
 							{searching ? (
 								<StoreSearchResults
 									groups={search.groups}
@@ -453,6 +456,11 @@ export default function StorePage({
 								/>
 							)}
 						</div>
+						<StoreBottomSearch
+							onChange={setSearchQuery}
+							placeholder="Search the whole marketplace…"
+							value={searchQuery}
+						/>
 					</div>
 				</StoreToolbarProvider>
 			</DesktopCatalogHost>

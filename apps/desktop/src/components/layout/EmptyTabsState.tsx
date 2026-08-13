@@ -24,7 +24,9 @@ import {
 	type DragEvent,
 	type ReactNode,
 	useCallback,
+	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
 import { useSession } from "@/lib/auth-client.ts";
@@ -38,8 +40,15 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import { useGettingStarted } from "@/src/hooks/useGettingStarted.ts";
+import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
+import {
+	readLastUsedAgentId,
+	rememberLastUsedAgent,
+	seedComposerAgentId,
+	shouldAdoptNodeDefault,
+} from "@/src/lib/composer-target.ts";
 import { normalizeTimestamp, stampRecent } from "@/src/lib/library.ts";
 import {
 	getAgentModel,
@@ -367,13 +376,29 @@ function LaunchpadComposer() {
 	const engineModels = useEngineModels();
 	const activeNode = useActiveNode();
 
+	// The launchpad is always a BRAND NEW chat, so it runs the same seed chain a
+	// fresh ChatPage does — minus the conversation link, which does not exist yet.
+	// The pick rides `initialAgent` into the tab it opens, so whatever resolves
+	// here is what that chat starts on.
 	const [agentId, setAgentId] = useState<string | null>(() =>
-		localStorage.getItem("ryu_default_agent")
+		seedComposerAgentId({ lastUsedAgentId: readLastUsedAgentId() })
 	);
+	const agentIdRef = useRef(agentId);
+	agentIdRef.current = agentId;
 	const [teamId, setTeamId] = useState<string | null>(null);
 	const [selectedModel, setSelectedModel] = useState<string | null>(() =>
-		getAgentModel(localStorage.getItem("ryu_default_agent"))
+		getAgentModel(agentIdRef.current)
 	);
+
+	// Last link in the chain: the node-wide default (`default-agent-selection`).
+	// Async, so it fills a hole rather than seeding — see `shouldAdoptNodeDefault`.
+	const nodeDefaultAgentId = useNodeDefaultAgentId();
+	useEffect(() => {
+		if (shouldAdoptNodeDefault(agentIdRef.current, nodeDefaultAgentId)) {
+			setAgentId(nodeDefaultAgentId);
+			setSelectedModel(getAgentModel(nodeDefaultAgentId));
+		}
+	}, [nodeDefaultAgentId]);
 	// Temporary chat, picked BEFORE the thread exists — the launchpad is the
 	// new-chat surface, which is the only place ChatPage offers the toggle too. It
 	// rides the tab seed so the spawned chat opens already unsaved.
@@ -402,11 +427,13 @@ function LaunchpadComposer() {
 		[agentId]
 	);
 
-	// Picking an agent clears any team target and becomes the remembered default.
+	// Picking an agent clears any team target and becomes the remembered seed for
+	// the next brand-new chat. It does NOT reach into any open chat tab: each one
+	// owns its own target, pinned by its conversation.
 	const handleSelectAgent = useCallback((next: string) => {
 		setTeamId(null);
 		setAgentId(next);
-		localStorage.setItem("ryu_default_agent", next);
+		rememberLastUsedAgent(next);
 		setSelectedModel(getAgentModel(next));
 	}, []);
 

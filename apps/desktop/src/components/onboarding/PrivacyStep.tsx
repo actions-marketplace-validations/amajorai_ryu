@@ -15,6 +15,7 @@
 
 import { Alert01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { ONBOARDING_CONTENT_DELAY_MS } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { PageHeader } from "@ryu/ui/components/page-header";
@@ -197,8 +198,15 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 						subtitle="Choose what Ryu can send. You can change any of it later in Settings."
 						title="Your privacy"
 					/>
+				</StaggerReveal>
 
-					<div className="flex w-full max-w-md flex-col gap-6">
+				{/* The content picks the cascade back up where the header left it, so
+				    the notice, the toggles and the Continue row arrive one after
+				    another instead of as one block. Outside the reveal above on
+				    purpose: revealing this column there AND its rows here would apply
+				    the travel and the blur twice to the same rows. */}
+				<div className="flex w-full max-w-md flex-col gap-6">
+					<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
 						<SettingsCard className="flex flex-col gap-2.5 border-primary/40">
 							<div className="flex items-start gap-2.5">
 								<HugeiconsIcon
@@ -281,8 +289,8 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 								{busy ? "Finishing…" : "Continue"}
 							</Button>
 						</div>
-					</div>
-				</StaggerReveal>
+					</StaggerReveal>
+				</div>
 			</div>
 		</div>
 	);

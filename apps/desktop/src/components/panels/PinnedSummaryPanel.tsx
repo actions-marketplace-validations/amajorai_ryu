@@ -29,9 +29,10 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@ryu/ui/lib/utils";
 import { useEffect, useRef, useState } from "react";
-import { ProjectPicker } from "@/src/components/chat/ProjectPicker.tsx";
-import { WorkspaceHeader } from "@/src/components/chat/WorkspaceHeader.tsx";
-import { WorktreePicker } from "@/src/components/chat/WorktreePicker.tsx";
+import {
+	DiffStat,
+	WorkspacePicker,
+} from "@/src/components/chat/WorkspacePicker.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
 import type { BouncyAccordionItem } from "@/src/components/ui/bouncy-accordion.tsx";
@@ -63,30 +64,6 @@ type CommitState =
 	| { status: "done"; label: string }
 	| { status: "error"; message: string };
 
-/** +added / −removed line counts, matching the chat page's workspace picker. */
-function DiffStat({
-	insertions,
-	deletions,
-}: {
-	deletions: number;
-	insertions: number;
-}) {
-	return (
-		<span className="flex items-center gap-1 font-medium tabular-nums">
-			{insertions > 0 && (
-				<span className="text-emerald-600 dark:text-emerald-400/90">
-					+{insertions}
-				</span>
-			)}
-			{deletions > 0 && (
-				<span className="text-red-600/90 dark:text-red-400/90">
-					−{deletions}
-				</span>
-			)}
-		</span>
-	);
-}
-
 /** The Environment row body: pickers + git line-stats + commit & push. */
 function EnvironmentDescription({
 	conversationId,
@@ -110,14 +87,16 @@ function EnvironmentDescription({
 	const ahead = git?.ahead ?? 0;
 	const clean = insertions === 0 && deletions === 0;
 
-	// No folder: the branch/worktree pickers and every git affordance render
-	// nothing, so the row shows just the project picker and says why it is bare.
+	// No folder: the branch and run-mode rows and every git affordance render
+	// nothing, so the row shows just the folder picker and says why it is bare.
 	if (!folder) {
 		return (
 			<div className="flex flex-col gap-2">
-				<div className="flex flex-col items-stretch [&_button]:w-full [&_button]:justify-start">
-					<ProjectPicker />
-				</div>
+				<WorkspacePicker
+					conversationId={conversationId}
+					stacked
+					target={target}
+				/>
 				<p className="text-muted-foreground text-xs">
 					No project folder. Pick one to see branch, changes and commit.
 				</p>
@@ -127,17 +106,16 @@ function EnvironmentDescription({
 
 	return (
 		<div className="flex flex-col gap-2">
-			{/* Project ▸ branch ▸ worktree — the pickers relocated from the
-			    composer's workspace bar. They read the workspace store reactively
-			    and render nothing outside a git repo. Stacked one-per-row here (each
-			    trigger stretched full-width and left-aligned) rather than the
-			    composer's compact inline pills, so the narrow pinned panel reads as a
-			    clean list: project on its row, branch on its row, worktree on its. */}
-			<div className="flex flex-col items-stretch gap-1 [&_button]:w-full [&_button]:justify-start">
-				<ProjectPicker />
-				<WorkspaceHeader target={target} />
-				<WorktreePicker conversationId={conversationId} target={target} />
-			</div>
+			{/* Project ▸ branch ▸ run mode — the SAME picker the composer's workspace
+			    bar renders, in its `stacked` variant: three full-width rows rather
+			    than one inline chip, because this column is 288px wide. The panel
+			    used to mount three separate picker components here, which is how the
+			    two families drifted; it now owns no picker markup of its own. */}
+			<WorkspacePicker
+				conversationId={conversationId}
+				stacked
+				target={target}
+			/>
 
 			{!git && (
 				<p className="text-muted-foreground text-xs">Not a git repository.</p>
@@ -159,7 +137,7 @@ function EnvironmentDescription({
 						</span>
 					)}
 					{ahead > 0 && (
-						<span className="flex shrink-0 items-center gap-0.5 font-mono">
+						<span className="flex shrink-0 items-center gap-0.5 tabular-nums">
 							<HugeiconsIcon
 								aria-hidden
 								className="size-3"
@@ -226,12 +204,18 @@ export function PinnedSummaryPanel({
 			if (!pressed) {
 				return;
 			}
-			// Ignore presses inside the panel, or inside a Radix popover the
-			// pickers portal to the body root (project ▸ branch ▸ worktree) — those
+			// Ignore presses inside the panel, or inside a menu/popover/dialog the
+			// pickers portal to the body root (project ▸ branch ▸ run mode) — those
 			// live outside the panel's DOM subtree but are logically part of it.
+			// The selector matches what the UI kit actually emits: these are Base UI
+			// popups (`data-slot="…-content"`), never Radix — the old
+			// `[data-radix-popper-content-wrapper]` probe could not match anything in
+			// this app, so choosing a branch while the panel floated dismissed it.
 			if (
 				panelRef.current?.contains(pressed) ||
-				pressed.closest("[data-radix-popper-content-wrapper]")
+				pressed.closest(
+					'[data-slot="dropdown-menu-content"],[data-slot="popover-content"],[data-slot="dialog-content"]'
+				)
 			) {
 				return;
 			}
@@ -297,11 +281,7 @@ export function PinnedSummaryPanel({
 		title: (
 			<span className="flex items-center gap-2">
 				<span className="font-medium text-foreground text-xs">Environment</span>
-				{git && (insertions > 0 || deletions > 0) && (
-					<span className="text-[11px]">
-						<DiffStat deletions={deletions} insertions={insertions} />
-					</span>
-				)}
+				{git && <DiffStat stat={{ insertions, deletions }} />}
 			</span>
 		),
 		description: (

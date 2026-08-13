@@ -2,6 +2,7 @@ mod core;
 mod hardware;
 mod identifier_migration;
 mod mcp_bridge;
+mod midnight_wipe;
 mod nodes;
 mod permissions;
 mod profile;
@@ -88,6 +89,30 @@ fn macos_titlebar_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
 
 struct CoreState {
 	process: Mutex<Option<RyuCoreProcess>>,
+}
+
+/// Stop the managed `ryu-core` child, if one is running.
+///
+/// Exists because the tray's Quit is now the ONLY path that reliably ends the
+/// app: with "stay in tray on close" on by default, closing the window no longer
+/// destroys it, so the `WindowEvent::Destroyed` arm below — which used to be
+/// where Core was stopped — does not run. A quit that left `ryu-core` alive would
+/// leave it holding its port, which this repo has already paid for once (a stale
+/// Core squatting 8980 with a pile of hung probes).
+///
+/// Idempotent: `try_stop` runs against an `Option` that the Destroyed arm may
+/// also have taken, so calling both is safe.
+pub(crate) fn stop_managed_core<R: tauri::Runtime, M: Manager<R>>(app: &M) {
+	let state = app.state::<CoreState>();
+	let mut guard = match state.process.lock() {
+		Ok(guard) => guard,
+		Err(_) => return,
+	};
+	if let Some(ref mut process) = *guard {
+		if let Err(e) = process.try_stop() {
+			tracing::error!("Failed to stop Ryu Core on quit: {}", e);
+		}
+	}
 }
 
 pub(crate) struct HttpClient(pub reqwest::Client);
@@ -357,15 +382,24 @@ fn get_ryu_core_url() -> String {
 /// Build/runtime profile for the frontend badge. `dev = true` when this is the
 /// dev variant (RYU_PROFILE=dev or the `dev-variant` build), so the sidebar can
 /// show a "Dev" badge. Release builds return `false`.
+///
+/// `dev` is the DEV VARIANT specifically, not `profile::is_dev()` ("any
+/// non-release profile"). Since a canary/nightly bundle activates its own profile
+/// from its version, `is_dev()` is true there too — and the frontend uses this
+/// flag to label the window "Ryu (Research Preview Dev)", which a canary build is
+/// not. `profile` carries the actual profile for anything that wants it.
 #[derive(serde::Serialize)]
 struct BuildProfile {
 	dev: bool,
+	profile: String,
 }
 
 #[tauri::command]
 fn get_build_profile() -> BuildProfile {
+	let profile = profile::name();
 	BuildProfile {
-		dev: profile::is_dev(),
+		dev: profile == "dev",
+		profile,
 	}
 }
 
@@ -1635,6 +1669,8 @@ pub fn run() {
             install_update_at_tag,
             copy_data_folder_to_profile,
             deep_clean_node,
+            midnight_wipe::get_midnight_wipe,
+            midnight_wipe::set_midnight_wipe,
             migrate_data_folder,
             import_data_folder,
             open_external,
@@ -1643,6 +1679,8 @@ pub fn run() {
             open_tab_window,
             tray::get_hide_tray_icon,
             tray::set_hide_tray_icon,
+            tray::get_close_to_tray,
+            tray::set_close_to_tray,
             startup::get_start_hidden,
             startup::set_start_hidden,
             shell_execute,
@@ -1695,6 +1733,23 @@ pub fn run() {
                 if let Some(win) = window.app_handle().get_webview_window(window.label()) {
                     let _ = win
                         .set_traffic_lights_inset(TRAFFIC_LIGHTS_INSET.0, TRAFFIC_LIGHTS_INSET.1);
+                }
+            }
+            // "Stay in the tray on close": the main window hides instead of being
+            // destroyed, so Core — and every turn running against it — survives.
+            // Only the main window: destroying the companion overlay must stay a
+            // real destroy, and only when a quit is not already under way, or the
+            // tray's own Quit could never finish. `read_close_to_tray` reports
+            // false whenever the tray icon is hidden, so this can never strand a
+            // running app with neither a window nor an icon.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main"
+                    && !tray::is_quitting()
+                    && tray::read_close_to_tray(window.app_handle())
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
                 }
             }
             if let WindowEvent::Destroyed = event {

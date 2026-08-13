@@ -44,6 +44,44 @@ export function equalSizes(n: number): number[] {
 	return Array.from({ length: n }, () => 1 / n);
 }
 
+/** Reset every branch's fractions to an equal share, at EVERY depth. Structure
+    (orientation, children, leaf order) is untouched — this is a sizes-only
+    rewrite, so membership never changes and no reconcile is needed.
+    Deliberately recursive, unlike `setSplitOrientation` which only re-tilts the
+    root: "equalize panes" reads as "make every pane the same", and a nested
+    tree whose inner branch stayed skewed would look untouched.
+    The result is NOT re-normalized: `normalizeNode` flattens same-orientation
+    nesting, which would rearrange the panes rather than only resize them. That
+    cannot bite here (every stored tree is already normalized, so no branch has
+    a same-orientation child), but the invariant is the reason. */
+export function equalizeNode(node: SplitNode): SplitNode {
+	if (node.type === "leaf") {
+		return node;
+	}
+	return {
+		...node,
+		children: node.children.map(equalizeNode),
+		sizes: equalSizes(node.children.length),
+	};
+}
+
+/** Whether every branch already holds an equal share, at every depth — i.e.
+    whether `equalizeNode` would be a no-op. Drives the disabled state of the
+    "Equalize panes" menu item. Compared with a tolerance because fractions come
+    back from gutter drags as float arithmetic, and a pane a thousandth off is
+    even as far as anyone can see. */
+export function isEqualized(node: SplitNode): boolean {
+	if (node.type === "leaf") {
+		return true;
+	}
+	const even = 1 / node.children.length;
+	return (
+		node.sizes.length === node.children.length &&
+		node.sizes.every((s) => Math.abs(s - even) < 0.005) &&
+		node.children.every(isEqualized)
+	);
+}
+
 export function makeLeaf(tabId: string): SplitLeaf {
 	return { type: "leaf", tabId };
 }
@@ -232,6 +270,26 @@ export function insertLeaf(
 				? insertLeaf(c, targetTabId, tabId, direction)
 				: c
 		),
+	};
+}
+
+/** Point the leaf currently holding `tabId` at `nextTabId` instead, leaving the
+    shape and every fraction alone. Used when a pane's occupant is replaced (an
+    empty placeholder pane taking on a real tab) — unlike `removeLeaf` +
+    `insertLeaf` this can never renegotiate sizes or collapse a branch. The
+    caller must ensure `nextTabId` isn't already in the tree, or it would appear
+    twice. */
+export function replaceLeaf(
+	node: SplitNode,
+	tabId: string,
+	nextTabId: string
+): SplitNode {
+	if (node.type === "leaf") {
+		return node.tabId === tabId ? makeLeaf(nextTabId) : node;
+	}
+	return {
+		...node,
+		children: node.children.map((c) => replaceLeaf(c, tabId, nextTabId)),
 	};
 }
 

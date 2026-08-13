@@ -811,7 +811,33 @@ pub struct PluginManifest {
     )]
     pub accent_color: Option<String>,
 
-    /// Detail-page hero banner spec ({colors,style,seed}); opaque passthrough (Ryu ext).
+    /// Detail-page hero banner spec; opaque passthrough (Ryu ext).
+    ///
+    /// The banner is the listing's OWN background, not its icon enlarged. Declared
+    /// or not, the hero always paints something: with no `banner` the detail page
+    /// derives its wash from `icon_dither`, so an app that never thinks about this
+    /// key still opens on its own colour rather than a grey slab. Declaring one is
+    /// how an author says "my hero is not just my icon, bigger".
+    ///
+    /// Accepted keys, all optional — the render layer picks the first that paints
+    /// and falls back down the list, so an unknown or malformed value degrades to
+    /// the derived wash rather than failing:
+    ///
+    /// - `background` — a flat CSS background (a colour, a `linear-gradient(…)`).
+    /// - `imageUrl` — a raster banner, painted `object-cover`. http(s) only.
+    /// - `colors: [String]` — two or more stops, ramped 135°.
+    /// - `style: "gradient" | "dither" | "flat" | "image"` — how to treat the
+    ///   above; `dither` adds the noise overlay, `flat`/`image` select `background`
+    ///   / `imageUrl` explicitly.
+    /// - `seed: Number` — the dither noise seed, so two apps sharing a palette do
+    ///   not share a texture.
+    ///
+    /// Kept as raw JSON like `icon_dither`, for the same reason: this is
+    /// PUBLISHER-supplied and reaches a CSS background, so it must never fail the
+    /// manifest parse, and the client validates before painting (`safeHttpUrl` for
+    /// `imageUrl`; the flat string is trusted exactly as far as `icon_background`
+    /// already is). Core does not read any of these keys — it copies the whole
+    /// value onto the catalog entry — so a new one needs no Core release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub banner: Option<serde_json::Value>,
 
@@ -1852,6 +1878,23 @@ pub struct Contributes {
     #[serde(default)]
     #[schemars(with = "Vec<ContextMenuContribution>")]
     pub context_menu_items: Vec<serde_json::Value>,
+
+    /// "New X" rows the app contributes to the shell's create menu (the sidebar
+    /// footer "+"). See [`CreateActionContribution`].
+    ///
+    /// This exists because the create menu's only app seam used to be
+    /// `sidebar_sections[].spec.create` — section-scoped, so an app that
+    /// contributes no sidebar section could not put a row there at all. The shell
+    /// therefore hardcoded rows for apps it happened to know about, and those rows
+    /// stayed in the menu when the app was not installed, leading straight to an
+    /// error page. A create action is its own contribution precisely so the row
+    /// appears and disappears with the app.
+    ///
+    /// **Stored raw, validated at the chokepoint** — same rule as
+    /// [`Contributes::context_menu_items`].
+    #[serde(default)]
+    #[schemars(with = "Vec<CreateActionContribution>")]
+    pub create_actions: Vec<serde_json::Value>,
 
     /// **Deletable data categories** the app owns — one "Delete all X" row in
     /// Settings → Danger Zone (see [`DataCategoryContribution`]).
@@ -3511,6 +3554,71 @@ pub fn validate_context_menu_item(item: &ContextMenuContribution) -> Result<(), 
     Ok(())
 }
 
+/// One "New X" row a plugin contributes to the shell's create menu (see
+/// [`Contributes::create_actions`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CreateActionContribution {
+    /// Stable id for this row within the plugin.
+    pub id: String,
+
+    /// Row label, written as the user reads it — "New workflow", not "Workflow".
+    pub label: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive. The desktop's
+    /// create menu draws no icons today (its rows are label-only by design), so
+    /// this is read and ignored there — it exists for shells that do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// In-app route the shell opens, e.g. `/workflows/new`. Must be a path, not a
+    /// URL: this is a navigation inside the shell, and accepting a scheme here
+    /// would turn a create row into an arbitrary-link affordance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
+    /// Title for the tab `target` opens. Falls back to `label`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+
+    /// Granted capability to invoke instead of navigating, plus static `args` —
+    /// for a create that is an action rather than a destination. Dispatched
+    /// through the same host seam as a context-menu row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+
+    /// Sort position among contributed rows (ascending).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+}
+
+/// Validate one [`CreateActionContribution`].
+pub fn validate_create_action(action: &CreateActionContribution) -> Result<(), String> {
+    if action.id.trim().is_empty() {
+        return Err("create action has an empty 'id'".to_string());
+    }
+    if action.label.trim().is_empty() {
+        return Err(format!("create action '{}' has an empty 'label'", action.id));
+    }
+    let target = action.target.as_deref().unwrap_or("").trim();
+    let capability = action.capability.as_deref().unwrap_or("").trim();
+    if target.is_empty() && capability.is_empty() {
+        return Err(format!(
+            "create action '{}' declares neither 'target' nor 'capability'; a row that does nothing when clicked is worse than no row",
+            action.id
+        ));
+    }
+    if !target.is_empty() && !target.starts_with('/') {
+        return Err(format!(
+            "create action '{}' has a 'target' that is not an in-app route (it must start with '/')",
+            action.id
+        ));
+    }
+    Ok(())
+}
+
 /// Characters a `pref_key` may contain. It is interpolated into the preference
 /// route (`/api/preferences/<key>`), so a `/`, a backslash or a `..` segment would
 /// escape the key space and address an unrelated route; a strict allowlist (not a
@@ -3833,6 +3941,23 @@ impl Contributes {
             }
         }
 
+        let mut create_actions: Vec<CreateActionContribution> =
+            Vec::with_capacity(self.create_actions.len());
+        for (index, raw) in self.create_actions.iter().enumerate() {
+            let action: CreateActionContribution = serde_json::from_value(raw.clone())
+                .map_err(|e| {
+                    format!("create action #{index} is not a valid create action: {e}")
+                })?;
+            validate_create_action(&action)?;
+            create_actions.push(action);
+        }
+        let mut seen_create_ids: BTreeSet<&str> = BTreeSet::new();
+        for action in &create_actions {
+            if !seen_create_ids.insert(action.id.as_str()) {
+                return Err(format!("duplicate create action id '{}'", action.id));
+            }
+        }
+
         for filter in &self.tool_filters {
             validate_tool_filter(filter)?;
         }
@@ -4088,6 +4213,28 @@ pub struct ProvidesEntry {
     /// via the broker. Absent = no extra grant beyond declaring the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<String>,
+
+    /// The human name of the **capability** (not of this provider): `"Search"` for
+    /// `web.search`, `"Document Parsing"` for `document.parse`. What a layer picker
+    /// puts above the provider list.
+    ///
+    /// Declared here, on the provider, because the capability itself is not a
+    /// manifest — it exists only as the string its providers agree on — and there is
+    /// nowhere else to hang the name. So every provider of a capability should carry
+    /// the same `title`, and the layer keeps its name when the default provider is
+    /// uninstalled.
+    ///
+    /// Deliberately NOT unanimity-checked the way [`Self::selectable`] is: forcing
+    /// six independent `web.search` manifests to spell one cosmetic string
+    /// byte-identically or fail to load trades a real capability for a label. Core
+    /// picks one with the same ladder the binder uses (declared default, else
+    /// lowest plugin id) and disagreement costs at most a differently-worded header.
+    ///
+    /// Absent = the client falls back to its own naming (a built-in table, else the
+    /// capability's last dotted segment). No server-side humaniser derives it from
+    /// the id — that route reads `news.crud` as "News Crud".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 
     /// Opt in to the **selectable** flavour: many providers of this capability may
     /// be enabled at once and the user *picks* one, exactly like a local engine.
@@ -5246,6 +5393,42 @@ mod tests {
             confirm_word: None,
             detail: format!("Every {id} record will be permanently deleted."),
         }
+    }
+
+    fn create_action(raw: serde_json::Value) -> Result<(), String> {
+        let action: CreateActionContribution =
+            serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        validate_create_action(&action)
+    }
+
+    /// The failure this validation exists for: a create-menu row that navigates
+    /// nowhere and invokes nothing still renders, so the user clicks it and the
+    /// menu closes with nothing to show for it.
+    #[test]
+    fn a_create_action_must_do_something_when_clicked() {
+        assert!(create_action(serde_json::json!({
+            "id": "workflows.new", "label": "New workflow"
+        }))
+        .is_err());
+        assert!(create_action(serde_json::json!({
+            "id": "workflows.new", "label": "New workflow", "target": "/workflows/new"
+        }))
+        .is_ok());
+        assert!(create_action(serde_json::json!({
+            "id": "x.new", "label": "New thing", "capability": "x.create"
+        }))
+        .is_ok());
+    }
+
+    /// `target` is an in-app route, not a link. Accepting a scheme here would turn
+    /// a create row into an arbitrary-navigation affordance any installed app could
+    /// point wherever it liked.
+    #[test]
+    fn a_create_action_target_must_be_an_in_app_route() {
+        assert!(create_action(serde_json::json!({
+            "id": "x.new", "label": "New thing", "target": "https://example.com"
+        }))
+        .is_err());
     }
 
     /// The whole point of the surface: a well-formed app declaration loads.

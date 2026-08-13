@@ -345,9 +345,13 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     out
 }
 
+/// Same allowlist as the Deno backend's `strip_control`, deliberately: which
+/// backend is compiled in must not change the TEXT a hook or tool returns. `\n` and
+/// `\t` survive because neither moves a cursor; `ESC`, `CR`, `BEL` and the rest of
+/// C0/C1 go. See `deno_backend::strip_control` for the reasoning.
 fn strip_control(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control() || *c == '\t')
+        .filter(|c| !c.is_control() || *c == '\t' || *c == '\n')
         .collect()
 }
 
@@ -402,6 +406,14 @@ mod tests {
     #[test]
     fn strip_control_removes_escapes_keeps_tabs() {
         assert_eq!(strip_control("a\u{1b}[31mb\tc"), "a[31mb\tc");
+    }
+
+    /// Byte-identical newline handling to the Deno backend — a hook must not return
+    /// different text depending on which sandbox was built.
+    #[test]
+    fn strip_control_keeps_newlines_and_drops_carriage_returns() {
+        assert_eq!(strip_control("para one\n\npara two"), "para one\n\npara two");
+        assert_eq!(strip_control("kept\r\ngone"), "kept\ngone");
     }
 
     #[tokio::test]

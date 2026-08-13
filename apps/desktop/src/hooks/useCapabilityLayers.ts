@@ -1,8 +1,9 @@
 // apps/desktop/src/hooks/useCapabilityLayers.ts
 //
-// Backs the "Layers" block in the node selector: the SELECTABLE capabilities on
-// a node (search / extract / crawl / browser / computer / memory / whatever a
-// third-party app declares) plus the swap that pins one to a provider app.
+// Backs the "Layers" block in the node selector: the TOOLKIT capabilities on a
+// node (search / extract / crawl / browser / computer / memory / document parsing
+// / whatever a third-party app declares) plus the swap that pins one to a
+// provider app.
 //
 // Joins Core's `/api/capabilities` read model into one row per capability, with
 // the bound provider resolved from `providers` so a caller never has to do the
@@ -10,11 +11,18 @@
 //
 // Two deliberate behaviours:
 //
-//   - NON-SELECTABLE capabilities are filtered out. Selectability requires
-//     UNANIMITY: if any provider of a capability omits `"selectable": true`, Core
-//     will not auto-pick between two of them and the capability resolves to
-//     nothing. Rendering a picker for one would offer a choice that cannot be
-//     honoured, so those capabilities simply have no layer.
+//   - NON-TOOLKIT capabilities are filtered out. `toolkit` is COMPUTED by Core:
+//     true when a host facade owns the capability (the verbs, or the parse route,
+//     stay the same whichever provider is bound) or when two or more known
+//     manifests provide it. Anything else is one app's private wiring to its own
+//     sidecar, and there is no choice to render.
+//
+//     This used to filter on `selectable`, which is a different question with a
+//     confusingly similar name: that is the BINDER's tie-break flag, a unanimity
+//     check across a capability's providers, and it is trivially true when there
+//     is only one provider. So `news.crud`, `plan.review`, `reasoning.check` and
+//     `tuition.crud` all became "toolkits" in the dropdown just by copying the
+//     flag into a manifest.
 //   - A FAILED read yields an empty list, not an error. An older Core 404s on
 //     `/api/capabilities`; the node dropdown's rule for that is "no layer rather
 //     than a fake one" (see the sandbox layer in NodeSelector).
@@ -31,7 +39,7 @@ import {
 } from "@/src/lib/api/capability-layers.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 
-/** One selectable capability, ready to render as a swap layer. */
+/** One toolkit capability, ready to render as a swap layer. */
 export interface CapabilityLayerEntry {
 	/** The bound provider row, resolved out of `providers`. `null` when unresolved. */
 	/**
@@ -49,6 +57,16 @@ export interface CapabilityLayerEntry {
 	overridden: boolean;
 	/** Every enabled app that provides this capability, sorted by id. */
 	providers: CapabilityProvider[];
+	/**
+	 * The capability's display name as its providers declare it (`"Search"`,
+	 * `"Document Parsing"`), or `null` when none does.
+	 *
+	 * The reason the picker no longer needs a label column of its own: a closed
+	 * client-side table could only ever name the capabilities that shipped with it,
+	 * so a third-party toolkit rendered as its raw dotted id. App-supplied text —
+	 * clamp it, never render it as markup.
+	 */
+	title: string | null;
 }
 
 export interface UseCapabilityLayersResult {
@@ -76,8 +94,12 @@ export function useCapabilityLayers(
 			if (!model) {
 				return [];
 			}
+			// `toolkit`, not `selectable`. The latter is the binder's tie-break flag —
+			// a unanimity check across providers that is trivially true for a sole
+			// provider — so four app-private capabilities were rendering here as
+			// swappable layers.
 			return model.capabilities
-				.filter((c) => c.selectable)
+				.filter((c) => c.toolkit)
 				.map(
 					(c): CapabilityLayerEntry => ({
 						available: c.available,
@@ -86,6 +108,7 @@ export function useCapabilityLayers(
 						capability: c.capability,
 						overridden: c.overridden,
 						providers: c.providers,
+						title: c.title,
 					})
 				);
 		},

@@ -52,6 +52,65 @@ function makeId(): string {
 	return `q-${Date.now()}-${queueSeq}`;
 }
 
+/**
+ * A turn that ERRORED is finished — there is nothing left to wait for.
+ *
+ * This is the trap the state used to be: `useChat` parks at `"error"` and never
+ * returns to `"ready"` on its own, so a queue that only drained on `"ready"`
+ * held its messages forever and "send now" had a run to interrupt that was not
+ * running. Sending from `"error"` is safe — the AI SDK's `makeRequest` sets
+ * `{ status: "submitted", error: undefined }` before it issues the request, so
+ * the next send clears the error itself.
+ */
+export function isTerminalChatStatus(status: ChatStatus): boolean {
+	return status === "ready" || status === "error";
+}
+
+/** The inputs the drain decision is made from — see {@link shouldDrainQueue}. */
+export interface QueueDrainSignal {
+	/** Core/Gateway unreachable: draining is suspended entirely. */
+	blocked: boolean;
+	prevQueueLen: number;
+	prevStatus: ChatStatus;
+	queueLen: number;
+	status: ChatStatus;
+}
+
+/**
+ * Whether this render should dispatch one queued turn.
+ *
+ * Two triggers, deliberately asymmetric:
+ *
+ *  - an EDGE into a terminal status (busy → ready, busy → error). Edge, not
+ *    level: `send` churns identity on every message update while streaming, so
+ *    a level-triggered effect would re-fire through a whole turn.
+ *  - the queue GROWING while already parked in `"error"`. There is no status
+ *    edge left to wait for in that state — the turn errored before the message
+ *    was typed — so without this the first message after a failure would sit in
+ *    the queue for the rest of the session. Scoped to `"error"` on purpose: the
+ *    ready path keeps its original edge-only semantics, since nothing enqueues
+ *    while ready (an idle composer sends straight through).
+ */
+export function shouldDrainQueue({
+	status,
+	prevStatus,
+	queueLen,
+	prevQueueLen,
+	blocked,
+}: QueueDrainSignal): boolean {
+	if (blocked || queueLen === 0 || !isTerminalChatStatus(status)) {
+		return false;
+	}
+	if (!isTerminalChatStatus(prevStatus)) {
+		return true;
+	}
+	// ready → error / error → ready is still an edge worth draining on; a repeat
+	// of the same terminal status only drains when a new message arrived.
+	return (
+		status !== prevStatus || (status === "error" && queueLen > prevQueueLen)
+	);
+}
+
 /** Joins multiple queued turns into a single message body. */
 function combine(items: QueuedMessage[]): string {
 	return items.map((m) => m.content).join("\n\n");
@@ -84,12 +143,14 @@ export function useMessageQueue({
 	// preference (which would otherwise pick the head/tail/whole queue instead).
 	const forcedNextRef = useRef<string | null>(null);
 
-	// Edge-trigger drain: only dispatch when status *transitions* into "ready".
-	// This is load-bearing — `send` (handleSend) churns identity on every message
-	// update during streaming, so a level-triggered effect would fire repeatedly;
-	// the prev-status guard makes it fire exactly once per completed turn and is
-	// also tolerant of StrictMode's double-invoke.
+	// Edge-trigger drain: only dispatch when status *transitions* into a terminal
+	// state (or, in the errored state, when a new message arrives — see
+	// `shouldDrainQueue`). This is load-bearing — `send` (handleSend) churns
+	// identity on every message update during streaming, so a level-triggered
+	// effect would fire repeatedly; the prev-status guard makes it fire exactly
+	// once per completed turn and is also tolerant of StrictMode's double-invoke.
 	const prevStatusRef = useRef<ChatStatus>(status);
+	const prevQueueLenRef = useRef(0);
 
 	const enqueue = useCallback((content: string) => {
 		const trimmed = content.trim();
@@ -152,17 +213,22 @@ export function useMessageQueue({
 	}, [send]);
 
 	useEffect(() => {
-		const prev = prevStatusRef.current;
+		const prevStatus = prevStatusRef.current;
+		const prevQueueLen = prevQueueLenRef.current;
 		prevStatusRef.current = status;
+		prevQueueLenRef.current = queue.length;
 		if (
-			status === "ready" &&
-			prev !== "ready" &&
-			!blocked &&
-			queueRef.current.length > 0
+			shouldDrainQueue({
+				status,
+				prevStatus,
+				queueLen: queue.length,
+				prevQueueLen,
+				blocked,
+			})
 		) {
 			dispatchFront();
 		}
-	}, [status, blocked, dispatchFront]);
+	}, [status, blocked, queue.length, dispatchFront]);
 
 	const sendNow = useCallback(
 		(id: string) => {
@@ -170,15 +236,19 @@ export function useMessageQueue({
 			if (!item) {
 				return;
 			}
-			if (status === "ready" && !blocked) {
-				// Idle: send immediately, dropping it from the queue.
+			if (isTerminalChatStatus(status) && !blocked) {
+				// Settled — idle, or a turn that already errored: send immediately,
+				// dropping it from the queue. The errored case is why this is not a
+				// bare `=== "ready"`: `stop()` has nothing to interrupt there, so the
+				// button below would do nothing at all.
 				setQueue((prev) => prev.filter((m) => m.id !== id));
 				send({ role: "user", content: item.content });
 				return;
 			}
 			// Busy: mark it as the forced next dispatch and move it to the front,
 			// then interrupt the run. The drain effect sends exactly this item when
-			// status returns to "ready" — regardless of the drain-order preference.
+			// the status settles — ready OR error, so an interrupted run that dies
+			// still releases it — regardless of the drain-order preference.
 			forcedNextRef.current = id;
 			setQueue((prev) => [item, ...prev.filter((m) => m.id !== id)]);
 			stop();
@@ -192,7 +262,7 @@ export function useMessageQueue({
 			return;
 		}
 		const merged = combine(items);
-		if (status === "ready" && !blocked) {
+		if (isTerminalChatStatus(status) && !blocked) {
 			setQueue([]);
 			send({ role: "user", content: merged });
 			return;

@@ -1,22 +1,38 @@
 // apps/desktop/src/components/agents/AcpSessionControls.tsx
 //
-// The agent-edit ACP session controls for external agents: an "Authentication"
-// section (the agent-advertised "Login with X" methods) and a "Sessions"
-// section (the sessions the agent persists, each deletable). Both are fully
-// data-driven from Core — the auth methods ride the same `/acp-config` payload
-// the composer pickers use (`useAcpConfig`), the sessions come from
-// `/agents/:id/sessions` (`useAcpSessions`). Each section renders ONLY when the
-// agent reports something, so the flagship Pi (no auth, no tracked sessions)
-// shows nothing. Rendered from AgentEditPage's model tab.
+// The agent-edit ACP session controls for external agents: a "Session defaults"
+// section (the agent's own model / approval mode / reasoning-effort pickers), an
+// "Authentication" section (the agent-advertised "Login with X" methods) and a
+// "Sessions" section (the sessions the agent persists, each deletable). All
+// three are fully data-driven from Core — the config and auth methods ride the
+// same `/acp-config` payload the composer pickers use (`useAcpConfig`), the
+// sessions come from `/agents/:id/sessions` (`useAcpSessions`). Each section
+// renders ONLY when the agent reports something, so the flagship Pi (no auth, no
+// tracked sessions) shows nothing. Rendered from AgentEditPage's model tab.
 
 import { Button } from "@ryu/ui/components/button";
+import { RangeSlider } from "@ryu/ui/components/motion/range-slider";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select";
 import { toast } from "@ryu/ui/components/sileo";
+import { Spinner } from "@ryu/ui/components/spinner";
+import { cn } from "@ryu/ui/lib/utils";
 import { useState } from "react";
+import type { ComposerSettingsSection } from "@/components/agent-elements/input/composer-settings-menu.tsx";
+import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import { useAcpConfig } from "@/src/hooks/useAcpConfig.ts";
 import { useAcpSessions } from "@/src/hooks/useAcpSessions.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useAgents } from "@/src/hooks/useAgents.ts";
 import { authenticateAgent, logoutAgent } from "@/src/lib/api/acp.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import { LEVEL_RAMP_CLASS, levelFillColor } from "@/src/lib/level-ramp.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 import {
 	SettingsCard,
 	SettingsSection,
@@ -32,7 +48,186 @@ function formatUpdatedAt(value: string): string {
 	if (Number.isNaN(parsed.getTime())) {
 		return value;
 	}
-	return parsed.toLocaleString();
+	return formatDateTime(parsed);
+}
+
+/** Engine-catalog fallback inputs. This surface only shows what the AGENT
+ *  advertises — the engine model has its own field on the same page — so the
+ *  fallback branch is fed an empty list and its section self-hides. */
+const NO_MODEL_OPTIONS: never[] = [];
+const noopModelChange = () => {
+	// The engine-catalog branch is not rendered here; see NO_MODEL_OPTIONS.
+};
+
+/**
+ * One agent-advertised session control, rendered as a settings row.
+ *
+ * An ORDERED scale (reasoning effort: off → low → … → max) is a stepped slider
+ * with the shared cool → hot fill ramp, exactly as the composer renders it
+ * (`EffortSliderRow`) — same control, same colours, whether you meet it in the
+ * chat bar or here. `LEVEL_RAMP_CLASS` on the wrapper is what makes the top of
+ * that ramp resolve; without it the fill silently disappears. Everything else is
+ * an unordered set and gets a select.
+ */
+function AcpOptionRow({ section }: { section: ComposerSettingsSection }) {
+	const activeIndex = Math.max(
+		0,
+		section.items.findIndex((it) => it.id === section.value)
+	);
+	const active = section.items[activeIndex];
+
+	if (section.variant === "slider") {
+		return (
+			<div className={cn("flex flex-col gap-1.5", LEVEL_RAMP_CLASS)}>
+				<div className="flex items-center justify-between gap-2">
+					<span className="font-medium text-sm">{section.label}</span>
+					<span className="max-w-[160px] truncate text-muted-foreground text-xs">
+						{active?.name}
+					</span>
+				</div>
+				<RangeSlider
+					aria-label={section.ariaLabel}
+					className="h-8"
+					fillColor={levelFillColor(activeIndex, section.items.length)}
+					formatValueText={(v) =>
+						section.items[Math.round(v)]?.name ?? String(v)
+					}
+					max={section.items.length - 1}
+					min={0}
+					onValueChange={(next) => {
+						const picked = section.items[Math.round(next)];
+						if (picked && picked.id !== section.value) {
+							section.onChange(picked.id);
+						}
+					}}
+					step={1}
+					value={activeIndex}
+				/>
+				<div className="flex items-center justify-between gap-1">
+					{section.items.map((item, i) => (
+						<span
+							className={cn(
+								"flex-1 truncate text-[10px] leading-none",
+								i === 0 && "text-left",
+								i === section.items.length - 1 && "text-right",
+								i > 0 && i < section.items.length - 1 && "text-center",
+								i === activeIndex
+									? "text-foreground"
+									: "text-muted-foreground/70"
+							)}
+							key={item.id}
+						>
+							{item.name}
+						</span>
+					))}
+				</div>
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex items-center justify-between gap-3">
+			<div className="flex min-w-0 flex-col gap-0.5">
+				<span className="font-medium text-sm">{section.label}</span>
+				{active?.description ? (
+					<span className="text-muted-foreground text-xs">
+						{active.description}
+					</span>
+				) : null}
+			</div>
+			<Select
+				onValueChange={(next) => {
+					if (next) {
+						section.onChange(next);
+					}
+				}}
+				value={section.value ?? ""}
+			>
+				<SelectTrigger className="w-56 shrink-0">
+					<SelectValue placeholder="Default" />
+				</SelectTrigger>
+				<SelectContent>
+					{section.items.map((item) => (
+						<SelectItem key={item.id} value={item.id}>
+							{item.name}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+		</div>
+	);
+}
+
+/**
+ * The agent's OWN session controls — model, approval mode, reasoning effort and
+ * whatever else it advertises — configurable per agent, on the agent's page.
+ *
+ * These are the same sections the composer builds
+ * (`useComposerAcpSections`, keyed by agent rather than by live chat session)
+ * writing through the same per-agent store (`src/lib/acp-selections.ts`), so a
+ * pick made here is the pick a new chat with this agent starts on, and the chat
+ * bar shows it already selected. That shared store is the point: at the Simple
+ * interface level the composer stops carrying these controls at all, and this
+ * page is where they continue to live.
+ */
+function AcpSessionOptionsSection({ agentId }: { agentId: string }) {
+	const { agents } = useAgents();
+	const { modelSection, extraSections } = useComposerAcpSections({
+		agentId,
+		agents,
+		engineModel: null,
+		modelOptions: NO_MODEL_OPTIONS,
+		onEngineModelChange: noopModelChange,
+	});
+
+	const modelAsSection: ComposerSettingsSection = {
+		key: "model",
+		label: "Model",
+		ariaLabel: "Select model",
+		items: modelSection.items,
+		value: modelSection.value,
+		onChange: modelSection.onChange,
+		loading: modelSection.loading,
+	};
+	// Deliberately NOT `modelSection.renderContent`: that body is the composer's
+	// grouped/searchable dropdown, built to live inside a menu. A settings row
+	// wants a plain select over the same items.
+	const sections = [modelAsSection, ...extraSections].filter(
+		(section) => section.items.length > 0
+	);
+	const probing = modelSection.loading && sections.length === 0;
+
+	if (probing) {
+		return (
+			<SettingsSection
+				caption="Asking the agent which models and modes it supports…"
+				title="Session defaults"
+			>
+				<SettingsCard className="flex items-center gap-2">
+					<Spinner className="size-4" />
+					<span className="text-muted-foreground text-sm">Detecting…</span>
+				</SettingsCard>
+			</SettingsSection>
+		);
+	}
+	// A local agent advertises no session config at all, so this whole block is
+	// absent rather than empty.
+	if (sections.length === 0) {
+		return null;
+	}
+
+	return (
+		<SettingsSection
+			caption="What this agent runs with by default — its own model, approval mode and reasoning effort. New chats with it start here, and picking one in the chat bar updates this."
+			title="Session defaults"
+		>
+			<SettingsCard className="flex flex-col gap-4">
+				{sections.map((section) => (
+					<AcpOptionRow key={section.key} section={section} />
+				))}
+			</SettingsCard>
+		</SettingsSection>
+	);
 }
 
 function AcpAuthSection({ agentId }: { agentId: string }) {
@@ -232,12 +427,14 @@ function AcpSessionsSection({ agentId }: { agentId: string }) {
 }
 
 /**
- * ACP auth + sessions for one agent. Each section self-hides when the agent
- * reports nothing, so this renders nothing at all for a plain local agent.
+ * ACP session defaults + auth + sessions for one agent. Each section self-hides
+ * when the agent reports nothing, so this renders nothing at all for a plain
+ * local agent.
  */
 export function AcpSessionControls({ agentId }: { agentId: string }) {
 	return (
 		<>
+			<AcpSessionOptionsSection agentId={agentId} />
 			<AcpAuthSection agentId={agentId} />
 			<AcpSessionsSection agentId={agentId} />
 		</>

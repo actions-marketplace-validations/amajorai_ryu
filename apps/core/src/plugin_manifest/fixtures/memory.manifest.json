@@ -206,6 +206,7 @@
     {
       "capability": "memory",
       "version": "1.0.0",
+      "title": "Memory",
       "selectable": true,
       "default": true,
       "tools": {

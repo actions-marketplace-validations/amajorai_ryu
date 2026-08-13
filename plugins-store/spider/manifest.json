@@ -76,6 +76,7 @@
     {
       "capability": "web.extract",
       "version": "1.0.0",
+      "title": "Extract",
       "selectable": true,
       "default": true,
       "tools": {
@@ -94,6 +95,7 @@
     {
       "capability": "web.crawl",
       "version": "1.0.0",
+      "title": "Crawl",
       "selectable": true,
       "default": true,
       "tools": {

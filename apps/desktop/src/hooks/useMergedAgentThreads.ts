@@ -144,6 +144,15 @@ interface LoadedThread {
 }
 
 /**
+ * Shared empty value so "no older threads" always has the SAME identity. A fresh
+ * `[]` from the reset path below commits a state change on every run of the
+ * effect (`Object.is([], [])` is false), which schedules another render — the
+ * exact shape that becomes an unbounded synchronous loop ("Maximum update depth
+ * exceeded") the moment one of the effect's dependencies stops being stable.
+ */
+const NO_THREADS: LoadedThread[] = [];
+
+/**
  * Load the read-only history that sits above the live thread in the merged view.
  *
  * `liveConversationId` is excluded — that thread is rendered live by `useChat`,
@@ -160,7 +169,7 @@ export function useMergedAgentThreads({
 }): MergedAgentThreads {
 	const { loadMessages } = useChatHistoryContext();
 	const threads = useAgentThreads(agentId);
-	const [loaded, setLoaded] = useState<LoadedThread[]>([]);
+	const [loaded, setLoaded] = useState<LoadedThread[]>(NO_THREADS);
 	const [loading, setLoading] = useState(false);
 
 	// Older threads, newest first, minus the one rendered live.
@@ -178,7 +187,9 @@ export function useMergedAgentThreads({
 
 	useEffect(() => {
 		if (!(enabled && key)) {
-			setLoaded([]);
+			// Functional form so React bails out when the list is already empty
+			// instead of committing a new-but-equal array and scheduling a render.
+			setLoaded((prev) => (prev.length === 0 ? prev : NO_THREADS));
 			return;
 		}
 		let cancelled = false;

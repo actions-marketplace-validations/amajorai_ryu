@@ -117,7 +117,7 @@ function CommunityAgentAction({
 			) : (
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
 			)}
-			Install
+			Add
 		</Button>
 	);
 }
@@ -163,7 +163,7 @@ export function CommunityAgentsShelf({
 					) : null
 				}
 				className="mb-3"
-				description="Agents other people wrote and published — instructions and settings, not programs. Installing one adds it to your agents; it turns nothing on."
+				description="Agents other people wrote and published — instructions and settings, not programs. Adding one puts it in your agents; it turns nothing on."
 			>
 				From the community
 			</StoreShelfHeading>
@@ -302,7 +302,7 @@ export function CommunityAgentDetail({
 						icon={Alert01Icon}
 					/>
 					<p className="text-muted-foreground">
-						Written by another user, not by Ryu. Installing copies its
+						Written by another user, not by Ryu. Adding it copies its
 						instructions and model preference into a new agent of your own. It
 						never gains your credentials, your Spaces, or your connected
 						accounts — anything it needs, you grant yourself afterwards.

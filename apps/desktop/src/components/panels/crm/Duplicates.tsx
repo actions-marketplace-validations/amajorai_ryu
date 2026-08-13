@@ -28,6 +28,7 @@ import type {
 	DuplicateGroup,
 	ObjectWithFields,
 } from "@/src/lib/api/crm.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 
 export function Duplicates({
 	client,
@@ -248,7 +249,7 @@ export function Duplicates({
 													</td>
 												))}
 												<td className="p-1 text-muted-foreground text-xs tabular-nums">
-													{new Date(record.created_at).toLocaleDateString()}
+													{formatDate(record.created_at)}
 												</td>
 											</tr>
 										))}

@@ -10,6 +10,8 @@
 // drifting "expires in" formats on the same screen is exactly the sort of thing
 // nobody notices until a user asks why one says "6d" and the other "in ~1w".
 
+import { formatDateTime } from "@/src/lib/timezone.ts";
+
 const HOURS_PER_DAY = 24;
 const SECONDS_PER_HOUR = 3600;
 const HOURS_IN_WEEK = HOURS_PER_DAY * 7;
@@ -21,7 +23,7 @@ export function formatExpiryDate(iso: string): string {
 	if (Number.isNaN(ms)) {
 		return iso;
 	}
-	return new Date(ms).toLocaleString(undefined, {
+	return formatDateTime(ms, {
 		month: "short",
 		day: "numeric",
 		hour: "numeric",

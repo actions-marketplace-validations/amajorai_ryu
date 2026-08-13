@@ -16,17 +16,23 @@
 
 import { describe, expect, test } from "bun:test";
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
+import { PAGE_ROUTES, pageRoute } from "@/src/lib/page-routes.ts";
+import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
 import {
 	type BuiltinTabKind,
 	type DockTabKind,
 	dockPanelsFor,
 	dockTabKind,
 	findDockPanel,
+	isDockableRoutePath,
 	isKnownDockPanelKind,
 	isPinnableDockTabKind,
 	isPluginTabKind,
+	isRouteTabKind,
 	nativeDockPanelKey,
 	panelDocksIn,
+	routeTabKind,
+	routeTabPath,
 } from "./dock-panels.ts";
 
 function panel(over: Partial<PluginDockPanel> = {}): PluginDockPanel {
@@ -196,5 +202,67 @@ describe("isPinnableDockTabKind", () => {
 		expect(isPinnableDockTabKind("artifact")).toBe(false);
 		expect(isPinnableDockTabKind("inspector")).toBe(false);
 		expect(isPinnableDockTabKind("context")).toBe(false);
+	});
+});
+
+describe("page tabs (route: kinds)", () => {
+	test("the path rides inside the kind and round-trips", () => {
+		expect(routeTabKind("/library/space")).toBe("route:/library/space");
+		expect(routeTabPath(routeTabKind("/library/space"))).toBe("/library/space");
+		// Paths with their own colons/segments survive — only the FIRST prefix is
+		// stripped, so a route is never truncated at an inner separator.
+		expect(routeTabPath(routeTabKind("/store/mcp/q/a:b"))).toBe(
+			"/store/mcp/q/a:b"
+		);
+	});
+
+	test("page kinds are distinct from plugin and built-in kinds", () => {
+		expect(isRouteTabKind("route:/store")).toBe(true);
+		expect(isRouteTabKind("plugin:@ryu/browser:browser")).toBe(false);
+		expect(isRouteTabKind("terminal")).toBe(false);
+		// The two namespaced families must not be mistaken for each other: a page
+		// tab resolved as a plugin tab would look for a contribution that cannot
+		// exist and render the "app no longer enabled" placeholder forever.
+		expect(isPluginTabKind("route:/store")).toBe(false);
+		expect(findDockPanel([], "route:/store")).toBeUndefined();
+	});
+
+	test("a page is workspace-level, so it pins like a terminal", () => {
+		expect(isPinnableDockTabKind("route:/library/space")).toBe(true);
+		expect(isPinnableDockTabKind("route:/chat")).toBe(true);
+	});
+
+	test("only real tab routes are dockable", () => {
+		expect(isDockableRoutePath("/store")).toBe(true);
+		// `/chat` IS allowed — WorkspacePanels renders bare inside a dock-hosted
+		// page, so a chat in the panel cannot mount a dock inside the dock.
+		expect(isDockableRoutePath("/chat")).toBe(true);
+		// The empty-pane chooser exists to replace itself with a window tab.
+		expect(isDockableRoutePath(PANE_CHOOSER_PATH)).toBe(false);
+		// Anything that is not rooted at `/` is not a tab route at all.
+		expect(isDockableRoutePath("")).toBe(false);
+		expect(isDockableRoutePath("store")).toBe(false);
+		expect(isDockableRoutePath("https://evil.example")).toBe(false);
+		expect(isDockableRoutePath("//evil.example")).toBe(false);
+	});
+
+	test("a prototype key is not a page", () => {
+		// `PAGE_ROUTES` is an object literal, so a bare index lookup resolves these
+		// up the prototype chain to a truthy FUNCTION — which TypeScript types as
+		// `string`, so nothing catches it at build time. This is the allowlist an
+		// agent-chosen key is checked against, so the own-property check is the job.
+		expect(pageRoute("toString")).toBeUndefined();
+		expect(pageRoute("constructor")).toBeUndefined();
+		expect(pageRoute("__proto__")).toBeUndefined();
+		expect(pageRoute("nope")).toBeUndefined();
+		expect(pageRoute("spaces")).toBe("/library/space");
+	});
+
+	test("every deep-linkable page is dockable", () => {
+		// The two allowlists are one list on purpose: a page an agent may name via
+		// `ryu://open/<page>` is exactly a page it may raise in the side panel.
+		for (const path of Object.values(PAGE_ROUTES)) {
+			expect(isDockableRoutePath(path)).toBe(true);
+		}
 	});
 });

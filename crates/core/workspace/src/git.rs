@@ -211,7 +211,16 @@ pub fn list_branches(cwd: &str) -> GitBranches {
         };
     }
 
-    let raw = run_git(cwd, &["branch", "--format=%(refname:short)"]).unwrap_or_default();
+    // Most-recently-committed first, not git's default alphabetical order. The
+    // list is NOT paged — `checkout_branch` re-lists to validate its argument, so
+    // a server-side limit would make any branch past the cut unreachable — but a
+    // client that shows only the head of a long list should be showing the
+    // branches actually in play, not the ones that happen to start with "a".
+    let raw = run_git(
+        cwd,
+        &["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+    )
+    .unwrap_or_default();
     let branches: Vec<String> = raw
         .lines()
         .map(|l| l.trim().to_string())

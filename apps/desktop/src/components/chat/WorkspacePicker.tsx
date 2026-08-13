@@ -2,17 +2,25 @@
 //
 // Unified composer workspace selector: folder ▸ branch ▸ run-mode as ONE trigger +
 // ONE compact dropdown whose rows open submenus (the folder/branch/run-mode detail),
-// mirroring the agent/model/thinking selector. Replaces the three separate chips
-// (ProjectPicker · WorkspaceHeader · WorktreePicker).
+// mirroring the agent/model/thinking selector. It REPLACED the three separate chips
+// (ProjectPicker · WorkspaceHeader · WorktreePicker); the latter two are deleted and
+// their lists live here, so there is exactly one implementation of each.
 //
 // Trigger: the folder name, plus the branch (git repos only) with its working-tree
 // +added/−removed line counts, plus the worktree label ONLY when the chat is running
 // in a worktree (worktree active or worktree mode armed) — a plain "this folder" run
 // adds nothing. Git + worktree state is polled here, folded from the old pickers; the
 // Folder submenu reuses ProjectPickerContent.
+//
+// `stacked` is the pinned summary panel's variant: the same three lists, but as
+// three full-width rows each opening its own menu directly, instead of one inline
+// chip whose submenus you have to walk. It exists so that panel has no reason to
+// keep its own copy of these pickers — the narrow (288px) column cannot show the
+// inline chip without truncating it to nothing.
 
 import {
 	Add01Icon,
+	ArrowDown01Icon,
 	Folder03Icon,
 	FolderTreeIcon,
 	LaptopIcon,
@@ -50,11 +58,17 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { useCallback, useEffect, useState } from "react";
-import { WORKSPACE_SELECT_TRIGGER } from "@/components/agent-elements/input/composer-select.ts";
+import type { ReactNode } from "react";
+import { useCallback, useMemo, useState } from "react";
+import {
+	COMPOSER_SELECT_ITEM,
+	WORKSPACE_MENU_CONTENT,
+	WORKSPACE_SELECT_TRIGGER,
+} from "@/components/agent-elements/input/composer-select.ts";
 import {
 	invalidateGitStatus,
 	useGitStatus,
+	useWorktreeDiff,
 	useWorktreeStatus,
 } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -62,7 +76,6 @@ import {
 	checkoutBranch,
 	createBranch,
 	fetchGitBranches,
-	fetchWorktreeDiff,
 	type WorktreeStatus,
 } from "@/src/lib/api/git.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
@@ -71,12 +84,18 @@ import { CreateFolderDialog, ProjectPickerContent } from "./ProjectPicker.tsx";
 
 interface WorkspacePickerProps {
 	conversationId?: string | null;
+	/**
+	 * Render as three full-width rows (folder · branch · run mode), each opening
+	 * its own menu, instead of one inline chip with submenus. For narrow columns
+	 * — the pinned summary panel — where the inline chip has nowhere to go.
+	 */
+	stacked?: boolean;
 	target: ApiTarget;
 }
 
 const PATH_SEP = /[\\/]/;
 
-interface LineStat {
+export interface LineStat {
 	deletions: number;
 	insertions: number;
 }
@@ -84,8 +103,10 @@ interface LineStat {
 const NO_STAT: LineStat = { insertions: 0, deletions: 0 };
 
 /** +added / −removed line counts, replacing the old dirty dot. Renders nothing
- *  when there is no change. */
-function DiffStat({ stat }: { stat: LineStat }) {
+ *  when there is no change. Exported because the pinned summary panel shows the
+ *  same counts in its accordion header — it used to carry a second copy of this
+ *  component, which is how the two ended up sized differently. */
+export function DiffStat({ stat }: { stat: LineStat }) {
 	if (stat.insertions === 0 && stat.deletions === 0) {
 		return null;
 	}
@@ -105,11 +126,16 @@ function DiffStat({ stat }: { stat: LineStat }) {
 	);
 }
 
+/** Which stacked row's menu is open. Only one at a time, like the inline menu. */
+type StackedRowId = "folder" | "branch" | "mode";
+
 export function WorkspacePicker({
 	target,
 	conversationId,
+	stacked = false,
 }: WorkspacePickerProps) {
 	const folder = useWorkspaceStore((s) => s.folder);
+	const projectNames = useWorkspaceStore((s) => s.projectNames);
 	const setFolder = useWorkspaceStore((s) => s.setFolder);
 	const worktreeMode = useWorkspaceStore((s) => s.worktreeMode);
 	const worktreeBranch = useWorkspaceStore((s) => s.worktreeBranch);
@@ -120,6 +146,9 @@ export function WorkspacePicker({
 	);
 
 	const [open, setOpen] = useState(false);
+	// Stacked mode has one menu per row rather than one menu with submenus, so it
+	// tracks WHICH row is open instead of a boolean.
+	const [stackedOpen, setStackedOpen] = useState<StackedRowId | null>(null);
 	// Create/browse dialogs live OUTSIDE the menu so they survive it closing on select.
 	const [createFolderOpen, setCreateFolderOpen] = useState(false);
 	const [createBranchOpen, setCreateBranchOpen] = useState(false);
@@ -151,52 +180,37 @@ export function WorkspacePicker({
 	const [branchError, setBranchError] = useState<string | null>(null);
 	const [creatingBranch, setCreatingBranch] = useState(false);
 
-	// Worktree state — the status itself is shared with WorktreePicker; only the
-	// per-file line totals (a second, heavier request) are fetched here.
+	// Worktree state — both the status and the per-file diff ride the shared
+	// queries every git surface reads, so this chip, the pinned panel's Changes
+	// section and the Artifacts list can never quote three different totals.
 	const worktreeStatus = useWorktreeStatus(
 		target,
 		folder ? conversationId : null
 	);
-	const [worktreeStat, setWorktreeStat] = useState<LineStat>(NO_STAT);
-
-	const folderName = folder ? folder.split(PATH_SEP).at(-1) : null;
-
-	// The worktree's own line totals: only fetched when a live worktree actually
-	// has changes, since it is a heavier per-file diff than the status read.
-	useEffect(() => {
-		if (
-			!(worktreeStatus.active && worktreeStatus.has_changes && conversationId)
-		) {
-			setWorktreeStat(NO_STAT);
-			return;
-		}
-		const controller = new AbortController();
-		fetchWorktreeDiff(target, conversationId, controller.signal)
-			.then((diff) => {
-				if (controller.signal.aborted) {
-					return;
-				}
-				setWorktreeStat(
-					diff.files.reduce(
-						(acc, f) => ({
-							insertions: acc.insertions + f.additions,
-							deletions: acc.deletions + f.deletions,
-						}),
-						NO_STAT
-					)
-				);
-			})
-			.catch(() => {
-				/* leave the previous totals in place */
-			});
-		return () => controller.abort();
-	}, [
-		conversationId,
+	// Only asked for while a live worktree actually has changes: the diff read is
+	// heavier than the status read, and with nothing to show the answer is NO_STAT
+	// either way.
+	const worktreeDiff = useWorktreeDiff(
 		target,
-		worktreeStatus.active,
-		worktreeStatus.has_changes,
-		worktreeStatus.changed_files,
-	]);
+		worktreeStatus.active && worktreeStatus.has_changes ? conversationId : null
+	);
+	const worktreeStat: LineStat = useMemo(
+		() =>
+			worktreeDiff.files.reduce(
+				(acc, f) => ({
+					insertions: acc.insertions + f.additions,
+					deletions: acc.deletions + f.deletions,
+				}),
+				NO_STAT
+			),
+		[worktreeDiff.files]
+	);
+
+	// A renamed project shows its name, not its path leaf — the same resolution
+	// the folder list itself uses, so the trigger and the row it selected agree.
+	const folderName = folder
+		? projectNames[folder]?.trim() || folder.split(PATH_SEP).at(-1) || null
+		: null;
 
 	const loadBranches = useCallback(async () => {
 		if (!folder) {
@@ -218,6 +232,26 @@ export function WorkspacePicker({
 		(next: boolean) => {
 			setOpen(next);
 			if (next && folder && isRepo) {
+				setBranchError(null);
+				loadBranches().catch(() => undefined);
+			}
+		},
+		[folder, isRepo, loadBranches]
+	);
+
+	/** Close whichever menu is open, in either variant. */
+	const closeMenus = useCallback(() => {
+		setOpen(false);
+		setStackedOpen(null);
+	}, []);
+
+	// One row's menu opening closes the others (they are separate menus in this
+	// variant), and opening the branch row is what triggers the branch fetch —
+	// the inline variant gets that from its single root menu opening.
+	const onStackedOpenChange = useCallback(
+		(id: StackedRowId, next: boolean) => {
+			setStackedOpen(next ? id : null);
+			if (next && id === "branch" && folder && isRepo) {
 				setBranchError(null);
 				loadBranches().catch(() => undefined);
 			}
@@ -257,12 +291,12 @@ export function WorkspacePicker({
 			if (result.success) {
 				invalidateGitStatus(folder);
 				loadBranches().catch(() => undefined);
-				setOpen(false);
+				closeMenus();
 				return null;
 			}
 			return result.error ?? "Failed to create branch";
 		},
-		[folder, target, loadBranches]
+		[folder, target, loadBranches, closeMenus]
 	);
 
 	// The worktree segment shows ONLY when the chat actually runs in a worktree:
@@ -278,6 +312,112 @@ export function WorkspacePicker({
 		runModeLabel = "Worktree";
 	} else if (worktreeMode) {
 		runModeLabel = "New worktree";
+	}
+
+	// The three menu bodies, built once and mounted by whichever variant renders:
+	// the inline chip hangs them off submenus, the stacked rows each own one. Two
+	// variants, one list each — never two implementations of the same list.
+	const folderBody = (
+		<ProjectPickerContent
+			onBrowse={() => {
+				closeMenus();
+				setBrowseOpen(true);
+			}}
+			onClose={closeMenus}
+			onStartFromScratch={() => {
+				closeMenus();
+				setCreateFolderOpen(true);
+			}}
+		/>
+	);
+	const branchBody = (
+		<BranchList
+			branch={branch}
+			branches={branches}
+			dirty={dirty}
+			error={branchError}
+			loading={loadingBranches}
+			onStartCreate={() => {
+				closeMenus();
+				setCreateBranchOpen(true);
+			}}
+			onSwitch={handleSwitchBranch}
+			switching={switching}
+		/>
+	);
+	const runModeBody = (
+		<RunModeContent
+			onRegenerate={regenerateWorktreeBranch}
+			onSetBranch={setWorktreeBranch}
+			onSetMode={setWorktreeMode}
+			status={worktreeStatus}
+			worktreeBranch={worktreeBranch}
+			worktreeMode={worktreeMode}
+		/>
+	);
+
+	if (stacked) {
+		return (
+			<>
+				<div className="flex flex-col items-stretch gap-0.5">
+					<PickerRow
+						contentClassName="max-h-[60vh] overflow-y-auto"
+						icon={Folder03Icon}
+						id="folder"
+						label={folderName ?? "Project"}
+						onOpenChange={onStackedOpenChange}
+						open={stackedOpen === "folder"}
+						title={folder ?? "Pick a project folder"}
+					>
+						{folderBody}
+					</PickerRow>
+					{folder && isRepo && branch && (
+						<PickerRow
+							contentClassName="max-h-[60vh] overflow-y-auto"
+							icon={WorkflowCircle06Icon}
+							id="branch"
+							label={branch}
+							onOpenChange={onStackedOpenChange}
+							open={stackedOpen === "branch"}
+							title={`Branch: ${branch}`}
+							trailing={<DiffStat stat={folderStat} />}
+						>
+							{branchBody}
+						</PickerRow>
+					)}
+					{folder && isRepo && (
+						<PickerRow
+							icon={inWorktree ? FolderTreeIcon : LaptopIcon}
+							id="mode"
+							label={inWorktree ? worktreeLabel : runModeLabel}
+							onOpenChange={onStackedOpenChange}
+							open={stackedOpen === "mode"}
+							title="Choose how this chat runs"
+							trailing={
+								worktreeStatus.active ? <DiffStat stat={worktreeStat} /> : null
+							}
+						>
+							{runModeBody}
+						</PickerRow>
+					)}
+				</div>
+				<CreateFolderDialog
+					onOpenChange={setCreateFolderOpen}
+					open={createFolderOpen}
+				/>
+				<NodeFolderBrowser
+					onOpenChange={setBrowseOpen}
+					onSelect={handleSelectBrowsed}
+					open={browseOpen}
+				/>
+				<CreateBranchDialog
+					creating={creatingBranch}
+					onCreate={handleCreateBranch}
+					onOpenChange={setCreateBranchOpen}
+					open={createBranchOpen}
+				/>
+			</>
+		);
 	}
 
 	return (
@@ -304,7 +444,7 @@ export function WorkspacePicker({
 								className="size-3.5 shrink-0"
 								icon={WorkflowCircle06Icon}
 							/>
-							<span className="max-w-28 truncate">{branch}</span>
+							<span className="max-w-32 truncate">{branch}</span>
 							<DiffStat stat={folderStat} />
 						</>
 					)}
@@ -315,7 +455,7 @@ export function WorkspacePicker({
 								className="size-3.5 shrink-0"
 								icon={FolderTreeIcon}
 							/>
-							<span className="max-w-28 truncate">{worktreeLabel}</span>
+							<span className="max-w-32 truncate">{worktreeLabel}</span>
 							<DiffStat stat={worktreeStat} />
 						</>
 					)}
@@ -323,7 +463,7 @@ export function WorkspacePicker({
 
 				<DropdownMenuContent
 					align="start"
-					className="min-w-[280px]"
+					className={WORKSPACE_MENU_CONTENT}
 					side="top"
 					sideOffset={6}
 				>
@@ -334,25 +474,18 @@ export function WorkspacePicker({
 								className="size-4 shrink-0 text-muted-foreground"
 								icon={Folder03Icon}
 							/>
-							<span className="flex-1 text-[13px] text-muted-foreground">
-								Folder
-							</span>
-							<span className="max-w-[140px] truncate text-[13px]">
+							<span className="flex-1 text-muted-foreground">Folder</span>
+							<span className="max-w-[140px] truncate">
 								{folderName ?? "None"}
 							</span>
 						</DropdownMenuSubTrigger>
-						<DropdownMenuSubContent className="max-h-[60vh] w-64 overflow-y-auto">
-							<ProjectPickerContent
-								onBrowse={() => {
-									setOpen(false);
-									setBrowseOpen(true);
-								}}
-								onClose={() => setOpen(false)}
-								onStartFromScratch={() => {
-									setOpen(false);
-									setCreateFolderOpen(true);
-								}}
-							/>
+						<DropdownMenuSubContent
+							className={cn(
+								WORKSPACE_MENU_CONTENT,
+								"max-h-[60vh] overflow-y-auto"
+							)}
+						>
+							{folderBody}
 						</DropdownMenuSubContent>
 					</DropdownMenuSub>
 
@@ -365,30 +498,19 @@ export function WorkspacePicker({
 										className="size-4 shrink-0 text-muted-foreground"
 										icon={WorkflowCircle06Icon}
 									/>
-									<span className="flex-1 text-[13px] text-muted-foreground">
-										Branch
-									</span>
+									<span className="flex-1 text-muted-foreground">Branch</span>
 									<span className="flex items-center gap-1.5">
-										<span className="max-w-[140px] truncate text-[13px]">
-											{branch}
-										</span>
+										<span className="max-w-[140px] truncate">{branch}</span>
 										<DiffStat stat={folderStat} />
 									</span>
 								</DropdownMenuSubTrigger>
-								<DropdownMenuSubContent className="max-h-[60vh] min-w-[220px] overflow-y-auto">
-									<BranchList
-										branch={branch}
-										branches={branches}
-										dirty={dirty}
-										error={branchError}
-										loading={loadingBranches}
-										onStartCreate={() => {
-											setOpen(false);
-											setCreateBranchOpen(true);
-										}}
-										onSwitch={handleSwitchBranch}
-										switching={switching}
-									/>
+								<DropdownMenuSubContent
+									className={cn(
+										WORKSPACE_MENU_CONTENT,
+										"max-h-[60vh] overflow-y-auto"
+									)}
+								>
+									{branchBody}
 								</DropdownMenuSubContent>
 							</DropdownMenuSub>
 
@@ -399,22 +521,11 @@ export function WorkspacePicker({
 										className="size-4 shrink-0 text-muted-foreground"
 										icon={inWorktree ? FolderTreeIcon : LaptopIcon}
 									/>
-									<span className="flex-1 text-[13px] text-muted-foreground">
-										Run mode
-									</span>
-									<span className="max-w-[140px] truncate text-[13px]">
-										{runModeLabel}
-									</span>
+									<span className="flex-1 text-muted-foreground">Run mode</span>
+									<span className="max-w-[140px] truncate">{runModeLabel}</span>
 								</DropdownMenuSubTrigger>
-								<DropdownMenuSubContent className="min-w-[280px]">
-									<RunModeContent
-										onRegenerate={regenerateWorktreeBranch}
-										onSetBranch={setWorktreeBranch}
-										onSetMode={setWorktreeMode}
-										status={worktreeStatus}
-										worktreeBranch={worktreeBranch}
-										worktreeMode={worktreeMode}
-									/>
+								<DropdownMenuSubContent className={WORKSPACE_MENU_CONTENT}>
+									{runModeBody}
 								</DropdownMenuSubContent>
 							</DropdownMenuSub>
 						</>
@@ -440,6 +551,68 @@ export function WorkspacePicker({
 	);
 }
 
+/** One stacked row: a full-width trigger over its own menu. The three rows are
+ *  three menus, not one menu with submenus, so a click lands on the list it
+ *  names — the same one-click reach the panel's old separate pickers had. */
+function PickerRow({
+	children,
+	contentClassName,
+	icon,
+	id,
+	label,
+	onOpenChange,
+	open,
+	title,
+	trailing,
+}: {
+	children: ReactNode;
+	contentClassName?: string;
+	icon: typeof WorkflowCircle06Icon;
+	id: StackedRowId;
+	label: string;
+	onOpenChange: (id: StackedRowId, next: boolean) => void;
+	open: boolean;
+	title: string;
+	trailing?: ReactNode;
+}) {
+	return (
+		<DropdownMenu onOpenChange={(next) => onOpenChange(id, next)} open={open}>
+			<DropdownMenuTrigger
+				render={
+					<Button
+						className={cn(WORKSPACE_SELECT_TRIGGER, "w-full justify-start")}
+						size="sm"
+						title={title}
+						type="button"
+						variant="ghost"
+					/>
+				}
+			>
+				<HugeiconsIcon className="size-3.5 shrink-0" icon={icon} />
+				<span className="min-w-0 flex-1 truncate text-left">{label}</span>
+				{trailing}
+			</DropdownMenuTrigger>
+			<DropdownMenuContent
+				align="start"
+				className={cn(WORKSPACE_MENU_CONTENT, contentClassName)}
+				side="bottom"
+				sideOffset={6}
+			>
+				{children}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
+// How many branches the list renders before it stops and offers "show all". A
+// repo with hundreds of branches would otherwise mount hundreds of menu rows on
+// every open — and nobody scrolls past the first screen anyway. Core sorts by
+// most-recent commit, so the visible head is the branches actually in play; the
+// search box filters the FULL list, so a capped-away branch is always one query
+// away (filter first, cap the filtered result — capping first would hide rows
+// from search, which is the trap this affordance exists to avoid).
+const BRANCH_PAGE = 50;
+
 function BranchList({
 	branches,
 	branch,
@@ -462,6 +635,7 @@ function BranchList({
 	onStartCreate: () => void;
 }) {
 	const [query, setQuery] = useState("");
+	const [showAll, setShowAll] = useState(false);
 
 	if (loading) {
 		return (
@@ -482,6 +656,8 @@ function BranchList({
 	const filtered = q
 		? branches.filter((b) => b.toLowerCase().includes(q))
 		: branches;
+	const visible = showAll ? filtered : filtered.slice(0, BRANCH_PAGE);
+	const hidden = filtered.length - visible.length;
 
 	// A dirty tree blocks branch creation, so the row is disabled with a tooltip;
 	// otherwise it opens the create-branch dialog (which outlives this menu).
@@ -491,7 +667,7 @@ function BranchList({
 				className="size-4 shrink-0 text-muted-foreground"
 				icon={Add01Icon}
 			/>
-			<span className="flex-1 text-[13px]">Create a new branch</span>
+			<span className="flex-1">Create a new branch</span>
 		</DropdownMenuItem>
 	);
 
@@ -520,7 +696,7 @@ function BranchList({
 					No matching branches.
 				</p>
 			) : (
-				filtered.map((b) => {
+				visible.map((b) => {
 					const isActive = b === branch;
 					return (
 						<DropdownMenuItem
@@ -533,7 +709,7 @@ function BranchList({
 								className="size-4 shrink-0 text-muted-foreground"
 								icon={WorkflowCircle06Icon}
 							/>
-							<span className="min-w-0 flex-1 truncate text-[13px]">{b}</span>
+							<span className="min-w-0 flex-1 truncate">{b}</span>
 							{switching === b ? (
 								<Spinner className="size-4 shrink-0" />
 							) : (
@@ -549,6 +725,17 @@ function BranchList({
 						</DropdownMenuItem>
 					);
 				})
+			)}
+			{hidden > 0 && (
+				<DropdownMenuItem closeOnClick={false} onClick={() => setShowAll(true)}>
+					<HugeiconsIcon
+						className="size-4 shrink-0 text-muted-foreground"
+						icon={ArrowDown01Icon}
+					/>
+					<span className="flex-1 text-muted-foreground">
+						Show {hidden} more branch{hidden === 1 ? "" : "es"}
+					</span>
+				</DropdownMenuItem>
 			)}
 			{error && (
 				<p className="mt-1 px-2 py-1.5 text-[12px] text-destructive">{error}</p>
@@ -667,9 +854,7 @@ function RunModeContent({
 						className="size-4 shrink-0 text-muted-foreground"
 						icon={FolderTreeIcon}
 					/>
-					<span className="min-w-0 flex-1 truncate font-mono text-[13px]">
-						{status.branch}
-					</span>
+					<span className="min-w-0 flex-1 truncate">{status.branch}</span>
 				</div>
 				<p className="px-1 text-[12px] text-muted-foreground">
 					{status.changed_files > 0
@@ -738,24 +923,30 @@ function ModeRow({
 	selected: boolean;
 	onSelect: () => void;
 }) {
+	// The same row as the composer's mode-selector (`input/mode-selector.tsx`),
+	// down to the class list: COMPOSER_SELECT_ITEM supplies the size and padding
+	// (it has no `flex` of its own — that comes from Button), so the title and
+	// description carry no size class at all. The description is deliberately NOT
+	// truncated here: unlike the agent picker's one-liners, these two sentences
+	// are what the choice means.
 	return (
-		<button
+		<Button
 			className={cn(
-				"flex w-full items-start gap-2 rounded-2xl px-1.5 py-1.5 text-left transition-colors hover:bg-foreground/10",
-				selected && "bg-foreground/10"
+				COMPOSER_SELECT_ITEM,
+				"items-start",
+				selected && "bg-accent"
 			)}
 			onClick={onSelect}
 			type="button"
+			variant="ghost"
 		>
 			<HugeiconsIcon
 				className="mt-0.5 size-4 shrink-0 text-muted-foreground"
 				icon={icon}
 			/>
 			<span className="min-w-0 flex-1">
-				<span className="block truncate font-medium text-[13px] text-foreground/80">
-					{title}
-				</span>
-				<span className="block text-[11px] text-muted-foreground">
+				<span className="block truncate">{title}</span>
+				<span className="block font-normal text-muted-foreground text-sm">
 					{description}
 				</span>
 			</span>
@@ -767,6 +958,6 @@ function ModeRow({
 					strokeWidth={2}
 				/>
 			)}
-		</button>
+		</Button>
 	);
 }

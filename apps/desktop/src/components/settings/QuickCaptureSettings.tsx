@@ -116,12 +116,12 @@ export function QuickCaptureSettings() {
 		return (
 			<SettingsSection
 				caption="Quick Capture is macOS-only for now."
-				title="Quick capture"
+				title="Quick Capture"
 			>
 				<SettingsGroup>
 					<SettingsItem
 						actions={<Switch checked={false} disabled />}
-						title="Keep the selection with a double-tap of Shift"
+						title="Keep The Selection With A Double-Tap Of Shift"
 					/>
 				</SettingsGroup>
 			</SettingsSection>
@@ -131,7 +131,7 @@ export function QuickCaptureSettings() {
 	return (
 		<SettingsSection
 			caption="Select text in any app and tap Shift twice — it lands on your Quests board with the app and page it came from. Nothing is read until you tap; Ryu never stores what you type."
-			title="Quick capture"
+			title="Quick Capture"
 		>
 			<SettingsGroup>
 				<SettingsItem
@@ -142,7 +142,7 @@ export function QuickCaptureSettings() {
 							onCheckedChange={toggle}
 						/>
 					}
-					title="Keep the selection with a double-tap of Shift"
+					title="Keep The Selection With A Double-Tap Of Shift"
 				/>
 
 				<SettingsItem
@@ -190,7 +190,7 @@ export function QuickCaptureSettings() {
 				{status.error ? (
 					<SettingsItem
 						description={status.error}
-						title="Last capture failed"
+						title="Last Capture Failed"
 					/>
 				) : null}
 
@@ -207,7 +207,7 @@ export function QuickCaptureSettings() {
 							? undefined
 							: "Captures have nowhere to go until Quests is enabled — turn it on from the Store."
 					}
-					title="Quests app"
+					title="Quests App"
 				/>
 			</SettingsGroup>
 		</SettingsSection>

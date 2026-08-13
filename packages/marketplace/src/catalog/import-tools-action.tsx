@@ -20,7 +20,7 @@ export default function ImportToolsAction({
 	node,
 	endpoint,
 	body,
-	label = "Install as tools",
+	label = "Add as tools",
 	size = "sm",
 }: {
 	body: Record<string, unknown>;
@@ -59,7 +59,7 @@ export default function ImportToolsAction({
 						? ` (${json.dropped} more not imported)`
 						: "";
 					setMessage(
-						`Installed ${json.tools ?? 0} tool${json.tools === 1 ? "" : "s"}${dropped}. Enable it from Tools to use them.`
+						`Added ${json.tools ?? 0} tool${json.tools === 1 ? "" : "s"}${dropped}. Enable it from Tools to use them.`
 					);
 					setState("done");
 				} else {
@@ -80,7 +80,7 @@ export default function ImportToolsAction({
 		<div className="flex flex-col gap-1">
 			<Button disabled={state === "busy"} onClick={run} size={size}>
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				{state === "busy" ? "Installing…" : label}
+				{state === "busy" ? "Adding…" : label}
 			</Button>
 			{state === "error" && message ? (
 				<p className="text-destructive text-xs">{message}</p>

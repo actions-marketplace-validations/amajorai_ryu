@@ -48,6 +48,7 @@ import {
 import { STORAGE_KEYS } from "@/src/lib/themes/presets.ts";
 import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 import { SafeModeSettings } from "./SafeModeSettings.tsx";
+import { SplitPresetSettings } from "./SplitPresetSettings.tsx";
 import {
 	SettingsGroup,
 	SettingsItem,
@@ -121,9 +122,18 @@ export function GeneralTab() {
 	// so it can be read at startup before Core is up. Disabled by default — the
 	// icon shows in the tray / menu bar unless the user opts out.
 	const [hideTrayIcon, setHideTrayIcon] = useState(false);
+	// "Stay in the tray when closed" lives in the same desktop-process store and
+	// is ON by default, so seed it optimistically to true — reading it back false
+	// for a frame would flash the toggle off on every open.
+	const [closeToTray, setCloseToTray] = useState(true);
 	useEffect(() => {
 		invoke<boolean>("get_hide_tray_icon")
 			.then(setHideTrayIcon)
+			.catch(() => {
+				// Non-Tauri context or command unavailable: keep the default.
+			});
+		invoke<boolean>("get_close_to_tray")
+			.then(setCloseToTray)
 			.catch(() => {
 				// Non-Tauri context or command unavailable: keep the default.
 			});
@@ -169,6 +179,18 @@ export function GeneralTab() {
 		} catch {
 			setStartHidden(!hidden);
 			toast.error("Couldn't update the start-hidden setting", {
+				description: "Your change wasn't saved. Please try again.",
+			});
+		}
+	};
+
+	const handleCloseToTray = async (enabled: boolean) => {
+		setCloseToTray(enabled);
+		try {
+			await invoke("set_close_to_tray", { enabled });
+		} catch {
+			setCloseToTray(!enabled);
+			toast.error("Couldn't update the close-to-tray setting", {
 				description: "Your change wasn't saved. Please try again.",
 			});
 		}
@@ -366,6 +388,10 @@ export function GeneralTab() {
 				</SettingsGroup>
 			</SettingsSection>
 
+			{/* Split-view layout presets: captured from the split's own context
+			    menu, renamed or deleted here. */}
+			<SplitPresetSettings />
+
 			<SettingsSection
 				caption="How Ryu surfaces your agents' own chat history."
 				title="Chats"
@@ -470,6 +496,18 @@ export function GeneralTab() {
 						}
 						description="When Ryu starts at login, run it in the background with no window on screen — open it later from the tray icon, the dock or taskbar, or its global shortcut. Launching Ryu yourself always opens the window."
 						title="Start hidden"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={closeToTray && !hideTrayIcon}
+								disabled={hideTrayIcon}
+								id="close-to-tray-toggle"
+								onCheckedChange={handleCloseToTray}
+							/>
+						}
+						description="Closing the window leaves Ryu running in the tray instead of quitting, so background agents and running turns keep going. Quit from the tray menu to stop it completely. Ignored while the tray icon is hidden — there would be no way back to the window."
+						title="Stay in tray on close"
 					/>
 					<SettingsItem
 						actions={

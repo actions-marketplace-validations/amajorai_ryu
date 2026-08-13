@@ -464,7 +464,7 @@ function SkillsFilterPanel({
 							onCheckedChange={setInstalledOnly}
 						/>
 						<label className="cursor-pointer" htmlFor="skills-installed-only">
-							Installed only
+							Added only
 						</label>
 					</div>
 				</div>
@@ -713,6 +713,10 @@ function SkillList({
 							<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
 						}
 						key={s.id}
+						// A skill's `owner/repo[/subdir]` id IS its namespace — the same
+						// string the fetcher installs from — so it keys likes exactly as
+						// an app's `@scope/name` does.
+						likeNamespace={s.id}
 						name={s.name}
 						onClick={() => onSelect(s.id)}
 						seedId={s.id}
@@ -730,7 +734,7 @@ function SkillList({
 	);
 }
 
-/** Card action for a skill: Install (not installed) or an Enabled↔Disabled morph
+/** Card action for a skill: Add (not installed) or an Enabled↔Disabled morph
  *  once installed. `enabled` is `enabledByKey[id]` (undefined when the on-disk key
  *  isn't the card id, which collapses to the plain "Installed" affordance). */
 function SkillCardAction({
@@ -913,7 +917,7 @@ function SkillDetailPanel({
 			hero={
 				<ListingHero
 					badges={[
-						card.installed ? (skillEnabled ? "Enabled" : "Installed") : null,
+						card.installed ? (skillEnabled ? "Enabled" : "Added") : null,
 						sourceLabel,
 					].filter((b): b is string => Boolean(b))}
 					icon={
@@ -1112,7 +1116,7 @@ function SkillDetailAction({
 				progress={{ kinds: ["skill"], name: card.name }}
 			>
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				Install skill
+				Add skill
 			</InstallButton>
 		);
 	}
@@ -1130,7 +1134,7 @@ function SkillDetailAction({
 					className="size-3.5 text-success"
 					icon={CheckmarkCircle02Icon}
 				/>
-				Installed
+				Added
 			</Badge>
 			{skillKey === null ? null : (
 				<div className="flex items-center gap-1.5">

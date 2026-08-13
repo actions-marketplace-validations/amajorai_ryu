@@ -7,6 +7,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { composeTriggerSummary } from "@ryu/blocks/composer/composer-trigger-summary";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	DropdownMenu,
@@ -186,19 +187,22 @@ export function ComposerSettingsMenu({
 	// Each trigger segment carries its section's active decoration (icon + tone),
 	// so the approval mode reads in the trigger with the SAME icon/colour it shows
 	// inside the dropdown (agent/model have no `decorate`, so they stay plain).
+	//
+	// How those segments COMPOSE — a decorated mode collapsing to its icon,
+	// reasoning effort riding on the model after an en dash — is
+	// `composeTriggerSummary`, kept pure in @ryu/blocks so the rules are testable
+	// without a renderer. Everything here is the rendering of its verdict.
 	const summary = visibleSections
 		.map((section) => {
-			if (isLoadingEmpty(section)) {
-				return { name: "Detecting…", deco: undefined, loading: true };
-			}
-			const name = activeItemName(section);
+			const loading = isLoadingEmpty(section);
+			const name = loading ? "Detecting…" : activeItemName(section);
 			if (!name) {
 				return null;
 			}
-			const deco = section.decorate?.(
-				activeItem(section) ?? { id: "", name: "" }
-			);
-			return { name, deco, loading: false };
+			const deco = loading
+				? undefined
+				: section.decorate?.(activeItem(section) ?? { id: "", name: "" });
+			return { section, name, deco, loading };
 		})
 		.filter(
 			(
@@ -207,8 +211,33 @@ export function ComposerSettingsMenu({
 				deco: ItemDecoration | undefined;
 				loading: boolean;
 				name: string;
+				section: ComposerSettingsSection;
 			} => s !== null
 		);
+	const decoByKey = new Map(
+		summary.map((s) => [s.section.key, s.deco] as const)
+	);
+	const segments = composeTriggerSummary(
+		summary.map((s) => ({
+			key: s.section.key,
+			name: s.name,
+			// Icon-only keys off the RESOLVED decoration, never off the section
+			// carrying a `decorate`: opencode's `mode` option decorates but its
+			// default `build` matches no approval style, and an icon-less
+			// text-less segment would drop the setting from the trigger entirely.
+			decorated: Boolean(s.deco),
+			effort: s.section.variant === "slider",
+			loading: s.loading,
+		}))
+	);
+	// The mode's word is redundant beside its icon + colour, but it is also the
+	// only textual signal of the permission mode — keep it in the accessible name.
+	const triggerLabel = [
+		"Chat settings",
+		...segments.map((seg) =>
+			seg.effortName ? `${seg.name} ${seg.effortName}` : seg.name
+		),
+	].join(" · ");
 
 	/** Apply a setting without dismissing — users often chain model + thinking. */
 	const selectItem = (section: ComposerSettingsSection) => (id: string) => {
@@ -270,7 +299,7 @@ export function ComposerSettingsMenu({
 				<DropdownMenuTrigger
 					render={
 						<Button
-							aria-label="Chat settings"
+							aria-label={triggerLabel}
 							className={cn(COMPOSER_SELECT_TRIGGER, className)}
 							size="sm"
 							type="button"
@@ -283,38 +312,62 @@ export function ComposerSettingsMenu({
 						{compact ? (
 							// Compact mode names only the agent (the first section); the model
 							// and approval settings stay reachable inside the dropdown.
-							<span className="truncate">{summary[0]?.name}</span>
+							<span className="truncate">{segments[0]?.name}</span>
 						) : (
-							summary.map(({ name, deco, loading }, i) => (
-								<span className="flex items-center gap-1" key={name + i}>
-									{i > 0 && <span className="text-muted-foreground/50">·</span>}
-									{loading ? (
-										<HugeiconsIcon
-											className="shrink-0 animate-spin text-muted-foreground"
-											icon={Loading03Icon}
-											size={13}
-											strokeWidth={2}
-										/>
-									) : (
-										deco && (
-											<HugeiconsIcon
-												className={cn("shrink-0", deco.className)}
-												icon={deco.icon}
-												size={13}
-												strokeWidth={2}
-											/>
-										)
-									)}
-									<span
-										className={cn(
-											"truncate",
-											loading ? "text-muted-foreground" : deco?.className
-										)}
-									>
-										{name}
-									</span>
-								</span>
-							))
+							segments.map(
+								({ key, name, effortName, iconOnly, loading }, i) => {
+									const deco = decoByKey.get(key);
+									return (
+										<span
+											className="flex items-center gap-1"
+											key={key}
+											// An icon-only mode has no on-screen word; hovering it must
+											// still say which mode it is.
+											title={iconOnly ? name : undefined}
+										>
+											{i > 0 && (
+												<span className="text-muted-foreground/50">·</span>
+											)}
+											{loading ? (
+												<HugeiconsIcon
+													className="shrink-0 animate-spin text-muted-foreground"
+													icon={Loading03Icon}
+													size={13}
+													strokeWidth={2}
+												/>
+											) : (
+												deco && (
+													<HugeiconsIcon
+														className={cn("shrink-0", deco.className)}
+														icon={deco.icon}
+														size={13}
+														strokeWidth={2}
+													/>
+												)
+											)}
+											{/* A recognised mode is its icon + colour; its word would
+										    only repeat what the tone already says. */}
+											{iconOnly ? null : (
+												<span
+													className={cn(
+														"truncate",
+														loading ? "text-muted-foreground" : deco?.className
+													)}
+												>
+													{name}
+												</span>
+											)}
+											{/* Effort rides the model after an en dash — one setting
+										    reading as one fact, not two bulleted ones. */}
+											{effortName && (
+												<span className="truncate text-muted-foreground">
+													– {effortName}
+												</span>
+											)}
+										</span>
+									);
+								}
+							)
 						)}
 						{trailing}
 					</span>
@@ -415,7 +468,10 @@ export function ComposerSettingsMenu({
 							);
 						})}
 				{footerContent && (
-					<div className="sticky bottom-0 z-10 shrink-0 border-border/50 border-t bg-muted/90 pt-2 pb-1 backdrop-blur-2xl empty:hidden">
+					// `py-1`, not `pt-2 pb-1`: the extra top padding pushed "Manage
+					// models" off the rule and left it floating in the footer band,
+					// vertically off-centre against every other row in the menu.
+					<div className="sticky bottom-0 z-10 shrink-0 border-border/50 border-t bg-muted/90 py-1 backdrop-blur-2xl empty:hidden">
 						{footerContent}
 					</div>
 				)}

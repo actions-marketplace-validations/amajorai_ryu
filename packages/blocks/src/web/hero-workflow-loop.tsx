@@ -81,66 +81,379 @@ const toolPart = (
 	output,
 });
 
-/** The conversation on screen before the island interrupts — the app at rest. */
-const IDLE_THREAD: UIMessage[] = [
-	textMessage("idle-user", "user", "What's left on my plate this afternoon?"),
-	textMessage(
-		"idle-assistant",
-		"assistant",
-		"Two things: the Acme sync at 3, and the Q3 report draft. I'll watch the call and pick up anything that turns into work."
-	),
-];
-
-const TASK_PROMPT =
-	"Draft the Acme follow-up, log it against the deal, and post the summary to #sales.";
+/* ── the use cases the loop rotates through ────────────────────────────────── */
 
 /**
- * The assistant turn, part by part. The loop reveals these one at a time, with
- * the newest tool row held in its running state for a beat before it resolves.
+ * One scripted job. Every scenario has the SAME shape — an idle exchange, a
+ * prompt, an opening line, exactly FOUR tool calls and a closing line — because
+ * the beat list is built from that shape and the beat indices (`accept`,
+ * `handoff`, `done`) are referenced by the island's real buttons. Four steps is
+ * also the honest number: it is what fits on screen without the transcript
+ * scrolling itself mid-demo.
+ *
+ * They are deliberately ordinary jobs — the inbox, the weekly update, receipts,
+ * a calendar clash — because the point being made is "this is your Tuesday",
+ * not "this is a demo".
  */
-const RUN_PARTS: Part[] = [
+interface Step {
+	caption: string;
+	part: Part;
+}
+
+interface Scenario {
+	/** The closing assistant line, after the last tool resolves. */
+	close: string;
+	id: string;
+	/** The exchange already on screen before the island interrupts. */
+	idle: { answer: string; question: string };
+	/** The first assistant line, before any tool runs. */
+	intro: string;
+	/** Chip text in the use-case switcher. */
+	label: string;
+	/** The caption on the beat where the island offers the job. */
+	noticeCaption: string;
+	prompt: string;
+	/** The Space shown in the app's top bar. */
+	space: string;
+	steps: [Step, Step, Step, Step];
+	suggestion: { body: string; title: string };
+}
+
+const SCENARIOS: Scenario[] = [
 	{
-		type: "text",
-		text: "On it. Reading today's Acme transcript from your Meetings space — that stays on this machine.",
+		id: "call",
+		label: "After a call",
+		space: "Meetings",
+		idle: {
+			question: "What's left on my plate this afternoon?",
+			answer:
+				"Two things: the Acme call at 3, and the Q3 report draft. I'll watch the call and pick up anything that turns into work.",
+		},
+		suggestion: {
+			title: "Your Acme call just ended",
+			body: "Draft the follow-up and log the deal?",
+		},
+		noticeCaption:
+			"Your 3pm ends. The Island already knows what happened and offers the next step — nothing to open, nothing to prompt.",
+		prompt:
+			"Draft the Acme follow-up, log it against the deal, and post the summary to #sales.",
+		intro:
+			"On it. Reading today's Acme transcript from your Meetings space — that stays on this machine.",
+		steps: [
+			{
+				caption:
+					"Step 1 — it reads the call transcript straight off your machine.",
+				part: toolPart(
+					"Read",
+					{ file_path: "~/Ryu/Spaces/Meetings/acme-call.md" },
+					{
+						preview: "42 min transcript · 3 action items · decision due Friday",
+					}
+				),
+			},
+			{
+				caption:
+					"Step 2 — it drafts the follow-up in Gmail, using the connector you already granted.",
+				part: toolPart(
+					"mcp__gmail__create_draft",
+					{ to: "sarah@acme.com", subject: "Acme — follow-up and next steps" },
+					{ id: "draft_8241", status: "draft saved" }
+				),
+			},
+			{
+				caption: "Step 3 — it logs the outcome against the deal in your CRM.",
+				part: toolPart(
+					"mcp__hubspot__create_note",
+					{
+						deal: "Acme — pilot",
+						body: "3 action items agreed, decision due Friday.",
+					},
+					{ id: "note_5512" }
+				),
+			},
+			{
+				caption: "Step 4 — it posts the summary where your team will see it.",
+				part: toolPart(
+					"mcp__slack__send_message",
+					{
+						channel: "#sales",
+						text: "Acme pilot: follow-up drafted, decision due Friday.",
+					},
+					{ ok: true }
+				),
+			},
+		],
+		close:
+			"Done. The draft is waiting in your inbox, the deal has the notes, and #sales is posted. Four tools, one accept — and the transcript itself stayed on your machine; only the summary you approved went out.",
 	},
-	toolPart(
-		"Read",
-		{ file_path: "~/Ryu/Spaces/Meetings/acme-sync.md" },
-		{ preview: "42 min transcript · 3 action items · decision due Friday" }
-	),
-	toolPart(
-		"mcp__gmail__create_draft",
-		{
-			to: "sarah@acme.com",
-			subject: "Acme — follow-up and next steps",
-		},
-		{ id: "draft_8241", status: "draft saved" }
-	),
-	toolPart(
-		"mcp__hubspot__create_note",
-		{
-			deal: "Acme — pilot",
-			body: "3 action items agreed, decision due Friday.",
-		},
-		{ id: "note_5512" }
-	),
-	toolPart(
-		"mcp__slack__send_message",
-		{
-			channel: "#sales",
-			text: "Acme pilot: follow-up drafted, decision due Friday.",
-		},
-		{ ok: true }
-	),
 	{
-		type: "text",
-		text: "Done. The draft is waiting in your inbox, the deal has the notes, and #sales is posted. Four tools, one accept — and the transcript itself stayed on your machine; only the summary you approved went out.",
+		id: "inbox",
+		label: "Inbox triage",
+		space: "Inbox",
+		idle: {
+			question: "Anything in my inbox that actually needs me?",
+			answer:
+				"84 unread since last night, and most of it is noise. Say the word and I'll sort it before your first meeting.",
+		},
+		suggestion: {
+			title: "84 unread since last night",
+			body: "Triage the inbox before your 9am?",
+		},
+		noticeCaption:
+			"You open your laptop to 84 unread. The Island has already looked, and offers to deal with it.",
+		prompt:
+			"Triage this morning's inbox: draft the easy replies, flag what needs me, archive the rest.",
+		intro:
+			"Reading the inbox now. Nothing gets sent — you'll approve every reply that leaves.",
+		steps: [
+			{
+				caption:
+					"Step 1 — it reads the mail you already gave it access to, and sorts the noise from the six that matter.",
+				part: toolPart(
+					"mcp__gmail__list_messages",
+					{ query: "is:unread newer_than:1d" },
+					{ unread: 84, needs_reply: 6, newsletters: 71 }
+				),
+			},
+			{
+				caption:
+					"Step 2 — the easy ones come back as drafts, not sent mail. You still hit send.",
+				part: toolPart(
+					"mcp__gmail__create_draft",
+					{
+						to: "priya@northwind.com",
+						subject: "Re: Thursday deadline — confirmed",
+					},
+					{ drafts: 6, status: "6 drafts saved" }
+				),
+			},
+			{
+				caption:
+					"Step 3 — the ones that genuinely need you get flagged, at the top.",
+				part: toolPart(
+					"mcp__gmail__add_label",
+					{ label: "Needs you", count: 6 },
+					{ ok: true }
+				),
+			},
+			{
+				caption:
+					"Step 4 — the other 71 are archived, so the inbox you open is the inbox that matters.",
+				part: toolPart(
+					"mcp__gmail__update_messages",
+					{ action: "archive", count: 71 },
+					{ archived: 71 }
+				),
+			},
+		],
+		close:
+			"Done. Six drafts waiting on your send, six flagged, 71 archived. Your inbox is a six-item list — and nothing went out without you.",
+	},
+	{
+		id: "update",
+		label: "Weekly update",
+		space: "Work",
+		idle: {
+			question: "What did I actually get done this week?",
+			answer:
+				"More than it feels like. It's all in your commits, tickets and calendar — I can write the update whenever you want it.",
+		},
+		suggestion: {
+			title: "It's Friday — your update isn't written",
+			body: "Draft it from this week's work?",
+		},
+		noticeCaption:
+			"Friday afternoon. The Island notices the update you write every week is still not written.",
+		prompt:
+			"Write my weekly update from this week's work and post it in #standup.",
+		intro:
+			"Pulling the week together — commits, tickets and the meetings that changed something.",
+		steps: [
+			{
+				caption:
+					"Step 1 — it reads the week you actually had, instead of asking you to remember it.",
+				part: toolPart(
+					"mcp__github__list_commits",
+					{ author: "me", since: "Monday" },
+					{ commits: 37, repos: 3 }
+				),
+			},
+			{
+				caption: "Step 2 — it checks what closed and what is still in flight.",
+				part: toolPart(
+					"mcp__linear__list_issues",
+					{ assignee: "me", state: "done, in progress" },
+					{ done: 9, in_progress: 2, blocked: 1 }
+				),
+			},
+			{
+				caption:
+					"Step 3 — the update is written where your team already keeps them.",
+				part: toolPart(
+					"mcp__notion__create_page",
+					{ title: "Weekly update — week 32", parent: "Team updates" },
+					{ id: "page_2291", status: "published" }
+				),
+			},
+			{
+				caption:
+					"Step 4 — and posted in your voice, without you re-typing your own week.",
+				part: toolPart(
+					"mcp__slack__send_message",
+					{
+						channel: "#standup",
+						text: "Shipped 9, 2 in flight, blocked on the billing API key.",
+					},
+					{ ok: true }
+				),
+			},
+		],
+		close:
+			"Done. Nine shipped, two in flight, one blocker named. Written from what you did, not from what you could remember on a Friday.",
+	},
+	{
+		id: "expenses",
+		label: "Expenses",
+		space: "Admin",
+		idle: {
+			question: "Remind me what I'm behind on.",
+			answer:
+				"Expenses. Fourteen receipts from last month's trip are still sitting in your Downloads folder.",
+		},
+		suggestion: {
+			title: "14 receipts still sitting in Downloads",
+			body: "Turn them into last month's expense report?",
+		},
+		noticeCaption:
+			"The admin you keep postponing. The Island brings it up once, at a moment you can actually deal with it.",
+		prompt:
+			"Sort last month's receipts, total them up, and get the expense report ready to submit.",
+		intro:
+			"Starting with the receipts on disk. The PDFs are read locally and never uploaded.",
+		steps: [
+			{
+				caption:
+					"Step 1 — it finds the receipts where they actually are: your Downloads folder.",
+				// `numFiles` is the key the Glob row's title reads — anything else
+				// renders as "No files found".
+				part: toolPart(
+					"Glob",
+					{ pattern: "~/Downloads/*receipt*.pdf" },
+					{ numFiles: 14 }
+				),
+			},
+			{
+				caption:
+					"Step 2 — it reads each one. Your bank details never leave the machine.",
+				part: toolPart(
+					"Read",
+					{ file_path: "~/Downloads/hotel-receipt-14-mar.pdf" },
+					{ preview: "Hotel · 14 Mar · $412.80 · card ending 4471" }
+				),
+			},
+			{
+				caption: "Step 3 — the sheet gets filled in, categorised and totalled.",
+				part: toolPart(
+					"mcp__sheets__update_rows",
+					{ sheet: "Expenses — March", rows: 14 },
+					{ total: "$1,284.40" }
+				),
+			},
+			{
+				caption: "Step 4 — the submission email is drafted and waiting on you.",
+				part: toolPart(
+					"mcp__gmail__create_draft",
+					{
+						to: "finance@yourcompany.com",
+						subject: "March expenses — $1,284.40 (14 receipts)",
+					},
+					{ id: "draft_9930", status: "draft saved" }
+				),
+			},
+		],
+		close:
+			"Done. Fourteen receipts, $1,284.40, sorted into March. Nothing was submitted — the email is drafted and it's your send.",
+	},
+	{
+		id: "calendar",
+		label: "Calendar clash",
+		space: "Calendar",
+		idle: {
+			question: "Is Thursday still fine?",
+			answer:
+				"Not quite. Your dentist appointment now sits on top of the design review — I can move things around if you want.",
+		},
+		suggestion: {
+			title: "Thursday has a clash",
+			body: "Move the design review and tell the team?",
+		},
+		noticeCaption:
+			"A clash you hadn't spotted yet. The Island raises it before it becomes an apology.",
+		prompt: "Move the design review off my dentist slot and tell everyone.",
+		intro:
+			"Looking at Thursday. I'll find a slot that works for all five of you before I move anything.",
+		steps: [
+			{
+				caption:
+					"Step 1 — it reads the day and finds the clash you hadn't noticed.",
+				part: toolPart(
+					"mcp__gcal__list_events",
+					{ day: "Thursday" },
+					{ events: 7, conflicts: 1 }
+				),
+			},
+			{
+				caption: "Step 2 — it checks everyone's availability, not just yours.",
+				part: toolPart(
+					"mcp__gcal__check_availability",
+					{ attendees: 5, window: "Thu–Fri" },
+					{ slot: "Friday 10:00", all_free: true }
+				),
+			},
+			{
+				caption: "Step 3 — the meeting moves to the slot that actually works.",
+				part: toolPart(
+					"mcp__gcal__update_event",
+					{ event: "Design review", time: "Friday 10:00" },
+					{ ok: true, invites_sent: 5 }
+				),
+			},
+			{
+				caption:
+					"Step 4 — and the room hears it from you, not from a silent calendar ping.",
+				part: toolPart(
+					"mcp__slack__send_message",
+					{
+						channel: "#design",
+						text: "Design review moved to Fri 10:00 — clash on my side. Same agenda.",
+					},
+					{ ok: true }
+				),
+			},
+		],
+		close:
+			"Done. Thursday is clear, Friday 10:00 works for all five, and #design already knows why. You kept the dentist.",
 	},
 ];
 
+/** The six parts of a scenario's assistant turn: intro, four tools, close. */
+function runParts(scenario: Scenario): Part[] {
+	return [
+		{ type: "text", text: scenario.intro },
+		...scenario.steps.map((step) => step.part),
+		{ type: "text", text: scenario.close },
+	];
+}
+
+const RUN_PART_COUNT = runParts(SCENARIOS[0] as Scenario).length;
+
 /** Slice the turn to `count` parts, holding the last tool row mid-run. */
-function assistantParts(count: number, pending: boolean): Part[] {
-	const shown = RUN_PARTS.slice(0, count);
+function assistantParts(
+	parts: Part[],
+	count: number,
+	pending: boolean
+): Part[] {
+	const shown = parts.slice(0, count);
 	return shown.map((part, index) => {
 		const isTool =
 			typeof part.type === "string" && part.type.startsWith("tool");
@@ -196,118 +509,111 @@ const RUN_BEAT = (
 	run: { parts, pending, streaming: true },
 });
 
-const BEATS: Beat[] = [
-	{
-		id: "watch",
-		hold: 1800,
-		caption:
-			"Ryu rides on top of whatever you're doing — one pill, not another window to check.",
-		phase: "notice",
-		focus: "island",
-		island: { state: "idle", pill: "Ryu", cursor: "away" },
-		thread: "idle",
-		run: { parts: 0, pending: false, streaming: false },
-	},
-	{
-		id: "notice",
-		hold: 2600,
-		caption:
-			"Your 3pm ends. The Island already knows what happened and offers the next step — nothing to open, nothing to prompt.",
-		phase: "notice",
-		focus: "island",
-		island: { state: "suggestion", cursor: "away" },
-		thread: "idle",
-		run: { parts: 0, pending: false, streaming: false },
-	},
-	{
-		id: "reach",
-		hold: 900,
-		caption: "Accept, snooze or dismiss. That is the whole decision.",
-		phase: "accept",
-		focus: "island",
-		island: { state: "suggestion", cursor: "hover" },
-		thread: "idle",
-		run: { parts: 0, pending: false, streaming: false },
-	},
-	{
-		id: "accept",
-		hold: 750,
-		caption: "Accept.",
-		phase: "accept",
-		focus: "island",
-		island: { state: "suggestion", cursor: "press" },
-		thread: "idle",
-		run: { parts: 0, pending: false, streaming: false },
-	},
-	{
-		id: "handoff",
-		hold: 1400,
-		caption:
-			"The job lands in the desktop app — the surface that holds your tools, permissions and history.",
-		phase: "run",
-		focus: "desktop",
-		island: { state: "idle", pill: "Handing off", cursor: "away" },
-		thread: "task",
-		run: { parts: 0, pending: false, streaming: true },
-		trail: true,
-	},
-	RUN_BEAT(
-		"run-intro",
-		1,
-		false,
-		"The run opens as a real thread you can read, interrupt and rerun."
-	),
-	RUN_BEAT(
-		"run-read",
-		2,
-		true,
-		"Step 1 — it reads the meeting transcript straight off your machine."
-	),
-	RUN_BEAT(
-		"run-draft",
-		3,
-		true,
-		"Step 2 — it drafts the follow-up in Gmail, using the connector you already granted.",
-		1600
-	),
-	RUN_BEAT(
-		"run-crm",
-		4,
-		true,
-		"Step 3 — it logs the outcome against the deal in your CRM.",
-		1600
-	),
-	RUN_BEAT(
-		"run-slack",
-		5,
-		true,
-		"Step 4 — it posts the summary where your team will see it."
-	),
-	{
-		id: "done",
-		hold: 3200,
-		caption:
-			"One accept on the Island. The full run — every tool call, every file it touched — on the desktop.",
-		phase: "done",
-		focus: "desktop",
-		island: { state: "idle", pill: "Done", cursor: "away" },
-		thread: "task",
-		run: { parts: RUN_PARTS.length, pending: false, streaming: false },
-	},
-	{
-		id: "rest",
-		hold: 2000,
-		caption:
-			"Your keys, your machine, and your call on what leaves it. The Island goes quiet until the next thing worth doing.",
-		phase: "done",
-		focus: "island",
-		island: { state: "collapsed", cursor: "away" },
-		thread: "task",
-		run: { parts: RUN_PARTS.length, pending: false, streaming: false },
-	},
-];
+/**
+ * The beat list for one scenario. Every scenario produces the SAME beats in the
+ * same order — only the captions and the transcript underneath change — so the
+ * indices below stay valid whichever use case is on screen.
+ */
+function buildBeats(scenario: Scenario): Beat[] {
+	return [
+		{
+			id: "watch",
+			hold: 1800,
+			caption:
+				"Ryu rides on top of whatever you're doing — one pill, not another window to check.",
+			phase: "notice",
+			focus: "island",
+			island: { state: "idle", pill: "Ryu", cursor: "away" },
+			thread: "idle",
+			run: { parts: 0, pending: false, streaming: false },
+		},
+		{
+			id: "notice",
+			hold: 2600,
+			caption: scenario.noticeCaption,
+			phase: "notice",
+			focus: "island",
+			island: { state: "suggestion", cursor: "away" },
+			thread: "idle",
+			run: { parts: 0, pending: false, streaming: false },
+		},
+		{
+			id: "reach",
+			hold: 900,
+			caption: "Accept, snooze or dismiss. That is the whole decision.",
+			phase: "accept",
+			focus: "island",
+			island: { state: "suggestion", cursor: "hover" },
+			thread: "idle",
+			run: { parts: 0, pending: false, streaming: false },
+		},
+		{
+			id: "accept",
+			hold: 750,
+			caption: "Accept.",
+			phase: "accept",
+			focus: "island",
+			island: { state: "suggestion", cursor: "press" },
+			thread: "idle",
+			run: { parts: 0, pending: false, streaming: false },
+		},
+		{
+			id: "handoff",
+			hold: 1400,
+			caption:
+				"The job lands in the desktop app — the surface that holds your tools, permissions and history.",
+			phase: "run",
+			focus: "desktop",
+			island: { state: "idle", pill: "Handing off", cursor: "away" },
+			thread: "task",
+			run: { parts: 0, pending: false, streaming: true },
+			trail: true,
+		},
+		RUN_BEAT(
+			"run-intro",
+			1,
+			false,
+			"The run opens as a real thread you can read, interrupt and rerun."
+		),
+		...scenario.steps.map((step, index) =>
+			RUN_BEAT(
+				`run-step-${index}`,
+				index + 2,
+				true,
+				step.caption,
+				index === 1 || index === 2 ? 1600 : 1500
+			)
+		),
+		{
+			id: "done",
+			hold: 3200,
+			caption:
+				"One accept on the Island. The full run — every tool call, every file it touched — on the desktop.",
+			phase: "done",
+			focus: "desktop",
+			island: { state: "idle", pill: "Done", cursor: "away" },
+			thread: "task",
+			run: { parts: RUN_PART_COUNT, pending: false, streaming: false },
+		},
+		{
+			id: "rest",
+			hold: 2000,
+			caption:
+				"Your keys, your machine, and your call on what leaves it. The Island goes quiet until the next thing worth doing.",
+			phase: "done",
+			focus: "island",
+			island: { state: "collapsed", cursor: "away" },
+			thread: "task",
+			run: { parts: RUN_PART_COUNT, pending: false, streaming: false },
+		},
+	];
+}
 
-const beatIndexOf = (id: string) => BEATS.findIndex((beat) => beat.id === id);
+// Structural, not per-scenario: every scenario builds the same beat list.
+const BEAT_TEMPLATE = buildBeats(SCENARIOS[0] as Scenario);
+const BEAT_COUNT = BEAT_TEMPLATE.length;
+const beatIndexOf = (id: string) =>
+	BEAT_TEMPLATE.findIndex((beat) => beat.id === id);
 const DONE_BEAT_INDEX = beatIndexOf("done");
 const HANDOFF_BEAT_INDEX = beatIndexOf("handoff");
 const REST_BEAT_INDEX = beatIndexOf("rest");
@@ -318,12 +624,6 @@ const PHASES: { id: Phase; label: string }[] = [
 	{ id: "run", label: "Desktop runs it" },
 	{ id: "done", label: "Work is done" },
 ];
-
-const SUGGESTION = {
-	title: "Your Acme sync just ended",
-	// One line: the island's chip truncates, it never wraps.
-	body: "Draft the follow-up and log the deal?",
-};
 
 /**
  * The pills are real buttons under an animated pointer, so they have to do what
@@ -398,9 +698,17 @@ function DemoCursor({ mode }: { mode: Beat["island"]["cursor"] }) {
 	);
 }
 
-function IslandDetail({ state, pill }: { state: IslandState; pill?: string }) {
+function IslandDetail({
+	state,
+	pill,
+	suggestion,
+}: {
+	pill?: string;
+	state: IslandState;
+	suggestion: Scenario["suggestion"];
+}) {
 	if (state === "suggestion") {
-		return <IslandSuggestionChip suggestion={SUGGESTION} />;
+		return <IslandSuggestionChip suggestion={suggestion} />;
 	}
 	return (
 		<span className="truncate font-medium text-neutral-100 text-sm">
@@ -412,9 +720,11 @@ function IslandDetail({ state, pill }: { state: IslandState; pill?: string }) {
 function DemoIsland({
 	beat,
 	jumpTo,
+	suggestion,
 }: {
 	beat: Beat;
 	jumpTo: (index: number) => void;
+	suggestion: Scenario["suggestion"];
 }) {
 	const { state, pill, cursor } = beat.island;
 	const detail = DETAIL_SIZES[state];
@@ -463,7 +773,11 @@ function DemoIsland({
 									key={`${state}-${pill ?? ""}`}
 									transition={CONTENT_SPRING}
 								>
-									<IslandDetail pill={pill} state={state} />
+									<IslandDetail
+										pill={pill}
+										state={state}
+										suggestion={suggestion}
+									/>
 								</motion.div>
 							</AnimatePresence>
 						</motion.div>
@@ -577,12 +891,18 @@ function Selector({ label, value }: { label: string; value: string }) {
 	);
 }
 
-function ChatTopBar({ thread }: { thread: Beat["thread"] }) {
+function ChatTopBar({
+	space,
+	thread,
+}: {
+	space: string;
+	thread: Beat["thread"];
+}) {
 	return (
 		<header className="flex items-center gap-2 border-border border-b px-4 py-2.5">
 			<Selector label="Agent" value="Ryu" />
 			<Selector label="Model" value="claude-opus-4-8" />
-			<Selector label="Space" value="Meetings" />
+			<Selector label="Space" value={space} />
 			<div className="ml-auto flex items-center gap-2">
 				<AnimatePresence initial={false} mode="wait">
 					<motion.div
@@ -631,6 +951,41 @@ function PhaseStrip({ phase }: { phase: Phase }) {
 						{item.label}
 					</span>
 				</span>
+			))}
+		</div>
+	);
+}
+
+/**
+ * The use-case switcher. The loop rotates on its own — this is here so the point
+ * lands ("it is not one canned demo") without waiting three minutes for the
+ * rotation to prove it, and so a visitor can jump to the job that is theirs.
+ */
+function UseCaseSwitcher({
+	current,
+	onPick,
+}: {
+	current: number;
+	onPick: (index: number) => void;
+}) {
+	return (
+		<div className="flex flex-wrap items-center gap-1.5">
+			<span className="pr-1 text-muted-foreground text-xs">Also runs</span>
+			{SCENARIOS.map((scenario, index) => (
+				<button
+					aria-current={index === current ? "true" : undefined}
+					className={cn(
+						"rounded-full border px-2.5 py-1 text-xs transition-colors duration-300",
+						index === current
+							? "border-foreground/25 bg-background font-medium text-foreground shadow-sm"
+							: "border-border/60 bg-background/60 text-muted-foreground hover:bg-background/90 hover:text-foreground"
+					)}
+					key={scenario.id}
+					onClick={() => onPick(index)}
+					type="button"
+				>
+					{scenario.label}
+				</button>
 			))}
 		</div>
 	);
@@ -688,8 +1043,14 @@ const TAKEOVER_REPLY =
 function useBeatLoop(paused: boolean) {
 	const reduceMotion = useReducedMotion();
 	const [index, setIndex] = useState(0);
+	// Which use case is running. The loop steps to the next one every time it
+	// wraps, so a visitor who watches for a minute sees four different jobs
+	// rather than the same one four times.
+	const [scenarioIndex, setScenarioIndex] = useState(0);
 	const [visible, setVisible] = useState(true);
 	const stageRef = useRef<HTMLDivElement>(null);
+	const scenario = SCENARIOS[scenarioIndex] ?? (SCENARIOS[0] as Scenario);
+	const beats = useMemo(() => buildBeats(scenario), [scenario]);
 
 	// Reduced motion: skip straight to the finished run and never advance.
 	useEffect(() => {
@@ -712,18 +1073,41 @@ function useBeatLoop(paused: boolean) {
 		return () => observer.disconnect();
 	}, []);
 
+	// The wrap is computed here rather than inside the state updater: React can
+	// invoke an updater twice, and a scenario bump hidden in one would skip a use
+	// case on every lap.
 	useEffect(() => {
 		if (reduceMotion || paused || !visible) {
 			return;
 		}
-		const timer = window.setTimeout(
-			() => setIndex((i) => (i + 1) % BEATS.length),
-			BEATS[index]?.hold ?? 1500
-		);
+		const timer = window.setTimeout(() => {
+			const next = index + 1;
+			if (next < BEAT_COUNT) {
+				setIndex(next);
+				return;
+			}
+			setScenarioIndex((s) => (s + 1) % SCENARIOS.length);
+			setIndex(0);
+		}, beats[index]?.hold ?? 1500);
 		return () => window.clearTimeout(timer);
-	}, [index, paused, visible, reduceMotion]);
+	}, [index, paused, visible, reduceMotion, beats]);
 
-	return { beat: BEATS[index] ?? BEATS[0], index, stageRef, setIndex, visible };
+	/** Jump straight to a use case — from the switcher chips. */
+	const pickScenario = useCallback((next: number) => {
+		setScenarioIndex(next);
+		setIndex(0);
+	}, []);
+
+	return {
+		beat: beats[index] ?? (beats[0] as Beat),
+		index,
+		pickScenario,
+		scenario,
+		scenarioIndex,
+		setIndex,
+		stageRef,
+		visible,
+	};
 }
 
 export function HeroWorkflowLoop() {
@@ -737,7 +1121,15 @@ export function HeroWorkflowLoop() {
 	// theirs — the same "take it over" affordance the old showcase had.
 	const [takeover, setTakeover] = useState<UIMessage[] | null>(null);
 	const [takeoverStatus, setTakeoverStatus] = useState<ChatStatus>("ready");
-	const { beat, stageRef, setIndex, visible } = useBeatLoop(takeover !== null);
+	const {
+		beat,
+		pickScenario,
+		scenario,
+		scenarioIndex,
+		setIndex,
+		stageRef,
+		visible,
+	} = useBeatLoop(takeover !== null);
 	const { frameRef, scale } = useStageScale();
 
 	// One island on screen: stand the persistent site island down while the stage
@@ -750,20 +1142,27 @@ export function HeroWorkflowLoop() {
 
 	const scriptedMessages = useMemo<UIMessage[]>(() => {
 		if (beat.thread === "idle") {
-			return IDLE_THREAD;
+			return [
+				textMessage("idle-user", "user", scenario.idle.question),
+				textMessage("idle-assistant", "assistant", scenario.idle.answer),
+			];
 		}
 		const messages: UIMessage[] = [
-			textMessage("task-user", "user", TASK_PROMPT),
+			textMessage("task-user", "user", scenario.prompt),
 		];
 		if (beat.run.parts > 0) {
 			messages.push({
 				id: "task-assistant",
 				role: "assistant",
-				parts: assistantParts(beat.run.parts, beat.run.pending),
+				parts: assistantParts(
+					runParts(scenario),
+					beat.run.parts,
+					beat.run.pending
+				),
 			} as unknown as UIMessage);
 		}
 		return messages;
-	}, [beat]);
+	}, [beat, scenario]);
 
 	const messages = takeover ?? scriptedMessages;
 
@@ -804,6 +1203,17 @@ export function HeroWorkflowLoop() {
 		setIndex(0);
 	}, [setIndex]);
 
+	// Picking a use case also ends a takeover: the visitor asked to see that job
+	// run, and the script cannot run while their own chat is on screen.
+	const chooseScenario = useCallback(
+		(next: number) => {
+			setTakeover(null);
+			setTakeoverStatus("ready");
+			pickScenario(next);
+		},
+		[pickScenario]
+	);
+
 	const status: ChatStatus = takeover
 		? takeoverStatus
 		: beat.run.streaming && beat.run.pending
@@ -833,7 +1243,11 @@ export function HeroWorkflowLoop() {
 								transformOrigin: "top center",
 							}}
 						>
-							<DemoIsland beat={beat} jumpTo={setIndex} />
+							<DemoIsland
+								beat={beat}
+								jumpTo={setIndex}
+								suggestion={scenario.suggestion}
+							/>
 						</div>
 					)}
 				</div>
@@ -858,7 +1272,10 @@ export function HeroWorkflowLoop() {
 						}}
 					>
 						<DesktopShell>
-							<ChatTopBar thread={takeover ? "task" : beat.thread} />
+							<ChatTopBar
+								space={scenario.space}
+								thread={takeover ? "task" : beat.thread}
+							/>
 							<AgentChat
 								messages={messages}
 								onSend={onSend}
@@ -891,7 +1308,7 @@ export function HeroWorkflowLoop() {
 						className="inline-block max-w-3xl rounded-xl border border-border/60 bg-background/85 px-3 py-2 text-foreground text-sm leading-snug backdrop-blur-md"
 						exit={{ opacity: 0, y: -4 }}
 						initial={{ opacity: 0, y: 4 }}
-						key={takeover ? "takeover" : beat.id}
+						key={takeover ? "takeover" : `${scenario.id}-${beat.id}`}
 						transition={{ duration: 0.28 }}
 					>
 						{takeover
@@ -899,6 +1316,10 @@ export function HeroWorkflowLoop() {
 							: beat.caption}
 					</motion.p>
 				</AnimatePresence>
+			</div>
+
+			<div className="mt-1">
+				<UseCaseSwitcher current={scenarioIndex} onPick={chooseScenario} />
 			</div>
 		</div>
 	);

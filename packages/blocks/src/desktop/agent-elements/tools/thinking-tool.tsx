@@ -5,6 +5,7 @@ import {
 	mapToolInvocationToStep,
 	mapToolStateToStepState,
 } from "../utils/tool-adapters.ts";
+import { resolveThinkingStepState } from "./thinking-state.ts";
 import { ToolRowBase } from "./tool-row-base.tsx";
 
 const WHITESPACE_RE = /\s+/;
@@ -199,6 +200,15 @@ export function ThinkingCollapsed({
 }
 
 export interface ThinkingToolProps {
+	/**
+	 * The chat's own status, in `getToolStatus` terms: only `"streaming"` (or
+	 * `"submitted"`) means a thought derived from `part` may still be running.
+	 * Without it a thought whose closing frame never landed (crash, Stop, Core
+	 * restart) shimmers and counts up forever — including when the thread is
+	 * reopened days later. Every other tool row gets this guard via
+	 * `getToolStatus`; this one was called without it.
+	 */
+	chatStatus?: string;
 	defaultOpen?: boolean;
 	expanded?: boolean;
 	onComplete?: () => void;
@@ -209,6 +219,7 @@ export interface ThinkingToolProps {
 }
 
 export const ThinkingTool = memo(function ThinkingTool({
+	chatStatus,
 	part,
 	step: externalStep,
 	state: externalState,
@@ -220,12 +231,17 @@ export const ThinkingTool = memo(function ThinkingTool({
 	let step: Extract<TimelineStep, { type: "tool-call" }>;
 	let stepState: StepState;
 	let onComplete: () => void;
+	// Whether `stepState` was derived from the message part or handed down by a
+	// caller that drives this row itself. Only the payload-derived value is
+	// suspect — see the freeze below.
+	let stateFromPart = false;
 
 	if (externalStep && externalState && externalOnComplete) {
 		step = externalStep;
 		stepState = externalState;
 		onComplete = externalOnComplete;
 	} else if (part) {
+		stateFromPart = true;
 		step = mapToolInvocationToStep(part.toolCallId ?? part.id ?? "thinking", {
 			toolName: "Thinking",
 			args: part.input ?? part.args ?? {},
@@ -248,6 +264,14 @@ export const ThinkingTool = memo(function ThinkingTool({
 	} else {
 		return null;
 	}
+
+	// A turn that ended without its closing frame must not keep shimmering; see
+	// resolveThinkingStepState for why the chat's status is the deciding vote.
+	stepState = resolveThinkingStepState({
+		chatStatus,
+		stateFromPart,
+		stepState,
+	});
 
 	// Timing + size metadata, read with the same conventions sibling tools use
 	// (see subagent-tool.tsx): the engine may stamp `startedAt` in provider

@@ -105,11 +105,15 @@ export interface InputBarProps {
 	className?: string;
 
 	/**
-	 * Single-row "compact" composer: the "+" sits to the left of the textarea and
-	 * the trailing controls (model selector via {@link rightActions}, mic, send)
-	 * to its right — the whole bar on one line, textarea auto-growing upward past
-	 * one row. Used on the chat page once a conversation has history; the default
-	 * (false) is the roomy stacked layout (textarea above, controls row below).
+	 * Denser composer: a tighter textarea block above the SAME stacked controls
+	 * row every surface renders (the "+" and the agent selector on the left, the
+	 * trailing mic/send on the right). Used on the chat page once a conversation
+	 * has history, where the bar should give the transcript back some height.
+	 *
+	 * It is a density flag only. It used to switch the whole bar to a single-row
+	 * layout with the textarea wedged between the two control clusters, so the
+	 * chat page and the launchpad were two structurally different composers behind
+	 * one boolean; the layout is now shared and only the padding differs.
 	 */
 	compact?: boolean;
 
@@ -824,10 +828,9 @@ export const InputBar = memo(function InputBar({
 		? undefined
 		: suggestions?.itemClassName;
 
-	// The textarea (or its typing-animation stand-in). Shared by both layouts:
-	// the stacked default wraps it in its own padded block above the controls
-	// row; compact mode threads it through the toolbar as the flexing centre so
-	// the "+" and trailing controls flank it on a single line.
+	// The textarea (or its typing-animation stand-in). It always sits in its own
+	// padded block above the controls row; `compact` only tightens that block's
+	// padding.
 	//
 	// While recording, the textarea is REPLACED (not overlaid) by a full-width
 	// live waveform that fills the input slot — like ChatGPT. Swapping it out (vs
@@ -872,24 +875,11 @@ export const InputBar = memo(function InputBar({
 		);
 	}
 
-	// The controls row (the "+", model selector, voice/image, send). In compact
-	// mode it also hosts the textarea as its flexing centre.
+	// The controls row (the "+", agent selector, voice/image, send), identical on
+	// every surface and in both densities.
 	const composerToolbar = (
 		<ComposerToolbar
 			canQueue={canQueueNow && hasInput}
-			center={
-				compact ? (
-					// Match the 28px (h-7) control buttons so a single-row composer reads
-					// vertically centered: `min-h-7` floors the column to button height and
-					// `items-center` centers the textarea within it. As the textarea grows
-					// past one row the column outgrows 28px and the toolbar's `items-end`
-					// pins the "+"/send to the bottom (ChatGPT/Claude-style).
-					<div className="flex min-h-7 min-w-0 flex-1 items-center">
-						{inputContent}
-					</div>
-				) : undefined
-			}
-			compact={compact}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
 			disabled={disabled}
@@ -1032,35 +1022,46 @@ export const InputBar = memo(function InputBar({
 							</div>
 						)}
 
-						{compact ? (
-							// Compact single-row layout: the toolbar hosts the textarea as
-							// its flexing centre, so "+" · input · model/mic/send sit on one
-							// line. Always rendered (the send button lives here).
-							composerToolbar
-						) : (
-							<>
-								{/* Text input or typing animation text */}
-								<div className="min-h-[56px] pt-3 pr-3 pb-1 pl-3.5">
-									{inputContent}
-								</div>
+						{/* Text input or typing animation text. `compact` is purely this
+						    block's density — it buys the transcript back some height once
+						    a chat has history; the controls row below is the same on
+						    every surface.
 
-								{/* Controls row, INSIDE the composer box (Codex-style): the
-								    "+", model selector, voice/image, and send button all share
-								    the textarea's rounded card and background. */}
-								{(leftActions ||
-									rightActions ||
-									showAttach ||
-									voice ||
-									voiceMode ||
-									onGenerateImage ||
-									onGenerateVideo ||
-									goalControls ||
-									ghostControls ||
-									pluginControls?.length ||
-									contextMeter) &&
-									composerToolbar}
-							</>
-						)}
+						    The roomy block CENTRES its content rather than pinning it with a
+						    top pad: `pt-3` against a 56px floor put a 22px line 12px from the
+						    top and left 22px of dead air under it, so the caret sat visibly
+						    high in an apparently empty box. `justify-center` with symmetric
+						    padding makes one line sit in the middle and a grown textarea
+						    simply push the block taller — no fixed pad to re-tune when the
+						    floor or the line-height changes. */}
+						<div
+							className={
+								compact
+									? "min-h-[40px] pt-2 pr-3 pb-0.5 pl-3"
+									: "flex min-h-[56px] flex-col justify-center py-2 pr-3 pl-3.5"
+							}
+						>
+							{inputContent}
+						</div>
+
+						{/* Controls row, INSIDE the composer box (Codex-style): the "+",
+						    agent selector, voice/image, and send button all share the
+						    textarea's rounded card and background. `compact` forces it on:
+						    that layout always carried the send button, so a compact surface
+						    wiring none of the optional controls must not lose it. */}
+						{(compact ||
+							leftActions ||
+							rightActions ||
+							showAttach ||
+							voice ||
+							voiceMode ||
+							onGenerateImage ||
+							onGenerateVideo ||
+							goalControls ||
+							ghostControls ||
+							pluginControls?.length ||
+							contextMeter) &&
+							composerToolbar}
 					</div>
 
 					{suggestionItems.length > 0 && (

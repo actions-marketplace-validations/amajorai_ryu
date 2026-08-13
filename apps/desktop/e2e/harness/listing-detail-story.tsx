@@ -54,7 +54,7 @@ function Story() {
 				<ListingDetailShell
 					actions={
 						<>
-							<Button size="sm">Install</Button>
+							<Button size="sm">Add</Button>
 							<Button size="sm" variant="outline">
 								Settings
 							</Button>
@@ -62,7 +62,7 @@ function Story() {
 								className="ml-auto flex shrink-0 items-center gap-2"
 								data-testid="status"
 							>
-								<Badge variant="secondary">Installed</Badge>
+								<Badge variant="secondary">Added</Badge>
 							</span>
 						</>
 					}

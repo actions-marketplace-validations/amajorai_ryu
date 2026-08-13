@@ -66,7 +66,11 @@ export type AnalyticsEvent =
 	| { event: "chat_started" }
 	| { event: "feature_enabled"; section: string }
 	| { event: "feature_disabled"; section: string }
-	| { event: "error_shown"; code: string };
+	| { event: "error_shown"; code: string }
+	| {
+			event: "onboarding_agent_catalog_failed";
+			reason: "unauthorized" | "timeout" | "unreachable";
+	  };
 
 /** The set of event names that can ever be sent (powers the inspector catalog). */
 export const ANALYTICS_EVENT_NAMES = [
@@ -81,6 +85,7 @@ export const ANALYTICS_EVENT_NAMES = [
 	"feature_enabled",
 	"feature_disabled",
 	"error_shown",
+	"onboarding_agent_catalog_failed",
 ] as const;
 
 export type AnalyticsEventName = (typeof ANALYTICS_EVENT_NAMES)[number];
@@ -133,6 +138,11 @@ export const ANALYTICS_EVENT_CATALOG: Record<
 	error_shown: {
 		description: "An error surfaced to the user (by stable code, no message).",
 		props: ["code"],
+	},
+	onboarding_agent_catalog_failed: {
+		description:
+			"Onboarding could not read the agent catalog, so the 'Add your agents' step fell back to its curated list.",
+		props: ["reason"],
 	},
 };
 

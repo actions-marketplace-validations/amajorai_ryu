@@ -4,8 +4,9 @@
 // desktop. Every surface that shows a branch, a dirty dot, or a +/− count reads
 // it from here, so they can never disagree with each other.
 //
-// Before this hook each consumer (WorkspaceHeader, WorkspacePicker,
-// WorktreePicker, PinnedSummaryPanel) called `fetchGitStatus` from its own
+// Before this hook each consumer (the branch picker, the worktree picker, the
+// unified WorkspacePicker that has since replaced both, and PinnedSummaryPanel)
+// called `fetchGitStatus` from its own
 // effect on its own schedule: two of them polled every 5s from independently
 // started timers, two fetched exactly once and then never again. That is why the
 // numbers drifted — not because any one of them was wrong, but because they were
@@ -17,19 +18,50 @@
 // the switch. A git worktree is not a third axis either — it is simply a
 // different working directory, so `~/proj` and `~/proj/.claude/worktrees/foo`
 // are two keys, which is correct.
+//
+// ── When these queries re-read git, and why ──────────────────────────────────
+//
+// Three triggers, in order of how much of the problem each one actually solves:
+//
+//  1. **Window focus.** To run git OUTSIDE Ryu — commit, reset, checkout, pull —
+//     the user has to leave this window and come back. So focus is not a
+//     heuristic here, it is the exact event: every out-of-app change is followed
+//     by a focus, and every focus is cheap (one read per open folder). The
+//     app-wide client sets `refetchOnWindowFocus: false` (right for slow-moving
+//     catalog data), so each query below opts back IN explicitly. Without this
+//     the number stayed whatever it was when the user tabbed away — the "silently
+//     wrong for hours" failure. Note this only works because `query-client.ts`
+//     teaches TanStack what focus means on a desktop: out of the box v5 watches
+//     `visibilitychange` alone, which a cmd-tab away from a still-visible window
+//     never fires.
+//  2. **Explicit invalidation** after anything Ryu itself does: checkout, branch
+//     create, commit/push, worktree apply, and the end of an agent turn (the
+//     moment a run's edits have all landed). See `invalidate*` below.
+//  3. **A slow poll**, as a safety net only, for changes no one announced (a
+//     background `git gc`, an editor writing files, a long agent run mid-flight).
+//     15s, not 5s: one read is 3-4 `git` subprocesses against the whole worktree,
+//     it runs per open folder for as long as the app is up, and (1)+(2) already
+//     cover every case a human would notice. TanStack pauses the interval while
+//     the window is unfocused, so an idle background app polls nothing at all.
+//
+// What is deliberately NOT a trigger: typing, rendering, or any per-keystroke
+// event. Git status is a process spawn, not a state read.
 
 import { useQuery } from "@tanstack/react-query";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchGitStatus,
+	fetchWorktreeDiff,
 	fetchWorktreeStatus,
 	type GitStatus,
+	type WorktreeDiff,
 	type WorktreeStatus,
 } from "@/src/lib/api/git.ts";
 import { queryClient } from "@/src/lib/query-client.ts";
 
-/** How often the shared query re-reads git. One timer for the whole app. */
-const POLL_INTERVAL_MS = 5000;
+/** Safety-net poll interval. One timer for the whole app; see the header note on
+ *  why this is a backstop rather than the primary freshness mechanism. */
+const POLL_INTERVAL_MS = 15_000;
 
 const NOT_REPO: GitStatus = {
 	is_repo: false,
@@ -76,6 +108,9 @@ export function useGitStatus(
 			fetchGitStatus(target, canonicalCwd(cwd ?? ""), signal),
 		enabled: Boolean(cwd),
 		refetchInterval: POLL_INTERVAL_MS,
+		// Re-read the moment the user comes back — that is when an out-of-app git
+		// command has just happened. The app-wide default is `false`.
+		refetchOnWindowFocus: true,
 		// The point of this hook is freshness, so opt out of the app-wide
 		// 5-minute staleTime that suits slow-moving catalog data.
 		staleTime: 0,
@@ -104,7 +139,7 @@ export function invalidateGitStatus(cwd?: string | null): void {
 
 // ── Per-conversation worktree status ─────────────────────────────────────────
 //
-// Same problem, same shape: WorktreePicker and WorkspacePicker each polled
+// Same problem, same shape: the old worktree picker and WorkspacePicker each polled
 // `/api/worktree/:run_id/status` on their own timer. Keyed by conversation id
 // because that is what the endpoint is keyed by.
 
@@ -137,6 +172,7 @@ export function useWorktreeStatus(
 			fetchWorktreeStatus(target, conversationId ?? "", signal),
 		enabled: Boolean(conversationId),
 		refetchInterval: POLL_INTERVAL_MS,
+		refetchOnWindowFocus: true,
 		staleTime: 0,
 		gcTime: 60_000,
 	});
@@ -150,5 +186,69 @@ export function invalidateWorktreeStatus(conversationId?: string | null): void {
 		queryKey: conversationId
 			? worktreeStatusKey(conversationId)
 			: ["worktree-status"],
+	});
+}
+
+// ── Per-conversation worktree DIFF ───────────────────────────────────────────
+//
+// The +added/−removed totals and the per-file list behind the Changes section,
+// the Artifacts list and the run-mode chip. Core recomputes this from the live
+// worktree on every read (it used to answer with a snapshot taken when the run
+// finished — the number that stayed on screen long after the change was
+// committed, reset or discarded outside the app).
+//
+// It is here, next to status, for the same reason status is: three consumers
+// (DiffReviewPane, CoworkContextPanel, WorkspacePicker) each fetched it from
+// their own effect on their own trigger — one on mount only, one per turn
+// transition, one on worktree-status changes — so the same run could show three
+// different totals. One query, one answer, one refetch schedule.
+
+const EMPTY_DIFF: WorktreeDiff = {
+	has_changes: false,
+	files: [],
+	unified_diff: "",
+};
+
+/** The shared worktree-diff query key. */
+export function worktreeDiffKey(
+	conversationId: string | null | undefined
+): [string, string] {
+	return ["worktree-diff", conversationId ?? ""];
+}
+
+/**
+ * The live aggregate diff for a conversation's worktree, shared across every
+ * consumer. Returns the empty diff while loading, when the conversation never
+ * ran in a worktree, or when Core is unreachable — callers render `has_changes`
+ * directly rather than handling an error state.
+ *
+ * No poll: a diff read is heavier than a status read (it walks every changed
+ * file), and the two events that can change it — an agent turn finishing and the
+ * user doing something to the tree — are both announced (turn end invalidates;
+ * an out-of-app change is followed by a window focus).
+ */
+export function useWorktreeDiff(
+	target: ApiTarget,
+	conversationId: string | null | undefined
+): WorktreeDiff {
+	const { data } = useQuery({
+		queryKey: worktreeDiffKey(conversationId),
+		queryFn: ({ signal }) =>
+			fetchWorktreeDiff(target, conversationId ?? "", signal),
+		enabled: Boolean(conversationId),
+		refetchOnWindowFocus: true,
+		staleTime: 0,
+		gcTime: 60_000,
+	});
+
+	return data ?? EMPTY_DIFF;
+}
+
+/** Force a re-read of one conversation's worktree diff (or all of them). */
+export function invalidateWorktreeDiff(conversationId?: string | null): void {
+	queryClient.invalidateQueries({
+		queryKey: conversationId
+			? worktreeDiffKey(conversationId)
+			: ["worktree-diff"],
 	});
 }

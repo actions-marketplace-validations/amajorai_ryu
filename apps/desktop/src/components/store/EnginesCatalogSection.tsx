@@ -46,11 +46,14 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { Label } from "@ryu/ui/components/label";
+import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import { type ComponentProps, useMemo, useState } from "react";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
 import { useEngines } from "@/src/hooks/useEngines.ts";
+import { useLlamacppAcceleration } from "@/src/hooks/useLlamacppAcceleration.ts";
 import {
 	type PluginSettingsOpener,
 	usePluginSettingsOpener,
@@ -400,6 +403,117 @@ function EngineList({
 	);
 }
 
+/** The engine whose build can be swapped between CPU and GPU. */
+const ACCELERATION_ENGINE = "llamacpp";
+
+/**
+ * CPU-vs-GPU build picker for llama.cpp.
+ *
+ * Written for someone who does not know what CUDA, Metal or Vulkan are: the
+ * first line states what is happening right now in plain words, "Automatic" is
+ * the default and is marked recommended, and the builds this computer cannot
+ * run are visibly disabled with the reason next to them rather than hidden
+ * (hiding them makes the list look arbitrary; showing why is what teaches).
+ */
+function EngineAccelerationSection() {
+	const { acceleration, loading, switching, error, select } =
+		useLlamacppAcceleration();
+
+	if (loading && !acceleration) {
+		return (
+			<ListingSection title="Speed">
+				<Spinner className="size-4" />
+			</ListingSection>
+		);
+	}
+	if (!acceleration) {
+		return null;
+	}
+
+	const { selected, resolvedLabel, hasGpu, gpuName, vram, options } =
+		acceleration;
+	const hardware = hasGpu
+		? `Graphics card detected${gpuName ? `: ${gpuName}` : ""}${vram ? ` (${vram})` : ""}.`
+		: "No usable graphics card detected on this computer.";
+
+	return (
+		<ListingSection title="Speed">
+			<p className="text-muted-foreground text-sm leading-relaxed">
+				{hardware} Right now this engine runs on{" "}
+				<span className="text-foreground">{resolvedLabel}</span>. Leave this on
+				Automatic unless something is going wrong — Ryu picks the fastest option
+				your computer can actually run.
+			</p>
+			<RadioGroup
+				aria-label="How llama.cpp runs"
+				className="mt-3"
+				disabled={switching}
+				onValueChange={(value) => {
+					void select(String(value));
+				}}
+				value={selected}
+			>
+				<div className="flex items-start gap-2.5">
+					<RadioGroupItem
+						className="mt-0.5"
+						id="llamacpp-accel-auto"
+						value="auto"
+					/>
+					<div className="flex flex-col gap-0.5">
+						<Label
+							className="flex items-center gap-2 font-medium text-sm"
+							htmlFor="llamacpp-accel-auto"
+						>
+							Automatic
+							<Badge variant="secondary">Recommended</Badge>
+						</Label>
+						<p className="text-muted-foreground text-xs">
+							Detects your hardware and uses the fastest option available.
+						</p>
+					</div>
+				</div>
+				{options.map((option) => {
+					const id = `llamacpp-accel-${option.id}`;
+					return (
+						<div
+							className={
+								option.available
+									? "flex items-start gap-2.5"
+									: "flex items-start gap-2.5 opacity-60"
+							}
+							key={option.id}
+						>
+							<RadioGroupItem
+								className="mt-0.5"
+								disabled={!option.available}
+								id={id}
+								value={option.id}
+							/>
+							<div className="flex flex-col gap-0.5">
+								<Label className="font-medium text-sm" htmlFor={id}>
+									{option.label}
+								</Label>
+								<p className="text-muted-foreground text-xs">
+									{option.available
+										? option.description
+										: option.unavailableReason}
+								</p>
+							</div>
+						</div>
+					);
+				})}
+			</RadioGroup>
+			{switching && (
+				<p className="mt-2 flex items-center gap-2 text-muted-foreground text-sm">
+					<Spinner className="size-4" />
+					Downloading and switching the build…
+				</p>
+			)}
+			{error && <EngineFootnote tone="destructive">{error}</EngineFootnote>}
+		</ListingSection>
+	);
+}
+
 function EngineDetailPanel({
 	selectedId,
 	textEngines,
@@ -577,6 +691,9 @@ function EngineDetailPanel({
 						agents to.
 					</p>
 				</ListingSection>
+				{engine.name === ACCELERATION_ENGINE && isInstalled && (
+					<EngineAccelerationSection />
+				)}
 				{unsupported && (
 					<EngineFootnote>{unsupportedReason(engine.platforms)}</EngineFootnote>
 				)}

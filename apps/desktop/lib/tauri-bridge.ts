@@ -1,8 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+// Every command here is called during boot (App.tsx starts Core and polls its
+// status in its first effect), which is exactly when Tauri may not have injected
+// its bridge yet — so they all go through the shared ready-gate.
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 
-export const startRyuCore = () => invoke<string>("start_ryu_core");
-export const stopRyuCore = () => invoke<void>("stop_ryu_core");
-export const getRyuStatus = () => invoke<string>("get_ryu_status");
+export const startRyuCore = () => invokeWhenReady<string>("start_ryu_core");
+export const stopRyuCore = () => invokeWhenReady<void>("stop_ryu_core");
+export const getRyuStatus = () => invokeWhenReady<string>("get_ryu_status");
 /**
  * Download the `ryu-core` binary into `~/.ryu{profile}/bin` if it is missing,
  * resolving to its path. A no-op (`"dev"`) in dev builds, where turbo owns the
@@ -11,7 +14,7 @@ export const getRyuStatus = () => invoke<string>("get_ryu_status");
  * requires one to open.
  */
 export const ensureCoreInstalled = () =>
-	invoke<string>("ensure_core_installed");
+	invokeWhenReady<string>("ensure_core_installed");
 
 const sleep = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -50,7 +53,7 @@ export const restartRyuCore = async (): Promise<string> => {
 	return last;
 };
 export const openExternal = (url: string) =>
-	invoke<void>("open_external", { url });
+	invokeWhenReady<void>("open_external", { url });
 
 /** Move a tab into a separate OS window (browser-style "open in new window").
  * The new window re-fetches the conversation by id and keeps targeting `node`. */
@@ -60,7 +63,7 @@ export const openTabWindow = (opts: {
 	node?: string;
 	title?: string;
 }) =>
-	invoke<void>("open_tab_window", {
+	invokeWhenReady<void>("open_tab_window", {
 		path: opts.path ?? null,
 		conversationId: opts.conversationId ?? null,
 		node: opts.node ?? null,

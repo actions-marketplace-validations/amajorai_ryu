@@ -34,6 +34,9 @@ pub struct DeviceInfo {
     pub vram_human: String,
     /// Detected GPU name, e.g. `"NVIDIA GeForce RTX 4080"`.
     pub gpu_name: Option<String>,
+    /// Which GPU stack the detected adapter belongs to. Decides which
+    /// accelerated engine build this machine can run (CUDA/Metal/Vulkan).
+    pub gpu_vendor: Option<GpuVendor>,
     /// True on unified-memory machines (Apple Silicon) where RAM doubles as VRAM.
     pub unified_memory: bool,
     /// Detected OS label, e.g. `"windows"`, `"macos"`, `"linux"`.
@@ -48,8 +51,14 @@ impl DeviceInfo {
 
         // On unified-memory machines the GPU shares system RAM, so report RAM as
         // the VRAM pool too (that's the number that governs GPU-class fit there).
-        let (vram_bytes, gpu_name, unified_memory) = match gpu {
-            Some(GpuInfo::Discrete { vram_bytes, name }) => (Some(vram_bytes), Some(name), false),
+        let gpu_vendor = gpu.as_ref().map(|p| p.vendor);
+        let (vram_bytes, gpu_name, unified_memory) = match gpu.map(|p| p.info) {
+            // A discrete adapter whose size we could not read reports 0 here;
+            // surface that as "unknown" rather than "zero-byte GPU" so the
+            // usable-GPU floor and the fit estimate both take the unknown path.
+            Some(GpuInfo::Discrete { vram_bytes, name }) => {
+                ((vram_bytes > 0).then_some(vram_bytes), Some(name), false)
+            }
             Some(GpuInfo::Unified { name }) => (total_ram_bytes, Some(name), true),
             None => (None, None, false),
         };
@@ -60,6 +69,7 @@ impl DeviceInfo {
             vram_human: vram_bytes.map(human_bytes).unwrap_or_default(),
             vram_bytes,
             gpu_name,
+            gpu_vendor,
             unified_memory,
             os: std::env::consts::OS.to_string(),
         }
@@ -283,28 +293,227 @@ fn total_ram_bytes() -> Option<u64> {
 
 // ── GPU detection ────────────────────────────────────────────────────────────
 
+struct GpuProbe {
+    info: GpuInfo,
+    vendor: GpuVendor,
+}
+
 enum GpuInfo {
-    /// Discrete GPU with its own VRAM (NVIDIA via nvidia-smi).
+    /// Discrete GPU with its own VRAM (NVIDIA via nvidia-smi, AMD/Intel via the
+    /// platform display-adapter probe). Never constructed on Apple Silicon,
+    /// where the probe short-circuits to unified memory.
+    #[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
     Discrete { vram_bytes: u64, name: String },
     /// Unified-memory GPU (Apple Silicon) — shares system RAM.
     Unified { name: String },
 }
 
-/// Best-effort GPU probe. Apple Silicon is unified memory; otherwise we ask
-/// `nvidia-smi` for the largest discrete NVIDIA GPU. Returns `None` when no
-/// supported GPU is found (the fit estimate then falls back to the CPU path).
-fn detect_gpu() -> Option<GpuInfo> {
+/// Which GPU stack the detected adapter belongs to. This is what decides which
+/// accelerated build of an inference engine a machine can actually run — CUDA
+/// needs NVIDIA, Metal needs Apple, and Vulkan covers the rest — so it is
+/// detected here alongside VRAM rather than re-probed per engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Apple,
+    /// A display adapter we recognized as present but could not attribute.
+    Other,
+}
+
+impl GpuVendor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GpuVendor::Nvidia => "nvidia",
+            GpuVendor::Amd => "amd",
+            GpuVendor::Intel => "intel",
+            GpuVendor::Apple => "apple",
+            GpuVendor::Other => "other",
+        }
+    }
+
+    /// Classify an adapter by its product name, the one signal every platform
+    /// probe gives us. Kept name-based (not PCI-id-based) because the Windows
+    /// CIM query and the Linux `lspci` fallback both report names, not ids.
+    pub fn from_name(name: &str) -> GpuVendor {
+        let n = name.to_ascii_lowercase();
+        if n.contains("nvidia")
+            || n.contains("geforce")
+            || n.contains("quadro")
+            || n.contains("tesla")
+        {
+            GpuVendor::Nvidia
+        } else if n.contains("amd") || n.contains("radeon") || n.contains("advanced micro") {
+            GpuVendor::Amd
+        } else if n.contains("intel") || n.contains("arc ") {
+            GpuVendor::Intel
+        } else if n.contains("apple") {
+            GpuVendor::Apple
+        } else {
+            GpuVendor::Other
+        }
+    }
+}
+
+/// VRAM floor below which a discrete GPU is not worth building an accelerated
+/// engine around: the weights would immediately spill to system RAM, so the
+/// GPU build is slower than the CPU build *and* far more fragile (driver and
+/// runtime dependencies). 4 GiB is the smallest pool that holds the bundled
+/// chat model plus its KV cache with room to spare.
+pub const USABLE_VRAM_FLOOR_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Whether this machine has a GPU worth running an accelerated engine build on.
+///
+/// This is the predicate behind "auto-detect the user's hardware": `false` means
+/// the accelerated builds must not be offered *or* installed, because they would
+/// either fail to load (no driver / no device) or run slower than the CPU build.
+/// Unified-memory machines (Apple Silicon) always qualify — the GPU shares the
+/// system pool, so there is no separate VRAM budget to fall short of.
+pub fn has_usable_gpu(device: &DeviceInfo) -> bool {
+    if device.unified_memory {
+        return true;
+    }
+    match device.vram_bytes {
+        Some(vram) => vram >= USABLE_VRAM_FLOOR_BYTES,
+        // An adapter was named but its VRAM was unreadable. NVIDIA answers
+        // through `nvidia-smi` (which always reports memory), so a nameless-size
+        // adapter here is an integrated part; treat unknown as not usable rather
+        // than install a GPU build on a machine that cannot run it.
+        None => false,
+    }
+}
+
+/// Best-effort GPU probe. Apple Silicon is unified memory; elsewhere we ask
+/// `nvidia-smi` for the largest discrete NVIDIA GPU, and fall back to the
+/// platform display-adapter list (Windows CIM / Linux sysfs+lspci) so AMD and
+/// Intel GPUs are seen too. Returns `None` when no GPU is found (the fit
+/// estimate then falls back to the CPU path).
+fn detect_gpu() -> Option<GpuProbe> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        return Some(GpuInfo::Unified {
-            name: "Apple Silicon (unified memory)".to_string(),
+        return Some(GpuProbe {
+            info: GpuInfo::Unified {
+                name: "Apple Silicon (unified memory)".to_string(),
+            },
+            vendor: GpuVendor::Apple,
         });
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
-        nvidia_gpu()
+        // NVIDIA first: `nvidia-smi` is the only probe that reports real VRAM
+        // totals, and it is the vendor with a dedicated engine build.
+        if let Some(info) = nvidia_gpu() {
+            return Some(GpuProbe {
+                info,
+                vendor: GpuVendor::Nvidia,
+            });
+        }
+        other_gpu()
     }
+}
+
+/// Non-NVIDIA display adapter probe (AMD, Intel, everything else). Returns the
+/// adapter with the most VRAM, with `vram_bytes` only when the platform reports
+/// a believable number — an unknown size is reported as a discrete adapter with
+/// zero VRAM so [`has_usable_gpu`] declines it rather than guessing.
+#[cfg(target_os = "windows")]
+fn other_gpu() -> Option<GpuProbe> {
+    // `AdapterRAM` is a 32-bit field that saturates at 4 GiB on large cards, so
+    // it is a floor, not a total. That is the right direction for our use: we
+    // only ever ask "is there at least N bytes".
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | ForEach-Object { \"$($_.AdapterRAM)|$($_.Name)\" }",
+        ])
+        .no_window()
+        .output()
+        .ok()?;
+    parse_adapter_lines(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn other_gpu() -> Option<GpuProbe> {
+    // amdgpu and i915 both expose a VRAM total in sysfs; read it per card and
+    // pair it with the human name from `lspci` when that is available.
+    let mut best: Option<(u64, String)> = None;
+    if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Only whole cards ("card0"), never their connector children
+            // ("card0-DP-1"), which have no device memory of their own.
+            if !name.starts_with("card") || name.contains('-') {
+                continue;
+            }
+            let device = entry.path().join("device");
+            let vram = std::fs::read_to_string(device.join("mem_info_vram_total"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let label = lspci_name().unwrap_or_else(|| "GPU".to_string());
+            if best.as_ref().map(|(b, _)| vram > *b).unwrap_or(true) {
+                best = Some((vram, label));
+            }
+        }
+    }
+    let (vram_bytes, name) = best?;
+    Some(GpuProbe {
+        vendor: GpuVendor::from_name(&name),
+        info: GpuInfo::Discrete { vram_bytes, name },
+    })
+}
+
+/// First VGA/3D controller line from `lspci`, used only for the adapter's
+/// human name (sysfs carries the memory total).
+#[cfg(target_os = "linux")]
+fn lspci_name() -> Option<String> {
+    let out = Command::new("lspci").no_window().output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.contains("VGA compatible controller") || l.contains("3D controller"))
+        .and_then(|l| l.split_once(": "))
+        .map(|(_, name)| name.trim().to_string())
+}
+
+/// No display-adapter enumeration on this platform (macOS answers through the
+/// unified-memory branch; anything else has no probe we trust).
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
+fn other_gpu() -> Option<GpuProbe> {
+    None
+}
+
+/// Parse `"<bytes>|<adapter name>"` lines into the largest adapter. Split out
+/// from the Windows probe so the parsing is testable without a CIM host.
+#[cfg(any(target_os = "windows", test))]
+fn parse_adapter_lines(stdout: &str) -> Option<GpuProbe> {
+    let mut best: Option<(u64, String)> = None;
+    for line in stdout.lines() {
+        let Some((bytes_str, name)) = line.split_once('|') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        // A blank/`null` AdapterRAM means "unknown", which we record as 0 so the
+        // usable-GPU floor declines it.
+        let bytes = bytes_str.trim().parse::<u64>().unwrap_or(0);
+        if best.as_ref().map(|(b, _)| bytes > *b).unwrap_or(true) {
+            best = Some((bytes, name.to_string()));
+        }
+    }
+    let (vram_bytes, name) = best?;
+    Some(GpuProbe {
+        vendor: GpuVendor::from_name(&name),
+        info: GpuInfo::Discrete { vram_bytes, name },
+    })
 }
 
 /// Query `nvidia-smi` for total VRAM + name, picking the GPU with the most VRAM.
@@ -349,9 +558,80 @@ mod tests {
             vram_bytes: vram,
             vram_human: String::new(),
             gpu_name: None,
+            gpu_vendor: None,
             unified_memory: unified,
             os: "test".into(),
         }
+    }
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn gpu_vendor_is_classified_from_adapter_name() {
+        assert_eq!(
+            GpuVendor::from_name("NVIDIA GeForce RTX 4080"),
+            GpuVendor::Nvidia
+        );
+        assert_eq!(
+            GpuVendor::from_name("AMD Radeon RX 7900 XTX"),
+            GpuVendor::Amd
+        );
+        assert_eq!(
+            GpuVendor::from_name("Intel(R) Arc(TM) A770 Graphics"),
+            GpuVendor::Intel
+        );
+        assert_eq!(GpuVendor::from_name("Apple M3 Max"), GpuVendor::Apple);
+        assert_eq!(
+            GpuVendor::from_name("Basic Display Adapter"),
+            GpuVendor::Other
+        );
+    }
+
+    #[test]
+    fn usable_gpu_requires_real_vram_or_unified_memory() {
+        // Apple Silicon: the GPU shares the system pool, always usable.
+        assert!(has_usable_gpu(&dev(Some(16 * GB), Some(16 * GB), true)));
+        // A 16 GB discrete card clears the floor.
+        assert!(has_usable_gpu(&dev(Some(32 * GB), Some(16 * GB), false)));
+        // A 2 GB integrated part does not — an accelerated build there is
+        // slower than CPU and far more fragile.
+        assert!(!has_usable_gpu(&dev(Some(16 * GB), Some(2 * GB), false)));
+        // No GPU at all, and an adapter whose size we could not read.
+        assert!(!has_usable_gpu(&dev(Some(16 * GB), None, false)));
+    }
+
+    #[test]
+    fn adapter_lines_pick_the_largest_named_adapter() {
+        let probe = parse_adapter_lines(
+            "2147483648|Intel(R) UHD Graphics 630\n17179869184|NVIDIA GeForce RTX 4090\n",
+        )
+        .expect("an adapter");
+        assert_eq!(probe.vendor, GpuVendor::Nvidia);
+        match probe.info {
+            GpuInfo::Discrete {
+                vram_bytes,
+                ref name,
+            } => {
+                assert_eq!(vram_bytes, 16 * GB);
+                assert!(name.contains("4090"));
+            }
+            GpuInfo::Unified { .. } => panic!("expected a discrete adapter"),
+        }
+    }
+
+    #[test]
+    fn adapter_lines_tolerate_unknown_sizes_and_blank_rows() {
+        // `AdapterRAM` comes back empty for some virtual adapters; the row is
+        // still a real GPU, but with unknown VRAM (recorded as 0 so the usable
+        // floor declines it).
+        let probe = parse_adapter_lines("|Microsoft Basic Display Adapter\n |\n|AMD Radeon\n")
+            .expect("an adapter");
+        assert_eq!(probe.vendor, GpuVendor::Other);
+        match probe.info {
+            GpuInfo::Discrete { vram_bytes, .. } => assert_eq!(vram_bytes, 0),
+            GpuInfo::Unified { .. } => panic!("expected a discrete adapter"),
+        }
+        assert!(parse_adapter_lines("").is_none());
     }
 
     #[test]

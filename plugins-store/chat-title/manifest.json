@@ -23,7 +23,8 @@
   "permission_grants": [
     "hook:side-model",
     "conversation:set-title",
-    "preferences:read"
+    "preferences:read",
+    "hook:run-self"
   ],
   "activation_events": ["*"],
   "contributes": {
@@ -63,6 +64,25 @@
             "description": "Optional. Empty uses the local engine (or the node default)."
           }
         ]
+      }
+    ],
+    "context_menu_items": [
+      {
+        "id": "chat-title.rename-now",
+        "label": "Rename with AI",
+        "icon": "bubble-chat-edit",
+        "anchor": "conversation",
+        "capability": "hooks.run",
+        "args": {
+          "hook_id": "chat-title.rename",
+          "event": { "force": true }
+        },
+        "feedback": {
+          "loading": "Renaming this chat\u2026",
+          "success": "Renamed",
+          "error": "Couldn't rename this chat"
+        },
+        "order": 20
       }
     ],
     "turn_hooks": [

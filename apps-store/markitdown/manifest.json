@@ -34,6 +34,7 @@
     {
       "capability": "document.parse",
       "version": "1.0.0",
+      "title": "Document Parsing",
       "selectable": true,
       "default": true,
       "sidecar": "markitdown",

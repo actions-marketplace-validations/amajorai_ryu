@@ -18,6 +18,13 @@ export interface ToolRowBaseProps {
 	expanded?: boolean;
 	icon?: ReactNode;
 	isAnimating: boolean;
+	/**
+	 * Replaces the 12px `icon` slot wholesale, for a leading element that has to
+	 * size itself — the live status row's stack of agent avatars, say, which is
+	 * both taller than a glyph and as wide as the number of agents running.
+	 * Mutually exclusive with `icon`; when set, `icon` is ignored.
+	 */
+	leading?: ReactNode;
 	onToggleExpand?: () => void;
 	shimmerLabel?: string;
 	/**
@@ -32,6 +39,7 @@ export interface ToolRowBaseProps {
 
 export function ToolRowBase({
 	icon,
+	leading,
 	shimmerLabel,
 	completeLabel,
 	isAnimating,
@@ -56,11 +64,12 @@ export function ToolRowBase({
 			)}
 		>
 			<div className="flex min-w-0 items-center gap-2 text-muted-foreground text-sm">
-				{icon && (
-					<span className="flex size-3 shrink-0 items-center justify-center">
-						{icon}
-					</span>
-				)}
+				{leading ??
+					(icon && (
+						<span className="flex size-3 shrink-0 items-center justify-center">
+							{icon}
+						</span>
+					))}
 				<span className="shrink-0 whitespace-nowrap font-[450]">
 					{isAnimating && shimmerLabel ? (
 						<TextShimmer

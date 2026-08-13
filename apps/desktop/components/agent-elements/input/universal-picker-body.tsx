@@ -15,12 +15,17 @@
 //   2. External agents — installed ACP harnesses (Claude Code, Codex, Gemini CLI,
 //                      …) drill into their advertised model / thinking / approval,
 //                      probed LAZILY on submenu-open (one subprocess, not a storm).
-//   3. Install agents — not-installed catalog entries collapsed behind ONE
-//                      submenu row (greyed rows with an Install button inside).
+//   3. Add more agents — ONE row out to the Customize page when the catalog has
+//                      anything left to install. It is a link, not a list: this
+//                      picker chooses a TARGET for the next turn, and the
+//                      not-yet-installed catalog it used to nest here duplicated
+//                      a browsing surface the marketplace already owns.
 //
 // Typing in the search box flattens everything back out (providers and
-// installable agents surface as top-level matches) so nesting never hides a
-// target from search.
+// installable agents surface as top-level matches, the latter still with their
+// inline Install button) so nesting never hides a target from search — and a
+// user who knows the name of an agent they have not installed yet still finds
+// it here without the round trip.
 //
 // The lazy probe is the load-bearing detail: `DropdownMenuSubContent` (Base UI,
 // `keepMounted={false}`) unmounts a closed submenu's children, so
@@ -28,12 +33,14 @@
 // agent subprocess on first fetch) when its submenu is actually opened.
 
 import {
+	Add01Icon,
 	CheckmarkCircle02Icon,
 	Download04Icon,
 	HelpCircleIcon,
 	Loading03Icon,
 	PlugSocketIcon,
 	SparklesIcon,
+	Store01Icon,
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -53,7 +60,7 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useContext, useMemo, useState } from "react";
 import type {
 	ComposerSettingItem,
 	ComposerSettingsSection,
@@ -67,7 +74,9 @@ import {
 } from "@/components/agent-elements/input/usage-bar.tsx";
 import { useComposerAcpSections } from "@/components/agent-elements/input/use-composer-acp-sections.ts";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
+import { TabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry, AgentSummary } from "@/src/lib/api/agents.ts";
@@ -79,6 +88,10 @@ import {
 	formatCountdown,
 	formatExpiryDate,
 } from "@/src/lib/expiry.ts";
+import {
+	showsComposerTuning,
+	showsModelPicker,
+} from "@/src/lib/interface-level.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 
 /** A Pi provider row for the Providers section (built by `useUniversalPicker`). */
@@ -461,8 +474,21 @@ function ExternalAgentSettings({
 	onSelect: () => void;
 }) {
 	const noModelOptions = useMemo<ModelOption[]>(() => [], []);
+	// Interface level decides whether this agent's row offers anything BUT "Use
+	// it" — the same gate the host applies to the active agent's sections, applied
+	// again here because this body builds its own (see the hook's header). Without
+	// it, Simple would strip the model from the trigger summary and still list one
+	// under every agent in the popover.
+	//
+	// It also feeds `agentId: null` when nothing would render, which skips the
+	// probe entirely: `useComposerAcpSections` spawns the agent subprocess on
+	// first fetch, and a level that shows none of the answers should not be asking
+	// the question.
+	const interfaceLevel = useInterfaceLevel();
+	const showModelSection = showsModelPicker(interfaceLevel);
+	const showTuningSections = showsComposerTuning(interfaceLevel);
 	const { modelSection, extraSections } = useComposerAcpSections({
-		agentId: agent.id,
+		agentId: showModelSection || showTuningSections ? agent.id : null,
 		agents,
 		modelOptions: noModelOptions,
 		engineModel: null,
@@ -493,21 +519,22 @@ function ExternalAgentSettings({
 					onSelect();
 				}}
 			/>
-			<SettingSub section={modelAsSection} />
-			{extraSections.map((section) => (
-				<SettingSub
-					key={section.key}
-					section={{
-						...section,
-						onChange: (id) => {
-							section.onChange(id);
-							if (!isActive) {
-								onSelect();
-							}
-						},
-					}}
-				/>
-			))}
+			{showModelSection && <SettingSub section={modelAsSection} />}
+			{showTuningSections &&
+				extraSections.map((section) => (
+					<SettingSub
+						key={section.key}
+						section={{
+							...section,
+							onChange: (id) => {
+								section.onChange(id);
+								if (!isActive) {
+									onSelect();
+								}
+							},
+						}}
+					/>
+				))}
 		</>
 	);
 }
@@ -577,6 +604,9 @@ function ProviderSubBody({
 	thinkingLevels: string[];
 }) {
 	const node = useActiveNode();
+	const interfaceLevel = useInterfaceLevel();
+	const showModelSection = showsModelPicker(interfaceLevel);
+	const showTuningSections = showsComposerTuning(interfaceLevel);
 	// Live-enumerate the provider's full model list once the submenu opens (this
 	// component only mounts on open). OpenRouter exposes hundreds of models Core's
 	// static `suggestedModels` can't carry, so a discovery-capable provider gets the
@@ -587,7 +617,16 @@ function ProviderSubBody({
 	const discoverable =
 		!provider.upsell &&
 		provider.configured &&
-		(provider.supportsDiscovery || provider.discoveryProviderId !== undefined);
+		(provider.supportsDiscovery ||
+			provider.discoveryProviderId !== undefined ||
+			// A login (subscription) provider — ChatGPT Plus/Pro, Claude Pro/Max,
+			// GitHub Copilot — advertises no OpenAI-style `/models` endpoint, so Core
+			// reports `supportsDiscovery: false` and ships an EMPTY `suggestedModels`.
+			// Gating on that alone left every signed-in subscription row with a model
+			// submenu containing nothing at all, even though Core's discovery falls
+			// through to models.dev for exactly these ids (Settings → Providers has
+			// always shown the real list because it asks unconditionally).
+			provider.authKind === "subscription");
 	const discovery = useQuery({
 		queryKey: ["pi-discover", node.url, discoveryId],
 		queryFn: () => discoverModels(toTarget(node), { provider: discoveryId }),
@@ -726,8 +765,12 @@ function ProviderSubBody({
 				label={`Use ${provider.label}`}
 				onSelect={onUse}
 			/>
-			<SettingSub section={modelSection} />
-			{thinkingLevels.length > 0 && <SettingSub section={thinkingSection} />}
+			{/* Same interface-level gate as the external-agent body above: Simple
+			    offers the provider itself and nothing to tune inside it. */}
+			{showModelSection && <SettingSub section={modelSection} />}
+			{showTuningSections && thinkingLevels.length > 0 && (
+				<SettingSub section={thinkingSection} />
+			)}
 		</>
 	);
 }
@@ -986,6 +1029,15 @@ export function UniversalPickerBody({
 }) {
 	const [query, setQuery] = useState("");
 	const q = query.trim().toLowerCase();
+	// Read the tabs context RAW rather than through `useTabsContext`, which throws
+	// outside a provider. This body is also mounted by settings-shaped fields
+	// (`AgentSelectionField`, `AgentModelPickerField`) that a future surface could
+	// render outside the workspace shell; a null context just hides the
+	// marketplace row instead of taking the whole picker down with it.
+	const tabsCtx = useContext(TabsContext);
+	const openAgentsCatalog = tabsCtx
+		? () => tabsCtx.openTab("/store/agents", { title: "Customize" })
+		: null;
 	const {
 		agents,
 		activeModelSection,
@@ -1283,33 +1335,29 @@ export function UniversalPickerBody({
 						{ryuSub}
 						{filteredInstalled.map(externalSub)}
 						{filteredCustom.map(customAgentRow)}
-						{availableExternal.length > 0 && (
-							<DropdownMenuSub>
-								<DropdownMenuSubTrigger>
-									<span className="flex min-w-0 flex-1 items-center gap-2 text-muted-foreground">
-										<HugeiconsIcon
-											className="shrink-0"
-											icon={Download04Icon}
-											size={16}
-											strokeWidth={2}
-										/>
-										<span className="truncate">Install agents</span>
-									</span>
-									<span className="mr-1 shrink-0 text-[11px] text-muted-foreground tabular-nums">
-										{availableExternal.length}
-									</span>
-								</DropdownMenuSubTrigger>
-								<DropdownMenuSubContent className="max-h-80 min-w-[240px] max-w-[320px] overflow-y-auto p-1">
-									{availableExternal.map((entry) => (
-										<AvailableAgentRow
-											entry={entry}
-											installing={installPendingId === entry.id}
-											key={entry.id}
-											onInstall={() => onInstallExternal(entry.id)}
-										/>
-									))}
-								</DropdownMenuSubContent>
-							</DropdownMenuSub>
+						{/* One row out to the marketplace, not a second catalog nested
+						    inside this one. The submenu that used to live here re-listed
+						    every not-yet-installed agent with its own Install buttons —
+						    a browsing surface the Customize page already owns, and one
+						    that made a picker-for-choosing-a-target double as a store.
+						    Searching still surfaces installable agents inline (the
+						    "Not installed" branch above), so nothing became unreachable. */}
+						{openAgentsCatalog && availableExternal.length > 0 && (
+							<DropdownMenuItem
+								className="gap-2"
+								onClick={() => {
+									openAgentsCatalog();
+									close();
+								}}
+							>
+								<HugeiconsIcon
+									className="shrink-0 text-muted-foreground"
+									icon={Store01Icon}
+									size={16}
+									strokeWidth={2}
+								/>
+								<span className="flex-1 truncate">Add more agents</span>
+							</DropdownMenuItem>
 						)}
 					</>
 				)}
@@ -1346,7 +1394,9 @@ export function UniversalPickerBody({
 					</>
 				)}
 
-				{/* New agent… */}
+				{/* Create new agent — a plus, because this row AUTHORS an agent. It
+				    used to wear the download glyph, which read as "fetch one from
+				    somewhere" and collided with the row above it. */}
 				{onCreateAgent && !q && (
 					<DropdownMenuItem
 						className="gap-2"
@@ -1357,11 +1407,11 @@ export function UniversalPickerBody({
 					>
 						<HugeiconsIcon
 							className="shrink-0 text-muted-foreground"
-							icon={Download04Icon}
+							icon={Add01Icon}
 							size={16}
 							strokeWidth={2}
 						/>
-						<span className="flex-1 truncate">New agent…</span>
+						<span className="flex-1 truncate">Create new agent</span>
 					</DropdownMenuItem>
 				)}
 			</div>

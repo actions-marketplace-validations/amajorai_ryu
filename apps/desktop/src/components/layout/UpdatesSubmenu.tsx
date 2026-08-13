@@ -15,6 +15,7 @@ import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useRecentUpdates } from "@/src/hooks/useRecentUpdates.ts";
 import type { RecentUpdateItem } from "@/src/lib/api/updates.ts";
+import { formatDate } from "@/src/lib/timezone.ts";
 import { OverflowTooltip } from "./overflow-tooltip.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
@@ -24,7 +25,7 @@ function formatItemDate(date: string): string {
 	if (Number.isNaN(parsed.getTime())) {
 		return "";
 	}
-	return parsed.toLocaleDateString(undefined, {
+	return formatDate(parsed, {
 		month: "short",
 		day: "numeric",
 		year: "numeric",

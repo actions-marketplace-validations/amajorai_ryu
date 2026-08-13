@@ -34,7 +34,9 @@ const GATEWAY_DIALOG = join(
  * own component file or inline in GatewayDialog.tsx).
  */
 const SECTION_SOURCES: Record<string, string[]> = {
-	general: ["GeneralTab.tsx"],
+	// The Tabs settings, plus the pane-layout preset manager rendered beside
+	// them from its own file (same pattern as Voice's sub-panels).
+	general: ["GeneralTab.tsx", "SplitPresetSettings.tsx"],
 	appearance: ["AppearanceTab.tsx"],
 	developer: ["DeveloperTab.tsx", "DevMetricsPanel.tsx"],
 	account: ["AccountTab.tsx"],

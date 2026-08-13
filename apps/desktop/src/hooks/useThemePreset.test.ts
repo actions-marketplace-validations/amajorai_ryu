@@ -75,24 +75,34 @@ describe("default theme mode", () => {
 		expect(defaultThemePrefs().mode).toBe(DEFAULT_THEME_MODE);
 	});
 
-	test("the default mode is a concrete mode, so it never consults the OS", () => {
-		// If this is ever set to "system", the two resolvers can diverge again the
-		// moment one of them is mounted with a concrete default.
-		expect(DEFAULT_THEME_MODE === "system").toBe(false);
+	test("the default follows the OS", () => {
+		// Both providers are mounted with `enableSystem`, so next-themes resolves
+		// the same media query these resolvers do. A concrete default here is what
+		// made a dark-OS machine open in light mode until the user toggled it.
+		expect(DEFAULT_THEME_MODE).toBe("system");
 	});
 });
 
 describe("initTheme", () => {
-	test("a fresh install ignores a dark OS and paints the light preset", () => {
-		// The regression: no `theme` key + dark OS used to resolve "system" -> dark
-		// while next-themes had already put `.light` on <html>.
+	test("a fresh install on a dark OS paints the dark preset", () => {
 		stubPrefersDark(true);
 		expect(localStorage.getItem("theme")).toBeNull();
 
 		initTheme();
 
+		expect(appliedBackground()).toBe(presetBackground(DEFAULT_DARK_ID));
+		expect(appliedBackground()).not.toBe(presetBackground(DEFAULT_LIGHT_ID));
+	});
+
+	test("a fresh install on a light OS paints the light preset", () => {
+		// The invariant the whole file guards: <html class> and the inline tokens
+		// must resolve the SAME mode before the user has picked one.
+		stubPrefersDark(false);
+		expect(localStorage.getItem("theme")).toBeNull();
+
+		initTheme();
+
 		expect(appliedBackground()).toBe(presetBackground(DEFAULT_LIGHT_ID));
-		expect(appliedBackground()).not.toBe(presetBackground(DEFAULT_DARK_ID));
 	});
 
 	test("an explicit dark choice still paints the dark preset", () => {
@@ -113,12 +123,14 @@ describe("initTheme", () => {
 		expect(appliedBackground()).toBe(presetBackground(DEFAULT_DARK_ID));
 	});
 
-	test("an unrecognised stored mode falls back to the default, not to the OS", () => {
+	test("an unrecognised stored mode falls back to the default", () => {
+		// Garbage in the key must resolve exactly like a fresh install — i.e. the
+		// OS — never to a hardcoded mode the class on <html> would disagree with.
 		localStorage.setItem("theme", "sepia");
 		stubPrefersDark(true);
 
 		initTheme();
 
-		expect(appliedBackground()).toBe(presetBackground(DEFAULT_LIGHT_ID));
+		expect(appliedBackground()).toBe(presetBackground(DEFAULT_DARK_ID));
 	});
 });

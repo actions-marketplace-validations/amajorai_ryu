@@ -789,7 +789,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			if (!convIdRef.current || messages.length === 0) {
 				// First turn of this thread: register the conversation locally and
 				// mirror its id into the store + shared history selection.
-				createConversation(convId, genericRuntime.agentId);
+				createConversation(convId, { agentId: genericRuntime.agentId });
 				setConversationId(convId);
 				setActiveConversationId(convId);
 			}

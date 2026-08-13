@@ -144,6 +144,42 @@ describe("isReasoningOption", () => {
 			isReasoningOption(option({ id: "ryu.plan", name: "Plan mode" }))
 		).toBe(false);
 	});
+
+	// Captured verbatim from opencode 1.18.5 over ACP (`session/set_config_option`
+	// response, after selecting a model that has effort levels). Pinned because
+	// that agent was reported as having no effort selector: the classifier was
+	// never the gap — the option simply never reached it, since opencode omits it
+	// from `session/new` until a model with effort levels is applied.
+	it("classifies opencode's effort option, and renders it as the slider", () => {
+		const openCodeEffort = {
+			id: "effort",
+			name: "Effort",
+			description: "Available effort levels for this model",
+			category: "thought_level",
+			type: "select",
+			currentValue: "low",
+			options: [
+				{ value: "low", name: "Low" },
+				{ value: "medium", name: "Medium" },
+				{ value: "high", name: "High" },
+				{ value: "xhigh", name: "Xhigh" },
+			],
+		};
+		expect(isReasoningOption(openCodeEffort)).toBe(true);
+		const section = buildConfigOptionSection(
+			openCodeEffort,
+			{},
+			() => undefined
+		);
+		expect(section.variant).toBe("slider");
+		expect(section.items.map((i) => i.id)).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+		expect(section.value).toBe("low");
+	});
 });
 
 describe("buildConfigOptionSection", () => {

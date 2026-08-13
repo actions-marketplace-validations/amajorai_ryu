@@ -83,6 +83,40 @@ describe("reconcileSectionOrder", () => {
 		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
 	});
 
+	it("migrates the pre-apps-under-agents default (Apps still at the bottom)", () => {
+		// The default persisted before `companions` (Apps) moved up beneath `agents`,
+		// leaving `plugins` alone at the bottom — a user who never customised
+		// anything on that build. Without this snapshot every existing install reads
+		// as "customised" and keeps Apps at the bottom forever.
+		const legacy = [
+			"tabs",
+			"agents",
+			"teams",
+			"projects",
+			"pinned",
+			"chats",
+			"spaces",
+			"channels",
+			"integrations",
+			"identities",
+			"workflows",
+			"skills",
+			"mcp",
+			"tools",
+			"engines",
+			"archived",
+			"plugins",
+			"companions",
+		];
+		expect(reconcileSectionOrder(legacy)).toEqual(DEFAULT_SECTION_ORDER);
+	});
+
+	it("puts Apps directly below Agents in the default order", () => {
+		expect(DEFAULT_SECTION_ORDER.indexOf("companions")).toBe(
+			DEFAULT_SECTION_ORDER.indexOf("agents") + 1
+		);
+	});
+
 	it("preserves a customised order verbatim", () => {
 		// Archived dragged to the top — nothing missing, nothing unknown.
 		const customised: SectionKey[] = [
@@ -99,7 +133,7 @@ describe("reconcileSectionOrder", () => {
 		const result = reconcileSectionOrder(stored);
 		expect(result).toEqual(DEFAULT_SECTION_ORDER);
 		// Specifically: right after its default predecessor, not appended at the end.
-		expect(result.indexOf("companions")).toBe(result.indexOf("plugins") + 1);
+		expect(result.indexOf("companions")).toBe(result.indexOf("agents") + 1);
 	});
 
 	it("keeps an app-registered section in its stored position", () => {

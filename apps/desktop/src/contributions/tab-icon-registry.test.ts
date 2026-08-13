@@ -11,7 +11,13 @@ describe("tab-icon-registry", () => {
 		expect(resolveTabIcon("/spaces/abc")).toBe("delivery-secure-01");
 		expect(resolveTabIcon("/spaces/abc/doc/xyz")).toBe("file-01");
 		expect(resolveTabIcon("/spaces/abc/db/xyz")).toBe("database");
-		expect(resolveTabIcon("/meetings/m1")).toBe("mic-01");
+	});
+
+	test("no built-in seed for an app-owned path", () => {
+		// `/meetings` belongs to the `@ryu/meetings` app, which seeds its own icon
+		// into this registry from the live contributions feed. A built-in row for it
+		// painted a glyph whether or not the (default-OFF) app was enabled.
+		expect(resolveTabIcon("/meetings/m1")).toBeUndefined();
 	});
 
 	test("longest / most-specific rule wins", () => {

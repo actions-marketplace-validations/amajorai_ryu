@@ -79,12 +79,30 @@ function toReport(raw: CapabilityReport): CapabilityReport {
 export async function fetchAgentCapabilities(
 	target: ApiTarget,
 	agentId: string,
-	modelId?: string | null
+	modelId?: string | null,
+	/**
+	 * The caller's ACP config-option picks, same shape as `fetchAcpConfig`'s.
+	 *
+	 * Load-bearing, not an optimisation: `reasoning` is true when the agent's
+	 * probe reported a thought-level option, and an agent whose reasoning option
+	 * only exists for some models advertises none on its default one. The
+	 * composer HIDES a reasoning option whenever this says false, so probing the
+	 * two endpoints with different selections makes them contradict each other —
+	 * the option is advertised and then suppressed.
+	 */
+	selections?: Record<string, string> | null
 ): Promise<CapabilityReport> {
-	const query =
-		modelId && modelId.trim().length > 0
-			? `?model=${encodeURIComponent(modelId)}`
-			: "";
+	const params = new URLSearchParams();
+	if (modelId && modelId.trim().length > 0) {
+		params.set("model", modelId);
+	}
+	const picks = Object.entries(selections ?? {})
+		.filter(([id, value]) => id.length > 0 && value.length > 0)
+		.sort(([a], [b]) => a.localeCompare(b));
+	if (picks.length > 0) {
+		params.set("selections", JSON.stringify(Object.fromEntries(picks)));
+	}
+	const query = params.size > 0 ? `?${params.toString()}` : "";
 	return toReport(
 		await request<CapabilityReport>(
 			target,

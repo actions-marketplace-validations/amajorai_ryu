@@ -1,12 +1,16 @@
 // packages/ui/src/hooks/use-dialog-overlay-blur.ts
 //
-// THE one shared, persisted "Blur dialog backgrounds" toggle. ON by default: it
-// dims (30% black) and blurs (8px) the app behind dialogs, alert dialogs, sheets
-// and drawers, and the panels themselves are translucent (`bg-popover/90
-// backdrop-blur-xl`) so that shows through. Off — reachable only from the
-// desktop Appearance settings — uses a flat transparent look with no backdrop
-// and no panel shadow. `apps/web` exposes no toggle at all; it is always on
-// there.
+// THE one shared, persisted "Blur dialog backgrounds" toggle. OFF by default:
+// dialogs, alert dialogs, sheets and drawers get a flat transparent look with no
+// backdrop and no panel shadow. On — reachable only from the desktop Appearance
+// settings — dims (30% black) and blurs (8px) the app behind them, and the
+// panels themselves are translucent (`bg-popover/90 backdrop-blur-xl`) so that
+// shows through.
+//
+// `apps/web` exposes no toggle and deliberately never bootstraps this store
+// (see apps/web/src/components/providers.tsx), so the CSS base state below —
+// which IS blurred — is what the web renders. This module's default therefore
+// only ever decides what the desktop does.
 //
 // This lives in `@ryu/ui` — the leaf package `apps/web`, `apps/desktop`, and the
 // other surfaces all import — so there is exactly ONE module-level `listeners`
@@ -21,17 +25,20 @@
 // The CSS side is `--ryu-dialog-overlay-background` / `--ryu-dialog-overlay-blur`
 // in `styles/globals.css` (.ryu-dialog-overlay), plus the
 // `html[data-dialog-overlay-blur="off"]` rules that hide the backdrop and strip
-// panel shadows when the toggle is off. That polarity is deliberate: the blurred
-// state is the CSS base state, so it paints on the first frame without waiting
-// for any JS, and only the off state needs an attribute stamped on <html>.
+// panel shadows when the toggle is off. The CSS keeps blurred as its BASE state
+// even though the desktop default is now off, because that is what `apps/web`
+// paints with no JS at all. The desktop reaches its own default by stamping the
+// attribute at boot — `initDialogOverlayBlur()` runs in `main.tsx` module scope,
+// before `createRoot(...).render(...)`, so the off state is on <html> before the
+// first paint rather than one effect later.
 
 import { useSyncExternalStore } from "react";
 
 /** Historical key — see the file header before renaming it. */
 export const DIALOG_OVERLAY_BLUR_STORAGE_KEY = "ryu_dialog_overlay_blur";
 
-/** Default ON — only an explicit `"false"` in storage disables the overlay. */
-export const DEFAULT_DIALOG_OVERLAY_BLUR = true;
+/** Default OFF — only an explicit `"true"` in storage enables the overlay. */
+export const DEFAULT_DIALOG_OVERLAY_BLUR = false;
 
 const ENABLED_BACKGROUND = "rgb(0 0 0 / 30%)";
 const DISABLED_BACKGROUND = "rgb(0 0 0 / 0)";
@@ -64,7 +71,9 @@ function applyOverlayVars(enabled: boolean): void {
 /** Current preference. Safe in SSR / storage-denied contexts (returns the default). */
 export function readDialogOverlayBlur(): boolean {
 	try {
-		return localStorage.getItem(DIALOG_OVERLAY_BLUR_STORAGE_KEY) !== "false";
+		// An absent key means "never chosen" and resolves to the OFF default.
+		// Users who explicitly turned the overlay on stored `"true"` and keep it.
+		return localStorage.getItem(DIALOG_OVERLAY_BLUR_STORAGE_KEY) === "true";
 	} catch {
 		return DEFAULT_DIALOG_OVERLAY_BLUR;
 	}
@@ -111,8 +120,9 @@ export function setDialogOverlayBlur(enabled: boolean): void {
 }
 
 /**
- * Apply the saved preference to the document. Call once at app boot so a
- * returning user's dialogs render the way they left them without a flash.
+ * Apply the saved preference to the document. Call once at app boot, as early as
+ * possible — the desktop calls it in `main.tsx` module scope — so both the OFF
+ * default and a returning user's ON choice are on <html> before the first paint.
  */
 export function initDialogOverlayBlur(): void {
 	applyOverlayVars(readDialogOverlayBlur());

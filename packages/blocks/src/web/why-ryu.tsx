@@ -8,20 +8,20 @@ import { StaggerLines } from "./stagger-lines.tsx";
 
 const steps = [
 	{
-		title: "The hard part is not the model.",
-		body: "The work needs tools, memory, policies, approvals, retries, and a record of what happened. Most teams have to assemble that layer by hand.",
+		title: "We start with the job, not the software.",
+		body: "A free session where we look at one workflow your team is drowning in, and say plainly whether we can take it off them.",
 	},
 	{
-		title: "Ryu owns the control layer.",
-		body: "Local models handle routine work. Frontier models handle the jobs that need them. Routing, budgets, redaction, tools, and audit live in one place.",
+		title: "We set it up around your firm.",
+		body: "Your document types, your rules, your glossary, your approval steps. Days of configuration, not months of training a model on your data.",
 	},
 	{
-		title: "Your team gets agents, not another infra project.",
-		body: "Install an agent for a real workflow, connect the tools your team already uses, and keep humans in the loop where work needs review.",
+		title: "You see every action and every cost.",
+		body: "A plain record a partner can read, and a monthly ceiling you set. This is what makes sign-off possible instead of a leap of faith.",
 	},
 	{
-		title: "Start narrow. Expand on the same core.",
-		body: "Map one workflow, set its policy, and add more agents as the platform proves itself. Each rollout hardens the same control layer instead of creating another silo.",
+		title: "Then you add the next workflow.",
+		body: "Every rule and correction your team captures stays. The second workflow is faster than the first, and the tenth is faster still.",
 	},
 ];
 
@@ -34,10 +34,10 @@ export default function WhyRyu() {
 					{/* Wraps only the title and its supporting line: the button row below
 					    is a flex layout and `.t-stagger-line` would force it to block. */}
 					<StaggerLines>
-						<SectionTitle title="The layer that gets agents into production." />
+						<SectionTitle title="How we actually work with you." />
 						<p className={sectionSubtitleClass}>
-							One interface and one control layer for every agent a company
-							runs.
+							One workflow at a time, priced monthly, with the record and the
+							ceiling in place from day one.
 						</p>
 					</StaggerLines>
 					<div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -47,13 +47,13 @@ export default function WhyRyu() {
 							rel="noopener noreferrer"
 							target="_blank"
 						>
-							Book a Demo
+							Book a free consultation
 						</Link>
 						<Link
 							className={cn(buttonVariants({ variant: "ghost" }))}
 							href="/for"
 						>
-							See workflows
+							See what we automate
 						</Link>
 					</div>
 				</div>

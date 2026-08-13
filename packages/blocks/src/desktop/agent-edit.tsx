@@ -34,10 +34,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Checkbox } from "@ryu/ui/components/checkbox";
-import {
-	DitherGradient,
-	type GradientDirection,
-} from "@ryu/ui/components/dither-kit/gradient";
+import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import type { DitherColor } from "@ryu/ui/components/dither-kit/palette";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
@@ -67,6 +64,13 @@ import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import {
+	AGENT_BANNER_BASE,
+	AgentBannerDialog,
+	AgentBannerWash,
+	resolveAgentBanner,
+	useAgentBannerPrefs,
+} from "./agent-banner-dialog.tsx";
 import { GuidedSetup } from "./guided-setup.tsx";
 import {
 	SettingsCard,
@@ -1866,150 +1870,6 @@ const SCHEDULE_PHRASE_ITEMS = [
 	{ value: "custom", label: "Custom cron" },
 ];
 
-// Banner palette. "Random" here means DETERMINISTICALLY random: the colour and
-// direction are derived from the agent name, so every agent gets a different
-// wash but the same agent looks the same on every render and every machine.
-// Both are overridable via props so a user can pick their own.
-const BANNER_COLORS: readonly DitherColor[] = [
-	"purple",
-	"blue",
-	"green",
-	"pink",
-	"orange",
-	"red",
-];
-const BANNER_DIRECTIONS: readonly GradientDirection[] = [
-	"up",
-	"down",
-	"left",
-	"right",
-];
-
-/** Swatch fills for the colour picker — indicative only; the real fill is the
- *  dithered canvas, which cannot be shown in a 16px dot. */
-const BANNER_SWATCHES: Record<DitherColor, string> = {
-	purple: "#b497cf",
-	blue: "#7aa2f7",
-	green: "#9ece6a",
-	pink: "#e39ac7",
-	orange: "#e0a363",
-	red: "#e06c75",
-	grey: "#9aa0a6",
-};
-
-/** Stable 32-bit hash of a string — same seed in, same banner out. */
-function bannerHash(seed: string): number {
-	let h = 2_166_136_261;
-	for (let i = 0; i < seed.length; i++) {
-		h ^= seed.charCodeAt(i);
-		h = Math.imul(h, 16_777_619);
-	}
-	return Math.abs(h);
-}
-
-/**
- * The user's banner override for one agent.
- *
- * Persisted to localStorage rather than onto the agent record: this is a purely
- * cosmetic, per-machine preference, and a Core schema change (plus migration and
- * sync) buys nothing for it. With no override the deterministic hash default
- * applies, so every agent has a sensible banner without anyone choosing one.
- */
-interface BannerPrefs {
-	/** A palette name, or a HUE (0–360) for a custom colour. DitherGradient's
-	 *  `from` is `DitherColor | number`, so a hue needs no extra plumbing. */
-	color?: DitherColor | number;
-	direction?: GradientDirection;
-}
-
-/** Hex (#rrggbb) → hue, so a native colour input can drive the dither fill.
- *  Only the hue is kept: the kit derives its own saturation/lightness so the
- *  wash stays consistent with the rest of the palette. */
-function hexToHue(hex: string): number {
-	const m = /^#?([\da-f]{6})$/i.exec(hex.trim());
-	if (!m) {
-		return 0;
-	}
-	const n = Number.parseInt(m[1], 16);
-	const r = ((n >> 16) & 255) / 255;
-	const g = ((n >> 8) & 255) / 255;
-	const b = (n & 255) / 255;
-	const max = Math.max(r, g, b);
-	const min = Math.min(r, g, b);
-	const d = max - min;
-	if (d === 0) {
-		return 0;
-	}
-	let h: number;
-	if (max === r) {
-		h = ((g - b) / d) % 6;
-	} else if (max === g) {
-		h = (b - r) / d + 2;
-	} else {
-		h = (r - g) / d + 4;
-	}
-	return Math.round((((h * 60) % 360) + 360) % 360);
-}
-
-/** Hue → hex, so the colour input shows the currently-selected custom hue. */
-function hueToHex(hue: number): string {
-	const h = ((hue % 360) + 360) % 360;
-	const s = 0.85;
-	const l = 0.58;
-	const c = (1 - Math.abs(2 * l - 1)) * s;
-	const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-	const m = l - c / 2;
-	const [r, g, b] =
-		h < 60
-			? [c, x, 0]
-			: h < 120
-				? [x, c, 0]
-				: h < 180
-					? [0, c, x]
-					: h < 240
-						? [0, x, c]
-						: h < 300
-							? [x, 0, c]
-							: [c, 0, x];
-	const to = (v: number) =>
-		Math.round((v + m) * 255)
-			.toString(16)
-			.padStart(2, "0");
-	return `#${to(r)}${to(g)}${to(b)}`;
-}
-
-const bannerPrefsKey = (agent: string) => `ryu:agent-banner:${agent}`;
-
-function loadBannerPrefs(agent: string): BannerPrefs {
-	try {
-		const raw = localStorage.getItem(bannerPrefsKey(agent));
-		const prefs = raw ? (JSON.parse(raw) as BannerPrefs) : {};
-		// A stale/hand-edited `color` string that isn't a known swatch reaches
-		// `fillOf` → `PALETTE[color].fill`, which throws during canvas paint and
-		// crashes the editor on open. Numbers are always valid (treated as a hue);
-		// drop any string that isn't a palette swatch so the banner falls back to
-		// its derived default instead of exploding.
-		if (
-			typeof prefs.color === "string" &&
-			!BANNER_COLORS.includes(prefs.color as DitherColor)
-		) {
-			prefs.color = undefined;
-		}
-		return prefs;
-	} catch {
-		// Corrupt or unavailable storage must never break the editor.
-		return {};
-	}
-}
-
-function saveBannerPrefs(agent: string, prefs: BannerPrefs): void {
-	try {
-		localStorage.setItem(bannerPrefsKey(agent), JSON.stringify(prefs));
-	} catch {
-		// Non-fatal: the banner falls back to the derived default next load.
-	}
-}
-
 const PROFILE_DITHER_SETTINGS = {
 	color: "#B497CF",
 	edgeFade: 0.5,
@@ -2110,18 +1970,13 @@ function ProfileHeader({
 	selectedSkills: Set<string>;
 	selectedTools: Set<string>;
 }) {
-	// Lazily read once per agent so the picker reflects a previous choice, and
-	// re-read when the agent changes (the editor reuses this component).
-	const [prefs, setPrefs] = useState<BannerPrefs>(() => loadBannerPrefs(name));
-	useEffect(() => {
-		setPrefs(loadBannerPrefs(name));
-	}, [name]);
-
-	const updatePrefs = (next: BannerPrefs) => {
-		const merged = { ...prefs, ...next };
-		setPrefs(merged);
-		saveBannerPrefs(name, merged);
-	};
+	// Prefs live in their own module with the dialog that edits them, so the
+	// header only has to know how to PAINT one.
+	const { prefs, reset, update } = useAgentBannerPrefs(name);
+	const banner = resolveAgentBanner(name, prefs, {
+		color: bannerColor,
+		direction: bannerDirection,
+	});
 
 	return (
 		<section
@@ -2130,106 +1985,23 @@ function ProfileHeader({
 		>
 			<div
 				className="relative min-h-48 overflow-hidden"
-				style={{
-					background:
-						"linear-gradient(135deg, hsl(222 18% 7%), hsl(222 12% 13%) 58%, hsl(224 10% 22%))",
-				}}
+				style={{ background: AGENT_BANNER_BASE }}
 			>
-				<DitherGradient
-					className="absolute inset-0"
-					direction={
-						bannerDirection ??
-						prefs.direction ??
-						BANNER_DIRECTIONS[
-							bannerHash(`${name}:dir`) % BANNER_DIRECTIONS.length
-						]
-					}
-					from={
-						bannerColor ??
-						prefs.color ??
-						BANNER_COLORS[bannerHash(name) % BANNER_COLORS.length]
-					}
-					opacity={0.55}
-				/>
-				{/* Banner customisation. Sits on the banner itself rather than in a
-				    settings tab so the effect is visible while choosing. Unlocked
-				    agents only — a locked/built-in agent's chrome is not editable. */}
+				<AgentBannerWash banner={banner} />
+				{/* Customisation moved off the banner and into a dialog: the swatch
+				    strip that used to sit here was permanently parked over the
+				    top-left corner and could only offer colour + direction. The
+				    dialog carries a live preview, so the effect is still visible
+				    while choosing. Unlocked agents only — a locked/built-in agent's
+				    chrome is not editable. */}
 				{isLocked ? null : (
-					<div className="absolute top-3 left-3 z-10 flex items-center gap-1.5">
-						{BANNER_COLORS.map((c) => {
-							const active =
-								(prefs.color ??
-									BANNER_COLORS[bannerHash(name) % BANNER_COLORS.length]) === c;
-							return (
-								<button
-									aria-label={`Banner colour ${c}`}
-									aria-pressed={active}
-									className={`size-4 rounded-full border transition-transform hover:scale-110 ${
-										active
-											? "border-white ring-2 ring-white/60"
-											: "border-white/40"
-									}`}
-									key={c}
-									onClick={() => updatePrefs({ color: c })}
-									style={{ backgroundColor: BANNER_SWATCHES[c] }}
-									type="button"
-								/>
-							);
-						})}
-						{/* Custom colour: any hue, not just the six presets. Stored as a
-						    number so `from` takes it directly. */}
-						<label
-							className={`relative size-4 cursor-pointer overflow-hidden rounded-full border transition-transform hover:scale-110 ${
-								typeof prefs.color === "number"
-									? "border-white ring-2 ring-white/60"
-									: "border-white/40"
-							}`}
-							style={{
-								background:
-									typeof prefs.color === "number"
-										? hueToHex(prefs.color)
-										: "conic-gradient(red,yellow,lime,cyan,blue,magenta,red)",
-							}}
-							title="Custom colour"
-						>
-							<input
-								aria-label="Custom banner colour"
-								className="absolute inset-0 cursor-pointer opacity-0"
-								onChange={(e) =>
-									updatePrefs({ color: hexToHue(e.target.value) })
-								}
-								type="color"
-								value={
-									typeof prefs.color === "number"
-										? hueToHex(prefs.color)
-										: "#b497cf"
-								}
-							/>
-						</label>
-						<span className="mx-1 h-4 w-px bg-white/25" />
-						{BANNER_DIRECTIONS.map((d) => {
-							const active =
-								(prefs.direction ??
-									BANNER_DIRECTIONS[
-										bannerHash(`${name}:dir`) % BANNER_DIRECTIONS.length
-									]) === d;
-							return (
-								<button
-									aria-label={`Banner direction ${d}`}
-									aria-pressed={active}
-									className={`rounded px-1.5 py-0.5 text-[10px] uppercase transition-colors ${
-										active
-											? "bg-white/85 text-black"
-											: "bg-black/35 text-white/80 hover:bg-black/50"
-									}`}
-									key={d}
-									onClick={() => updatePrefs({ direction: d })}
-									type="button"
-								>
-									{d}
-								</button>
-							);
-						})}
+					<div className="absolute top-3 left-3 z-10">
+						<AgentBannerDialog
+							agent={name}
+							onReset={reset}
+							onUpdate={update}
+							prefs={prefs}
+						/>
 					</div>
 				)}
 				<div
@@ -3139,7 +2911,10 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				}
 				title="Instructions"
 			>
-				<SettingsCard>
+				{/* `bare`: the editor (injected PlateJS, or the fallback textarea) is a
+				    tall bordered box that fills the card edge to edge, so the card
+				    surface only draws a second edge a few pixels outside the first. */}
+				<SettingsCard bare>
 					{instructionsEditor ?? (
 						<Textarea
 							className="min-h-32"

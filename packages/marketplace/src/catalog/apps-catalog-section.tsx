@@ -68,6 +68,7 @@ import { groupByCategory } from "./categories.ts";
 import BrandOrCoverImage from "./chrome/brand-image.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
+import ItemLikeButton from "../likes/like-button.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
@@ -76,6 +77,7 @@ import StoreItemAction, {
 	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
 } from "./chrome/store-item-action.tsx";
+import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import VerifiedBadge from "./chrome/verified-badge.tsx";
 import { formatCount, formatDate } from "./detail/detail-panels.tsx";
 import {
@@ -96,6 +98,7 @@ import {
 	type CatalogInstall,
 	type PluginSettingsOpener,
 	useCatalogHost,
+	useNoInstallingLookup,
 	useNoSettingsOpener,
 } from "./host.tsx";
 import { resolveCardIcon } from "./icon-url.ts";
@@ -113,10 +116,18 @@ import type {
 	PluginCatalogSource,
 } from "./types.ts";
 
-/** Which slice of the plugin catalog a section instance browses. An "app" is a
- *  plugin that bundles a Companion runnable (a full-page UI surface); a "plugin"
- *  is everything else (tools/agents/channels/policies). "all" = the historical
- *  unsplit tab, which web still uses.
+/** Which slice of the plugin catalog a section instance browses. An "app" claims a
+ *  UI DESTINATION — somewhere the user navigates TO that does not exist while the
+ *  item is uninstalled: a companion window, a workspace dock tab, or a top-level
+ *  route. A "plugin" is everything else — it only modifies surfaces that already
+ *  exist (tools/agents/channels/policies, turn hooks, capability providers, settings
+ *  tabs, sidebar sections). "all" = the historical unsplit tab, which web still uses.
+ *
+ *  Notably NOT app-ness: shipping a sidecar (the four `document.parse` providers each
+ *  ship one and nobody opens Docling), living under `apps-store/` (that is a
+ *  PACKAGING root — items published as their own satellite repo), or declaring a
+ *  `category`. The rule is adjudicated server-side by `manifest_declares_destination`
+ *  (apps/core/src/server/mod.rs) and arrives here as {@link CatalogEntry.type}.
  *
  *  There is no "community" variant any more. Community listings are not a
  *  different KIND of thing — they are apps and plugins that nobody at Ryu
@@ -126,9 +137,25 @@ import type {
  *  tabs; see {@link CommunityShelf}. */
 export type AppsCatalogVariant = "apps" | "plugins" | "all";
 
-/** True when a catalog entry is an "app". Prefers the explicit `type` discriminator
- *  the catalog now emits; falls back to the legacy "ships a Companion runnable"
- *  derivation for older wires that don't carry `type`.
+/** True when a catalog entry is an "app" — i.e. it claims a UI destination (see
+ *  {@link AppsCatalogVariant}).
+ *
+ *  The `type` discriminator is AUTHORITATIVE and the rule lives in exactly one
+ *  place: Core's `manifest_declares_destination`, which reads the three keys that
+ *  mint a destination (a `companion` runnable, `contributes.dock_panels` in any
+ *  panel mode, or a top-level `contributes.sidebar_buttons[].target`). Do not
+ *  re-derive it here — a second copy is how Browser/Simulator/CRM/UGC and
+ *  Dashboards/Drafts/Mission Control ended up in a different tab than their `type`
+ *  said they were in.
+ *
+ *  The `kinds` fallback is for OLDER WIRES ONLY (a Core that predates the `type`
+ *  key). It is deliberately still the narrow companion test rather than the full
+ *  rule, because it cannot be anything else: the catalog entry carries `kinds`, but
+ *  the projector never puts `dock_panels` or `sidebar_buttons` on it
+ *  (`project_manifest`'s allowlist emits `apiSurface`, not the shell contributions),
+ *  so the three-key rule is not expressible from entry data. A stale Core therefore
+ *  under-reports apps; it never mis-reports one.
+ *
  *  Exported for unit tests (the detail-panel helpers below run only inside the
  *  Dialog-portaled preview, which `renderToStaticMarkup` cannot emit). */
 export function isCompanionApp(item: AppCatalogItem): boolean {
@@ -206,6 +233,12 @@ export default function AppsCatalogSection({
 	const usePluginSettingsOpener =
 		host.usePluginSettingsOpener ?? useNoSettingsOpener;
 	const settingsOpener = usePluginSettingsOpener();
+	// One reader of the surface's shared install state, for the same reason: the
+	// answer has to be identical on the card and in the detail dialog, and this
+	// section mounts TWO catalog hooks whose private flags cannot see each other.
+	const useInstallingLookup =
+		host.install?.useInstallingLookup ?? useNoInstallingLookup;
+	const sharedInstalling = useInstallingLookup();
 	const {
 		items,
 		loading,
@@ -290,34 +323,52 @@ export default function AppsCatalogSection({
 		select("");
 	};
 
-	// Per-card lifecycle without a per-id hook: the hook's install()/setEnabled()
-	// act on the SELECTED item, so a card action selects its item and defers the
-	// call until the selection lands (non-racy — the effect fires only once
-	// selectedId matches). Install + Disable run inline; Enable routes to the
+	// Is THIS listing busy? One question, one answer, everywhere on the page.
+	//
+	// The shared store is the authority (it spans both catalog hook instances and
+	// the other store sections); the two hooks' own `installing` ids are folded in
+	// so a host that provides no shared state — or a test host — still gets a
+	// correct per-instance answer instead of a dead flag.
+	const isInstalling = (id: string) =>
+		sharedInstalling(id) || installing === id || community.installing === id;
+
+	// Per-card lifecycle without a per-id hook: the hook's setEnabled() acts on the
+	// SELECTED item, so a card's Disable selects its item and defers the call until
+	// the selection lands (non-racy — the effect fires only once selectedId
+	// matches). Add runs inline against an explicit id. Enable routes to the
 	// preview so its grant-confirmation dialog is never bypassed.
-	const [pending, setPending] = useState<{
-		id: string;
-		action: "install" | "disable";
-	} | null>(null);
+	//
+	// This latch is ONLY that deferral; it is deliberately not the busy flag. It
+	// was both once, and it cleared synchronously on the line after the call was
+	// FIRED — so a card's spinner lasted a single render and the row re-armed
+	// itself while its add was still running, which is how a second click reached
+	// Core's 409 "already installed" on an add that was actually succeeding. It
+	// still clears synchronously, because holding it past the fire would re-run
+	// this effect the next time `setEnabled` changes identity (it is a useCallback
+	// over `items`, which re-creates on every catalog refetch) and disable twice.
+	const [pendingDisableId, setPendingDisableId] = useState<string | null>(null);
 
 	useEffect(() => {
-		if (!pending || selectedId !== pending.id) {
+		if (pendingDisableId === null || selectedId !== pendingDisableId) {
 			return;
 		}
-		const run =
-			pending.action === "install" ? install : () => setEnabled(false);
-		run().catch(() => {
+		setEnabled(false).catch(() => {
 			// Errors surface through the hook's error state in the detail panel.
 		});
-		setPending(null);
-	}, [pending, selectedId, install, setEnabled]);
+		setPendingDisableId(null);
+	}, [pendingDisableId, selectedId, setEnabled]);
 
+	// Add takes the id directly, so the call no longer waits on a selection to
+	// land. The preview still opens — that is where this listing's action error
+	// renders, and an add that fails silently on a card is worse than a dialog.
 	const cardInstall = (id: string) => {
-		setPending({ id, action: "install" });
 		selectFirstParty(id);
+		install(id).catch(() => {
+			// Errors surface through the hook's error state in the detail panel.
+		});
 	};
 	const cardDisable = (id: string) => {
-		setPending({ id, action: "disable" });
+		setPendingDisableId(id);
 		selectFirstParty(id);
 	};
 
@@ -350,8 +401,8 @@ export default function AppsCatalogSection({
 					detailLoading={active ? active.detailLoading : detailLoading}
 					error={active ? active.error : error}
 					install={active ? active.install : install}
-					installing={active ? active.installing : installing}
 					installLayer={host.install}
+					isInstalling={isInstalling}
 					item={active ? active.selectedItem : selectedItem}
 					lifecyclePending={active ? active.lifecyclePending : lifecyclePending}
 					noun={copy.noun}
@@ -378,6 +429,7 @@ export default function AppsCatalogSection({
 					fallbackIcon={REALM_ICONS[variant === "plugins" ? "plugins" : "apps"]}
 					fetchNextPage={fetchNextPage}
 					hasNextPage={hasNextPage}
+					isInstalling={isInstalling}
 					items={visibleItems}
 					loading={loading}
 					loadingMore={loadingMore}
@@ -386,7 +438,6 @@ export default function AppsCatalogSection({
 					onInstall={cardInstall}
 					onSelect={selectFirstParty}
 					onSelectCommunity={selectCommunity}
-					pendingId={pending?.id ?? null}
 					searching={query.trim().length > 0}
 					selectedId={communitySelected ? null : selectedId}
 					settingsOpener={settingsOpener}
@@ -594,7 +645,7 @@ function InstallFromUrl({
 				size="sm"
 				variant="outline"
 			>
-				{busy ? <Spinner className="size-4" /> : "Install from URL"}
+				{busy ? <Spinner className="size-4" /> : "Add from URL"}
 			</Button>
 		</div>
 	);
@@ -609,7 +660,7 @@ function AppList({
 	onSelect,
 	onInstall,
 	onDisable,
-	pendingId,
+	isInstalling,
 	canInstall,
 	fetchNextPage,
 	hasNextPage,
@@ -632,7 +683,9 @@ function AppList({
 	onSelect: (id: string) => void;
 	onInstall: (id: string) => void;
 	onDisable: (id: string) => void;
-	pendingId: string | null;
+	/** Shared "this listing has a call in flight" predicate — the same one the
+	 *  detail panel reads, so a row and its preview can never disagree. */
+	isInstalling: (id: string) => boolean;
 	canInstall: boolean;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
@@ -674,7 +727,7 @@ function AppList({
 					// for any installed listing: the catalog↔record join matches on
 					// it, which is what makes the row read "installed" at all.
 					onOpenSettings={settingsOpener(it.entry.id)}
-					pending={pendingId === it.entry.id}
+					pending={isInstalling(it.entry.id)}
 				/>
 			}
 			contextMenu={
@@ -693,6 +746,12 @@ function AppList({
 			iconId={it.entry.icon}
 			iconUrl={it.entry.icon_url}
 			key={it.entry.id}
+			// The heart, keyed by the listing's NAMESPACE. `entry.id` IS that
+			// namespace (`@ryu/crm`) — the same string the install path and the
+			// settings join already key on — so a community listing discovered
+			// from a GitHub topic, which has no marketplace document at all,
+			// carries the same count as a published one.
+			likeNamespace={it.entry.id}
 			name={it.entry.name}
 			onClick={() => onSelect(it.entry.id)}
 			orgVerified={it.entry.org_verified}
@@ -842,14 +901,15 @@ function CommunityShelf({
 	}
 	return (
 		<section className="mt-6 flex flex-col gap-3 border-t pt-6">
-			<div>
-				<h3 className="font-semibold text-base tracking-tight">
-					From the community
-				</h3>
-				<p className="text-muted-foreground text-xs">
-					Discovered from public GitHub topics.
-				</p>
-			</div>
+			{/* The SHARED shelf heading, not a hand-rolled copy of its markup — the
+			    same primitive the Agents tab's community shelf and every category
+			    shelf above use, so the two community shelves read as one system. */}
+			<StoreShelfHeading
+				className="mb-0"
+				description="Discovered from public GitHub topics."
+			>
+				From the community
+			</StoreShelfHeading>
 			<CommunityTrustNotice tone="banner" />
 			<StoreCardGrid>
 				{items.map((it) => (
@@ -876,6 +936,9 @@ function CommunityShelf({
 						iconId={it.entry.icon}
 						iconUrl={it.entry.icon_url}
 						key={it.entry.id}
+						// A community listing has no marketplace document — the namespace
+						// key is the whole reason it can be liked at all. See the model.
+						likeNamespace={it.entry.id}
 						name={it.entry.name}
 						onClick={() => onSelect(it.entry.id)}
 						// The check rides on the COMMUNITY shelf too, and that is exactly
@@ -919,7 +982,19 @@ export function isMandatoryListing(entry: CatalogEntry): boolean {
 	return entry.mandatory === true && entry.source === "built-in";
 }
 
-/** Card action for an app: Install (inline), Enabled↔Disable morph (Disable
+/** The download-center task id Core registers an add under.
+ *
+ *  One scheme, declared once, shared by every path that adds a plugin — the
+ *  catalog resolve, the built-in store write, and the update re-resolve all
+ *  register `plugin:<id>`, so a retry dedupes onto the same row and a button can
+ *  find its own transfer by id instead of guessing from a label.
+ *
+ *  Exported for unit tests. */
+export function pluginDownloadTaskId(id: string): string {
+	return `plugin:${id}`;
+}
+
+/** Card action for an app: Add (inline), Enabled↔Disable morph (Disable
  *  inline), or Disabled→Enable which opens the preview so its grant dialog runs.
  *  Descriptor-only rows + read-only surfaces just open the preview. */
 function AppCardAction({
@@ -1043,7 +1118,7 @@ function reportTargetForApp(item: AppCatalogItem) {
 	};
 }
 
-/** The Install / Enable / Disable button cluster plus inline action error.
+/** The Add / Enable / Disable button cluster plus inline action error.
  *  Enable is gated behind a grant-confirmation dialog because enable is where
  *  the Gateway validates (and may deny) the app's declared grants. On a
  *  read-only surface (installLayer === null) this renders the host's affordance
@@ -1052,6 +1127,7 @@ function AppActions({
 	item,
 	install,
 	installing,
+	installTaskId,
 	setEnabled,
 	lifecyclePending,
 	error,
@@ -1061,8 +1137,11 @@ function AppActions({
 	status,
 }: {
 	item: AppCatalogItem;
-	install: () => Promise<void>;
+	install: (id?: string) => Promise<void>;
 	installing: boolean;
+	/** Download-center task id this listing's add reports progress on, so the
+	 *  button fills from the real transfer instead of guessing by label. */
+	installTaskId: string;
 	setEnabled: (enabled: boolean) => Promise<void>;
 	lifecyclePending: boolean;
 	error: string | null;
@@ -1089,7 +1168,7 @@ function AppActions({
 		setEnabled(false).catch(noop);
 	};
 	const runInstall = () => {
-		install().catch(noop);
+		install(entry.id).catch(noop);
 	};
 	const confirmEnable = () => {
 		setConfirmOpen(false);
@@ -1175,13 +1254,21 @@ function AppActions({
 		const InstallButton = installLayer.InstallButton;
 		action = (
 			<InstallButton
+				busyLabel="Adding…"
 				idleVariant="ghost"
 				installing={installing}
 				onClick={runInstall}
-				progress={{ kinds: ["tool", "other"], name: entry.name }}
+				// The exact task id, not just the display name: Core labels a plugin
+				// download row with the plugin ID, so a name hint never matched and the
+				// button showed whichever single download happened to be running.
+				progress={{
+					kinds: ["tool", "other"],
+					name: entry.id,
+					taskId: installTaskId,
+				}}
 			>
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				Install
+				Add
 			</InstallButton>
 		);
 	} else if (enabled) {
@@ -1295,7 +1382,7 @@ function AppDetailPanel({
 	detailLoading,
 	detailError,
 	install,
-	installing,
+	isInstalling,
 	setEnabled,
 	lifecyclePending,
 	error,
@@ -1309,8 +1396,9 @@ function AppDetailPanel({
 	detail: PluginCatalogDetail | null;
 	detailLoading: boolean;
 	detailError: string | null;
-	install: () => Promise<void>;
-	installing: boolean;
+	install: (id?: string) => Promise<void>;
+	/** Shared busy predicate — the same one the list rows read. */
+	isInstalling: (id: string) => boolean;
 	setEnabled: (enabled: boolean) => Promise<void>;
 	lifecyclePending: boolean;
 	error: string | null;
@@ -1448,8 +1536,9 @@ function AppDetailPanel({
 				<AppActions
 					error={error}
 					install={install}
-					installing={installing}
+					installing={isInstalling(entry.id)}
 					installLayer={installLayer}
+					installTaskId={pluginDownloadTaskId(entry.id)}
 					item={item}
 					lifecyclePending={lifecyclePending}
 					onOpenSettings={settingsOpener(entry.id)}
@@ -1457,6 +1546,12 @@ function AppDetailPanel({
 					setEnabled={setEnabled}
 					status={
 						<>
+							{/* Same control, same namespace key as the card it was opened
+							    from, so the two can never disagree about the total. */}
+							<ItemLikeButton
+								namespace={entry.id}
+								stopPropagation={false}
+							/>
 							<PriceBadge entry={entry} />
 							{entry.descriptor_only ? (
 								<Badge variant="outline">
@@ -1975,7 +2070,7 @@ function DescriptorDetail({
 	);
 }
 
-/** Status pill in the detail header: Enabled > Installed > nothing. */
+/** Status pill in the detail header: Enabled > Added > nothing. */
 function AppStatusBadge({
 	enabled,
 	installed,

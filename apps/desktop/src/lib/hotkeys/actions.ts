@@ -16,26 +16,37 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// --- Window / App ---
 	{
 		id: "command-palette.toggle",
-		label: "Toggle command palette",
+		label: "Toggle Command Palette",
 		category: "General",
 		defaultBinding: "Mod+K",
 		description: "Open or close the search-everything command palette.",
 	},
 	{
 		id: "settings.open",
-		label: "Open settings",
+		label: "Open Settings",
 		category: "General",
 		defaultBinding: "Mod+,",
 	},
 	{
 		id: "sidebar.toggle",
-		label: "Toggle sidebar",
+		label: "Toggle Sidebar",
 		category: "General",
 		defaultBinding: "Mod+B",
 	},
 	{
+		id: "assistant.toggle",
+		label: "Toggle Ryu Chat",
+		category: "General",
+		// Mod+B is the sidebar and Mod+K the palette; Mod+J is the free member of
+		// that same "toggle a surface" family and is what an editor user reaches
+		// for. The assistant is the third such surface, so it takes it.
+		defaultBinding: "Mod+J",
+		description:
+			"Open or close the floating Ryu chat. Always opens the FLOATING layout, never the docked sidebar one — a hotkey that reopened whichever layout was last used would look dead when that was the sidebar.",
+	},
+	{
 		id: "window.fullscreen-toggle",
-		label: "Toggle full screen",
+		label: "Toggle Full Screen",
 		category: "General",
 		// F11, not the macOS ⌃⌘F: `eventToChord` collapses ctrlKey and metaKey
 		// into a single `Mod` token, so a Cmd+Ctrl chord is unrepresentable in
@@ -46,31 +57,31 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// --- Tabs ---
 	{
 		id: "tab.new",
-		label: "New tab",
+		label: "New Tab",
 		category: "Tabs",
 		defaultBinding: "Mod+T",
 	},
 	{
 		id: "tab.close",
-		label: "Close tab",
+		label: "Close Tab",
 		category: "Tabs",
 		defaultBinding: "Mod+W",
 	},
 	{
 		id: "tab.restore",
-		label: "Restore closed tab",
+		label: "Restore Closed Tab",
 		category: "Tabs",
 		defaultBinding: "Mod+Shift+T",
 	},
 	{
 		id: "tab.split-toggle",
-		label: "Toggle split view",
+		label: "Toggle Split View",
 		category: "Tabs",
 		defaultBinding: "Mod+Alt+S",
 	},
 	{
 		id: "tab.next",
-		label: "Next tab",
+		label: "Next Tab",
 		category: "Tabs",
 		defaultBinding: "Mod+Tab",
 		description:
@@ -78,7 +89,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	},
 	{
 		id: "tab.prev",
-		label: "Previous tab",
+		label: "Previous Tab",
 		category: "Tabs",
 		defaultBinding: "Mod+Shift+Tab",
 		description:
@@ -87,38 +98,38 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// --- Navigation ---
 	{
 		id: "nav.back",
-		label: "Go back",
+		label: "Go Back",
 		category: "Navigation",
 		defaultBinding: "Alt+Left",
 	},
 	{
 		id: "nav.forward",
-		label: "Go forward",
+		label: "Go Forward",
 		category: "Navigation",
 		defaultBinding: "Alt+Right",
 	},
 	{
 		id: "nav.home",
-		label: "Go to Home",
+		label: "Go To Home",
 		category: "Navigation",
 		defaultBinding: null,
 	},
 	{
 		id: "nav.timeline",
-		label: "Go to Timeline",
+		label: "Go To Timeline",
 		category: "Navigation",
 		defaultBinding: null,
 	},
 	{
 		id: "nav.library",
-		label: "Go to Library",
+		label: "Go To Library",
 		category: "Navigation",
 		defaultBinding: null,
 	},
 	// --- Chat ---
 	{
 		id: "chat.new",
-		label: "New chat",
+		label: "New Chat",
 		category: "Chat",
 		defaultBinding: "Mod+N",
 	},
@@ -128,15 +139,31 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// binds these ids once — see that store for the full argument.
 	{
 		id: "chat.stop",
-		label: "Stop the current reply",
+		label: "Stop The Current Reply",
 		category: "Chat",
 		defaultBinding: "Mod+Shift+Backspace",
 		description:
 			"Interrupt the reply streaming in the focused chat. Does nothing when that chat has no turn in flight.",
 	},
 	{
+		id: "chat.toggle-bottom-panel",
+		label: "Toggle Bottom Panel",
+		category: "Chat",
+		defaultBinding: "Mod+Alt+Down",
+		description:
+			"Show or hide the focused chat's bottom dock (terminal, diff, preview…).",
+	},
+	{
+		id: "chat.toggle-right-panel",
+		label: "Toggle Right Panel",
+		category: "Chat",
+		defaultBinding: "Mod+Alt+Right",
+		description:
+			"Show or hide the focused chat's right dock (files, context, subagents…).",
+	},
+	{
 		id: "chat.voice-mode",
-		label: "Start voice mode",
+		label: "Start Voice Mode",
 		category: "Chat",
 		defaultBinding: null,
 		description:
@@ -145,7 +172,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// --- Composer (focus-scoped: only fire inside the prompt input) ---
 	{
 		id: "composer.cycle-agent",
-		label: "Cycle agent",
+		label: "Cycle Agent",
 		category: "Composer",
 		defaultBinding: "Tab",
 		description:
@@ -153,7 +180,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	},
 	{
 		id: "composer.cycle-mode",
-		label: "Cycle mode",
+		label: "Cycle Mode",
 		category: "Composer",
 		defaultBinding: "Shift+Tab",
 		description:
@@ -161,14 +188,14 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	},
 	{
 		id: "composer.cycle-model",
-		label: "Cycle model",
+		label: "Cycle Model",
 		category: "Composer",
 		defaultBinding: "Shift+M",
 		description: "While typing in the composer, cycle the selected model.",
 	},
 	{
 		id: "composer.cycle-thinking",
-		label: "Cycle thinking effort",
+		label: "Cycle Thinking Effort",
 		category: "Composer",
 		defaultBinding: "Shift+T",
 		description:
@@ -177,7 +204,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	// --- Global (OS-level, managed by the island's native layer) ---
 	{
 		id: "island.summon",
-		label: "Summon command bar",
+		label: "Summon Command Bar",
 		category: "Global",
 		defaultBinding: "Mod+Shift+Space",
 		global: true,
@@ -185,7 +212,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	},
 	{
 		id: "voice.push-to-talk",
-		label: "Push-to-talk",
+		label: "Push-To-Talk",
 		category: "Global",
 		defaultBinding: "Mod+Shift+A",
 		global: true,
@@ -193,7 +220,7 @@ export const DESKTOP_HOTKEYS: HotkeyRegistry = [
 	},
 	{
 		id: "dictation.toggle",
-		label: "System-wide dictation",
+		label: "System-Wide Dictation",
 		category: "Global",
 		defaultBinding: "Mod+Shift+D",
 		global: true,

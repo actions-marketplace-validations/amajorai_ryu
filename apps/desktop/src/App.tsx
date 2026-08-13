@@ -2,7 +2,6 @@ import { ditherAvatarSeed } from "@ryu/ui/components/dither-kit/avatar.tsx";
 import { Logo as OrbLogo } from "@ryu/ui/components/logo.tsx";
 import { Toaster, toast } from "@ryu/ui/components/sileo.tsx";
 import { DEFAULT_THEME_MODE } from "@ryu/ui/theme/prefs.ts";
-import { listen } from "@tauri-apps/api/event";
 import { ThemeProvider } from "next-themes";
 import { useEffect, useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -21,6 +20,14 @@ import {
 	shouldNudgeLocalMissing,
 } from "@/lib/prefer-local-node.ts";
 import { getRyuStatus, startRyuCore } from "@/lib/tauri-bridge.ts";
+// Boot effects fire before Tauri is guaranteed to have injected
+// `window.__TAURI_INTERNALS__`, and `listen()` reaches into it for
+// `transformCallback` — the single most frequent production error on 0.1.11.
+// The gate makes an early subscription wait for the bridge instead of rejecting.
+import {
+	listenWhenReady,
+	withTauri,
+} from "@/src/lib/tauri-ready.ts";
 import { EntitlementProvider } from "@/src/contexts/entitlement-context.tsx";
 import { initAnalytics } from "@/src/lib/analytics.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
@@ -34,7 +41,6 @@ import { PageWrapper } from "./components/layout/PageWrapper.tsx";
 import { GlobalContextMenu } from "./components/shell/GlobalContextMenu.tsx";
 import { initBackgroundCustomization } from "./hooks/useBackgroundCustomization.ts";
 import { initChromeShadows } from "./hooks/useChromeShadows.ts";
-import { initDialogOverlayBlur } from "./hooks/useDialogOverlayBlur.ts";
 import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
@@ -83,6 +89,13 @@ function downloadProgressLabel(
 		return `${Math.round(received / MB)} MB`;
 	}
 	return `${Math.min(100, Math.round((received / total) * 100))}%`;
+}
+
+/** Terminates a `listenWhenReady(...).then(...)` chain. Outside Tauri the gate
+ *  already resolves to a no-op unlisten, so reaching here means a real subscribe
+ *  failure — worth a log, never worth an unhandled rejection at the window. */
+function ignoreSubscribeFailure(error: unknown): void {
+	console.error("tauri event subscription failed", error);
 }
 
 // Remembers the last server-confirmed "approved" so a transient control-plane
@@ -139,11 +152,15 @@ function WindowTitleManager() {
 
 		const title = suffix ? `Ryu (Research Preview ${suffix})` : "Ryu";
 
-		import("@tauri-apps/api/window")
-			.then(({ getCurrentWindow }) => getCurrentWindow().setTitle(title))
-			.catch(() => {
-				// Not running in Tauri — ignore.
-			});
+		// `getCurrentWindow()` reads the bridge's metadata, so this effect fires
+		// inside the same cold-start race. Through the gate it retries once the
+		// bridge lands and resolves null (rather than throwing) when there is none.
+		withTauri(async () => {
+			const { getCurrentWindow } = await import("@tauri-apps/api/window");
+			await getCurrentWindow().setTitle(title);
+		}).catch(() => {
+			// Setting the window title is cosmetic — never worth surfacing.
+		});
 	}, [dev, channel]);
 
 	return null;
@@ -189,9 +206,18 @@ function MainApp() {
 		// only uploads when the user has opted in.
 		const stopSettingsSync = startSettingsSync();
 		let unlisten: (() => void) | undefined;
-		initNodes().then((fn) => {
-			unlisten = fn;
-		});
+		// The gate inside the store makes a too-early `list_nodes` wait for Tauri's
+		// bridge, so this no longer rejects on a slow cold start. It can still fail
+		// for a real reason (a broken node file), and an uncaught rejection here is
+		// what surfaced as "Object.refresh(src/store/useNodeStore)" in production —
+		// so the chain terminates in a catch rather than in the window.
+		initNodes()
+			.then((fn) => {
+				unlisten = fn;
+			})
+			.catch((error: unknown) => {
+				console.error("node store init failed", error);
+			});
 		return () => {
 			unlisten?.();
 			stopSettingsSync();
@@ -261,7 +287,7 @@ function MainApp() {
 			["core-install-progress", "Ryu Core"],
 			["gateway-install-progress", "the model gateway"],
 		] as const) {
-			listen<{
+			listenWhenReady<{
 				error?: string;
 				phase: string;
 				received?: number;
@@ -290,7 +316,9 @@ function MainApp() {
 				} else if (payload.phase === "error") {
 					toast.error(payload.error ?? `Couldn't install ${name}`);
 				}
-			}).then((fn) => unlisteners.push(fn));
+			})
+				.then((fn) => unlisteners.push(fn))
+				.catch(ignoreSubscribeFailure);
 		}
 		return () => {
 			for (const fn of unlisteners) {
@@ -304,7 +332,7 @@ function MainApp() {
 		// frontmost, so the toast is the ONLY feedback that it worked — without it
 		// the user has no way to tell a capture from a missed tap.
 		const unlisteners: (() => void)[] = [];
-		listen<{ title?: string; source?: { app?: string | null } }>(
+		listenWhenReady<{ title?: string; source?: { app?: string | null } }>(
 			"quick-capture:kept",
 			({ payload }) => {
 				toast.success({
@@ -314,13 +342,17 @@ function MainApp() {
 						: (payload.title ?? "Selection"),
 				});
 			}
-		).then((fn) => unlisteners.push(fn));
-		listen<{ error?: string }>("quick-capture:failed", ({ payload }) => {
+		)
+			.then((fn) => unlisteners.push(fn))
+			.catch(ignoreSubscribeFailure);
+		listenWhenReady<{ error?: string }>("quick-capture:failed", ({ payload }) => {
 			toast.error({
 				title: "Couldn't keep that",
 				description: payload.error ?? "The capture didn't reach Ryu.",
 			});
-		}).then((fn) => unlisteners.push(fn));
+		})
+			.then((fn) => unlisteners.push(fn))
+			.catch(ignoreSubscribeFailure);
 		return () => {
 			for (const fn of unlisteners) {
 				fn();
@@ -533,10 +565,12 @@ function MainApp() {
 	}, [authed, setIsAuthenticated]);
 
 	useEffect(() => {
+		// `initDialogOverlayBlur()` is deliberately NOT here — it runs in main.tsx
+		// module scope, because its default is off while the CSS base state is on,
+		// so applying it one effect late would flash a blurred backdrop.
 		initTheme();
 		initPointerCursor();
 		initChromeShadows();
-		initDialogOverlayBlur();
 		initInvertedBackgrounds();
 		initBackgroundCustomization();
 	}, []);

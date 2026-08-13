@@ -11,8 +11,15 @@ const convId = ctx.conversation_id;
 if (!convId) {
 	return { kind: "none" };
 }
+// A forced run comes from the chat's own context menu ("Rename with AI"), which
+// dispatches `hooks.run` with `event: { force: true }`. The user asked for this
+// rename by name, so it skips every gate that exists to keep the AUTOMATIC pass
+// quiet: the on/off preference, the first-turn rule, and the every-N interval.
+// It also writes the title as `mode: "custom"` further down — a rename the user
+// asked for must not be silently replaced by the next automatic pass.
+const forced = Boolean(ctx.event && ctx.event.force);
 const enabled = await host.getPreference({ key: "auto-title-enabled" });
-if (enabled === "false") {
+if (!forced && enabled === "false") {
 	return { kind: "none" };
 }
 let everyN = parseInt(
@@ -35,11 +42,15 @@ const onFirstTurn =
 const assistantTurns = (ctx.transcript || []).filter(
 	(m) => m.role === "assistant"
 ).length;
-if (assistantTurns < 1) {
+// The automatic pass needs a completed reply to title from. A forced run does
+// not: the user can ask to rename a chat that has only their opening message,
+// and the recent-turns slice below is what actually decides whether there is
+// enough text to work with.
+if (!forced && assistantTurns < 1) {
 	return { kind: "none" };
 }
 const isFirstTurn = assistantTurns === 1 && onFirstTurn;
-if (!isFirstTurn && assistantTurns % everyN !== 0) {
+if (!forced && !isFirstTurn && assistantTurns % everyN !== 0) {
 	return { kind: "none" };
 }
 const recent = (ctx.transcript || [])
@@ -58,13 +69,22 @@ const raw = await host.sideModel({
 if (!raw || !String(raw).trim()) {
 	return { kind: "none" };
 }
+const title = String(raw).trim();
 try {
 	await host.setConversationTitle({
 		id: convId,
-		title: String(raw).trim(),
-		mode: "auto",
+		title,
+		// "auto" skips a chat whose title the user already locked, which is right
+		// for the scheduled pass and wrong for one they just asked for by name.
+		mode: forced ? "custom" : "auto",
 	});
 } catch (e) {
 	host.log("chat-title: setTitle failed", e);
+	return { kind: "none" };
 }
-return { kind: "none" };
+// A forced run reports what it did. `host.runHook` turns a `none` directive into
+// an error, so the menu row's toast says "renamed" only when a rename actually
+// happened — every early return above lands on the error copy instead. The
+// automatic pass stays silent: a `note` is surfaced to the user out-of-band, and
+// nobody wants a notification every fifth turn saying their chat was renamed.
+return forced ? { kind: "note", text: 'Renamed to "' + title + '"' } : { kind: "none" };

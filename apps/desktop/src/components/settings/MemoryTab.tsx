@@ -832,7 +832,10 @@ export function MemoryTab() {
 				caption="Manually add a piece of text to long-term memory so Ryu can recall it later."
 				title="Add to memory"
 			>
-				<SettingsCard>
+				{/* `bare`: what the card holds is one tall textarea plus its OWN status
+				    line and submit button — not sibling settings — so the surface only
+				    draws a second edge around the textarea's border. */}
+				<SettingsCard bare>
 					<form className="flex flex-col gap-3" onSubmit={handleIndex}>
 						<Textarea
 							aria-label="Text to remember"

@@ -1,5 +1,5 @@
 import { buildRyuDeepLink } from "@ryuhq/protocol/deep-link";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
@@ -29,7 +29,7 @@ function ConnectDeviceQR() {
 			return;
 		}
 		let cancelled = false;
-		invoke<string>("get_lan_ip")
+		invokeWhenReady<string>("get_lan_ip")
 			.then((wifiAddress) => {
 				if (!cancelled && wifiAddress) {
 					setHost(withDetectedHost(node.url, wifiAddress));

@@ -80,6 +80,7 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "preferences.get" => Some("host.getPreference"),
         "learning.recordFeedback" => Some("host.recordFeedback"),
         "learning.synthesizeSkill" => Some("host.synthesizeSkill"),
+        "hooks.run" => Some("host.runHook"),
         _ => None,
     }
 }

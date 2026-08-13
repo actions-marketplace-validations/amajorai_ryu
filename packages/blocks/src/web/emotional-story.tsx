@@ -20,51 +20,51 @@ import {
 
 const THREE_PATHS: BentoItem[] = [
 	{
-		title: "The demo is not the deployment",
+		title: "One wrong output is a liability",
 		description:
-			"An agent can look impressive and still fail its first production review.",
+			"On a client file a mistake is not an inconvenience. Somebody is answerable for it.",
 		visual: <DemoDeathMock />,
 	},
 	{
-		title: "No control layer",
+		title: "Nobody can explain what it did",
 		description:
-			"Without tools, memory, or an audit trail, chat stops where real work starts.",
+			"When the client asks why, there is no answer anyone can read. So nobody signs.",
 		visual: <ChatbotOnlyMock />,
 	},
 	{
-		title: "The real blockers",
+		title: "The bill is a guess",
 		description:
-			"Customer data leaves, the bill is a guess, and nobody owns the runtime.",
+			"Finance blocks it before it starts, because nothing says what next month costs.",
 		visual: <AuditSafetyMock />,
 	},
 ];
 
 const RYU_PATH_ITEMS: BentoItem[] = [
 	{
-		title: "Bring any agent",
+		title: "Keep the tools you already pay for",
 		description:
-			"Use Claude Code, Codex, Gemini, OpenClaw, Ollama, or an agent you built.",
+			"ChatGPT, Claude, Gemini, or one we set up for you. We make them safe on client files instead of replacing them.",
 		visual: <InstallLocalMock />,
 	},
 	{
-		title: "Govern every call",
+		title: "We show you exactly what it did",
 		description:
-			"Audit chain, PII redaction, approvals, and budget ceilings stay in the path.",
+			"Every step written down as it happens: what it read, what it changed, who approved it, what it cost.",
 		span: "md:col-span-2",
 		visual: <GovernedAgentMock />,
 	},
 	{
-		title: "Start with one real workflow",
+		title: "Start with one job you already know",
 		description:
-			"Install, connect your tools, and run work. Add more agents as the team grows.",
+			"Pick the work eating the most hours. We set it up around your documents and your rules, then you decide whether it goes wider.",
 		span: "md:col-span-2",
 		visual: <SevenMinuteMock />,
 		action: <DownloadMenu />,
 	},
 	{
-		title: "Keep the option to leave",
+		title: "Nothing leaves the building",
 		description:
-			"Open standards and local-first deployment work on your laptop, your servers, or managed cloud.",
+			"It runs on your own machines. Or we run it for you, under the same limits, and you can move it back.",
 		visual: <StillRunningMock />,
 		action: (
 			<Link
@@ -84,10 +84,10 @@ export default function EmotionalStory() {
 		<section className="container mx-auto px-4 py-20 md:py-28">
 			<div className="mx-auto max-w-6xl">
 				<div className="mb-10 max-w-2xl">
-					<SectionTitle title="Agents are easy to demo. Running them for real is the hard part." />
+					<SectionTitle title="The work is done. Now somebody has to put their name on it." />
 					<p className="mt-4 max-w-xl text-muted-foreground leading-relaxed">
-						The missing layer is what makes an agent private, governable, and
-						dependable enough to run every day.
+						That is where it stops. Not because the AI is bad, but because the
+						firm has no way to prove how the work was done.
 					</p>
 				</div>
 
@@ -99,7 +99,7 @@ export default function EmotionalStory() {
 
 				<div className="mt-12 md:mt-16">
 					<p className="mb-6 font-medium text-foreground text-sm">
-						The control layer Ryu provides
+						What you get instead
 					</p>
 					<BentoGrid items={RYU_PATH_ITEMS} />
 				</div>

@@ -169,3 +169,61 @@ describe("fetchCapabilityLayers provider flags", () => {
 		expect(canServe(p)).toBe(false);
 	});
 });
+
+// `toolkit` — "should the node dropdown list this as a swappable layer" — degrades
+// the same way `serves_route` does, and for the same reason: only Core can compute
+// it (it needs the facade verb table and the whole known manifest set), so the
+// desktop has nothing truthful to fall back to.
+//
+// The tempting fallback is `selectable`, and that IS the bug this flag replaces:
+// `selectable` is the binder's tie-break flag, trivially true for a capability with
+// one provider, which is how four app-private capabilities became "toolkits".
+// Falling back to it would keep reproducing that against an older Core.
+describe("fetchCapabilityLayers toolkit flag", () => {
+	async function firstLayer(over: Record<string, unknown>) {
+		const payload = {
+			capabilities: [
+				{
+					available: [],
+					bound: null,
+					capability: "news.crud",
+					overridden: false,
+					providers: [],
+					selectable: true,
+					...over,
+				},
+			],
+			verbs: [],
+		};
+		const model = await withPayload(payload, () =>
+			fetchCapabilityLayers(TARGET)
+		);
+		const layer = model.capabilities[0];
+		if (!layer) {
+			throw new Error("payload must map to exactly one layer");
+		}
+		return layer;
+	}
+
+	it("reads toolkit off the wire", async () => {
+		expect((await firstLayer({ toolkit: true })).toolkit).toBe(true);
+		expect((await firstLayer({ toolkit: false })).toolkit).toBe(false);
+	});
+
+	it("defaults an absent toolkit to false, not to selectable", async () => {
+		const layer = await firstLayer({});
+		expect(layer.selectable).toBe(true);
+		expect(layer.toolkit).toBe(false);
+	});
+
+	// The layer's NAME now comes from its providers' manifests, so it is the first
+	// string on this wire an app author writes rather than the client. Blank has to
+	// collapse to `null`: a header rendered as empty space is worse than the
+	// picker's own fallback naming, and "" is a value a manifest can carry.
+	it("normalises the capability title, blank included", async () => {
+		expect((await firstLayer({ title: "Search" })).title).toBe("Search");
+		expect((await firstLayer({ title: "  Search  " })).title).toBe("Search");
+		expect((await firstLayer({ title: "   " })).title).toBeNull();
+		expect((await firstLayer({})).title).toBeNull();
+	});
+});

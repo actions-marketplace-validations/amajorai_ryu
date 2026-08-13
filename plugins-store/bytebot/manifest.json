@@ -235,6 +235,7 @@
     {
       "capability": "computer.control",
       "version": "1.0.0",
+      "title": "Computer",
       "selectable": true,
       "target": "remote-desktop",
       "tools": {

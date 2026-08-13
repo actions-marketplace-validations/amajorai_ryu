@@ -178,11 +178,17 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 	// `reasoning.request` fronts the whole `/api/reasoning` public mount, and the
 	// companion has no navigation verb to add — it never opens a shell tab.
 	"reasoning.request": "reasoning.check",
+	// Deep Read, same one-forwarder shape: `rlm.request` fronts the whole `/api/rlm`
+	// public mount and the companion has no navigation verb.
+	"rlm.request": "rlm.query",
 	// `tuition.request` and `news.request` front the whole `/api/tuition` and
 	// `/api/news` public mounts, for the same reason: one forwarder rather than a verb
 	// per route, so a route added to either manifest costs no host change.
 	"tuition.request": "tuition.crud",
 	"news.request": "news.crud",
+	// `subtitles.request` fronts the whole `/api/subtitles` public mount, same shape
+	// again: pick a video, poll the job, read the cues, download the file.
+	"subtitles.request": "subtitles.crud",
 	// Blueprint is ONE row for the same reason again: `blueprint.request` fronts the
 	// whole `/api/blueprint` public mount — plans, revisions, annotations, the verdict
 	// — and the review companion has no navigation verb, because the review surface IS
@@ -246,8 +252,10 @@ const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
 	"meetings:crud": "meetings.crud",
 	"social:crud": "social.crud",
 	"reasoning:check": "reasoning.check",
+	"rlm:query": "rlm.query",
 	"tuition:crud": "tuition.crud",
 	"news:crud": "news.crud",
+	"subtitles:crud": "subtitles.crud",
 	"blueprint:review": "blueprint.review",
 	"skills:crud": "skills.crud",
 	"shell:integrate": "shell.integrate",

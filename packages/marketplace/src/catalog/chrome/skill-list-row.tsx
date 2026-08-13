@@ -70,11 +70,11 @@ function renderInstalledMark(skill: SkillListRowData) {
 		return <Badge variant="secondary">Active</Badge>;
 	}
 	if (skill.active === false) {
-		return <Badge variant="outline">Installed</Badge>;
+		return <Badge variant="outline">Added</Badge>;
 	}
 	return (
 		<HugeiconsIcon
-			aria-label="Installed"
+			aria-label="Added"
 			className="size-3.5 shrink-0 text-success"
 			icon={CheckmarkCircle02Icon}
 		/>

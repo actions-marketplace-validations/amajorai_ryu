@@ -202,16 +202,16 @@ function summarize(
 		return `Enabling ${subjectName} turns these on automatically, dependencies first.`;
 	}
 	if (tally.toInstall === 0 && tally.toEnable === 0) {
-		return `Everything ${subjectName} needs is already installed and enabled on this node.`;
+		return `Everything ${subjectName} needs is already added and enabled on this node.`;
 	}
 	// Noun phrases rather than clauses: a tally reads the same at one as at ten,
 	// and nothing in it has to agree with a verb.
 	const clauses: string[] = [];
 	if (tally.toInstall > 0) {
-		clauses.push(`${tally.toInstall} installed alongside it`);
+		clauses.push(`${tally.toInstall} added alongside it`);
 	}
 	if (tally.toEnable > 0) {
-		clauses.push(`${tally.toEnable} already installed, switched on with it`);
+		clauses.push(`${tally.toEnable} already added, switched on with it`);
 	}
 	if (tally.alreadyEnabled > 0) {
 		clauses.push(`${tally.alreadyEnabled} already running`);
@@ -255,7 +255,7 @@ function DependencyStatus({
 	}
 	return (
 		<Badge className="shrink-0 text-xs" variant="outline">
-			Installed with this
+			Added with this
 		</Badge>
 	);
 }

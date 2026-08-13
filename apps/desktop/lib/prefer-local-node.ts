@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { AUTH_CORE_URL } from "@/lib/core-url.ts";
 import { LOCAL_FALLBACK, useNodeStore } from "@/src/store/useNodeStore.ts";
 
@@ -46,7 +46,7 @@ export async function preferLocalOrCloud(): Promise<PreferLocalResult> {
 		store.nodes.find((n) => normalize(n.url) === localUrl)?.name ??
 		LOCAL_FALLBACK.name;
 
-	const { online } = await invoke<{ online: boolean }>("test_node", {
+	const { online } = await invokeWhenReady<{ online: boolean }>("test_node", {
 		name: localName,
 	}).catch(() => ({ online: false }));
 

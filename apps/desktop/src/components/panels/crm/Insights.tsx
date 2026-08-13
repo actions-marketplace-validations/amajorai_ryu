@@ -25,6 +25,7 @@ import type {
 	CrmSummary,
 	PipelineReport,
 } from "@/src/lib/api/crm.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 const WINDOWS = [
 	{ label: "Overdue", value: "overdue" },
@@ -189,7 +190,7 @@ export function Insights({
 										</button>
 										{task.due_at && (
 											<div className="text-muted-foreground text-xs">
-												due {new Date(task.due_at).toLocaleString()}
+												due {formatDateTime(task.due_at)}
 												{task.assignee ? ` · ${task.assignee}` : ""}
 											</div>
 										)}

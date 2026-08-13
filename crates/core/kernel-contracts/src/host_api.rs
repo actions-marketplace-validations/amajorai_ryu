@@ -276,6 +276,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         false,
     ),
+    // Run one of the CALLING plugin's own declared turn hooks on demand, outside
+    // the turn loop — the seam behind a "do it now" menu row (e.g. chat-title's
+    // "Rename chat"). A plugin's menu row can only dispatch a HOST capability, so
+    // without this an app whose whole behaviour lives in a hook had no way to be
+    // triggered by the user at all. Scoped to the caller's own hooks by the bridge,
+    // which takes the plugin id from the path, never the body. Rust-bridge-only.
+    m("hooks.run", "hooks.run", Some("hook:run-self"), false, false),
     m(
         "agent.run.stream",
         "agent.run",
@@ -289,6 +296,16 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         Some("hook:run-agent"),
         false,
         true,
+    ),
+    // Get-or-create a Space by NAME. Rust-bridge-only (`ts_host: false`): a frame
+    // app is mounted with its `{ spaceId, docId }` context already resolved, so only
+    // a headless caller — a turn hook — has a Space it cannot name by id.
+    m(
+        "spaces.ensureSpace",
+        "spaces.docs",
+        Some("spaces:docs"),
+        false,
+        false,
     ),
     m(
         "spaces.createDoc",
@@ -1099,6 +1116,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Subtitles (`@ryu/subtitles`). ONE row, the Outpost shape without the navigation
+    // verbs: every call the companion makes arrives as `subtitles.request` and the host
+    // re-issues it against Core's `/api/subtitles<path>` public mount. It grants no
+    // authority that did not exist — that mount already answers any client holding the
+    // node token, which is what the host holds — and the gates stay `subtitles:crud` on
+    // the verb plus Core's ext-proxy route allowlist on the paths. The companion is the
+    // whole surface, so it never needs to open a shell tab.
+    m(
+        "subtitles.request",
+        "subtitles.crud",
+        Some("subtitles:crud"),
+        false,
+        true,
+    ),
     // Automated Reasoning (`@ryu/reasoning`). ONE row, the Outpost shape: the
     // companion's calls all arrive as `reasoning.request` and the host re-issues them
     // against Core's `/api/reasoning<path>` public mount. A verb per endpoint would
@@ -1115,6 +1146,14 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    // Deep Read (`@ryu/rlm`). The same ONE-row forwarder as Reasoning directly above:
+    // the companion's calls all arrive as `rlm.request` and the host re-issues them
+    // against Core's `/api/rlm<path>` public mount. Ten sidecar routes for one verb,
+    // and a route added later costs none. It grants nothing new — that mount already
+    // answers any client holding the node token, which is what the host holds — and
+    // the gates stay `rlm:query` on the verb plus Core's ext-proxy route allowlist on
+    // the paths. No navigation verb: the companion is the whole surface.
+    m("rlm.request", "rlm.query", Some("rlm:query"), false, true),
     // Tuition (`@ryu/tuition`) and Wire (`@ryu/news`). The same ONE-row forwarder as
     // Reasoning directly above: every call each companion makes arrives as
     // `<app>.request` and the host re-issues it against that app's `public_mount`.

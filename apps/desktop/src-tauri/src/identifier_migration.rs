@@ -41,22 +41,36 @@ pub const LEGACY_RELEASE_IDENTIFIER: &str = "dev.ryu.desktop";
 /// The pre-rename dev-variant identifier (`tauri.dev.conf.json`).
 pub const LEGACY_DEV_IDENTIFIER: &str = "dev.ryu.desktop.dev";
 
-/// The current identifier for the active profile, mirroring the two Tauri
-/// configs. Asserted against them by `identifiers_match_the_tauri_configs`.
+/// True when this bundle carries the `.dev` identifier — i.e. it was built from
+/// `tauri.dev.conf.json`, or is a local `RYU_PROFILE=dev` run of the same tree.
+///
+/// Deliberately NOT `!profile::is_release()`. The identifier is stamped into the
+/// bundle at BUILD time and only two configs exist, so it does not track the
+/// profile: a canary/nightly build activates the `canary`/`nightly` profile (see
+/// `profile::profile_for_version`) while still shipping the RELEASE identifier —
+/// the release CI declines to touch `identifier`. Keying on the profile would
+/// point such a build's migration at `ai.amajor.ryu.desktop.dev`, a directory it
+/// never reads, and skip the one it does.
+fn uses_dev_identifier() -> bool {
+    cfg!(feature = "dev-variant") || crate::profile::name() == "dev"
+}
+
+/// The current identifier for this bundle, mirroring the two Tauri configs.
+/// Asserted against them by `identifiers_match_the_tauri_configs`.
 pub fn current_identifier() -> &'static str {
-    if crate::profile::is_release() {
-        "ai.amajor.ryu.desktop"
-    } else {
+    if uses_dev_identifier() {
         "ai.amajor.ryu.desktop.dev"
+    } else {
+        "ai.amajor.ryu.desktop"
     }
 }
 
-/// The pre-rename identifier for the active profile.
+/// The pre-rename identifier for this bundle.
 pub fn legacy_identifier() -> &'static str {
-    if crate::profile::is_release() {
-        LEGACY_RELEASE_IDENTIFIER
-    } else {
+    if uses_dev_identifier() {
         LEGACY_DEV_IDENTIFIER
+    } else {
+        LEGACY_RELEASE_IDENTIFIER
     }
 }
 

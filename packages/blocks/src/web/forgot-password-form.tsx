@@ -1,11 +1,16 @@
 "use client";
 
 import { Button } from "@ryu/ui/components/button";
-import { Field, FieldError, FieldGroup } from "@ryu/ui/components/field";
+import {
+	Field,
+	FieldError,
+	FieldGroup,
+	FieldLabel,
+} from "@ryu/ui/components/field";
 import { Input } from "@ryu/ui/components/input";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export interface ForgotPasswordFormProps {
 	/** Field-level validation error message for email. */
@@ -34,6 +39,10 @@ export default function ForgotPasswordForm({
 	emailError,
 }: ForgotPasswordFormProps) {
 	const [email, setEmail] = useState("");
+	// See sign-in-form.tsx: withhold a stale error once the field is edited.
+	const [emailEdited, setEmailEdited] = useState(false);
+	useEffect(() => setEmailEdited(false), [emailError]);
+	const visibleEmailError = emailEdited ? undefined : emailError;
 
 	return (
 		<div className="mx-auto flex w-full max-w-md flex-col gap-6">
@@ -58,19 +67,32 @@ export default function ForgotPasswordForm({
 					}}
 				>
 					<FieldGroup>
-						<Field data-invalid={Boolean(emailError)}>
+						<Field data-invalid={Boolean(visibleEmailError)}>
+							<FieldLabel className="sr-only" htmlFor="email">
+								Email address
+							</FieldLabel>
 							<Input
-								aria-invalid={Boolean(emailError)}
+								aria-describedby={visibleEmailError ? "email-error" : undefined}
+								aria-invalid={Boolean(visibleEmailError)}
+								autoComplete="email"
+								autoFocus
 								className="h-16 border-0 bg-muted shadow-none"
 								id="email"
+								inputMode="email"
 								name="email"
-								onChange={(e) => setEmail(e.target.value)}
+								onChange={(e) => {
+									setEmail(e.target.value);
+									setEmailEdited(true);
+								}}
 								placeholder="Email Address"
 								type="email"
 								value={email}
 							/>
-							{emailError ? (
-								<FieldError errors={[{ message: emailError }]} />
+							{visibleEmailError ? (
+								<FieldError
+									errors={[{ message: visibleEmailError }]}
+									id="email-error"
+								/>
 							) : null}
 						</Field>
 					</FieldGroup>

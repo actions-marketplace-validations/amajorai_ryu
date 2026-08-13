@@ -173,8 +173,10 @@ import {
 import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
 import { newsRequest } from "@/src/lib/api/news.ts";
 import { reasoningRequest } from "@/src/lib/api/reasoning.ts";
+import { rlmRequest } from "@/src/lib/api/rlm.ts";
 import { tuitionRequest } from "@/src/lib/api/tuition.ts";
 import { socialRequest } from "@/src/lib/api/social.ts";
+import { subtitlesRequest } from "@/src/lib/api/subtitles.ts";
 import { fileToDataUrl, uploadUserFile } from "@/src/lib/api/uploads.ts";
 import { generateVideo as apiGenerateVideo } from "@/src/lib/api/video.ts";
 import {
@@ -1451,6 +1453,23 @@ export function PluginHostPanel({
 			// generic companion-alias route, and `/social/:id` through the pattern that
 			// bakes the post id into the frame as `window.ryu.context.postId`.
 			socialRequest: (input) => socialRequest(toTarget(node), input),
+
+			// Subtitles — the @ryu/subtitles companion picks a video, queues a local
+			// transcription + translation job, and reads the cue list back. Same ONE-verb
+			// shape as Outpost above: every call arrives as `subtitlesRequest`, which
+			// re-issues it against Core's `/api/subtitles` public mount with the node bearer
+			// attached (subtitles:crud).
+			//
+			// SECURITY: `subtitlesRequest` in `lib/api/subtitles.ts` owns the check — it
+			// resolves the frame's sub-path with the SAME URL parser `fetch` will use and
+			// asserts containment under the mount, then builds the URL from the fixed base,
+			// so the frame can never choose a host or climb out onto another Core API. The
+			// VIDEO never crosses this boundary at all: a job names a path and the sidecar
+			// opens the file itself.
+			//
+			// No navigation verb: the companion is the whole surface, and `/subtitles` +
+			// `/subtitles/:id` resolve through the generic companion-alias routes.
+			subtitlesRequest: (input) => subtitlesRequest(toTarget(node), input),
 			// Automated Reasoning — the @ryu/reasoning companion authors formal policies
 			// and runs the solver playground. Same one-forwarder shape as Outpost, and
 			// the same security note applies: `reasoningRequest` in `lib/api/reasoning.ts`
@@ -1460,6 +1479,15 @@ export function PluginHostPanel({
 			// rules one layer earlier. There is no `open` verb because the companion is the
 			// whole surface — it never navigates the shell.
 			reasoningRequest: (input) => reasoningRequest(toTarget(node), input),
+			// Deep Read — the @ryu/rlm companion loads a corpus, browses its outline,
+			// asks questions of it and reads run traces. Same one-forwarder shape as
+			// Reasoning, and the same security note applies: `rlmRequest` in
+			// `lib/api/rlm.ts` owns the path check (leading slash, not protocol-relative,
+			// no backslash, resolving under `/api/rlm` per the WHATWG parser rather than a
+			// literal `..` blocklist), and `rpc.ts`'s `asRlmRequestArg` applies the
+			// identical rules one layer earlier. No `open` verb: the companion is the whole
+			// surface.
+			rlmRequest: (input) => rlmRequest(toTarget(node), input),
 			// Tuition and Wire: the same one-forwarder shape, and the same security note
 			// — each `*Request` re-validates the frame-chosen sub-path against its own
 			// mount before building a URL, independently of the check `@ryu/app-host/rpc`

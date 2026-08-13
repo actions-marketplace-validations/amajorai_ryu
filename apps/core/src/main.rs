@@ -62,6 +62,7 @@ pub use ryu_mcp_catalog as mcp_catalog;
 mod mcp_catalog_host;
 mod meetings_client;
 mod mesh_host;
+mod midnight_wipe;
 /// OpenAPI/Swagger spec → `http`-backed tool descriptors (integrations.sh REST
 /// install-abstraction). Pure transform; install/persist wiring lives in `server`.
 mod openapi_import;
@@ -306,6 +307,14 @@ async fn main() {
     // the spawned Ghost via the `mcp_safe_env` allowlist. Set-if-unset so a user
     // override still wins, matching `apply_env_defaults`.
     seed_ghost_sidecar_env();
+
+    // Midnight auto-wipe (canary/nightly profiles only, OFF by default): if a
+    // calendar day has turned since the last one, ARM the node reset below. This
+    // only writes the marker — the delete itself is the audited reset path, one
+    // line down, in this same boot. Placed here so it runs after
+    // `apply_env_defaults` (the data dir must resolve against the active profile)
+    // and before anything opens a store. Every guard is in `midnight_wipe::decide`.
+    crate::midnight_wipe::arm_if_due();
 
     // Full node reset: if `POST /api/node/reset` armed a wipe, delete every store
     // DB / download / preference under the data dir (preserving only the encryption
@@ -666,7 +675,11 @@ async fn main() {
         // `seed_installed_from_disk` mark it installed on every boot and produce a
         // failed-start log for users who never enabled the mesh. That function
         // skips this one name for exactly that reason; the mesh pref stays the
-        // single source of installed-ness here.
+        // single source of installed-ness here. That skip is now load-bearing for
+        // the DEFAULT node, not just an unusual one: first run pre-installs the
+        // client (see `MESH_PREINSTALL_PREF_KEY`), so a mesh-OFF machine has a
+        // `versions.json` tailscale row from boot 2 onward. Seeding from it would
+        // start a tailnet daemon nobody asked for.
         "tailscale".into(),
     ];
 
@@ -886,6 +899,18 @@ async fn main() {
     if let Ok(Some(value)) = preferences.get(crate::mesh_host::MESH_ENABLED_PREF_KEY).await {
         ryu_mesh::set_pref_enabled(ryu_mesh::parse_enabled(Some(&value)));
     }
+    // Mesh client PRE-install (separate decision from the enable above — see
+    // `MESH_PREINSTALL_PREF_KEY`). Read into a plain bool HERE, beside the other
+    // pref seeds, because `preferences` moves into `ServerState` long before the
+    // mesh block near the end of boot that consumes it.
+    let mesh_preinstall_client = crate::mesh_host::preinstall_client_wanted(
+        preferences
+            .get(crate::mesh_host::MESH_PREINSTALL_PREF_KEY)
+            .await
+            .ok()
+            .flatten()
+            .as_deref(),
+    );
     // Managed-inference fleet coordinates. Same shape and the same reason as the
     // mesh seed above: `pi_config::apply` is synchronous and cannot await the
     // prefs store, so the pref half is read once here into a process-global that
@@ -2020,23 +2045,50 @@ async fn main() {
     if ryu_mesh::is_enabled() {
         setup.mark_installed("tailscale").await;
         tracing::info!("mesh: enabled, Tailscale daemon will start with the other sidecars");
-        // Self-heal a mesh-on node with no client: the pref says this machine wants
-        // a tailnet, so get it one rather than letting `start_all` log a missing
-        // binary the user never sees. Background (this is a ~38 MB transfer or a
-        // `brew install`) and gated on `is_enabled()` above, so a mesh-OFF install
-        // still never downloads anything — the invariant the `startup_order` note
-        // and `seed_installed_from_disk`'s skip both protect. The task starts the
-        // daemon itself, after `start_all` has already skipped it.
-        if crate::sidecar::tailscale::ensure_mesh_binaries().is_err()
-            && crate::sidecar::tailscale::downloader::can_install()
-        {
+    }
+
+    // Mesh CLIENT install — a separate decision from the enable above, and the
+    // reason the two are no longer one block. Staging the binaries on a mesh-OFF
+    // node is what makes first run behave like llama.cpp + the default GGUF, which
+    // `install_local_stack` fetches unconditionally ~90 lines up: the client is
+    // there before the user wants it. Without this the ONLY trigger was the
+    // Tunnel toggle itself, so flipping it dropped the user into an up-to-10-minute
+    // `watchMeshInstall` wait; with the binaries staged that toggle takes the
+    // `ensure_mesh_binaries().is_ok()` branch and connects immediately.
+    //
+    // This does NOT turn the mesh on. `spawn_mesh_client_install` re-reads
+    // `ryu_mesh::is_enabled()` only AFTER the download and, when false, logs
+    // "installed, but the mesh was turned off meanwhile" without marking or
+    // starting anything — so no daemon runs, Core stays loopback-only, and the
+    // fail-closed token gate is untouched. `seed_installed_from_disk`'s tailscale
+    // skip is what keeps that true across the NEXT boot (a `versions.json` row now
+    // exists on mesh-off nodes), so it must stay.
+    //
+    // Both conditions after the want-check are the honest ones: nothing downloads
+    // when a complete `tailscale`/`tailscaled` pair already resolves (PATH adoption
+    // included), and `can_install()` is false on Windows (no userspace route) and
+    // on a Mac without Homebrew, so those nodes stay silent instead of failing.
+    // Re-entry is guarded by `MESH_INSTALL_IN_FLIGHT`, so this racing a user's
+    // toggle cannot double-download.
+    if (ryu_mesh::is_enabled() || mesh_preinstall_client)
+        && crate::sidecar::tailscale::ensure_mesh_binaries().is_err()
+        && crate::sidecar::tailscale::downloader::can_install()
+    {
+        if ryu_mesh::is_enabled() {
             tracing::info!("mesh: enabled but no Tailscale client — installing one now");
-            crate::server::spawn_mesh_client_install(
-                download_center.clone(),
-                Arc::clone(&sidecars),
-                Arc::clone(&install_status),
+        } else {
+            tracing::info!(
+                "mesh: pre-installing the Tailscale client (mesh stays off; set \
+                 {}=0 or the `{}` pref to skip)",
+                crate::mesh_host::MESH_PREINSTALL_ENV,
+                crate::mesh_host::MESH_PREINSTALL_PREF_KEY,
             );
         }
+        crate::server::spawn_mesh_client_install(
+            download_center.clone(),
+            Arc::clone(&sidecars),
+            Arc::clone(&install_status),
+        );
     }
 
     // Start sidecars in background (only installed ones will actually start)

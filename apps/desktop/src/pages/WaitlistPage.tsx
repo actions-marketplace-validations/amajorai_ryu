@@ -1,5 +1,7 @@
+import { WaitlistShareDialog } from "@ryu/blocks/web/waitlist-share-dialog.tsx";
 import { toast } from "@ryu/ui/components/sileo";
 import {
+	linkedInShareUrl,
 	waitlistShareText,
 	xShareIntentUrl,
 } from "@ryu/ui/components/waitlist-pass";
@@ -8,6 +10,8 @@ import {
 	normalizeWaitlistUsername,
 	WAITLIST_USERNAME_RE,
 } from "@ryu/ui/components/waitlist-username-field";
+import { passPageUrl } from "@ryu/ui/lib/pass-share";
+import { waitlistShareFacts } from "@ryu/ui/lib/waitlist-share-facts";
 import { useTheme } from "next-themes";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -17,20 +21,36 @@ import {
 	signOut,
 } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
-import { fetchWaitlistMe, type WaitlistMe } from "@/src/lib/api/waitlist.ts";
+import {
+	fetchWaitlistMe,
+	releaseWaitlistUsername,
+	type WaitlistMe,
+} from "@/src/lib/api/waitlist.ts";
 
 /** How long the "Copied" label sticks before reverting. */
 const COPIED_RESET_MS = 2000;
 
+/** The host printed under the shared card, when FRONTEND_URL can't be parsed. */
+const FALLBACK_SHARE_HOST = "ryuhq.com";
+const TRAILING_SLASH_RE = /\/$/;
+/** The web app, without a trailing slash — `${origin}/pass?…` must not double it. */
+const SHARE_ORIGIN = FRONTEND_URL.replace(TRAILING_SLASH_RE, "");
+
 // The desktop activation gate a pending account sees instead of the app.
 //
-// The screen itself is `WaitlistQueue` from the UI package — the SAME component
-// apps/web renders. This file is only the desktop half of that contract: the
-// bearer-token auth client, `openExternal` (the shell has no back button, so
-// x.com must never open in the app window), and the reload-based sign-out.
+// The screen itself is `WaitlistQueue` from the UI package and its share sheet
+// is `WaitlistShareDialog` from blocks — the SAME two components apps/web
+// renders. This file is only the desktop half of that contract: the bearer-token
+// auth client, `openExternal` (the shell has no back button, so x.com must never
+// open in the app window), the web app's origin (the shell's own is
+// `tauri.localhost`), and the reload-based sign-out.
 //
 // It used to be a second, hand-written copy of the same screen, which is exactly
-// why it sat months behind the web one.
+// why it sat months behind the web one — and after the screen was shared, the
+// CALLBACKS drifted the same way: this file fired an x.com compose window
+// straight off "Share your pass" instead of opening the dialog, with a position
+// the web page's gate was hiding. Anything derived from queue state belongs in
+// `@ryu/ui/lib/waitlist-share-facts`, not inline here.
 export default function WaitlistPage({
 	avatarSeed,
 	avatarUrl,
@@ -55,6 +75,7 @@ export default function WaitlistPage({
 	// Held locally as well as on `me` so the pass flips to the reserved handle the
 	// instant the claim succeeds, without waiting for another /me read.
 	const [reserved, setReserved] = useState<string | null>(null);
+	const [sharing, setSharing] = useState(false);
 
 	const loadMe = useCallback(async () => {
 		try {
@@ -166,16 +187,72 @@ export default function WaitlistPage({
 		}
 	};
 
-	// Open the compose window in the user's browser, never in the app window —
-	// the desktop shell has no back button to return from x.com.
+	// Give the handle back. The server does the clearing; this only resets what
+	// the screen shows, which includes the pass — it reads the handle straight
+	// off `reserved`.
+	const unreserveHandle = async () => {
+		setReserving(true);
+		setHandleError(null);
+		try {
+			await releaseWaitlistUsername();
+			setReserved(null);
+			setHandle("");
+			toast.success("Handle released");
+		} catch {
+			setHandleError("Couldn't release that handle. Try again in a moment.");
+		} finally {
+			setReserving(false);
+		}
+	};
+
+	// The facts the shareable card is drawn from, via the SAME builder the web
+	// screen uses — which is what applies the position gate. Reading `me.position`
+	// straight (what this screen used to do) posted "spot #42" off a queue the web
+	// page was still hiding.
+	const shareFacts = waitlistShareFacts(me, { reserved, userName });
+
+	// The web app's host, not the shell's: `window.location.host` inside Tauri is
+	// `tauri.localhost`, which would print a dead address under every shared card.
+	let shareHost = FALLBACK_SHARE_HOST;
+	try {
+		shareHost = new URL(SHARE_ORIGIN).host;
+	} catch {
+		// Malformed FRONTEND_URL — the fallback is still a working address.
+	}
+
+	// Share the /pass page rather than the bare referral link: it is public and
+	// carries the card as its og:image, so the post unfurls the pass instead of a
+	// login screen — and it still forwards the referral code.
+	// Everything opens in the user's browser, never in the app window: the desktop
+	// shell has no back button to return from x.com.
 	const shareOnX = () => {
 		openExternal(
 			xShareIntentUrl(
-				waitlistShareText(me?.position),
-				me?.referralUrl ?? undefined
+				waitlistShareText(shareFacts.position),
+				passPageUrl(shareFacts, SHARE_ORIGIN)
 			)
 		);
 	};
+
+	// LinkedIn takes no compose text: it builds the post from the target page's
+	// Open Graph tags, which is what /pass serves.
+	const shareOnLinkedIn = () => {
+		openExternal(linkedInShareUrl(passPageUrl(shareFacts, SHARE_ORIGIN)));
+	};
+
+	// Same three states the web screen reads, for the same reason: "apply" is the
+	// one thing a queued member can do to move up, and a member who already did
+	// should not still be told to.
+	const APPLIED_SUBTITLE =
+		"Your application is in. We're reviewing applications and sending invites. We'll email you the moment you're in.";
+	const APPLY_SUBTITLE =
+		"Applying is optional, but a complete application can move you up and get you in sooner.";
+	const UNKNOWN_SUBTITLE =
+		"You're on the list. We'll email you the moment your spot opens up.";
+	let subtitle = UNKNOWN_SUBTITLE;
+	if (me) {
+		subtitle = me.hasApplied ? APPLIED_SUBTITLE : APPLY_SUBTITLE;
+	}
 
 	return (
 		// biome-ignore lint/a11y/noAriaHiddenOnFocusable: top area used as drag region
@@ -195,7 +272,7 @@ export default function WaitlistPage({
 				// /waitlist/apply, not /waitlist: the latter is the web queue page,
 				// which mirrors this screen — opening it would land the user on a page
 				// whose primary CTA is these same words.
-				onApply={() => openExternal(`${FRONTEND_URL}/waitlist/apply`)}
+				onApply={() => openExternal(`${SHARE_ORIGIN}/waitlist/apply`)}
 				onChangeHandle={(next) => {
 					setHandle(next);
 					setHandleError(null);
@@ -203,17 +280,31 @@ export default function WaitlistPage({
 				onCopyReferral={copyReferral}
 				onRefresh={loadMe}
 				onReserve={reserveHandle}
-				onShare={shareOnX}
+				// Same as the web: "Share your pass" opens the share sheet (preview,
+				// formats, image/video export, X and LinkedIn), it does not fire an
+				// x.com compose window straight off the button.
+				onShare={() => setSharing(true)}
 				onSignOut={handleSignOut}
+				onUnreserve={unreserveHandle}
 				position={me?.position ?? null}
 				referralCount={me?.referralCount ?? 0}
 				referralUrl={me?.referralUrl}
 				reserved={reserved}
 				reserving={reserving}
 				signingOut={signingOut}
-				subtitle="We'll email you the moment your spot opens up."
+				subtitle={subtitle}
 				totalWaiting={me?.totalWaiting ?? null}
 				userName={userName}
+			/>
+			<WaitlistShareDialog
+				avatarUrl={avatarUrl}
+				facts={shareFacts}
+				host={shareHost}
+				isDark={resolvedTheme !== "light"}
+				onOpenChange={setSharing}
+				onShareOnLinkedIn={shareOnLinkedIn}
+				onShareOnX={shareOnX}
+				open={sharing}
 			/>
 		</div>
 	);

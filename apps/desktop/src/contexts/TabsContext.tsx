@@ -26,9 +26,16 @@ import {
 import { effectivePlan } from "@/src/lib/gating/planCapBridge.ts";
 import { stampRecentFromPath } from "@/src/lib/library.ts";
 import {
+	buildPresetTree,
+	PANE_CHOOSER_PATH,
+	type PresetBranch,
+	presetSlots,
+} from "@/src/lib/splitPresets.ts";
+import {
 	appendLeaves,
 	containsLeaf,
 	directionOrientation,
+	equalizeNode,
 	insertLeaf,
 	leafOrder,
 	makeBranch,
@@ -36,6 +43,7 @@ import {
 	normalizeNode,
 	pruneToMembers,
 	removeLeaf,
+	replaceLeaf,
 	type SplitBranch,
 	type SplitDirection,
 	type SplitNode,
@@ -222,6 +230,15 @@ interface TabsContextValue {
 	activateTab: (id: string) => void;
 	activeTabId: string;
 	addTabToGroup: (tabId: string, groupId: string) => void;
+	/** Tile `tabIds` into a NEW split whose tree is the preset's shape (pane
+	    order = the preset's depth-first slot order). Extra ids are ignored;
+	    fewer ids than slots is a no-op. The one primitive that can create a
+	    NESTED split — `splitTabs` only ever builds one flat run. */
+	applySplitPreset: (root: PresetBranch, tabIds: string[]) => void;
+	/** Lay the preset out over brand-new tabs: one per slot, opening the slot's
+	    remembered route or an empty pane the user then fills. Fails as a whole
+	    (never half-applied) when the tab cap can't fit every pane. */
+	applySplitPresetToNewTabs: (root: PresetBranch) => void;
 	/** Join `tabId` to an existing split as a new pane at the end of its root
 	    run (drag a tab onto a split bracket, or the "Add … to split" menu). */
 	addTabToSplit: (splitId: string, tabId: string) => void;
@@ -245,6 +262,9 @@ interface TabsContextValue {
 	closeTab: (id: string) => void;
 	// Grouping
 	createGroup: (tabId: string) => string;
+	/** Reset every branch of a split to equal fractions, at every depth. Sizes
+	    only — membership and arrangement are untouched. */
+	equalizeSplit: (splitId: string) => void;
 	/** Make `id` the focused pane without recording a navigation (used when
 	    clicking between panes of an open split). */
 	focusTab: (id: string) => void;
@@ -274,6 +294,10 @@ interface TabsContextValue {
 	removeFromSplit: (tabId: string) => void;
 	removeTabFromGroup: (tabId: string) => void;
 	renameGroup: (groupId: string, name: string) => void;
+	/** Hand a split pane over to an already-open tab: `tabId` takes the exact
+	    position (and fractions) of `paneTabId`, which is then closed. This is
+	    how an empty placeholder pane is filled from the open-tabs list. */
+	replacePaneTab: (paneTabId: string, tabId: string) => void;
 	/** Queue a one-shot scroll-to-message for a chat tab (consumed by ChatPage). */
 	requestScrollToMessage: (conversationId: string, messageId: string) => void;
 	restoreTab: () => void;
@@ -282,6 +306,15 @@ interface TabsContextValue {
 	/** Replace the size fractions of the branch at `path` (child indexes from
 	    the root; [] targets the root itself). */
 	setSplitSizes: (splitId: string, path: number[], sizes: number[]) => void;
+	/** Point an EXISTING tab at a new route in place, remounting its pane. The
+	    one sanctioned way to change what a split pane shows — `openTab`'s
+	    in-place reuse deliberately refuses to touch a split member, because that
+	    path is reached by accident (a sidebar click) rather than on purpose. */
+	setTabRoute: (
+		tabId: string,
+		path: string,
+		opts?: { conversationId?: string; icon?: GlyphValue; title?: string }
+	) => void;
 	/** Tile `sourceTabId` next to `targetTabId` on the given side, nesting the
 	    layout as needed (the drag-a-tab-onto-a-pane-edge gesture). Creates a
 	    split when the target isn't in one; moves the source pane when it is. */
@@ -376,6 +409,7 @@ export function useTabsContext(): TabsContextValue {
 const PATH_TITLES: Record<string, string> = {
 	[DASHBOARD_DEFAULT_PATH]: "Home",
 	"/chat": "New chat",
+	[PANE_CHOOSER_PATH]: "Empty pane",
 	"/agents": "Agents",
 	"/library": "Library",
 	// Library section tabs (Agents/Spaces/Workflows consolidated into the Library).
@@ -463,10 +497,12 @@ function defaultTitle(path: string): string {
 	return segment ? humanizePathSegment(segment) : "Page";
 }
 
-// /chat tabs can have multiple instances; all other paths are singletons
+// /chat tabs can have multiple instances; all other paths are singletons.
+// `/pane` joins it: a preset lays out several empty panes at once, and a
+// singleton would collapse all of them onto one tab.
 function isSingleton(path: string): boolean {
 	const base = path.split("?")[0];
-	return base !== "/chat";
+	return base !== "/chat" && base !== PANE_CHOOSER_PATH;
 }
 
 // Pick the first group color not already in use, so new groups are visually
@@ -1594,6 +1630,103 @@ export function TabsProvider({
 		[markActive, pruneSplits]
 	);
 
+	// Tile tabs into a split whose SHAPE comes from a saved preset. Deliberately
+	// a sibling of `splitTabs` rather than an option on it: `splitTabs` builds
+	// one flat equal-sized run, and nesting ("one tall pane beside two stacked")
+	// is not expressible that way. The membership choreography below is copied
+	// from `splitTabs` on purpose — the synchronous `tabsRef.current` write and
+	// the `unloaded: false` wake are both load-bearing (see the comment there).
+	const applySplitPreset = useCallback(
+		(root: PresetBranch, tabIds: string[]) => {
+			const unique = [...new Set(tabIds)].filter((id) =>
+				tabsRef.current.some((t) => t.id === id)
+			);
+			// Validate the tree BEFORE touching membership: a preset that can't be
+			// filled would leave `reconcileSplits` to rebuild it FLAT, silently
+			// discarding the nesting the user picked the preset for.
+			const tree = buildPresetTree(root, unique);
+			if (!tree || unique.length < 2) {
+				return;
+			}
+			const members = new Set(leafOrder(tree));
+			const id = makeSplitId();
+			setTabs((prev) => {
+				const next = normalize(
+					prev.map((t) =>
+						members.has(t.id)
+							? {
+									...t,
+									splitId: id,
+									pinned: false,
+									groupId: undefined,
+									unloaded: false,
+								}
+							: t
+					)
+				);
+				tabsRef.current = next;
+				return next;
+			});
+			setGroups((prev) =>
+				prev.filter((g) => tabsRef.current.some((t) => t.groupId === g.id))
+			);
+			setSplits((prev) => [...prev, { id, root: tree }]);
+			pruneSplits();
+			markActive(unique[0]);
+		},
+		[markActive, pruneSplits]
+	);
+
+	// "Apply a preset onto empty panes": open one real tab per slot — its
+	// remembered route, or the pane chooser — and tile them into the preset's
+	// shape. Placeholders are ordinary tabs, so nothing in `reconcileSplits`
+	// needs a vacancy concept.
+	const applySplitPresetToNewTabs = useCallback(
+		(root: PresetBranch) => {
+			const slots = presetSlots(root);
+			if (slots.length < 2) {
+				return;
+			}
+			// All-or-nothing against the tab cap: opening panes one at a time would
+			// stop mid-preset and leave a half-applied split.
+			if (tabsRef.current.length + slots.length > tabLimitRef.current) {
+				requestUpgradeRef.current();
+				return;
+			}
+			const id = makeSplitId();
+			// Minted here rather than through N× `openTab` on purpose: `openTab`
+			// publishes each new tab through its own `setTabs`, and only the FIRST
+			// updater in a batch is evaluated eagerly — so the second call would
+			// read a stale `tabsRef` and the split would come out short.
+			const created: Tab[] = slots.map((slot) => {
+				const base = (slot.path ?? PANE_CHOOSER_PATH).split("?")[0];
+				return {
+					id: makeTabId(),
+					path: base,
+					title: defaultTitle(base),
+					splitId: id,
+				};
+			});
+			const tree = buildPresetTree(
+				root,
+				created.map((t) => t.id)
+			);
+			if (!tree) {
+				return;
+			}
+			setTabs((prev) => {
+				const next = normalize([...prev, ...created]);
+				tabsRef.current = next;
+				return next;
+			});
+			setSplits((prev) => [...prev, { id, root: tree }]);
+			pruneSplits();
+			markActive(created[0].id);
+			pushHistory(created[0].id);
+		},
+		[markActive, pruneSplits, pushHistory]
+	);
+
 	const removeFromSplit = useCallback(
 		(tabId: string) => {
 			setTabs((prev) => {
@@ -1659,6 +1792,20 @@ export function TabsProvider({
 		},
 		[]
 	);
+
+	// Even out the panes after the gutters have been dragged around. Sizes only:
+	// membership is untouched, so no reconcile/prune is involved. Recursive by
+	// design, unlike `setSplitOrientation` above — an inner branch left skewed
+	// would make "equalize panes" look like it did nothing.
+	const equalizeSplit = useCallback((splitId: string) => {
+		setSplits((prev) =>
+			prev.map((s) =>
+				s.id === splitId
+					? { ...s, root: equalizeNode(s.root) as SplitBranch }
+					: s
+			)
+		);
+	}, []);
 
 	const setSplitSizes = useCallback(
 		(splitId: string, path: number[], sizes: number[]) => {
@@ -1792,6 +1939,143 @@ export function TabsProvider({
 			)
 		);
 	}, []);
+
+	// Point an existing tab at a different route in place. Same body as
+	// `openTab`'s "open in current tab" reuse, minus the `!tab.splitId` guard —
+	// that guard protects split panes from being replaced BY ACCIDENT (a sidebar
+	// click under the "open links in the current tab" preference), and this call
+	// is the user explicitly saying "put this in this pane". Do NOT relax the
+	// guard inside `openTab` itself.
+	const setTabRoute = useCallback(
+		(
+			tabId: string,
+			path: string,
+			opts?: { conversationId?: string; icon?: GlyphValue; title?: string }
+		) => {
+			const base = path.split("?")[0];
+			const target = tabsRef.current.find((t) => t.id === tabId);
+			if (!target) {
+				return;
+			}
+			stampRecentFromPath(base, opts?.conversationId);
+			const next: Tab = {
+				...target,
+				path: base,
+				title: opts?.title ?? defaultTitle(base),
+				conversationId: opts?.conversationId,
+				icon: opts?.icon ?? target.icon,
+				// One-shot seeds belong to the route being left behind.
+				initialPrompt: undefined,
+				initialSubmit: undefined,
+				initialImages: undefined,
+				initialGhost: undefined,
+				scrollToMessageId: undefined,
+				// Force a fresh mount so the page re-seeds from the new props
+				// (otherwise ChatPage keeps rendering the previous thread).
+				navToken: (target.navToken ?? 0) + 1,
+				unloaded: false,
+			};
+			setTabs((prev) => {
+				const mapped = normalize(prev.map((t) => (t.id === tabId ? next : t)));
+				tabsRef.current = mapped;
+				return mapped;
+			});
+		},
+		[]
+	);
+
+	// Hand a pane over to an already-open tab: the incoming tab takes the exact
+	// leaf (and therefore the exact fractions) the pane occupied, and the pane's
+	// own tab is dropped. Written as ONE primitive rather than
+	// addTabToSplit + swapSplitPanes + closeTab because those three read
+	// `tabsRef`/`splitsRef` between calls, and only the first setState updater in
+	// a batch runs eagerly — the second would see stale membership and bail.
+	const replacePaneTab = useCallback(
+		(paneTabId: string, tabId: string) => {
+			if (paneTabId === tabId) {
+				return;
+			}
+			const current = tabsRef.current;
+			const pane = current.find((t) => t.id === paneTabId);
+			const incoming = current.find((t) => t.id === tabId);
+			const splitId = pane?.splitId;
+			if (!(splitId && incoming)) {
+				return;
+			}
+			const oldSplitId = incoming.splitId;
+			// The placeholder is discarded, not closed: it never held anything the
+			// user could want back, so it stays out of the reopen-closed-tab stack.
+			// Its nav-history entries still have to go, or back/forward would land
+			// on a tab that no longer exists.
+			useNodeStore.getState().clearTabOverride(paneTabId);
+			delete lastActiveAtRef.current[paneTabId];
+			const removedBeforePointer = historyRef.current
+				.slice(0, pointerRef.current)
+				.filter((h) => h === paneTabId).length;
+			historyRef.current = historyRef.current.filter((h) => h !== paneTabId);
+			pointerRef.current = Math.max(
+				0,
+				Math.min(
+					historyRef.current.length - 1,
+					pointerRef.current - removedBeforePointer
+				)
+			);
+			syncNav();
+			setTabs((prev) => {
+				let mapped = prev
+					.filter((t) => t.id !== paneTabId)
+					.map((t) => {
+						if (t.id === tabId) {
+							return {
+								...t,
+								splitId,
+								pinned: false,
+								groupId: undefined,
+								unloaded: false,
+							};
+						}
+						return t.splitId === splitId ? { ...t, unloaded: false } : t;
+					});
+				// Pulling the incoming tab out of a different split may leave that one
+				// with a single member — dissolve it, same as every other move.
+				if (
+					oldSplitId &&
+					oldSplitId !== splitId &&
+					mapped.filter((t) => t.splitId === oldSplitId).length < 2
+				) {
+					mapped = mapped.map((t) =>
+						t.splitId === oldSplitId ? { ...t, splitId: undefined } : t
+					);
+				}
+				const next = normalize(mapped);
+				tabsRef.current = next;
+				return next;
+			});
+			setGroups((prev) =>
+				prev.filter((g) => tabsRef.current.some((t) => t.groupId === g.id))
+			);
+			setSplits((prev) =>
+				reconcileSplits(
+					prev.map((s) => {
+						if (s.id !== splitId) {
+							return s;
+						}
+						// When the incoming tab is ALREADY a pane of this split, lift its
+						// old leaf out first or `replaceLeaf` would leave it in the tree
+						// twice.
+						const base = containsLeaf(s.root, tabId)
+							? (removeLeaf(s.root, tabId) ?? s.root)
+							: s.root;
+						const swapped = replaceLeaf(base, paneTabId, tabId);
+						return swapped.type === "branch" ? { ...s, root: swapped } : s;
+					}),
+					tabsRef.current
+				)
+			);
+			markActive(tabId);
+		},
+		[markActive, syncNav]
+	);
 
 	// Join `tabId` to an existing split as a new pane at the end of its root
 	// run (equal share of space).
@@ -1948,9 +2232,14 @@ export function TabsProvider({
 				swapSplitPanes,
 				addTabToSplit,
 				removeFromSplit,
+				replacePaneTab,
 				unsplit,
 				setSplitOrientation,
 				setSplitSizes,
+				setTabRoute,
+				applySplitPreset,
+				applySplitPresetToNewTabs,
+				equalizeSplit,
 			}}
 		>
 			{children}

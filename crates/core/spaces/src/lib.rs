@@ -2179,6 +2179,64 @@ impl SpaceStore {
         Ok(id)
     }
 
+    /// Get-or-create an **ordinary** Space by name, owned by `tenancy`. Returns its id.
+    ///
+    /// The seam a headless writer needs before an app-owned document can exist at
+    /// all: [`Self::app_create_doc`] takes a `space_id`, space ids are uuids, and a
+    /// caller with no UI (a turn hook running in the plugin sandbox) has no route
+    /// parameter to learn one from. Without this, the `spaces:docs` grant is
+    /// reachable only by an app whose frame was already handed a space id.
+    ///
+    /// Deliberately NOT [`Self::ensure_system_space`]. A system Space is a node
+    /// singleton the danger-zone bulk clear must preserve and the user may not
+    /// delete; a Space a plugin keeps its ledger in is an ordinary one the user owns
+    /// — renameable, re-scopable, deletable — so it is created with `system = 0` and
+    /// a real owner, and re-creating it after a delete is the caller's next write.
+    ///
+    /// The lookup is scoped to the caller's own tenancy (`IS`, so NULL matches NULL)
+    /// rather than by name alone. On a bound node two members can each hold a Space
+    /// called "Mistakes"; a name-only match would resolve one member's writes into
+    /// the other's Space, which the by-id ACL would then refuse to show them.
+    pub async fn ensure_named_space(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        tenancy: &DocOwner,
+    ) -> Result<String> {
+        let (owner_user_id, org_id) = tenancy.parts();
+        let conn = self.conn.lock().await;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM spaces
+                 WHERE name = :name AND owner_user_id IS :owner AND org_id IS :org
+                 ORDER BY created_at ASC LIMIT 1",
+                named_params! {
+                    ":name": name,
+                    ":owner": owner_user_id,
+                    ":org": org_id,
+                },
+                |row| row.get(0),
+            )
+            .optional()
+            .context("looking up named space")?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_millis();
+        upsert_space_row(
+            &conn,
+            &id,
+            name,
+            description,
+            now,
+            RetrievalMode::Vector.as_str(),
+            0,
+            tenancy,
+        )?;
+        Ok(id)
+    }
+
     /// Create a binary **file** document in a Space. Writes `bytes` to the content-
     /// addressed blob store, inserts a `kind = 'file'` document pointing at the
     /// blob, and embeds a short text descriptor (`title` + `mime`) so the file is
@@ -5011,6 +5069,52 @@ mod tests {
                 .any(|e| e.src == alice_doc && e.dst == bob_doc),
             "unrestricted graph keeps the cross-owner edge"
         );
+    }
+
+    /// `ensure_named_space` is the get-or-create a headless writer (a turn hook) needs:
+    /// idempotent by name, scoped to the caller's tenancy, and an ORDINARY space —
+    /// never a system one, or a plugin's ledger would become undeletable and would
+    /// survive the danger-zone clear the user asked for.
+    #[tokio::test]
+    async fn ensure_named_space_is_idempotent_and_tenancy_scoped() {
+        let store = SpaceStore::open_in_memory().unwrap();
+
+        let first = store
+            .ensure_named_space("Mistakes", Some("rules"), &owned("alice"))
+            .await
+            .unwrap();
+        let again = store
+            .ensure_named_space("Mistakes", None, &owned("alice"))
+            .await
+            .unwrap();
+        assert_eq!(first, again, "the same owner resolves the same space");
+
+        // A second member's Space of the same name is a DIFFERENT space: resolving by
+        // name alone would route one member's writes into the other's Space, which the
+        // by-id ACL would then refuse to show them.
+        let bob = store
+            .ensure_named_space("Mistakes", None, &owned("bob"))
+            .await
+            .unwrap();
+        assert_ne!(first, bob);
+
+        let meta = store.space_access_meta(&first).await.unwrap().unwrap();
+        assert_eq!(meta.owner_user_id.as_deref(), Some("alice"));
+        assert!(!meta.system, "a plugin's ledger must stay deletable");
+
+        // It really is a Space: an app-owned document can be created in it and listed
+        // back, which is the whole point of resolving the id.
+        let doc = store
+            .app_create_doc("@ryu/no-more-mistakes", &first, "Never run git stash", &owned("alice"))
+            .await
+            .unwrap();
+        let docs = store
+            .app_list_docs("@ryu/no-more-mistakes", &first)
+            .await
+            .unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id, doc);
+        assert_eq!(docs[0].title, "Never run git stash");
     }
 
     /// `space_access_meta` reads back the owner the choke point stamped, and marks a

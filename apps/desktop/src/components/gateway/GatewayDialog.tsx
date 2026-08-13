@@ -111,7 +111,6 @@ import {
 } from "@/src/components/settings/shared/settings-items.tsx";
 import { UpdatesSettings } from "@/src/components/settings/UpdatesSettings.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
-import { useAdvancedSettings } from "@/src/hooks/useAdvancedSettings.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useGatewayStatus } from "@/src/hooks/useGatewayStatus.ts";
 import {
@@ -5854,13 +5853,8 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
  * what it is, the hint says what it's for, and `keywords` keeps the old
  * developer-facing names ("guardrails", "BYOK", "evals", "audit") searchable so
  * renaming costs nobody their muscle memory.
- *
- * `advanced` sections are hidden until the "Show advanced settings" switch is on.
- * They are hidden, never removed: search still surfaces them, and a deep link
- * still opens them.
  */
 const GATEWAY_SECTIONS: {
-	advanced?: boolean;
 	hint: string;
 	icon: IconSvgElement;
 	keywords?: string;
@@ -5936,7 +5930,6 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "routing",
 		label: "Model routing",
-		advanced: true,
 		hint: "Rules that send a request to a different model than the one asked for.",
 		icon: GitBranchIcon,
 		keywords:
@@ -5981,7 +5974,6 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "audit",
 		label: "Activity log",
-		advanced: true,
 		hint: "Every request this node handled, in raw form.",
 		icon: Activity01Icon,
 		keywords: "audit log trace requests history",
@@ -5989,7 +5981,6 @@ const GATEWAY_SECTIONS: {
 	{
 		value: "evals",
 		label: "Quality tests",
-		advanced: true,
 		hint: "Score models against a set of prompts and compare the results.",
 		icon: Activity01Icon,
 		keywords: "evals eval quality benchmark scoring tests",
@@ -6255,7 +6246,6 @@ export function GatewayDialog({
 	// list outgrew "just read it" — a filter is the shortest path from "I know
 	// what I want" to the pane that holds it.
 	const [search, setSearch] = useState("");
-	const [advanced, setAdvanced] = useAdvancedSettings();
 	const openSettings = useSettingsDialog((s) => s.openSettings);
 	const contentRef = useSettingReveal(section);
 
@@ -6320,8 +6310,8 @@ export function GatewayDialog({
 	);
 	const navGroups = useMemo(() => {
 		const query = search.trim();
-		// A search reveals advanced sections: hiding a section the user just typed
-		// the name of would read as "this setting doesn't exist".
+		// Every section is in the nav by default; a search narrows it to the ones
+		// whose label, hint or legacy keywords match what was typed.
 		const visible = (value: GatewaySection) => {
 			const meta = GATEWAY_SECTIONS.find((s) => s.value === value);
 			if (!meta) {
@@ -6330,10 +6320,7 @@ export function GatewayDialog({
 			if (query) {
 				return sectionMatches(meta, query);
 			}
-			// The open section always shows, even when advanced is off: a deep link
-			// (openGateway("routing"), the command palette) must not land the user on
-			// a pane with no highlighted row in the nav.
-			return advanced || !meta.advanced || value === section;
+			return true;
 		};
 		const toGroup = (group: (typeof GATEWAY_NAV_GROUPS)[number]) => ({
 			title: group.title,
@@ -6361,7 +6348,7 @@ export function GatewayDialog({
 		return [...before, ...entities, ...nodeAndAfter].filter(
 			(group) => group.items.length > 0
 		);
-	}, [advanced, entityGroups, search, section]);
+	}, [entityGroups, search]);
 
 	const node = getActiveNode();
 	const target: ApiTarget = { url: node.url, token: node.token ?? null };
@@ -6619,21 +6606,6 @@ export function GatewayDialog({
 										</SidebarMenuButton>
 									</SidebarMenuItem>
 								</SidebarMenu>
-								{/* Advanced sections are hidden, not gone: this reveals model
-								    routing, the raw activity log, and quality tests. */}
-								<div className="mt-1 flex items-center justify-between gap-2 px-2 py-1.5">
-									<Label
-										className="cursor-pointer font-normal text-muted-foreground text-xs"
-										htmlFor="gateway-advanced-toggle"
-									>
-										Advanced settings
-									</Label>
-									<Switch
-										checked={advanced}
-										id="gateway-advanced-toggle"
-										onCheckedChange={setAdvanced}
-									/>
-								</div>
 							</SidebarGroup>
 						</>
 					}

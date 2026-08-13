@@ -12,6 +12,8 @@
 // carries keep a consistent identity across renders (rules of hooks).
 
 import { createContext, type ReactNode, useContext } from "react";
+import { LikesProvider } from "./likes/likes-provider.tsx";
+import type { MarketplaceLikesService } from "./likes/likes-store.ts";
 import type {
 	MarketplaceDetailTarget,
 	MarketplaceHostError,
@@ -117,6 +119,10 @@ export interface MarketplaceReviewsService {
 
 /** The full set of services the shared store UI needs from its host surface. */
 export interface MarketplaceHost {
+	/** The heart on a store card: bulk count reads plus like/unlike, keyed by the
+	 *  listing NAMESPACE. Optional for the same reason `reviews` is — a surface
+	 *  with no control-plane binding renders no heart rather than a dead one. */
+	likes?: MarketplaceLikesService;
 	/** Open an external URL (Tauri shell on desktop, navigation on web). */
 	openExternal: (url: string) => Promise<void> | void;
 	/** Ratings + user-submitted reviews. Optional: a surface without it renders no
@@ -144,9 +150,13 @@ export function MarketplaceHostProvider({
 	host: MarketplaceHost;
 	children: ReactNode;
 }) {
+	// The likes store is mounted HERE rather than asked of each surface: a
+	// surface that already provides the money layer gets the heart with no extra
+	// wiring, and there is exactly one store per surface, which is what makes the
+	// bulk batching work at all (sixty cards, one request).
 	return (
 		<MarketplaceHostContext.Provider value={host}>
-			{children}
+			<LikesProvider service={host.likes}>{children}</LikesProvider>
 		</MarketplaceHostContext.Provider>
 	);
 }
@@ -169,4 +179,4 @@ export function useMarketplaceHostOptional(): MarketplaceHost | null {
 	return useContext(MarketplaceHostContext);
 }
 
-export type { MarketplaceDetailTarget };
+export type { MarketplaceDetailTarget, MarketplaceLikesService };

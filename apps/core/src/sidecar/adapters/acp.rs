@@ -14,7 +14,8 @@ use agent_client_protocol::schema::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, TerminalId,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModelRequest, TerminalId,
     TerminalOutputRequest, TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation,
     ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
@@ -51,6 +52,16 @@ pub enum AcpEvent {
     /// before the assistant ones. Surfaced (not dropped) so a loaded conversation
     /// can show its user turns; on a live turn it's the user's own echoed input.
     UserText(String),
+    /// The agent's own startup banner — the text it declared in `session/new`'s
+    /// `_meta.piAcp.startupInfo` and then re-emitted as an `agent_message_chunk`
+    /// once the session was live (pi-acp's `sendStartupInfoIfPending`).
+    ///
+    /// It is agent chrome (a skills/commands listing, an available-update
+    /// notice), not a reply to anything — the user has not spoken yet. Routed
+    /// here so it does NOT join the assistant reply buffer and does NOT get
+    /// persisted as an assistant message row; mod.rs surfaces it as a data part
+    /// instead. Same treatment as [`AcpEvent::UserText`], for the same reason.
+    Banner(String),
     /// A chunk of the agent's internal reasoning (extended thinking) stream.
     Thought(String),
     /// The agent's current execution plan: a full snapshot of its entries
@@ -185,6 +196,77 @@ pub enum AcpEvent {
     ConfigUpdate(std::collections::BTreeMap<String, String>),
     /// A fatal error from the session; the stream ends after this.
     Error(String),
+}
+
+/// A snapshot of ACP's `unstable_session_usage` counters.
+///
+/// Every field of the protocol's `Usage` is documented as SESSION-CUMULATIVE
+/// ("Sum of all token types across session", "Total input tokens across all
+/// turns"), but it is delivered on the per-turn `PromptResponse`. Reporting it
+/// verbatim as the turn's usage — which Core did — makes turn 5 claim turns 1-5's
+/// tokens and inflates every derived number (tok/s, cost, TPOT) with it. So the
+/// session loop keeps the previous snapshot and emits the DELTA as this turn's
+/// usage, keeping the cumulative figure under a separate `session*` key.
+///
+/// Fields are `Option` because all but the first three are optional in the
+/// schema and `unstable_session_usage` support is sparse and per-agent — an
+/// absent counter must stay absent all the way to the UI, never become a zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AcpUsageSnapshot {
+    pub cached_read_tokens: Option<u64>,
+    pub cached_write_tokens: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub thought_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+/// One counter's turn delta.
+///
+/// `None` in ⇒ `None` out: an agent that never reports a counter must not get a
+/// fabricated zero. A DECREASE means the cumulative counter was re-based under
+/// us (agent restart, context compaction, a fresh session behind the same chat),
+/// so the current value IS the new baseline and the whole of it belongs to this
+/// turn — clamping to zero would silently drop a real turn's tokens.
+pub(crate) fn acp_usage_delta(current: Option<u64>, previous: Option<u64>) -> Option<u64> {
+    let cur = current?;
+    match previous {
+        Some(prev) if cur >= prev => Some(cur - prev),
+        _ => Some(cur),
+    }
+}
+
+impl AcpUsageSnapshot {
+    /// Read a serialized ACP `Usage` (camelCase, see the schema crate).
+    pub(crate) fn from_value(v: &serde_json::Value) -> Self {
+        let get = |k: &str| v.get(k).and_then(serde_json::Value::as_u64);
+        Self {
+            cached_read_tokens: get("cachedReadTokens"),
+            cached_write_tokens: get("cachedWriteTokens"),
+            input_tokens: get("inputTokens"),
+            output_tokens: get("outputTokens"),
+            thought_tokens: get("thoughtTokens"),
+            total_tokens: get("totalTokens"),
+        }
+    }
+
+    /// This turn's usage = cumulative now − cumulative at the end of last turn.
+    pub(crate) fn delta_from(&self, previous: &Self) -> Self {
+        Self {
+            cached_read_tokens: acp_usage_delta(
+                self.cached_read_tokens,
+                previous.cached_read_tokens,
+            ),
+            cached_write_tokens: acp_usage_delta(
+                self.cached_write_tokens,
+                previous.cached_write_tokens,
+            ),
+            input_tokens: acp_usage_delta(self.input_tokens, previous.input_tokens),
+            output_tokens: acp_usage_delta(self.output_tokens, previous.output_tokens),
+            thought_tokens: acp_usage_delta(self.thought_tokens, previous.thought_tokens),
+            total_tokens: acp_usage_delta(self.total_tokens, previous.total_tokens),
+        }
+    }
 }
 
 /// Fully-resolved payload for [`AcpEvent::ToolWidget`], mapped 1:1 onto the
@@ -1061,12 +1143,44 @@ pub async fn probe_acp_config(
     spawn_cmd: String,
     cwd: PathBuf,
 ) -> anyhow::Result<serde_json::Value> {
+    probe_acp_config_with(spawn_cmd, cwd, SessionSelections::new()).await
+}
+
+/// Config-option values to apply to the probe session before reading what the
+/// agent advertises — `{ config_id → value_id }`, sorted so the same selections
+/// always produce the same cache key.
+pub type SessionSelections = std::collections::BTreeMap<String, String>;
+
+/// Probe an ACP agent with `selections` already applied to the throwaway session.
+///
+/// The advertised option SET is not always a constant of the binary: an agent may
+/// only offer an option while some OTHER option holds a particular value. ACP
+/// exposes that directly — `session/set_config_option` answers with the whole
+/// refreshed `configOptions` list rather than an ack — and this is the client
+/// half of that contract: apply what the user has picked, then report what the
+/// agent says it offers *given those picks*.
+///
+/// Verified against opencode 1.18.5, which advertises `{ id: "effort",
+/// category: "thought_level" }` only while the session's model has effort levels:
+/// `session/new` on its default model returns `[model, mode]`, and the same
+/// session answers `[model, effort, mode]` once a model with effort levels is
+/// applied. Nothing here names that agent — any agent whose options depend on
+/// another option's value gets the same treatment.
+///
+/// Cached per (`spawn_cmd`, `selections`), so switching model re-probes once and
+/// is then instant, and the two answers cannot overwrite each other.
+pub async fn probe_acp_config_with(
+    spawn_cmd: String,
+    cwd: PathBuf,
+    selections: SessionSelections,
+) -> anyhow::Result<serde_json::Value> {
+    let key = probe_cache::cache_key(&spawn_cmd, &selections);
     // Cached answer (success OR failure) — see [`probe_cache`] for why failures
     // count and why a stale entry is served rather than awaited. The only probe
     // a user can block on is the first one for an agent never opened before.
-    if let Some(hit) = probe_cache::lookup(&spawn_cmd) {
+    if let Some(hit) = probe_cache::lookup(&key) {
         if hit.stale {
-            refresh_acp_config_in_background(spawn_cmd.clone(), cwd);
+            refresh_acp_config_in_background(spawn_cmd.clone(), cwd, selections);
         }
         return hit.outcome.map_err(|e| anyhow::anyhow!(e));
     }
@@ -1075,23 +1189,23 @@ pub async fn probe_acp_config(
     // at once, and without this each one spawns its own subprocess. The waiter
     // re-reads the cache, because the holder ahead of it has just written the
     // answer it was about to spend up to 30s computing.
-    let lock = probe_cache::probe_lock(&spawn_cmd);
+    let lock = probe_cache::probe_lock(&key);
     let _guard = lock.lock().await;
-    if let Some(hit) = probe_cache::lookup(&spawn_cmd) {
+    if let Some(hit) = probe_cache::lookup(&key) {
         return hit.outcome.map_err(|e| anyhow::anyhow!(e));
     }
 
-    let result = probe_acp_config_uncached(spawn_cmd.clone(), cwd).await;
-    store_probe_result(&spawn_cmd, &result);
+    let result = probe_acp_config_uncached(spawn_cmd.clone(), cwd, selections).await;
+    store_probe_result(&key, &result);
     result
 }
 
 /// Record a probe outcome, flattening `anyhow`'s error into the message the
 /// cache stores (and the desktop eventually shows).
-fn store_probe_result(spawn_cmd: &str, result: &anyhow::Result<serde_json::Value>) {
+fn store_probe_result(key: &str, result: &anyhow::Result<serde_json::Value>) {
     match result {
-        Ok(value) => probe_cache::store(spawn_cmd, Ok(value)),
-        Err(err) => probe_cache::store(spawn_cmd, Err(&err.to_string())),
+        Ok(value) => probe_cache::store(key, Ok(value)),
+        Err(err) => probe_cache::store(key, Err(&err.to_string())),
     }
 }
 
@@ -1101,15 +1215,22 @@ fn store_probe_result(spawn_cmd: &str, result: &anyhow::Result<serde_json::Value
 /// so the read that noticed the staleness has already returned. Deduped through
 /// [`probe_cache::begin_refresh`] so a burst of stale reads (several pickers
 /// mounting at once) schedules one re-probe, not one each.
-fn refresh_acp_config_in_background(spawn_cmd: String, cwd: PathBuf) {
-    let Some(slot) = probe_cache::begin_refresh(&spawn_cmd) else {
+fn refresh_acp_config_in_background(
+    spawn_cmd: String,
+    cwd: PathBuf,
+    selections: SessionSelections,
+) {
+    // Keyed by the same (spawn command, selections) pair the entry is: refreshing
+    // one model's answer must not dedupe out the refresh of another's.
+    let key = probe_cache::cache_key(&spawn_cmd, &selections);
+    let Some(slot) = probe_cache::begin_refresh(&key) else {
         return;
     };
     tokio::spawn(async move {
-        let lock = probe_cache::probe_lock(&spawn_cmd);
+        let lock = probe_cache::probe_lock(&key);
         let _guard = lock.lock().await;
-        let result = probe_acp_config_uncached(spawn_cmd.clone(), cwd).await;
-        store_probe_result(&spawn_cmd, &result);
+        let result = probe_acp_config_uncached(spawn_cmd, cwd, selections).await;
+        store_probe_result(&key, &result);
         drop(slot);
     });
 }
@@ -1120,6 +1241,7 @@ fn refresh_acp_config_in_background(spawn_cmd: String, cwd: PathBuf) {
 async fn probe_acp_config_uncached(
     spawn_cmd: String,
     cwd: PathBuf,
+    selections: SessionSelections,
 ) -> anyhow::Result<serde_json::Value> {
     let agent =
         AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
@@ -1151,6 +1273,7 @@ async fn probe_acp_config_uncached(
             .connect_with(agent, move |cx: ConnectionTo<Agent>| {
                 let cwd = cwd.clone();
                 let plan_cmd = plan_cmd.clone();
+                let selections = selections.clone();
                 async move {
                     // Capture the agent's advertised auth methods (ACP
                     // Authentication) so the desktop can offer "Login with …" for
@@ -1167,10 +1290,34 @@ async fn probe_acp_config_uncached(
                         .send_request(NewSessionRequest::new(cwd))
                         .block_task()
                         .await?;
+                    // Apply the caller's picks and let the agent re-answer. ACP's
+                    // `session/set_config_option` returns the FULL refreshed option
+                    // list, which is the only channel by which an option that
+                    // exists only for some other option's value can ever appear —
+                    // `session/new` cannot have mentioned it. Best-effort per
+                    // option: an agent that rejects an id (or implements no config
+                    // options at all) leaves the `session/new` answer standing.
+                    let mut config_options = resp.config_options;
+                    for (config_id, value) in model_first(&selections) {
+                        let applied: Result<SetSessionConfigOptionResponse, _> = cx
+                            .send_request(SetSessionConfigOptionRequest::new(
+                                resp.session_id.clone(),
+                                config_id.clone(),
+                                value.clone(),
+                            ))
+                            .block_task()
+                            .await;
+                        match applied {
+                            Ok(refreshed) => config_options = Some(refreshed.config_options),
+                            Err(e) => tracing::debug!(
+                                "ACP probe could not apply '{config_id}'='{value}': {e}"
+                            ),
+                        }
+                    }
                     Ok(serde_json::json!({
                         "modes": resp.modes,
                         "models": resp.models,
-                        "configOptions": with_plan_mode_option(&plan_cmd, resp.config_options),
+                        "configOptions": with_plan_mode_option(&plan_cmd, config_options),
                         "authMethods": init.auth_methods,
                         "agentCapabilities": agent_caps_json(&caps),
                         "ryuToolAccess": tool_access.as_str(),
@@ -1393,10 +1540,84 @@ pub async fn close_acp_session(spawn_cmd: String, session_id: String) -> anyhow:
     Ok(())
 }
 
+/// The startup banner the agent declared in its `session/new` response `_meta`,
+/// if any.
+///
+/// pi-acp computes its prelude (a "## Skills" listing of every skill root it can
+/// see — including the hard-coded `~/.agents/skills` — and/or an available-update
+/// notice), returns it verbatim under `_meta.piAcp.startupInfo`, and then emits
+/// that *same string, whole, as a single* `agent_message_chunk` once the session
+/// is live (`sendStartupInfoIfPending`). Capturing it here is what lets
+/// [`take_startup_banner`] recognise that chunk **by identity**: the agent told
+/// us in-band exactly what it was about to say. That is deliberately not a
+/// content heuristic — matching something like `## Skills` would silently
+/// swallow a genuine model reply that happened to discuss skills.
+///
+/// Agents that declare nothing return `None` and the whole path is inert for
+/// them, so no other agent's first chunk can ever be reclassified.
+fn declared_startup_banner(
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    let text = meta?.get("piAcp")?.get("startupInfo")?.as_str()?;
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Whether `text` is this session's still-unconsumed startup banner — consuming
+/// it when so, so it can match at most once.
+///
+/// The consume is the load-bearing part. The ACP instance is **pooled per
+/// conversation** and reused for every turn of the chat, so a naive "first agent
+/// chunk of the instance" rule would swallow real assistant text on turn 2+.
+/// Matching the exact declared string, once, cannot: the banner is emitted
+/// before the user has said anything, and after it is taken the slot is empty
+/// for the rest of the session.
+fn take_startup_banner(pending: &Mutex<Option<String>>, text: &str) -> bool {
+    let Ok(mut slot) = pending.lock() else {
+        return false;
+    };
+    if slot.as_deref() != Some(text) {
+        return false;
+    }
+    *slot = None;
+    true
+}
+
 /// The conventional ACP session-config-option id for model selection. Agents
 /// that predate the (unstable) `session/set_model` capability — pi-acp among
 /// them — expose the model as a `select` config option under this id instead.
 const MODEL_CONFIG_OPTION_ID: &str = "model";
+
+/// Order config-option writes so the model is applied FIRST, keeping every other
+/// option in the order it was given.
+///
+/// Config options are not independent: an agent may validate one against the
+/// value of another, and the model is the one every other option is plausibly
+/// scoped to. opencode 1.18.5 is the proof — its `effort` values are the current
+/// model's effort levels, so writing effort BEFORE the model is rejected
+/// (`Invalid params: effort not found: high`) and the later model write resets
+/// effort to that model's default. The user's pick is silently lost.
+///
+/// This is not a nicety: the values arrive as a `HashMap` from the request body,
+/// so without an explicit order the pair that goes first is whatever Rust's
+/// randomized hashing yields *this process* — the failure is intermittent, which
+/// is strictly worse than always broken. Nothing here names an agent; it encodes
+/// "the model scopes the rest", which is true of the ACP shape in general.
+///
+/// Core-synthesized ids never reach an agent (see
+/// [`is_core_synthesized_config_id`]) and are dropped here, so both callers get
+/// the same filtering.
+fn model_first<'a, I>(pairs: I) -> Vec<(&'a String, &'a String)>
+where
+    I: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    let mut ordered: Vec<(&String, &String)> = pairs
+        .into_iter()
+        .filter(|(id, _)| !id.is_empty() && !is_core_synthesized_config_id(id))
+        .collect();
+    // Stable sort ⇒ everything that is not the model keeps its relative order.
+    ordered.sort_by_key(|(id, _)| u8::from(id.as_str() != MODEL_CONFIG_OPTION_ID));
+    ordered
+}
 
 /// Apply a turn's chosen session controls (mode / config options / model) to a
 /// live ACP session over its connection. Each is best-effort: a failure
@@ -1427,19 +1648,16 @@ async fn apply_turn_config(
             Err(e) => tracing::warn!("ACP set_mode '{mode}' failed: {e}"),
         }
     }
-    for (config_id, value) in &turn.config_options {
-        if config_id.is_empty() {
-            continue;
-        }
-        // Core-synthesized ids never go on the wire — the agent never advertised
-        // them and rejects them. `ryu.plan` is applied by prepending the sentinel
-        // to the prompt instead (`super::route_acp_stream`), which is the whole
-        // reason it exists. Skipped here rather than removed from
-        // `turn.config_options`, because the model fallback below still has to see
-        // the full list to decide whether `model` was already sent explicitly.
-        if is_core_synthesized_config_id(config_id) {
-            continue;
-        }
+    // Model first, then the rest in their given order — an option can be scoped
+    // to the model (see [`model_first`]), so the reverse order loses the pick.
+    // `model_first` also drops the Core-synthesized ids, which never go on the
+    // wire: the agent never advertised them and rejects them. `ryu.plan` is
+    // applied by prepending the sentinel to the prompt instead
+    // (`super::route_acp_stream`), which is the whole reason it exists. Filtered
+    // rather than removed from `turn.config_options`, because the model fallback
+    // below still has to see the full list to decide whether `model` was already
+    // sent explicitly.
+    for (config_id, value) in model_first(turn.config_options.iter().map(|(a, b)| (a, b))) {
         if let Err(e) = connection
             .send_request_to(
                 Agent,
@@ -1733,6 +1951,7 @@ impl AgentAdapter for AcpAdapter {
                     // non-interactively.
                     AcpEvent::Text(_)
                     | AcpEvent::UserText(_)
+                    | AcpEvent::Banner(_)
                     | AcpEvent::Thought(_)
                     | AcpEvent::Plan(_)
                     | AcpEvent::Media { .. }
@@ -2289,6 +2508,16 @@ pub async fn run_acp_instance(
                     session_builder.start_session().await?
                 };
 
+                // The banner this session announced it was about to emit (pi-acp's
+                // startup skills/commands listing and/or update notice). Held for
+                // the life of the session and taken by the FIRST agent chunk that
+                // matches it exactly, which routes that chunk to `AcpEvent::Banner`
+                // instead of the assistant reply. `None` for every agent that
+                // declares no such banner. See `declared_startup_banner`.
+                let startup_banner: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(
+                    declared_startup_banner(session.meta().as_ref()),
+                ));
+
                 // Serve every turn for this chat on the ONE session. The first turn
                 // is already in hand (peeked above); subsequent turns block on the
                 // queue until the idle TTL or the pool dropping the queue tears the
@@ -2300,6 +2529,10 @@ pub async fn run_acp_instance(
                 // raw new user message) because the live session already holds the
                 // transcript — re-sending the full prompt would DOUBLE-COUNT it.
                 let mut is_first_turn = true;
+                // Baseline for the session-cumulative → per-turn subtraction (see
+                // `AcpUsageSnapshot`). Session-scoped on purpose: `turn_usage` below
+                // is rebuilt per turn and cannot hold it.
+                let mut prev_usage = AcpUsageSnapshot::default();
                 loop {
                     let AcpTurn {
                         prompt,
@@ -2497,6 +2730,9 @@ pub async fn run_acp_instance(
                             let fs_cwd_read = terminal_cwd.clone();
                             let fs_cwd_write = terminal_cwd.clone();
                             let term_scan_agent = scan_agent.clone();
+                            // Per-message handle on the session's undelivered startup
+                            // banner (the notification closure below is `move`).
+                            let banner_slot = Arc::clone(&startup_banner);
                             MatchDispatch::new(message)
                                 .if_notification(async move |notification: SessionNotification| {
                                     match notification.update {
@@ -2507,7 +2743,22 @@ pub async fn run_acp_instance(
                                             // and embedded text resources become text.
                                             match chunk.content {
                                                 ContentBlock::Text(t) => {
-                                                    let _ = tx_chunk.send(AcpEvent::Text(t.text));
+                                                    // The agent's own startup banner
+                                                    // is chrome, not a reply — it is
+                                                    // emitted before the user has
+                                                    // said anything. Route it off the
+                                                    // assistant path so it is neither
+                                                    // buffered into `reply` nor
+                                                    // persisted as an assistant row.
+                                                    let event = if take_startup_banner(
+                                                        &banner_slot,
+                                                        &t.text,
+                                                    ) {
+                                                        AcpEvent::Banner(t.text)
+                                                    } else {
+                                                        AcpEvent::Text(t.text)
+                                                    };
+                                                    let _ = tx_chunk.send(event);
                                                 }
                                                 ContentBlock::Image(img) => {
                                                     let _ = tx_chunk.send(AcpEvent::Media {
@@ -2709,13 +2960,31 @@ pub async fn run_acp_instance(
                                             // usage): tokens-in-context / window size.
                                             // A non-final frame; mod.rs reconciles it
                                             // in place and adds wall-clock timing.
-                                            let _ = tx_chunk.send(AcpEvent::Usage(
-                                                serde_json::json!({
-                                                    "used": u.used,
-                                                    "total": u.size,
-                                                    "done": false,
-                                                }),
-                                            ));
+                                            //
+                                            // `cost` is documented as the SESSION's
+                                            // cumulative spend, so it ships under a
+                                            // `session`-prefixed key and is labelled
+                                            // as such in the UI — presenting it as
+                                            // this turn's cost would bill turn 1 five
+                                            // times over by turn 5.
+                                            let mut frame = serde_json::json!({
+                                                "used": u.used,
+                                                "total": u.size,
+                                                "done": false,
+                                            });
+                                            if let (Some(cost), Some(obj)) =
+                                                (u.cost.as_ref(), frame.as_object_mut())
+                                            {
+                                                obj.insert(
+                                                    "sessionCostAmount".to_owned(),
+                                                    serde_json::json!(cost.amount),
+                                                );
+                                                obj.insert(
+                                                    "sessionCostCurrency".to_owned(),
+                                                    serde_json::json!(cost.currency),
+                                                );
+                                            }
+                                            let _ = tx_chunk.send(AcpEvent::Usage(frame));
                                         }
                                         SessionUpdate::UserMessageChunk(chunk) => {
                                             // The agent replayed a user message chunk
@@ -2990,32 +3259,45 @@ pub async fn run_acp_instance(
 
                     // Final usage frame for the turn (`done: true`). Carries the
                     // turn's token totals when the agent reported them
-                    // (`PromptResponse.usage`, camelCase: input/output/total); the
-                    // frame is emitted even when it did not, so the desktop's
-                    // duration/speed UI (computed from mod.rs's own timer) still
-                    // works. Note: claude-code-acp does not currently emit ACP
-                    // usage, so in practice this frame carries only `done: true`
-                    // and Core-side timing.
+                    // (`PromptResponse.usage`, camelCase: input/output/total/
+                    // thought/cachedRead/cachedWrite); the frame is emitted even when
+                    // it did not, so the desktop's duration/speed UI (computed from
+                    // mod.rs's own timer) still works. Note: claude-code-acp does not
+                    // currently emit ACP usage, so in practice this frame carries only
+                    // `done: true` and Core-side timing.
+                    //
+                    // Every counter the protocol defines is SESSION-CUMULATIVE, so the
+                    // per-turn keys carry `current − previous` and the raw cumulative
+                    // figure ships separately as `sessionTotalTokens`. `used` stays
+                    // cumulative BY DESIGN: it is context-window occupancy (what the
+                    // context ring and the workspace context panel read), not this
+                    // turn's spend.
                     let mut usage_payload = serde_json::Map::new();
                     usage_payload.insert("done".to_owned(), serde_json::Value::Bool(true));
                     if let Some(u) = turn_usage.lock().ok().and_then(|g| g.clone()) {
-                        if let Some(v) = u.get("inputTokens").and_then(serde_json::Value::as_u64)
-                        {
-                            usage_payload.insert("promptTokens".to_owned(), v.into());
-                        }
-                        if let Some(v) =
-                            u.get("outputTokens").and_then(serde_json::Value::as_u64)
-                        {
-                            usage_payload.insert("completionTokens".to_owned(), v.into());
-                        }
-                        if let Some(v) = u.get("totalTokens").and_then(serde_json::Value::as_u64)
-                        {
-                            usage_payload.insert("totalTokens".to_owned(), v.into());
+                        let cumulative = AcpUsageSnapshot::from_value(&u);
+                        let turn_delta = cumulative.delta_from(&prev_usage);
+                        prev_usage = cumulative;
+                        let mut put = |key: &str, value: Option<u64>| {
+                            if let Some(v) = value {
+                                usage_payload.insert(key.to_owned(), v.into());
+                            }
+                        };
+                        put("promptTokens", turn_delta.input_tokens);
+                        put("completionTokens", turn_delta.output_tokens);
+                        put("totalTokens", turn_delta.total_tokens);
+                        put("thoughtTokens", turn_delta.thought_tokens);
+                        put("cachedReadTokens", turn_delta.cached_read_tokens);
+                        put("cachedWriteTokens", turn_delta.cached_write_tokens);
+                        put("sessionTotalTokens", cumulative.total_tokens);
+                        // Context occupancy fallback for agents that send no live
+                        // `UsageUpdate`: the cumulative total is the best proxy the
+                        // turn-end response offers.
+                        if let Some(v) = cumulative.total_tokens {
                             usage_payload.insert("used".to_owned(), v.into());
-                        } else if let (Some(p), Some(c)) = (
-                            u.get("inputTokens").and_then(serde_json::Value::as_u64),
-                            u.get("outputTokens").and_then(serde_json::Value::as_u64),
-                        ) {
+                        } else if let (Some(p), Some(c)) =
+                            (cumulative.input_tokens, cumulative.output_tokens)
+                        {
                             usage_payload.insert("used".to_owned(), (p + c).into());
                         }
                     }
@@ -4454,6 +4736,171 @@ mod tests {
         pi_acp_cmd()
     }
 
+    /// The `session/new` meta shape pi-acp actually returns, so the reader is
+    /// pinned to the real wire form and not to a shape someone imagined.
+    fn session_meta(startup_info: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "piAcp".to_owned(),
+            serde_json::json!({ "startupInfo": startup_info }),
+        );
+        m
+    }
+
+    #[test]
+    fn a_declared_startup_banner_is_read_from_the_session_meta() {
+        let banner = "pi v1.2.3\n---\n\n## Skills\n- a\n- b";
+        assert_eq!(
+            declared_startup_banner(Some(&session_meta(banner.into()))),
+            Some(banner.to_owned())
+        );
+    }
+
+    /// Every way an agent can decline to declare one. All of them must leave the
+    /// slot empty, because an empty slot is what makes this whole path inert for
+    /// agents other than pi-acp — no other agent's first chunk may ever be
+    /// reclassified as chrome.
+    #[test]
+    fn no_declared_banner_leaves_the_slot_empty() {
+        // Quiet startup with no update available: pi sends the key as null.
+        assert_eq!(
+            declared_startup_banner(Some(&session_meta(serde_json::Value::Null))),
+            None
+        );
+        // Declared but empty is not a banner either.
+        assert_eq!(
+            declared_startup_banner(Some(&session_meta("".into()))),
+            None
+        );
+        // An agent that namespaces nothing under `piAcp`.
+        assert_eq!(declared_startup_banner(Some(&serde_json::Map::new())), None);
+        // An agent that returns no `_meta` at all (claude-code-acp, codex, …).
+        assert_eq!(declared_startup_banner(None), None);
+    }
+
+    /// The banner is matched by IDENTITY against what the agent declared, and it
+    /// is consumed on the way through.
+    ///
+    /// The consume is the guard against the pooled-session trap: one ACP instance
+    /// serves every turn of a chat, so anything shaped like "the first agent
+    /// chunk is chrome" would eat a real answer on turn 2. Here the same text
+    /// arriving again is plain assistant text.
+    #[test]
+    fn the_startup_banner_is_taken_at_most_once() {
+        let banner = "## Skills\n- one";
+        let slot = Mutex::new(Some(banner.to_owned()));
+        assert!(
+            take_startup_banner(&slot, banner),
+            "first match is the banner"
+        );
+        assert!(
+            !take_startup_banner(&slot, banner),
+            "a later chunk with the same text is a real reply, not chrome"
+        );
+    }
+
+    /// A real reply must never be swallowed, however much it looks like the
+    /// banner — which is exactly why this matches the declared string instead of
+    /// sniffing for a `## Skills` heading.
+    #[test]
+    fn a_reply_that_merely_discusses_skills_is_not_the_banner() {
+        let slot = Mutex::new(Some("pi v1.2.3\n---\n\n## Skills\n- a".to_owned()));
+        for reply in [
+            "## Skills\n- a", // the banner's tail, not the banner
+            "Sure — here are your skills:\n\n## Skills\n- a",
+            "pi v1.2.3\n---\n\n## Skills\n- a\n", // one trailing newline off
+        ] {
+            assert!(
+                !take_startup_banner(&slot, reply),
+                "must stay assistant text: {reply:?}"
+            );
+        }
+        // …and the banner itself still matches afterwards: a near miss must not
+        // consume the slot and let the real banner through as a persisted reply.
+        assert!(take_startup_banner(
+            &slot,
+            "pi v1.2.3\n---\n\n## Skills\n- a"
+        ));
+    }
+
+    /// The headline bug this subtraction exists for: ACP `Usage` is
+    /// session-cumulative, so turn 3 was reporting turns 1-3's tokens as its own
+    /// (and a tok/s several times the true rate, because the denominator was one
+    /// turn's wall clock).
+    #[test]
+    fn cumulative_session_usage_becomes_a_per_turn_delta() {
+        let turn1 = AcpUsageSnapshot::from_value(&serde_json::json!({
+            "inputTokens": 1000_u64,
+            "outputTokens": 200_u64,
+            "totalTokens": 1200_u64,
+        }));
+        let delta1 = turn1.delta_from(&AcpUsageSnapshot::default());
+        assert_eq!(delta1.input_tokens, Some(1000));
+        assert_eq!(delta1.output_tokens, Some(200));
+
+        let turn2 = AcpUsageSnapshot::from_value(&serde_json::json!({
+            "inputTokens": 2500_u64,
+            "outputTokens": 350_u64,
+            "totalTokens": 2850_u64,
+        }));
+        let delta2 = turn2.delta_from(&turn1);
+        assert_eq!(delta2.input_tokens, Some(1500), "turn 2's own input only");
+        assert_eq!(delta2.output_tokens, Some(150), "turn 2's own output only");
+        assert_eq!(delta2.total_tokens, Some(1650));
+    }
+
+    /// An absent optional counter must stay absent — never become a zero the UI
+    /// would render as a real "0 tokens" reading.
+    #[test]
+    fn absent_usage_counters_stay_absent_through_the_delta() {
+        let snap = AcpUsageSnapshot::from_value(&serde_json::json!({
+            "inputTokens": 10_u64,
+            "outputTokens": 5_u64,
+            "totalTokens": 15_u64,
+        }));
+        let delta = snap.delta_from(&AcpUsageSnapshot::default());
+        assert_eq!(delta.thought_tokens, None);
+        assert_eq!(delta.cached_read_tokens, None);
+        assert_eq!(delta.cached_write_tokens, None);
+        // An agent reporting nothing at all yields nothing at all.
+        let empty = AcpUsageSnapshot::from_value(&serde_json::json!({}));
+        assert_eq!(empty.delta_from(&snap), AcpUsageSnapshot::default());
+    }
+
+    /// A cumulative counter can go DOWN (agent restart, context compaction, a new
+    /// session behind the same chat). Clamping the delta to zero would silently
+    /// drop a whole turn's tokens, so the current value re-baselines instead.
+    #[test]
+    fn a_decreasing_cumulative_counter_rebaselines_instead_of_clamping() {
+        let previous = AcpUsageSnapshot::from_value(&serde_json::json!({
+            "inputTokens": 9000_u64,
+            "outputTokens": 800_u64,
+            "totalTokens": 9800_u64,
+        }));
+        let after_compaction = AcpUsageSnapshot::from_value(&serde_json::json!({
+            "inputTokens": 400_u64,
+            "outputTokens": 60_u64,
+            "totalTokens": 460_u64,
+        }));
+        let delta = after_compaction.delta_from(&previous);
+        assert_eq!(delta.input_tokens, Some(400));
+        assert_eq!(delta.output_tokens, Some(60));
+        assert_eq!(delta.total_tokens, Some(460));
+        // And the plain helper agrees on both directions.
+        assert_eq!(acp_usage_delta(Some(7), Some(3)), Some(4));
+        assert_eq!(acp_usage_delta(Some(3), Some(7)), Some(3));
+        assert_eq!(acp_usage_delta(None, Some(7)), None);
+        assert_eq!(acp_usage_delta(Some(7), None), Some(7));
+    }
+
+    /// An agent that declared nothing can never have a chunk reclassified.
+    #[test]
+    fn an_empty_slot_never_matches() {
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        assert!(!take_startup_banner(&slot, ""));
+        assert!(!take_startup_banner(&slot, "hello"));
+    }
+
     /// A probe that FAILS must still be cached — the whole bug this path exists
     /// to fix.
     ///
@@ -4882,6 +5329,132 @@ mod tests {
         // No `content` key, and no raw output at all → none.
         assert!(pi_subagent_answer(Some(&serde_json::json!({ "details": {} }))).is_none());
         assert!(pi_subagent_answer(None).is_none());
+    }
+
+    // ── Model-first config-option ordering ───────────────────────────────────
+    //
+    // Config options are not independent: opencode 1.18.5 validates its `effort`
+    // values against the CURRENT model's effort levels. Captured from the real
+    // binary over ACP:
+    //
+    //   effort→model : set_config_option(effort,"high") ⇒
+    //                  "Invalid params: effort not found: high"; the later model
+    //                  write then reports effort back as "low" (the pick is lost)
+    //   model→effort : both succeed, effort reads back "high"
+    //
+    // The values arrive as a `HashMap` from the request body, so with no explicit
+    // order the failing one is whatever the process's randomized hashing yields.
+
+    #[test]
+    fn model_first_applies_the_model_before_every_other_option() {
+        let pairs = vec![
+            ("effort".to_owned(), "high".to_owned()),
+            ("mode".to_owned(), "plan".to_owned()),
+            (MODEL_CONFIG_OPTION_ID.to_owned(), "xai/grok-4.6".to_owned()),
+        ];
+        let ordered: Vec<&str> = model_first(pairs.iter().map(|(a, b)| (a, b)))
+            .into_iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ordered, vec![MODEL_CONFIG_OPTION_ID, "effort", "mode"]);
+    }
+
+    #[test]
+    fn model_first_is_stable_for_everything_else() {
+        // Only the model moves; the rest keep the order they were given, so an
+        // agent that cares about its own option order still sees it.
+        let pairs = vec![
+            ("b".to_owned(), "1".to_owned()),
+            ("a".to_owned(), "2".to_owned()),
+            ("c".to_owned(), "3".to_owned()),
+        ];
+        let ordered: Vec<&str> = model_first(pairs.iter().map(|(a, b)| (a, b)))
+            .into_iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn model_first_drops_core_synthesized_and_empty_ids() {
+        // `ryu.plan` is applied as a prompt sentinel, never sent to the agent —
+        // both the probe and the turn path get that filtering from one place.
+        let pairs = vec![
+            (PLAN_MODE_CONFIG_ID.to_owned(), PLAN_MODE_ON.to_owned()),
+            (String::new(), "ignored".to_owned()),
+            ("effort".to_owned(), "high".to_owned()),
+        ];
+        let ordered: Vec<&str> = model_first(pairs.iter().map(|(a, b)| (a, b)))
+            .into_iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["effort"]);
+    }
+
+    /// End-to-end against a REAL agent, through Core's own probe path.
+    ///
+    /// Opt-in (`--ignored`) and env-gated because it spawns a third-party binary
+    /// and reads that installation's authenticated model list — neither belongs
+    /// in the default suite. Run it as:
+    ///
+    /// ```text
+    /// RYU_TEST_ACP_CMD="$HOME/.opencode/bin/opencode acp" \
+    /// RYU_TEST_ACP_REASONING_MODEL="xai/grok-4.6" \
+    ///   cargo test -p ryu-core --bin ryu-core probe_with_a_model_selection -- --ignored --nocapture
+    /// ```
+    ///
+    /// What it pins is the entire point of `probe_acp_config_with`: the plain
+    /// probe reports the agent's default option set, and the SAME binary reports
+    /// a reasoning option once the model that has one is applied first.
+    #[tokio::test]
+    #[ignore = "spawns a real third-party agent binary; set RYU_TEST_ACP_CMD to run"]
+    async fn probe_with_a_model_selection_reveals_that_models_options() {
+        let Ok(spawn_cmd) = std::env::var("RYU_TEST_ACP_CMD") else {
+            eprintln!("RYU_TEST_ACP_CMD unset — nothing to probe");
+            return;
+        };
+        let model = std::env::var("RYU_TEST_ACP_REASONING_MODEL")
+            .expect("RYU_TEST_ACP_REASONING_MODEL must name a model with reasoning levels");
+        let cwd = std::env::current_dir().expect("cwd");
+
+        let reasoning_ids = |v: &serde_json::Value| -> Vec<String> {
+            v.get("configOptions")
+                .and_then(|o| o.as_array())
+                .map(|opts| {
+                    opts.iter()
+                        .filter(|o| {
+                            let hay = ["category", "id", "name"]
+                                .iter()
+                                .filter_map(|k| o.get(*k).and_then(|v| v.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .to_lowercase();
+                            ["thought", "reason", "think", "effort"]
+                                .iter()
+                                .any(|m| hay.contains(m))
+                        })
+                        .filter_map(|o| o.get("id").and_then(|v| v.as_str()))
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let plain = probe_acp_config_with(spawn_cmd.clone(), cwd.clone(), SessionSelections::new())
+            .await
+            .expect("plain probe");
+        let mut selections = SessionSelections::new();
+        selections.insert(MODEL_CONFIG_OPTION_ID.to_owned(), model.clone());
+        let selected = probe_acp_config_with(spawn_cmd, cwd, selections)
+            .await
+            .expect("probe with a model selection");
+
+        eprintln!("plain reasoning options:    {:?}", reasoning_ids(&plain));
+        eprintln!("selected reasoning options: {:?}", reasoning_ids(&selected));
+        assert!(
+            !reasoning_ids(&selected).is_empty(),
+            "applying '{model}' must reveal the reasoning option the composer renders"
+        );
     }
 
     // ── Core-synthesized plan-mode config option (Unit 7) ────────────────────

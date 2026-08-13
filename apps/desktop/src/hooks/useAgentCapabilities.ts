@@ -29,22 +29,54 @@ export interface UseAgentCapabilitiesResult {
 
 export function useAgentCapabilities(
 	agentId: string | null | undefined,
-	modelId?: string | null
+	modelId?: string | null,
+	/**
+	 * The agent's current ACP config-option picks. Must be the SAME set passed to
+	 * `useAcpConfig`: `reasoning` is derived from the same probe, so probing them
+	 * apart lets this hook report "no reasoning" for a model whose reasoning
+	 * option the composer is simultaneously being told about — and the composer
+	 * resolves that contradiction by hiding the option.
+	 */
+	acpSelections?: Record<string, string> | null
 ): UseAgentCapabilitiesResult {
 	const node = useActiveNode();
 	const target = useMemo(() => toTarget(node), [node]);
 	const queryClient = useQueryClient();
+	// By value, not by object identity — see `useAcpConfig`.
+	const selectionKey = useMemo(
+		() =>
+			JSON.stringify(
+				Object.entries(acpSelections ?? {}).sort(([a], [b]) =>
+					a.localeCompare(b)
+				)
+			),
+		[acpSelections]
+	);
 	const queryKey = useMemo(
-		() => ["agent-capabilities", node.url, agentId, modelId ?? null],
-		[node.url, agentId, modelId]
+		() => [
+			"agent-capabilities",
+			node.url,
+			agentId,
+			modelId ?? null,
+			selectionKey,
+		],
+		[node.url, agentId, modelId, selectionKey]
 	);
 
 	const enabled = Boolean(agentId);
 	const query = useQuery({
 		queryKey,
 		queryFn: () =>
-			fetchAgentCapabilities(target, agentId as string, modelId ?? undefined),
+			fetchAgentCapabilities(
+				target,
+				agentId as string,
+				modelId ?? undefined,
+				acpSelections
+			),
 		enabled,
+		// Keep the last answer visible while a new selection is probed, so the
+		// composer does not briefly treat "unknown" as "no reasoning".
+		placeholderData: (previous) => previous,
 		// Detection is static per agent binary / model file; cache aggressively
 		// (an ACP probe spawns the agent subprocess) and never refetch on focus.
 		staleTime: 5 * 60 * 1000,

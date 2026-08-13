@@ -41,6 +41,11 @@ const GRANT_PREFERENCES_READ: &str = "preferences:read";
 const GRANT_LEARNING_FEEDBACK: &str = "learning:crud";
 /// Grant required to call `host.synthesizeSkill` (the Learning context-menu seam).
 const GRANT_LEARNING_SYNTHESIZE: &str = "learning:crud";
+/// Grant required to call `host.runHook` — run one of the CALLING plugin's own
+/// declared turn hooks on demand. Its own grant, not a reuse of `hook:side-model`
+/// or similar: this is the one capability whose effect is "everything that hook is
+/// allowed to do", so it has to be approved as its own line in the install dialog.
+const GRANT_RUN_SELF_HOOK: &str = "hook:run-self";
 
 /// Map a kernel-contracts host-API method name (dotted, e.g. `"model.complete"`,
 /// `"storage.get"`, `"spaces.createDoc"`) to the closed `host.<...>` path
@@ -64,6 +69,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "crypto.seal" => "host.crypto_seal",
         "crypto.open" => "host.crypto_open",
         "crypto.status" => "host.crypto_status",
+        "spaces.ensureSpace" => "host.spaces_ensure_space",
         "spaces.createDoc" => "host.spaces_create_doc",
         "spaces.getDoc" => "host.spaces_get_doc",
         "spaces.updateDoc" => "host.spaces_update_doc",
@@ -80,8 +86,37 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "preferences.get" => "host.getPreference",
         "learning.recordFeedback" => "host.recordFeedback",
         "learning.synthesizeSkill" => "host.synthesizeSkill",
+        "hooks.run" => "host.runHook",
         _ => return None,
     })
+}
+
+/// Hooks currently running through `host.runHook`, keyed `"<plugin>:<hook>"`.
+///
+/// The re-entrancy guard for [`PluginHookBridge::run_own_hook`]: a hook body that
+/// calls `host.runHook` on itself would otherwise spawn sandboxes until the
+/// machine gave out, and nothing else in the chain bounds that (the turn loop's
+/// own bound is that it fires each hook once per turn).
+fn manual_hook_runs() -> &'static std::sync::Mutex<HashSet<String>> {
+    static RUNS: std::sync::OnceLock<std::sync::Mutex<HashSet<String>>> =
+        std::sync::OnceLock::new();
+    RUNS.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
+/// Claim a manual run slot. `false` when one is already in flight for this key.
+/// A poisoned lock resolves to "refuse": failing closed here costs one menu click,
+/// while failing open costs the recursion bound this exists to hold.
+fn manual_run_begin(key: &str) -> bool {
+    manual_hook_runs()
+        .lock()
+        .map(|mut set| set.insert(key.to_string()))
+        .unwrap_or(false)
+}
+
+fn manual_run_end(key: &str) {
+    if let Ok(mut set) = manual_hook_runs().lock() {
+        set.remove(key);
+    }
 }
 
 /// Bridges sandbox `host.*` calls for one plugin hook run.
@@ -110,8 +145,10 @@ impl PluginHookBridge {
                 self.storage(method, args).await
             }
             "crypto_seal" | "crypto_open" | "crypto_status" => self.crypto(method, args).await,
-            "spaces_create_doc" | "spaces_get_doc" | "spaces_update_doc" | "spaces_list_docs"
-            | "spaces_delete_doc" => self.spaces(method, args).await,
+            "spaces_ensure_space" | "spaces_create_doc" | "spaces_get_doc"
+            | "spaces_update_doc" | "spaces_list_docs" | "spaces_delete_doc" => {
+                self.spaces(method, args).await
+            }
             "finetune_capability"
             | "finetune_start"
             | "finetune_list"
@@ -123,6 +160,7 @@ impl PluginHookBridge {
             "getPreference" => self.get_preference(args).await,
             "recordFeedback" => self.record_feedback(args).await,
             "synthesizeSkill" => self.synthesize_skill(args).await,
+            "runHook" => self.run_own_hook(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
         }
@@ -267,6 +305,132 @@ impl PluginHookBridge {
         match ryu_learning::synthesize_skill(&crate::learning::learning_ctx(&self.state), cid, force, None).await {
             Ok(outcome) => ok(json!(outcome)),
             Err(e) => err(e.to_string()),
+        }
+    }
+
+    /// `host.runHook({ hook_id, conversation_id, event? })` — run ONE of the
+    /// calling plugin's own declared turn hooks, now, outside the turn loop.
+    ///
+    /// This is what lets an app whose entire behaviour is a hook be triggered by
+    /// the user. A contributed context-menu row can only dispatch a HOST
+    /// capability, so before this a plugin like `@ryu/chat-title` — which renames
+    /// chats from a `post_assistant_turn` hook — had no way to offer "rename this
+    /// one now": the shell would have had to hardcode the feature, which is the
+    /// arrangement the contribution system exists to remove.
+    ///
+    /// Three properties make it safe to expose:
+    ///
+    /// * **Own hooks only.** `self.plugin_id` comes from the bridge (the HTTP relay
+    ///   takes it from the PATH, never the body), and the lookup filters on it, so
+    ///   a plugin cannot run another plugin's hook or borrow its grants.
+    /// * **No privilege gain.** The hook runs with the grants it already has —
+    ///   `run_hook` builds its bridge from `hook.grants`. The capability adds a
+    ///   TRIGGER, not an authority.
+    /// * **No recursion.** A hook that calls `host.runHook` on itself would spawn
+    ///   sandboxes without bound, so a re-entrancy set refuses a manual run of a
+    ///   hook already running manually.
+    ///
+    /// `event` is merged into `ctx.event` as `{ source: "manual", ... }`, which is
+    /// how a hook tells a user-forced run from its scheduled one (e.g. skipping its
+    /// own "only every N turns" gate).
+    async fn run_own_hook(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_RUN_SELF_HOOK) {
+            return err(format!(
+                "capability '{GRANT_RUN_SELF_HOOK}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let hook_id = args
+            .get("hook_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if hook_id.is_empty() {
+            return err("host.runHook requires a non-empty 'hook_id'".to_string());
+        }
+        let conversation_id = args
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if conversation_id.is_empty() {
+            return err("host.runHook requires a non-empty 'conversation_id'".to_string());
+        }
+
+        let hooks = crate::plugin_host::collect_enabled_hooks(&self.state).await;
+        let Some(hook) = hooks
+            .into_iter()
+            .find(|h| h.plugin_id == self.plugin_id && h.hook_id == hook_id)
+        else {
+            // Also the disabled case: `collect_enabled_hooks` only returns hooks of
+            // enabled plugins, so "not found" and "not enabled" are one message.
+            return err(format!(
+                "plugin '{}' declares no enabled hook '{hook_id}'",
+                self.plugin_id
+            ));
+        };
+
+        let key = format!("{}:{hook_id}", self.plugin_id);
+        if !manual_run_begin(&key) {
+            return err(format!("hook '{hook_id}' is already running"));
+        }
+
+        // Build the same shape the turn loop passes, from the persisted transcript.
+        const MAX_TRANSCRIPT: usize = 20;
+        let transcript = match self
+            .state
+            .conversations
+            .get_active_messages(&conversation_id)
+            .await
+        {
+            Ok(msgs) => {
+                let skip = msgs.len().saturating_sub(MAX_TRANSCRIPT);
+                msgs.into_iter()
+                    .skip(skip)
+                    .map(|m| crate::plugin_host::HookMessage {
+                        role: m.role,
+                        content: m.content,
+                    })
+                    .collect()
+            }
+            Err(e) => {
+                manual_run_end(&key);
+                return err(format!("host.runHook could not load the transcript: {e}"));
+            }
+        };
+        let mut event = match args.get("event") {
+            Some(Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        event.insert("source".to_string(), json!("manual"));
+        let ctx = crate::plugin_host::HookContext {
+            conversation_id: Some(conversation_id),
+            transcript,
+            event: Some(Value::Object(event)),
+            ..Default::default()
+        };
+        let directive = crate::plugin_host::run_hook(&self.state, &hook, &ctx).await;
+        manual_run_end(&key);
+        // A hook that returns `None` decided to do nothing — its gate did not
+        // match, its model returned nothing, its write failed. Reporting that as
+        // success is how a menu row ends up toasting "Renamed" over a chat whose
+        // title never changed, so the no-op is an error here and the caller's
+        // `error` copy is what the user sees. A hook that wants to report success
+        // returns a `Note`, whose text becomes the result.
+        match directive {
+            crate::plugin_host::HookDirective::None => err(format!(
+                "hook '{hook_id}' made no change (it declined to act, or its work failed)"
+            )),
+            other => ok(json!({
+                "ran": true,
+                "message": match &other {
+                    crate::plugin_host::HookDirective::Note { text }
+                    | crate::plugin_host::HookDirective::Continue { text } => text.clone(),
+                    _ => String::new(),
+                },
+            })),
         }
     }
 
@@ -563,6 +727,40 @@ impl PluginHookBridge {
             .trim();
 
         match method {
+            // `host.spaces.ensureSpace({ name, description? })` — resolve a Space by
+            // NAME, creating it if absent, and return its id.
+            //
+            // Without this the rest of this facade is unreachable from a turn hook:
+            // every other method needs a `space_id`, ids are uuids, and a sandboxed
+            // hook has no route parameter to read one from. The name is the caller's
+            // argument (never a constant in Core) so this stays a generic seam rather
+            // than one plugin's Space wired into the kernel.
+            "spaces_ensure_space" => {
+                let name = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim();
+                if name.is_empty() {
+                    return err("host.spaces.ensureSpace requires a non-empty 'name'".to_string());
+                }
+                let description = args
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                match store
+                    .ensure_named_space(
+                        name,
+                        description,
+                        &crate::server::spaces::background_owner(),
+                    )
+                    .await
+                {
+                    Ok(id) => ok(json!(id)),
+                    Err(e) => err(e.to_string()),
+                }
+            }
             "spaces_create_doc" => {
                 if space_id.is_empty() {
                     return err("host.spaces.createDoc requires a non-empty 'space_id'".to_string());
@@ -902,6 +1100,7 @@ mod tests {
                 | "crypto_seal"
                 | "crypto_open"
                 | "crypto_status"
+                | "spaces_ensure_space"
                 | "spaces_create_doc"
                 | "spaces_get_doc"
                 | "spaces_update_doc"
@@ -918,6 +1117,7 @@ mod tests {
                 | "getPreference"
                 | "recordFeedback"
                 | "synthesizeSkill"
+                | "runHook"
                 | "navigate"
         )
     }

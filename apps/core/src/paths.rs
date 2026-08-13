@@ -42,7 +42,12 @@ pub fn default_ryu_dir() -> PathBuf {
 /// Directory holding the bootstrap pointer file. Lives in the OS *config* dir
 /// (`%APPDATA%\ryu` on Windows, `~/.config/ryu` on Linux, `~/Library/Application
 /// Support/ryu` on macOS), NOT inside the data dir.
-fn config_dir() -> PathBuf {
+///
+/// Public because it is the only place a piece of state can live that must
+/// SURVIVE a wipe of the data dir. `preferences.db` is inside the data dir, so it
+/// cannot hold "did the user turn the wipe off" or "when did it last run" — the
+/// first wipe erases both.
+pub fn config_dir() -> PathBuf {
     // Profile-suffixed (`ryu` ⇒ `ryu-dev`) so the bootstrap pointer file is
     // isolated per profile too — a release relocation must not silently move a
     // dev stack's data dir (and vice-versa).

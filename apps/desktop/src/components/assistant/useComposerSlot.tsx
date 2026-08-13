@@ -136,7 +136,7 @@ export interface ComposerSlotOptions {
 	 */
 	ghost?: GhostControls;
 	/**
-	 * Offer "New agent…" in the agent picker. The surface routes it (a tab, a
+	 * Offer "Create new agent" in the agent picker. The surface routes it (a tab, a
 	 * dialog), so it's a callback rather than a slot-owned navigation.
 	 */
 	onCreateAgent?: () => void;

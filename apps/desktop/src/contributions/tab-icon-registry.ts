@@ -189,7 +189,14 @@ export function ruleFromItemTarget(
 	};
 }
 
-/** Built-in Core surface defaults — registered once at module load. */
+/** Built-in Core surface defaults — registered once at module load.
+ *
+ *  Core surfaces ONLY. `/meetings` used to be seeded here too; it belongs to the
+ *  `@ryu/meetings` apps-store app, which contributes its own `sidebar_sections` /
+ *  `sidebar_buttons` icon that `usePluginContributionTabIcons` seeds into this same
+ *  registry — so the built-in row was a second, dumber copy that painted a glyph for
+ *  an app the user may never have enabled. Spaces (and its `/doc/` + `/db/`
+ *  variants) stay: those are Core's. */
 registerTabIcons([
 	{
 		id: "builtin:spaces",
@@ -210,11 +217,5 @@ registerTabIcons([
 		pathIncludes: "/db/",
 		icon: "database",
 		priority: 10,
-	},
-	{
-		id: "builtin:meetings",
-		pathPrefix: "/meetings",
-		icon: "mic-01",
-		priority: 0,
 	},
 ]);

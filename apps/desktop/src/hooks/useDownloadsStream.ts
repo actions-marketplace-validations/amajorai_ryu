@@ -9,6 +9,7 @@
 import { useEffect } from "react";
 import { streamDownloads } from "@/src/lib/api/downloads.ts";
 import { useDownloadsStore } from "@/src/store/useDownloadsStore.ts";
+import { useInstallStore } from "@/src/store/useInstallStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 const RECONNECT_DELAY_MS = 2000;
@@ -32,6 +33,10 @@ export function useDownloadsStream(): void {
 
 		// Drop the mirror from any previous node; the snapshot event refills it.
 		reset();
+		// The in-flight install flags are node-scoped too — an add running on the
+		// node we just left has no way to report back here, so its id would spin
+		// forever on a node where nothing is happening.
+		useInstallStore.getState().reset();
 
 		const run = async () => {
 			while (!cancelled) {

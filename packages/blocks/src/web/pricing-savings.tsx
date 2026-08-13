@@ -184,7 +184,7 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 		monthlyUsd: 25,
 		perSeat: false,
 		defaultOn: false,
-		replacedBy: "A managed node, included with Max",
+		replacedBy: "A managed node, included with your plan",
 	},
 ];
 

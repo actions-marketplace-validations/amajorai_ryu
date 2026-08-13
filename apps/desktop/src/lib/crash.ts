@@ -33,6 +33,7 @@
 
 import {
 	captureException,
+	captureMessage,
 	type ErrorEvent as SentryErrorEvent,
 	init as sentryInit,
 } from "@sentry/react";
@@ -181,15 +182,60 @@ export function setCrashReportingEnabled(next: boolean): void {
 }
 
 /**
+ * Structured, non-content context attached to a crash report.
+ *
+ * Tags are indexed by Sentry (searchable/aggregatable), so they carry the small
+ * enumerable facts — which retry attempt this was, how the episode ended. `extra`
+ * carries the counts. NOTHING here may be user content: callers pass attempt
+ * numbers and outcomes, never a route title, prompt, or conversation id. The
+ * beforeSend scrub in scrubEvent() does not reach these fields, so the discipline
+ * has to live at the call site.
+ */
+export interface CrashContext {
+	extra?: Record<string, number | string | boolean>;
+	tags?: Record<string, string>;
+}
+
+/**
  * Manually report a caught error (e.g. from an error boundary). A no-op unless a
  * DSN is configured AND the gate is on.
  */
-export function reportError(error: unknown): void {
+export function reportError(error: unknown, context?: CrashContext): void {
 	if (!(enabled && SENTRY_DSN)) {
 		return;
 	}
 	try {
-		captureException(error);
+		captureException(error, {
+			extra: context?.extra,
+			tags: context?.tags,
+		});
+	} catch {
+		// Never let a crash-report failure surface to the user.
+	}
+}
+
+/**
+ * Report a crash-lifecycle event that is NOT itself an exception — specifically
+ * "the boundary auto-recovered". This exists so silent self-healing stays visible:
+ * a render crash that a remount papered over is still a real bug, and without this
+ * message the only trace in Sentry would be the original exception with no signal
+ * that the user was (or wasn't) rescued.
+ *
+ * Sent at `info` level so it never pages, but is still searchable by tag.
+ */
+export function reportCrashEvent(
+	message: string,
+	context?: CrashContext
+): void {
+	if (!(enabled && SENTRY_DSN)) {
+		return;
+	}
+	try {
+		captureMessage(message, {
+			extra: context?.extra,
+			level: "info",
+			tags: context?.tags,
+		});
 	} catch {
 		// Never let a crash-report failure surface to the user.
 	}

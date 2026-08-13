@@ -4,11 +4,17 @@
 // affordance is identical across Apps, Plugins, Models, Skills, MCP, and Agents.
 // It is the generalization of the models page's morph button:
 //
-//   • not installed          → an Install button (with live download %), wrapped
+//   • not installed          → an "Add" button (with live download %), wrapped
 //                              in a right-click ContextMenu.
-//   • installed, no enable    → 3-dot menu with Uninstall (+ Report).
-//   • installed + enabled     → 3-dot menu with Disable, Report, Uninstall.
-//   • installed + disabled    → 3-dot menu with Enable, Report, Uninstall.
+//   • installed, no enable    → 3-dot menu with Remove (+ Report).
+//   • installed + enabled     → 3-dot menu with Disable, Report, Remove.
+//   • installed + disabled    → 3-dot menu with Enable, Report, Remove.
+//
+// The user-facing verb is Add / Adding… / Added / Remove. The PROPS keep the
+// install vocabulary (`installed`, `onInstall`, `onUninstall`) deliberately:
+// that is what the lifecycle is called everywhere from Core outwards, and
+// renaming the wire to match the copy would make the two halves harder to trace,
+// not easier.
 //
 // Sections without an enable/disable concept (Models per-file, Agents, MCP) pass
 // `enabled={undefined}`; sections that have one (Apps, Skills) pass a boolean.
@@ -150,13 +156,13 @@ export default function StoreItemAction({
 						onClick={onInstall}
 						percent={percent}
 					>
-						Install
+						Add
 					</InstallProgressButton>
 				</ContextMenuTrigger>
 				<ContextMenuContent align="end">
 					<ContextMenuItem onClick={onInstall}>
 						<HugeiconsIcon className="size-4" icon={Download04Icon} />
-						Install
+						Add
 					</ContextMenuItem>
 					{canReport ? (
 						<>
@@ -260,7 +266,7 @@ export default function StoreItemAction({
 /**
  * Shared menu items used by both the installed DropdownMenu and the
  * not-installed ContextMenu. Renders Settings, the Enable/Disable toggle,
- * Report, and Uninstall — each conditionally.
+ * Report, and Remove — each conditionally.
  */
 function StoreItemMenuItems({
 	hasEnableConcept,
@@ -327,7 +333,7 @@ function StoreItemMenuItems({
 					{hasToggleItem || canReport ? <DropdownMenuSeparator /> : null}
 					<DropdownMenuItem onClick={onUninstall} variant="destructive">
 						<HugeiconsIcon className="size-4" icon={Delete01Icon} />
-						Uninstall
+						Remove
 					</DropdownMenuItem>
 				</>
 			) : null}
@@ -338,7 +344,7 @@ function StoreItemMenuItems({
 /**
  * Reusable context menu content for not-installed store items.
  * Catalog sections use this as the `contextMenu` prop on StoreCatalogCard
- * so right-clicking the card shows Install + Report (when available).
+ * so right-clicking the card shows Add + Report (when available).
  */
 export function StoreItemContextMenuContent({
 	onInstall,
@@ -354,7 +360,7 @@ export function StoreItemContextMenuContent({
 			{onInstall ? (
 				<ContextMenuItem onClick={onInstall}>
 					<HugeiconsIcon className="size-4" icon={Download04Icon} />
-					Install
+					Add
 				</ContextMenuItem>
 			) : null}
 			{canReport ? (

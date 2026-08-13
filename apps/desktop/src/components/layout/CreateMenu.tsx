@@ -115,11 +115,13 @@ export function CreateMenu() {
 			label: "New team",
 			onSelect: () => setTeamOpen(true),
 		},
-		{
-			id: "workflow",
-			label: "New workflow",
-			onSelect: () => openTab("/workflows/new", { title: "New workflow" }),
-		},
+		// No "New workflow" / "Build with AI" here any more. Both were hardcoded
+		// rows for ONE app: they showed even with Workflows uninstalled, and led
+		// straight to an error page. "New workflow" is now the Workflows app's own
+		// `contributes.create_actions` row, so it comes and goes with the app;
+		// "Build with AI" is deleted outright — a create menu is a list of things to
+		// make, and "describe it and I'll build it" is the app's own surface, not a
+		// seventh kind of thing.
 		{
 			id: "space",
 			label: "New space",
@@ -132,25 +134,7 @@ export function CreateMenu() {
 		},
 	];
 
-	/**
-	 * "Build with AI" is pinned to the bottom of the menu, below every app's rows.
-	 *
-	 * It reads as the menu's escape hatch — "none of the above, describe it
-	 * instead" — and an escape hatch in the middle of a list is just another item.
-	 * It sat above "New space" for exactly that reason, so this is a RULE rather
-	 * than a reordered array: an app enabled tomorrow lands above it too, without
-	 * anyone remembering to move it again.
-	 */
-	const pinnedLast: CreateMenuAction[] = [
-		{
-			id: "workflow-build",
-			label: "Build with AI",
-			onSelect: () =>
-				openTab("/workflows/build", { title: "Build a workflow" }),
-		},
-	];
-
-	const items = [...builtIns, ...contributed, ...pinnedLast];
+	const items = [...builtIns, ...contributed];
 	const morphVars = {
 		"--morph-open-w": `${MORPH_OPEN_W}px`,
 		"--morph-open-h": `${items.length * ROW_H + PANEL_PAD * 2}px`,

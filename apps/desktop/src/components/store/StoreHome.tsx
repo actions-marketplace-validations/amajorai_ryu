@@ -3,28 +3,40 @@
 // The Store's "Home" section — an app-store landing feed centered in the same
 // max-width column as every other catalog tab, so its header lines up with them.
 // A giant dithered featured carousel sits up top; below it, one 2-column grid per
-// realm using the SAME card the catalog tabs render (StoreCatalogCard). It is a
-// ROUTER, not an installer: every card hands a click back to the shell to open
-// that realm's own section, where the real detail + install flow lives.
+// realm using the SAME card the catalog tabs render (StoreCatalogCard).
+//
+// It routes AND it adds. Clicking a card still opens that realm's own section —
+// with the clicked item pre-selected, which is the whole point of landing there —
+// and the card's action adds it in place, through the realm's one-call add
+// (`HomeRow.add`). Home used to be router-ONLY, which read as a landing page you
+// could not do anything from: six shelves of things to add, no way to add any.
+//
+// Anything needing a decision (grants, quant choice, enable) still routes: this
+// button does the one unambiguous thing, and the realm tab owns the rest.
 
-import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
+import {
+	ArrowRight01Icon,
+	CheckmarkCircle02Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Carousel,
 	type CarouselApi,
 	CarouselContent,
 	CarouselItem,
-} from "@ryu/ui/components/carousel";
+} from "@ryu/ui/components/carousel.tsx";
 import {
 	DitherGradient,
 	type GradientDirection,
-} from "@ryu/ui/components/dither-kit/gradient";
-import type { DitherColor } from "@ryu/ui/components/dither-kit/palette";
-import { Spinner } from "@ryu/ui/components/spinner";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/dither-kit/gradient.tsx";
+import type { DitherColor } from "@ryu/ui/components/dither-kit/palette.ts";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useEffect, useState } from "react";
 import {
 	type HomeCard,
@@ -33,6 +45,7 @@ import {
 	useStoreHome,
 } from "@/src/hooks/useStoreHome.ts";
 import type { StoreSearchRealm } from "@/src/hooks/useStoreSearch.ts";
+import { useInstallingLookup } from "@/src/store/useInstallStore.ts";
 
 /** The six vivid dither hues (grey is the no-data fill, skipped here). A featured
  *  slide picks one deterministically from its id, so the carousel is colourful but
@@ -96,7 +109,8 @@ export default function StoreHome({
 					rows.map((row) => (
 						<HomeSection
 							key={row.realm}
-							onOpen={() => onOpenRealm(row.realm, "")}
+							onOpenItem={(name) => onOpenRealm(row.realm, name)}
+							onOpenRow={() => onOpenRealm(row.realm, "")}
 							row={row}
 						/>
 					))
@@ -298,7 +312,21 @@ function FeaturedLogo({
 	);
 }
 
-function HomeSection({ row, onOpen }: { row: HomeRow; onOpen: () => void }) {
+function HomeSection({
+	row,
+	onOpenRow,
+	onOpenItem,
+}: {
+	row: HomeRow;
+	/** "See all" — open the realm with no query. */
+	onOpenRow: () => void;
+	/** Open the realm pre-filtered to one item's name. */
+	onOpenItem: (name: string) => void;
+}) {
+	// One subscription for the whole shelf, shared with every other store surface:
+	// an add started here and the same item's card in its realm tab read the same
+	// flag, so Home is not a sixth private owner of "installing".
+	const isInstalling = useInstallingLookup();
 	return (
 		<section>
 			<StoreShelfHeading
@@ -309,13 +337,25 @@ function HomeSection({ row, onOpen }: { row: HomeRow; onOpen: () => void }) {
 					</span>
 				}
 				className="px-0"
-				onOpen={onOpen}
+				onOpen={onOpenRow}
 			>
 				{row.label}
 			</StoreShelfHeading>
 			<StoreCardGrid>
 				{row.items.slice(0, 6).map((item: HomeCard) => (
 					<StoreCatalogCard
+						action={
+							<HomeCardAction
+								busy={isInstalling(item.id)}
+								installed={item.installed}
+								onAdd={() => {
+									row.add(item).catch(() => {
+										// The realm tab owns error presentation; a failed add here
+										// just releases the button so it can be retried.
+									});
+								}}
+							/>
+						}
 						description={item.description}
 						// Home renders the SAME card component as the realm tabs, so it must
 						// also feed it the same icon inputs. Passing only `iconUrl` (which is
@@ -328,11 +368,52 @@ function HomeSection({ row, onOpen }: { row: HomeRow; onOpen: () => void }) {
 						iconUrl={item.iconUrl}
 						key={item.id}
 						name={item.name}
-						onClick={onOpen}
+						// The clicked ITEM, not just its realm. Every Home card used to open
+						// its realm with an empty query, so the one thing the user pointed at
+						// was the one thing the destination did not show — the featured
+						// carousel got this right and the shelves did not.
+						onClick={() => onOpenItem(item.name)}
 						seedId={item.id}
 					/>
 				))}
 			</StoreCardGrid>
 		</section>
+	);
+}
+
+/** A Home row's action: Add, or a static "Added" pill.
+ *
+ *  Deliberately not `StoreItemAction`: that control answers an installed item
+ *  with a 3-dot lifecycle menu, and Home has no lifecycle to offer — no enable,
+ *  no remove, no settings. An empty menu is worse than no menu. */
+function HomeCardAction({
+	installed,
+	busy,
+	onAdd,
+}: {
+	busy: boolean;
+	installed: boolean;
+	onAdd: () => void;
+}) {
+	if (installed) {
+		return (
+			<Button className="shrink-0" disabled size="sm" variant="secondary">
+				<HugeiconsIcon
+					className="size-3.5 text-success"
+					icon={CheckmarkCircle02Icon}
+				/>
+				Added
+			</Button>
+		);
+	}
+	return (
+		<InstallProgressButton
+			className="shrink-0"
+			idleVariant="default"
+			installing={busy}
+			onClick={onAdd}
+		>
+			Add
+		</InstallProgressButton>
 	);
 }

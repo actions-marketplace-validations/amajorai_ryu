@@ -13,6 +13,7 @@
 
 import { Tick01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { ONBOARDING_CONTENT_DELAY_MS } from "@ryu/blocks/desktop/onboarding";
 import { Button } from "@ryu/ui/components/button";
 import { Logo as GhostOrb } from "@ryu/ui/components/logo";
 import { FluidSlider } from "@ryu/ui/components/motion/range-slider-fluid";
@@ -219,8 +220,16 @@ export function ColorStep({ busy = false, onContinue }: ColorStepProps) {
 						subtitle="Pick a look. You can change any of it later in Settings."
 						title="Make it yours"
 					/>
+				</StaggerReveal>
 
-					<div className="flex w-full max-w-md flex-col gap-6">
+				{/* The content picks the cascade back up where the header left it, so
+				    the appearance tiles, the two theme pickers, the roundness slider
+				    and the Continue row arrive one after another instead of as one
+				    block. Outside the reveal above on purpose: revealing this column
+				    there AND its rows here would apply the travel and the blur twice
+				    to the same rows. */}
+				<div className="flex w-full max-w-md flex-col gap-6">
+					<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS} wrap>
 						<div className="flex flex-col gap-2">
 							<p className="font-medium text-sm">Appearance</p>
 							<div className="flex gap-4">
@@ -305,8 +314,8 @@ export function ColorStep({ busy = false, onContinue }: ColorStepProps) {
 								{busy ? "Finishing…" : "Continue"}
 							</Button>
 						</div>
-					</div>
-				</StaggerReveal>
+					</StaggerReveal>
+				</div>
 			</div>
 		</div>
 	);

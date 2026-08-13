@@ -530,12 +530,46 @@ pub fn ensure_gateway_models_json() -> Result<()> {
     Ok(())
 }
 
-/// Value written to Pi's `settings.json` `skills` array to disable Pi's own
-/// skill auto-discovery (`!` = exclude pattern, `**` = everything). Pi always
+/// Value written to Pi's `settings.json` `skills` array to ask Pi not to
+/// auto-discover skills (`!` = exclude pattern, `**` = everything). Pi
 /// auto-loads `~/.agents/skills` (a hard-coded home path, independent of
 /// `PI_CODING_AGENT_DIR`), which duplicated — and bypassed the allowlist of —
 /// Core's own governed skill injection on the ACP prompt (QA finding B1).
+///
+/// **Scope of what this actually buys, verified against `pi-acp@0.0.33`:** the
+/// ACP bridge itself ignores this key entirely. Its startup banner builder walks
+/// the three skill roots directly (it reads `settings.json` only for the
+/// `packages` key, to list extensions), and the one reader that does touch
+/// `skills` (`getEnableSkillCommands`) guards it with an
+/// `isObject()` that is `false` for an Array — so the array written here is not
+/// even looked at by the bridge. Whether the `pi` binary behind the bridge
+/// honours it for actual skill *loading* is UNVERIFIED (the binary is not
+/// installed on the machines this was checked on), which is exactly why the
+/// write stays: removing it would change unmeasured behaviour.
+///
+/// It therefore does **not** stop the startup skill dump — that is what
+/// [`PI_QUIET_STARTUP`] is for.
 const PI_SKILLS_DISABLED: &str = "!**";
+
+/// Settings key written to suppress pi-acp's `session/new` startup banner.
+///
+/// Without it, `getQuietStartup` defaults to **false**, so on every new session
+/// the bridge renders a "## Skills" bullet list of all three skill roots — one
+/// of which is the hard-coded `~/.agents/skills` — and emits it as an ACP
+/// `agent_message_chunk`. Core's ACP adapter maps that to assistant text, which
+/// then persists as a durable assistant row: the full skills list dumped into
+/// the chat before the user has said anything.
+///
+/// Quiet startup still lets an available-update notice through as an
+/// `agent_message_chunk`, so this write is necessary but not sufficient; the
+/// adapter also routes the agent's self-declared startup banner off the
+/// assistant reply path (see `AcpEvent::Banner`).
+const PI_QUIET_STARTUP: &str = "quietStartup";
+
+/// Legacy spelling of [`PI_QUIET_STARTUP`]. `getQuietStartup` falls back to it,
+/// so an explicit user value under the old name must not be overridden by the
+/// managed default either.
+const PI_QUIET_STARTUP_LEGACY: &str = "quietStart";
 
 /// Enforce the managed-Pi config invariants. Idempotent; called at spawn time
 /// (see `acp::ryu_pi_acp_cmd` and the `ryu` PATH-fallback route) so a fresh
@@ -545,13 +579,19 @@ const PI_SKILLS_DISABLED: &str = "!**";
 ///    block into the ACP prompt itself, so Pi loading `~/.agents/skills` on top
 ///    double-injected ~100 ungoverned SKILL.md manifests (QA B1). Written only
 ///    when the user has not set the `skills` key, so an explicit user choice in
-///    the managed dir always stands.
-/// 2. **A valid default model in Gateway mode** — Pi with no `defaultModel`
+///    the managed dir always stands. See [`PI_SKILLS_DISABLED`] for what this
+///    does and does not cover.
+/// 2. **Quiet startup** — pi-acp's `session/new` banner enumerates every skill
+///    it can find and ships it as an assistant message, so a fresh chat opened
+///    with the full skills list already dumped into it. `quietStartup: true`
+///    suppresses that banner ([`PI_QUIET_STARTUP`]). Written only when neither
+///    the current nor the legacy key is set.
+/// 3. **A valid default model in Gateway mode** — Pi with no `defaultModel`
 ///    parrots its skill manifest instead of answering (QA B1). When Gateway-routed
 ///    and no model is set, default to [`default_gateway_model`] (the local
 ///    llama.cpp model — resolvable through the gateway with zero API keys) and
 ///    normalize `defaultProvider` to the gateway-redirected `openai`.
-/// 3. **The Gateway provider pin** — [`ensure_gateway_models_json`], declaring
+/// 4. **The Gateway provider pin** — [`ensure_gateway_models_json`], declaring
 ///    the model so Pi actually sends it over chat-completions.
 pub fn ensure_managed_defaults() -> Result<()> {
     let mut settings = read_settings();
@@ -561,6 +601,19 @@ pub fn ensure_managed_defaults() -> Result<()> {
         settings
             .extra
             .insert("skills".to_owned(), json!([PI_SKILLS_DISABLED]));
+        dirty = true;
+    }
+
+    // Same "only when the user has not chosen" guard as `skills` — and it has to
+    // cover the legacy spelling too, because pi-acp's `getQuietStartup` falls
+    // back to it: writing `quietStartup: true` next to a user's deliberate
+    // `quietStart: false` would silently win over their choice.
+    if !settings.extra.contains_key(PI_QUIET_STARTUP)
+        && !settings.extra.contains_key(PI_QUIET_STARTUP_LEGACY)
+    {
+        settings
+            .extra
+            .insert(PI_QUIET_STARTUP.to_owned(), json!(true));
         dirty = true;
     }
 
@@ -2790,7 +2843,15 @@ async fn fetch_models(url: &str, auth: DiscoveryAuth) -> Result<Vec<Value>> {
                 .to_owned();
             let mut out = Map::new();
             out.insert("id".to_owned(), Value::String(id));
-            if let Some(name) = m.get("display_name").and_then(Value::as_str) {
+            // Anthropic spells the human label `display_name`; OpenRouter and the
+            // OpenAI-compatible routers spell it `name`. Reading only the first left
+            // every OpenRouter row rendering as its raw slug — including the Auto
+            // Router (`openrouter/auto`), which is the managed plan's own default.
+            if let Some(name) = m
+                .get("display_name")
+                .or_else(|| m.get("name"))
+                .and_then(Value::as_str)
+            {
                 out.insert("name".to_owned(), Value::String(name.to_owned()));
             }
             Some(Value::Object(out))
@@ -3846,6 +3907,55 @@ mod tests {
             assert_eq!(settings.default_model.as_deref(), Some("my-model"));
             assert_eq!(settings.extra.get("skills"), Some(&json!(["+/keep/me"])));
         });
+    }
+
+    /// The managed default that stops a brand-new chat opening with the whole
+    /// machine's skills list already sitting in it as an assistant message.
+    ///
+    /// pi-acp's `getQuietStartup` defaults to **false**, so without this key it
+    /// builds a "## Skills" listing of all three skill roots (including the
+    /// hard-coded `~/.agents/skills`) on every `session/new` and emits it as an
+    /// `agent_message_chunk` — which Core then persists as an assistant row.
+    /// The `skills: ["!**"]` write next to it does NOT cover this: the bridge's
+    /// banner builder never consults the skills setting at all.
+    #[test]
+    fn managed_defaults_quiet_the_pi_startup_banner() {
+        with_temp_dir(|| {
+            ensure_managed_defaults().unwrap();
+            assert_eq!(
+                read_settings().extra.get(PI_QUIET_STARTUP),
+                Some(&json!(true))
+            );
+        });
+    }
+
+    /// Same "an explicit user choice stands" guard the `skills` write has — and
+    /// it has to hold for the legacy key too, because `getQuietStartup` reads
+    /// `quietStartup` first but falls back to `quietStart`. Writing our default
+    /// alongside a user's `quietStart: false` would take precedence over it and
+    /// silently reverse their choice, which is the one failure mode a "only when
+    /// unset" guard exists to prevent.
+    #[test]
+    fn managed_defaults_respect_an_explicit_startup_banner_choice() {
+        for key in [PI_QUIET_STARTUP, PI_QUIET_STARTUP_LEGACY] {
+            with_temp_dir(|| {
+                let _ = ensure_dir();
+                fs::write(settings_path(), format!(r#"{{"{key}":false}}"#)).unwrap();
+                ensure_managed_defaults().unwrap();
+                let settings = read_settings();
+                assert_eq!(
+                    settings.extra.get(key),
+                    Some(&json!(false)),
+                    "{key}: the user's choice must survive"
+                );
+                assert!(
+                    !(key == PI_QUIET_STARTUP_LEGACY
+                        && settings.extra.contains_key(PI_QUIET_STARTUP)),
+                    "the legacy key is what pi falls back to; writing the current \
+                     one next to it would override the user's `false`"
+                );
+            });
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod downloader;
 pub mod embed;
 pub mod process;
 pub mod rerank;
+pub mod variant;
 
 pub use classify::LlamaCppClassifyManager;
 pub use downloader::LlamaCppDownloader;
@@ -156,15 +157,10 @@ impl Sidecar for LlamaCppManager {
                 }
             };
 
-            // Construct and start the process.
-            let binary_path = {
-                let name = if cfg!(target_os = "windows") {
-                    "llama-server.exe"
-                } else {
-                    "llama-server"
-                };
-                crate::paths::ryu_dir().join("bin").join(name)
-            };
+            // Construct and start the process. The binary lives inside the
+            // installed build's own directory (`~/.ryu/bin/llamacpp/`), beside
+            // that backend's `ggml-*` libraries.
+            let binary_path = variant::server_path();
 
             // Advanced per-model launch config (#mtp-advanced-inference): resolve
             // the tuning flags for the model being served, falling back to a
@@ -186,6 +182,15 @@ impl Sidecar for LlamaCppManager {
             // Ryu's fan-out (delegate / threads / teams) instead of serializing.
             // Kept out of persisted config so a different machine recomputes.
             launch.apply_llamacpp_batching_defaults();
+            // A CPU build must not be asked to offload layers. On macOS this is
+            // the ONLY thing separating a CPU run from a Metal one (upstream
+            // ships a single Apple Silicon archive with Metal compiled in), and
+            // on every platform it makes "CPU" mean CPU even when a stale
+            // per-model `gpu_layers` is still persisted from a GPU run.
+            let running_variant = variant::installed_variant();
+            if running_variant == Some(variant::LlamaVariant::Cpu) {
+                launch.gpu_layers = Some(0);
+            }
             if !launch.is_empty() {
                 tracing::info!(
                     "llama.cpp applying advanced launch config for model {}: {:?}",
@@ -268,7 +273,11 @@ impl Sidecar for LlamaCppManager {
                 return HealthStatus::Unhealthy("process not running".into());
             }
 
-            match client.get("http://localhost:8080/health").send().await {
+            // Probe the SAME profile-aware port the engine was spawned on
+            // (release 8080, dev 9080, …). A hardcoded :8080 here reported the
+            // engine permanently unhealthy under any non-release profile.
+            let health_url = format!("http://127.0.0.1:{}/health", crate::profile::port(8080));
+            match client.get(&health_url).send().await {
                 Ok(resp) if resp.status().is_success() => HealthStatus::Healthy,
                 Ok(resp) => {
                     HealthStatus::Unhealthy(format!("health endpoint returned {}", resp.status()))
@@ -289,7 +298,12 @@ impl Sidecar for LlamaCppManager {
 
     fn uninstall(&self, delete_data: bool) -> crate::sidecar::BoxFuture<anyhow::Result<()>> {
         Box::pin(async move {
-            // Binary is "llama-server", not "llamacpp".
+            // The whole installed build — binary, `llama-tts`, the backend's
+            // `ggml-*` libraries and the variant marker — lives in one directory.
+            crate::sidecar::remove_dir(&variant::install_dir()).await;
+            // Also clear the pre-variant layout, where `llama-server` sat
+            // directly in `~/.ryu/bin`; an install that predates variants and was
+            // never re-run still has it.
             crate::sidecar::remove_ryu_binary("llama-server").await;
             crate::sidecar::remove_from_version_store("llamacpp");
 

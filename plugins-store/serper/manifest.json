@@ -114,6 +114,7 @@
     {
       "capability": "web.search",
       "version": "1.0.0",
+      "title": "Search",
       "selectable": true,
       "tools": {
         "web__search": {
@@ -137,6 +138,7 @@
     {
       "capability": "web.extract",
       "version": "1.0.0",
+      "title": "Extract",
       "selectable": true,
       "tools": {
         "web__extract": {

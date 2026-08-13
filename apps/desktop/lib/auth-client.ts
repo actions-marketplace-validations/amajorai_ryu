@@ -6,6 +6,7 @@ import {
 	usernameClient,
 } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
+import { TauriUnavailableError, withTauri } from "@/src/lib/tauri-ready.ts";
 import { BACKEND_URL, FRONTEND_URL } from "./app-urls.ts";
 import { AUTH_CORE_URL } from "./core-url.ts";
 
@@ -47,9 +48,26 @@ let storePromise: Promise<import("@tauri-apps/plugin-store").Store> | null =
 
 function getAuthStore(): Promise<import("@tauri-apps/plugin-store").Store> {
 	if (!storePromise) {
-		storePromise = import("@tauri-apps/plugin-store").then(({ load }) =>
-			load("auth.bin")
-		);
+		storePromise = (async () => {
+			const { load } = await import("@tauri-apps/plugin-store");
+			// `load()` goes through Tauri's IPC bridge, and the vault is read on the
+			// boot path — early enough that on a cold start the bridge may not be
+			// injected yet. `withTauri` retries the load once the bridge lands
+			// instead of failing on the ordering.
+			const store = await withTauri(() => load("auth.bin"));
+			if (!store) {
+				throw new TauriUnavailableError("plugin-store:auth.bin");
+			}
+			return store;
+		})();
+		// Do NOT memoize a failure. This slot is a session-long cache, so keeping a
+		// rejected promise in it would leave the `auth.bin` vault permanently dead
+		// for the session after a single early miss — every caller silently falls
+		// back to localStorage, so the breakage is invisible until a reinstall
+		// wipes localStorage and the tokens that should have survived are gone.
+		storePromise.catch(() => {
+			storePromise = null;
+		});
 	}
 	return storePromise;
 }

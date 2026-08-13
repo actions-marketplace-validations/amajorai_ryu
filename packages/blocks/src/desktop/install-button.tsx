@@ -36,7 +36,11 @@ function InstallProgressButton({
 	installing,
 	percent = null,
 	idleVariant = "default",
-	busyLabel = "Installing…",
+	// "Adding…", not "Installing…": the store's verb is Add everywhere — Add /
+	// Adding… / Added / Remove read as one sentence on a card, and every caller of
+	// this button is a store surface (catalog cards, engines, knowledge, MCP,
+	// agents), so the default is the store's word.
+	busyLabel = "Adding…",
 	size = "sm",
 	className,
 	children,

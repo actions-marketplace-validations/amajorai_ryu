@@ -42,9 +42,20 @@ export const PinnedUserMessageBar = memo(function PinnedUserMessageBar({
 			)}
 			title="Jump to message"
 		>
+			{/* Line-height maths, all in `leading-5` (= 20px) units:
+			      • collapsed box `max-h-15` = 3 lines (60px)
+			      • fade strip `h-10`      = 2 lines (40px), and the gradient hits
+			        full opacity at HALF its height
+			    ⇒ the first opaque pixel lands at 60 − 20 = 40px, exactly the top of
+			    line THREE. Lines one and two stay fully legible. With the previous
+			    `max-h-10` box under the default `h-12` fade, the opaque edge landed
+			    at 16px — inside line one — so the bar showed a single line and the
+			    fade was pointless. Change the two classes together. */}
 			<CollapsibleText
-				collapsedMaxHeightClass="max-h-10"
+				collapsedMaxHeightClass="max-h-15"
 				contentClassName="whitespace-pre-wrap text-foreground text-sm leading-5"
+				contentKey={display}
+				fadeHeightClass="h-10"
 				fadeToClass="to-muted"
 				onContentClick={onScrollTo}
 			>

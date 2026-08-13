@@ -1,7 +1,7 @@
 // apps/desktop/src/lib/api/git.ts
 //
 // Typed client for Core's git endpoints:
-//   - `GET /api/git/status?cwd=<path>` (consumed by WorkspaceHeader)
+//   - `GET /api/git/status?cwd=<path>` (consumed by WorkspacePicker)
 //   - `GET /api/worktree/:run_id/diff` (consumed by DiffReviewPane)
 //   - `POST /api/worktree/:run_id/apply` (consumed by DiffReviewPane)
 

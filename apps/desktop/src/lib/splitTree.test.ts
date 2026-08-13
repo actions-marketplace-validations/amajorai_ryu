@@ -4,13 +4,17 @@ import {
 	containsLeaf,
 	directionBefore,
 	directionOrientation,
+	equalizeNode,
+	equalSizes,
 	insertLeaf,
+	isEqualized,
 	leafOrder,
 	makeBranch,
 	makeLeaf,
 	normalizeNode,
 	pruneToMembers,
 	removeLeaf,
+	replaceLeaf,
 	type SplitBranch,
 	setSizesAt,
 	swapLeaves,
@@ -196,5 +200,96 @@ describe("swapLeaves / setSizesAt / appendLeaves", () => {
 		const next = appendLeaves(pair("a", "b"), ["c"]);
 		expect(leafOrder(next)).toEqual(["a", "b", "c"]);
 		expect(next.sizes).toHaveLength(3);
+	});
+});
+
+describe("equalizeNode", () => {
+	const skewed = () =>
+		makeBranch(
+			"columns",
+			[
+				makeLeaf("a"),
+				makeBranch(
+					"rows",
+					[makeLeaf("b"), makeLeaf("c"), makeLeaf("d")],
+					[0.8, 0.15, 0.05]
+				),
+			],
+			[0.9, 0.1]
+		);
+
+	it("evens every branch at every depth", () => {
+		const next = equalizeNode(skewed()) as SplitBranch;
+		expect(next.sizes).toEqual(equalSizes(2));
+		expect((next.children[1] as SplitBranch).sizes).toEqual(equalSizes(3));
+	});
+
+	it("leaves structure, orientation and pane order untouched", () => {
+		const before = skewed();
+		const next = equalizeNode(before) as SplitBranch;
+		expect(leafOrder(next)).toEqual(leafOrder(before));
+		expect(next.orientation).toBe("columns");
+		expect((next.children[1] as SplitBranch).orientation).toBe("rows");
+		// Pure — the input is never mutated.
+		expect(before.sizes).toEqual([0.9, 0.1]);
+	});
+
+	it("is a no-op on a bare leaf", () => {
+		const leaf = makeLeaf("a");
+		expect(equalizeNode(leaf)).toEqual(leaf);
+	});
+});
+
+describe("isEqualized", () => {
+	it("spots a skewed branch at any depth", () => {
+		const outer = makeBranch(
+			"columns",
+			[
+				makeLeaf("a"),
+				makeBranch("rows", [makeLeaf("b"), makeLeaf("c")], [0.8, 0.2]),
+			],
+			[0.5, 0.5]
+		);
+		expect(isEqualized(outer)).toBe(false);
+	});
+
+	it("agrees with equalizeNode — its output is always equalized", () => {
+		const skewed = makeBranch(
+			"columns",
+			[
+				makeLeaf("a"),
+				makeBranch("rows", [makeLeaf("b"), makeLeaf("c")], [0.7, 0.3]),
+			],
+			[0.9, 0.1]
+		);
+		expect(isEqualized(skewed)).toBe(false);
+		expect(isEqualized(equalizeNode(skewed))).toBe(true);
+	});
+
+	it("tolerates the float drift a gutter drag leaves behind", () => {
+		const thirds = makeBranch(
+			"columns",
+			[makeLeaf("a"), makeLeaf("b"), makeLeaf("c")],
+			[0.3334, 0.3333, 0.3333]
+		);
+		expect(isEqualized(thirds)).toBe(true);
+	});
+});
+
+describe("replaceLeaf", () => {
+	it("swaps an occupant without disturbing sizes or shape", () => {
+		const tree = makeBranch(
+			"columns",
+			[makeLeaf("a"), makeBranch("rows", [makeLeaf("b"), makeLeaf("c")])],
+			[0.7, 0.3]
+		);
+		const next = replaceLeaf(tree, "b", "z") as SplitBranch;
+		expect(leafOrder(next)).toEqual(["a", "z", "c"]);
+		expect(next.sizes).toEqual([0.7, 0.3]);
+	});
+
+	it("ignores a tab id that isn't in the tree", () => {
+		const tree = pair("a", "b");
+		expect(replaceLeaf(tree, "nope", "z")).toEqual(tree);
 	});
 });

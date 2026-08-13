@@ -993,3 +993,77 @@ export async function resolveReport(input: {
 	}
 	return json.report;
 }
+
+// ── likes (the heart on a store card) ─────────────────────────────────────────
+//
+// Keyed by the listing's NAMESPACE (`@ryu/crm`, `owner/repo`), never by an
+// internal row id. The desktop browses the catalog through CORE's adapter, whose
+// payload carries no like fields at all, so these three calls are how a desktop
+// card learns its count — one BULK read per page, never one per card.
+
+/** One listing's like state, as the control plane returns it. */
+export interface LikeSnapshot {
+	count: number;
+	liked: boolean;
+	namespace: string;
+}
+
+function toSnapshot(raw: unknown, fallbackNamespace: string): LikeSnapshot {
+	const row = (raw ?? {}) as Partial<LikeSnapshot>;
+	return {
+		namespace:
+			typeof row.namespace === "string" ? row.namespace : fallbackNamespace,
+		count: typeof row.count === "number" ? Math.max(0, row.count) : 0,
+		liked: row.liked === true,
+	};
+}
+
+/**
+ * GET /api/marketplace/likes?ns=… — BULK counts for a whole page of cards.
+ *
+ * Public: an unauthenticated desktop still sees real counts (every row comes
+ * back `liked: false`), which is why the heart renders before sign-in rather
+ * than appearing only once a session exists.
+ */
+export async function fetchLikeCounts(
+	namespaces: string[]
+): Promise<LikeSnapshot[]> {
+	if (namespaces.length === 0) {
+		return [];
+	}
+	const q = new URLSearchParams({ ns: namespaces.join(",") });
+	const resp = await fetch(`${BASE}/likes?${q.toString()}`, {
+		headers: authHeaders(),
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	const json = (await resp.json()) as { likes?: unknown[] };
+	return (json.likes ?? []).map((row) => toSnapshot(row, ""));
+}
+
+/** POST /api/marketplace/likes — like one listing. Idempotent server-side. */
+export async function likeItem(namespace: string): Promise<LikeSnapshot> {
+	const resp = await fetch(`${BASE}/likes`, {
+		method: "POST",
+		headers: authHeaders(),
+		body: JSON.stringify({ namespace }),
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	return toSnapshot(await resp.json(), namespace);
+}
+
+/** DELETE /api/marketplace/likes?namespace= — remove the caller's own like. */
+export async function unlikeItem(namespace: string): Promise<LikeSnapshot> {
+	const q = new URLSearchParams({ namespace });
+	const resp = await fetch(`${BASE}/likes?${q.toString()}`, {
+		method: "DELETE",
+		headers: authHeaders(),
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	return toSnapshot(await resp.json(), namespace);
+}

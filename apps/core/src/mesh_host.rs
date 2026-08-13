@@ -36,6 +36,56 @@ pub const MESH_ENABLED_PREF_KEY: &str = "mesh-enabled";
 /// nothing to derive from, so the picker would have no selection to render.
 pub const MESH_BACKEND_PREF_KEY: &str = "mesh-backend";
 
+/// The Core preference deciding whether first run PRE-INSTALLS the mesh client
+/// (`tailscale` + `tailscaled`) even though the mesh itself is off.
+///
+/// Deliberately a SEPARATE key from [`MESH_ENABLED_PREF_KEY`]: pre-installing
+/// stages binaries, enabling changes the node's security posture (Core becomes
+/// reachable over the tailnet and loopback-admin trust is neutralized). Nothing
+/// may write `mesh-enabled` on behalf of the user; this key exists so the install
+/// half can be defaulted ON without dragging the enablement half with it.
+///
+/// The same client serves both control planes ([`MESH_BACKEND_PREF_KEY`]:
+/// Headscale or Tailscale SaaS), so there is nothing backend-specific to stage.
+pub const MESH_PREINSTALL_PREF_KEY: &str = "mesh-preinstall-client";
+
+/// Default for [`MESH_PREINSTALL_PREF_KEY`] when the pref was never written —
+/// i.e. on the fresh install this exists to serve. ON, matching how llama.cpp and
+/// the default Gemma GGUF are fetched unconditionally on first run: a user who
+/// later flips the Tunnel toggle then connects immediately instead of waiting out
+/// a ~38 MB transfer (or a `brew install`) behind the toggle.
+pub const MESH_PREINSTALL_DEFAULT: bool = true;
+
+/// Environment override for [`MESH_PREINSTALL_PREF_KEY`], with the same truthiness
+/// as `RYU_MESH_ENABLED` and the same precedence rule (env wins when SET, so
+/// `RYU_MESH_PREINSTALL_CLIENT=0` forces the pre-install off).
+///
+/// Needed because the pref cannot be written before the very first boot, which is
+/// exactly the boot that would download: CI, images and bandwidth-constrained
+/// installs need a way to opt out that does not require a running Core.
+pub const MESH_PREINSTALL_ENV: &str = "RYU_MESH_PREINSTALL_CLIENT";
+
+/// Resolve the pre-install decision from the env override and the stored pref.
+///
+/// `pref` is the raw `mesh-preinstall-client` value (`None` when unwritten).
+/// Parsing goes through [`ryu_mesh::parse_enabled`] so the truthiness matches the
+/// mesh's own signal instead of being a second, subtly different copy.
+pub fn preinstall_client_wanted(pref: Option<&str>) -> bool {
+    if let Ok(env) = std::env::var(MESH_PREINSTALL_ENV) {
+        return ryu_mesh::parse_enabled(Some(&env));
+    }
+    preinstall_client_from_pref(pref)
+}
+
+/// The pref half of [`preinstall_client_wanted`], split out so the default and the
+/// opt-out are testable without mutating the process environment.
+pub fn preinstall_client_from_pref(pref: Option<&str>) -> bool {
+    match pref {
+        Some(value) => ryu_mesh::parse_enabled(Some(value)),
+        None => MESH_PREINSTALL_DEFAULT,
+    }
+}
+
 /// Install [`CoreMeshHost`] as the process-global mesh host. Idempotent (a second
 /// call is a no-op). Called once from `main` at boot.
 pub fn install() {
@@ -67,6 +117,37 @@ mod tests {
     // bearer resolved by `ryu-mesh` against Core's `enforce_remote_auth` gate (the
     // trust root, which stays in `server`). These assert the two halves agree —
     // they intentionally live Core-side because they cross the crate boundary.
+
+    // Pre-install pref: the fresh-install default is the whole point of the key
+    // (an unwritten pref is exactly the first-run case), and the opt-out has to
+    // parse, or a user who turned it off still gets the download.
+    #[test]
+    fn mesh_client_preinstall_defaults_on_and_is_opt_outable() {
+        use super::{MESH_PREINSTALL_DEFAULT, preinstall_client_from_pref};
+        assert!(
+            MESH_PREINSTALL_DEFAULT,
+            "first run must stage the mesh client, like llama.cpp + the default GGUF"
+        );
+        assert!(preinstall_client_from_pref(None), "unwritten pref = fresh install = on");
+        for off in ["false", "0", "no", "", "  FALSE  "] {
+            assert!(
+                !preinstall_client_from_pref(Some(off)),
+                "{off:?} must opt out of the pre-install"
+            );
+        }
+        for on in ["true", "1", "yes"] {
+            assert!(preinstall_client_from_pref(Some(on)), "{on:?} must keep it on");
+        }
+    }
+
+    // The two keys must never collide: pre-installing stages binaries, enabling
+    // changes the node's security posture. Writing one through the other is the
+    // documented failure mode.
+    #[test]
+    fn mesh_preinstall_key_is_distinct_from_the_enable_key() {
+        assert_ne!(super::MESH_PREINSTALL_PREF_KEY, super::MESH_ENABLED_PREF_KEY);
+        assert_ne!(super::MESH_PREINSTALL_PREF_KEY, super::MESH_BACKEND_PREF_KEY);
+    }
 
     #[test]
     fn core_refuses_tokenless_start_under_mesh() {

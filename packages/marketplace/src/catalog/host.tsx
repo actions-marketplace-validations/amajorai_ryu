@@ -55,8 +55,16 @@ export interface CatalogInstallButtonProps {
 	idleVariant?: "default" | "outline" | "secondary" | "ghost" | "destructive";
 	installing: boolean;
 	onClick: () => void;
-	/** Identity for the progress lookup: download kinds + display name/id. */
-	progress: { kinds: string[]; name: string };
+	/** Identity for the progress lookup: download kinds + display name/id, plus
+	 *  the EXACT download-task id when the surface knows it.
+	 *
+	 *  `name` alone is a heuristic — it is matched against the task's label — and
+	 *  for plugins it never hit: Core labels a plugin row with the plugin ID
+	 *  (`@ryu/crm`) while the card knew only the display name ("Harbor CRM"), so
+	 *  the lookup silently fell back to "the sole in-flight task of this kind" and
+	 *  showed an unrelated download's percent whenever two things ran at once.
+	 *  `taskId` short-circuits that guesswork. */
+	progress: { kinds: string[]; name: string; taskId?: string };
 }
 
 /** Minimal node identity a model detail action needs to reach Core. */
@@ -68,6 +76,31 @@ export interface CatalogNode {
 /** The install layer a surface provides, or `null` for a read-only surface. */
 export interface CatalogInstall {
 	InstallButton: ComponentType<CatalogInstallButtonProps>;
+	/** Hook resolving "is this listing's add/enable in flight?" from the SURFACE's
+	 *  shared install state, for any id.
+	 *
+	 *  A hook returning a predicate, called ONCE per section and threaded down to
+	 *  the cards — a per-card hook would be one store subscription per row.
+	 *
+	 *  It exists because a section's own hook state cannot answer the question: the
+	 *  desktop Store mounts `useAppsCatalog` twice (first-party + community) and
+	 *  renders the same items in other sections entirely, so an add started in one
+	 *  place was invisible everywhere else — the detail dialog said "Adding…" while
+	 *  the item's own card sat there armed, inviting the second click that Core
+	 *  answers with a 409.
+	 *
+	 *  Omitted ⇒ the section falls back to its hook's per-instance `installing`. */
+	useInstallingLookup?: () => (id: string) => boolean;
+}
+
+/** Stable "nothing is in flight" lookup, for a host with no shared install state.
+ *  Module-level so the fallback hook keeps one identity across renders. */
+const NO_INSTALLING = () => false;
+
+/** Fallback for {@link CatalogInstall.useInstallingLookup}. A hook by shape so a
+ *  call site can pick one or the other and still make exactly one hook call. */
+export function useNoInstallingLookup(): (id: string) => boolean {
+	return NO_INSTALLING;
 }
 
 /** Resolves a plugin id to a "reveal its settings" action, or `null` when that

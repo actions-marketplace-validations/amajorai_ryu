@@ -12,7 +12,7 @@
 // one-time TCC prompt fires from the bundle's NSMicrophoneUsageDescription, and a
 // prior denial is only reversible from System Settings.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "../tauri-ready.ts";
 
 type OsKind = "windows" | "macos" | "other";
 
@@ -50,7 +50,7 @@ export async function openMicrophoneSettings(): Promise<boolean> {
 		return false;
 	}
 	try {
-		await invoke("open_external", { url: uri });
+		await invokeWhenReady("open_external", { url: uri });
 		return true;
 	} catch {
 		return false;
@@ -93,7 +93,7 @@ const INPUT_MONITORING_SETTINGS_URI: Record<OsKind, string | null> = {
 /** Whether Accessibility is currently granted. Never prompts. */
 export async function checkAccessibilityPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("check_accessibility_permission");
+		return await invokeWhenReady<boolean>("check_accessibility_permission");
 	} catch {
 		return false;
 	}
@@ -102,7 +102,7 @@ export async function checkAccessibilityPermission(): Promise<boolean> {
 /** Whether Screen Recording is currently granted. Never prompts. */
 export async function checkScreenRecordingPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("check_screen_recording_permission");
+		return await invokeWhenReady<boolean>("check_screen_recording_permission");
 	} catch {
 		return false;
 	}
@@ -115,7 +115,7 @@ export async function checkScreenRecordingPermission(): Promise<boolean> {
  */
 export async function requestAccessibilityPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("request_accessibility_permission");
+		return await invokeWhenReady<boolean>("request_accessibility_permission");
 	} catch {
 		return false;
 	}
@@ -128,7 +128,7 @@ export async function requestAccessibilityPermission(): Promise<boolean> {
  */
 export async function requestScreenRecordingPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("request_screen_recording_permission");
+		return await invokeWhenReady<boolean>("request_screen_recording_permission");
 	} catch {
 		return false;
 	}
@@ -141,7 +141,7 @@ export async function openAccessibilitySettings(): Promise<boolean> {
 		return false;
 	}
 	try {
-		await invoke("open_external", { url: uri });
+		await invokeWhenReady("open_external", { url: uri });
 		return true;
 	} catch {
 		return false;
@@ -155,7 +155,7 @@ export async function openScreenRecordingSettings(): Promise<boolean> {
 		return false;
 	}
 	try {
-		await invoke("open_external", { url: uri });
+		await invokeWhenReady("open_external", { url: uri });
 		return true;
 	} catch {
 		return false;
@@ -165,7 +165,7 @@ export async function openScreenRecordingSettings(): Promise<boolean> {
 /** Whether Input Monitoring is currently granted. Never prompts. */
 export async function checkInputMonitoringPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("check_input_monitoring_permission");
+		return await invokeWhenReady<boolean>("check_input_monitoring_permission");
 	} catch {
 		return false;
 	}
@@ -178,7 +178,7 @@ export async function checkInputMonitoringPermission(): Promise<boolean> {
  */
 export async function requestInputMonitoringPermission(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("request_input_monitoring_permission");
+		return await invokeWhenReady<boolean>("request_input_monitoring_permission");
 	} catch {
 		return false;
 	}
@@ -191,7 +191,7 @@ export async function openInputMonitoringSettings(): Promise<boolean> {
 		return false;
 	}
 	try {
-		await invoke("open_external", { url: uri });
+		await invokeWhenReady("open_external", { url: uri });
 		return true;
 	} catch {
 		return false;
@@ -206,7 +206,7 @@ export async function openInputMonitoringSettings(): Promise<boolean> {
  */
 export async function automationPermissionsRequired(): Promise<boolean> {
 	try {
-		return await invoke<boolean>("automation_permissions_required");
+		return await invokeWhenReady<boolean>("automation_permissions_required");
 	} catch {
 		// Fall back to the cheap client-side guess if the command is unavailable.
 		return detectOs() === "macos";

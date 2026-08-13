@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext } from "react";
+import { createContext, useContext, useMemo } from "react";
 
 /**
  * Global display preferences for the chat message list. Consumed by tool
@@ -53,6 +53,58 @@ export interface ChatDisplayPrefs {
 	 */
 	groupToolUses: boolean;
 	/**
+	 * The "None" rung of the Detail level ladder: the transcript shows NO tool
+	 * calls and NO file edits at all, leaving a pure messaging view of the
+	 * conversation. Default: false.
+	 *
+	 * This is a VISIBILITY knob and the other four transcript-detail prefs
+	 * (`groupToolUses` / `expandFileEdits` / `expandCommands` /
+	 * `expandCodeBlocks`) are all EXPANSION knobs — no combination of them can
+	 * express "not shown", which is why this is its own pref rather than another
+	 * derived preset. It overrides them: at None the expansion toggles have
+	 * nothing left to expand.
+	 *
+	 * What it hides, and what it deliberately does not:
+	 * - HIDDEN: every tool row, including reasoning/thinking traces (those arrive
+	 *   as tool parts routed to `ThinkingTool`, so they go for free) and the app
+	 *   widget parts that attach to a tool call.
+	 * - KEPT: assistant text and every non-tool part (images, generated images,
+	 *   file/audio attachments), `type: "error"` parts, and — the one deliberate
+	 *   exception — tool rows that FAILED. A tool-only turn that died is the case
+	 *   where hiding everything leaves the user staring at a silent gap, and a
+	 *   turn-level error part is not always produced. The cost, accepted: a
+	 *   transient failure the agent retried and recovered from still shows one
+	 *   row at None.
+	 * - KEPT: the "interrupted" marker. Interruption is turn STATUS, not tool
+	 *   detail, and it now rides on the message as `_interrupted` metadata
+	 *   rather than as a text part — so the message list counts an interrupted
+	 *   message as visible content in its own right. Without that, a turn that
+	 *   died with nothing but hidden tool work would vanish at None and take its
+	 *   crash notice with it.
+	 * - UNAFFECTED: the pinned summary (Cowork context) panel and the subagent
+	 *   panels. Those derive their own rollups straight from the message parts
+	 *   and never read this context — showing what the agent did IS their whole
+	 *   job, and blanking a panel the user deliberately opened would leave it
+	 *   empty rather than clean. None is a TRANSCRIPT setting.
+	 *
+	 * See `tool-detail-visibility.ts` for the predicate, and note the empty-turn
+	 * trap documented there: a turn whose entire content is hidden must not
+	 * render an empty row.
+	 */
+	hideToolDetail: boolean;
+	/**
+	 * When true, each completed assistant turn shows its inference stats footer:
+	 * token counts, tokens/sec, first-response time and the turn's duration
+	 * (`data-ryu-stats` for local engines, `data-acp-usage` for ACP agents).
+	 *
+	 * Default: FALSE. This is a developer readout — most turns run against agents
+	 * that report no token usage at all, and the numbers mean different things per
+	 * transport. Note the cost of the default: with it off, a live ACP turn shows
+	 * no token counter, which is the transcript's only in-line liveness cue. That
+	 * is the intended trade, not an oversight.
+	 */
+	inferenceStats: boolean;
+	/**
 	 * When true, opening a conversation jumps the transcript to the newest message
 	 * instead of leaving it wherever the scroller happened to settle while the
 	 * history was still loading. The jump fires once per conversation (on mount,
@@ -81,9 +133,18 @@ const DEFAULT_PREFS: ChatDisplayPrefs = {
 	expandFileEdits: false,
 	expandCommands: false,
 	expandCodeBlocks: false,
+	// Must equal APPEARANCE_DEFAULTS.hideToolDetail in
+	// apps/desktop/src/lib/appearance-settings.ts AND the usePersistedToggle
+	// default in apps/desktop/src/components/chat/ChatDisplayPrefsProvider.tsx.
+	// Three defaults, one value — two that disagree means the slider and the
+	// transcript disagree until the user touches the setting.
+	hideToolDetail: false,
 	openAtBottom: true,
 	pinUserMessage: true,
 	streamAnimation: true,
+	// Must equal APPEARANCE_DEFAULTS.inferenceStats in
+	// apps/desktop/src/lib/appearance-settings.ts.
+	inferenceStats: false,
 };
 
 const ChatDisplayPrefsContext = createContext<ChatDisplayPrefs>(DEFAULT_PREFS);
@@ -95,7 +156,10 @@ export function ChatDisplayPrefsProvider({
 	children: React.ReactNode;
 	value: Partial<ChatDisplayPrefs>;
 }) {
-	const merged = { ...DEFAULT_PREFS, ...value };
+	// Memoised because a context value is NOT gated by `memo()`: a fresh object
+	// here re-renders every consumer in the transcript (MessageList, every tool
+	// row, every markdown block) on every render of the provider's parent.
+	const merged = useMemo(() => ({ ...DEFAULT_PREFS, ...value }), [value]);
 	return (
 		<ChatDisplayPrefsContext.Provider value={merged}>
 			{children}

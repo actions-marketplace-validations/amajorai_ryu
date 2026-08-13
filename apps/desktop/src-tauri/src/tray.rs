@@ -15,6 +15,26 @@ const TRAY_ID: &str = "main";
 pub(crate) const SETTINGS_FILE: &str = "settings.json";
 /// When `true`, the tray / menu bar icon is hidden. Absent/false = shown.
 const HIDE_TRAY_KEY: &str = "hide-tray-icon";
+/// When `true`, closing the main window hides it to the tray instead of quitting.
+/// Absent = `true`: this is a background assistant with a menu-bar presence, and
+/// the alternative (closing the window kills Core and every running turn with it)
+/// is what a user closing a window almost never means.
+const CLOSE_TO_TRAY_KEY: &str = "close-to-tray";
+
+/// Set once a real quit is under way, so the close-to-tray interception knows to
+/// let this one through. Without it, "stay in tray" would swallow the tray's own
+/// Quit and the app could only be killed from Activity Monitor.
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark a real quit as in progress (tray Quit, app-menu Quit, `quit_app`).
+pub(crate) fn begin_quit() {
+    QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// True once [`begin_quit`] has run.
+pub(crate) fn is_quitting() -> bool {
+    QUITTING.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Loopback control server the Electron island exposes (see
 /// `island/src/main/control.ts`). The island has no tray of its own anymore — the
@@ -106,12 +126,33 @@ async fn toggle_shadow_capture() -> Option<bool> {
 
 /// Read the persisted "hide tray icon" preference. Defaults to `false` (shown)
 /// whenever the store is missing, unreadable, or the key is unset.
-fn read_hide_tray<R: Runtime, M: Manager<R>>(app: &M) -> bool {
+pub(crate) fn read_hide_tray<R: Runtime, M: Manager<R>>(app: &M) -> bool {
 	app.store(SETTINGS_FILE)
 		.ok()
 		.and_then(|store| store.get(HIDE_TRAY_KEY))
 		.and_then(|value| value.as_bool())
 		.unwrap_or(false)
+}
+
+/// Read the persisted "keep running in the tray when the window is closed"
+/// preference. Defaults to `true` — see [`CLOSE_TO_TRAY_KEY`].
+///
+/// Reported as `false` whenever the tray icon is hidden, no matter what is
+/// stored. Hiding to a tray that is not drawn leaves a running app with no
+/// window and no icon: on Windows and Linux the only way back is the
+/// single-instance path, and on macOS a Dock click (`RunEvent::Reopen`) — which
+/// is exactly the trap `lib.rs` already documents. The two settings are
+/// independent controls, so rather than forbid the combination we make the
+/// dangerous half inert while the other is on.
+pub(crate) fn read_close_to_tray<R: Runtime, M: Manager<R>>(app: &M) -> bool {
+	if read_hide_tray(app) {
+		return false;
+	}
+	app.store(SETTINGS_FILE)
+		.ok()
+		.and_then(|store| store.get(CLOSE_TO_TRAY_KEY))
+		.and_then(|value| value.as_bool())
+		.unwrap_or(true)
 }
 
 pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
@@ -192,6 +233,14 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 			// Stop the companion island too, then exit — the unified tray owns both
 			// lifecycles, and the island has no other quit affordance.
 			"quit" => {
+				// Flag the quit BEFORE it starts: with close-to-tray on, the window's
+				// CloseRequested handler would otherwise cancel the very shutdown this
+				// item exists to perform.
+				begin_quit();
+				// Stop the backend explicitly. With close-to-tray on, the window is
+				// never destroyed, so `WindowEvent::Destroyed` — the arm that used to
+				// own this — does not fire on the way out.
+				crate::stop_managed_core(app);
 				let handle = app.clone();
 				tauri::async_runtime::spawn(async move {
 					island_control("quit").await;
@@ -243,5 +292,22 @@ pub fn set_hide_tray_icon(app: tauri::AppHandle, hidden: bool) -> Result<(), Str
 	if let Some(tray) = app.tray_by_id(TRAY_ID) {
 		tray.set_visible(!hidden).map_err(|e| e.to_string())?;
 	}
+	Ok(())
+}
+
+/// Current "keep running in the tray on close" preference, for the settings UI
+/// and onboarding to seed their toggle.
+#[tauri::command]
+pub fn get_close_to_tray(app: tauri::AppHandle) -> bool {
+	read_close_to_tray(&app)
+}
+
+/// Persist the "keep running in the tray on close" preference. Takes effect on
+/// the next close; there is nothing live to reconfigure.
+#[tauri::command]
+pub fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+	let store = app.store(SETTINGS_FILE).map_err(|e| e.to_string())?;
+	store.set(CLOSE_TO_TRAY_KEY, serde_json::json!(enabled));
+	store.save().map_err(|e| e.to_string())?;
 	Ok(())
 }

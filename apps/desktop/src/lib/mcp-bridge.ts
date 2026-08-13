@@ -14,7 +14,7 @@
 // is the whole of the connection detail and the gate is that the socket exists
 // only while Developer Mode is on.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "./tauri-ready.ts";
 import { useEffect } from "react";
 
 /** Mirrors `BridgeStatus` in `src-tauri/src/mcp_bridge.rs`. */
@@ -32,7 +32,7 @@ export interface McpBridgeStatus {
 /** Current bridge state, or `null` outside Tauri (storyboard, vite preview). */
 export async function getMcpBridgeStatus(): Promise<McpBridgeStatus | null> {
 	try {
-		return await invoke<McpBridgeStatus>("mcp_bridge_status");
+		return await invokeWhenReady<McpBridgeStatus>("mcp_bridge_status");
 	} catch {
 		return null;
 	}
@@ -48,7 +48,7 @@ export async function setMcpBridgeEnabled(
 	enabled: boolean
 ): Promise<McpBridgeStatus | null> {
 	try {
-		return await invoke<McpBridgeStatus>("set_mcp_bridge_enabled", { enabled });
+		return await invokeWhenReady<McpBridgeStatus>("set_mcp_bridge_enabled", { enabled });
 	} catch {
 		return null;
 	}

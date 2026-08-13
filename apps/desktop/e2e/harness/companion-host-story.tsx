@@ -1,0 +1,119 @@
+// Browser harness for the PATH-B companion certificate
+// (`e2e/companion-host.spec.ts`). Path A (an ESM bundle eval'd through
+// `thirdPartyPluginSrcdoc`) already has a certificate — `plugin-runtime.spec.ts`
+// plus `harness/main.ts`. Path B, the one every shipped app actually uses
+// (`ui_format: "html"` → `htmlCompanionSrcdoc` → a `vite-plugin-singlefile`
+// bundle mounted straight as `srcdoc`), had none, so a regression in that
+// handshake shipped green.
+//
+// It mounts the REAL `<ExtensionHost>` with the REAL `htmlCompanionSrcdoc`
+// wrapper — never a copy — and records BOTH halves of the handshake so a failure
+// says which half broke:
+//   - every `window.message` the parent receives (did the frame ever announce?)
+//   - the `onConnected` callback (did the host accept and transfer the port?)
+// The spec feeds it the actual `apps/core/src/plugin_manifest/fixtures/*.ui.html`
+// bytes — the same bundle Core serves — because the pre-existing unit test wraps
+// `"<p>hi</p>"`, which is exactly why a real-bundle failure passed everything.
+
+import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
+import {
+	type Capability,
+	capabilitiesFromGrants,
+	type HostServices,
+	validatePluginRoute,
+} from "@ryu/app-host/rpc";
+import { htmlCompanionSrcdoc } from "@ryu/app-host/third-party-plugin";
+import { createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+
+interface MountOptions {
+	/** The app's self-contained HTML bundle (a real fixture's bytes). */
+	appHtml: string;
+	/** Gateway-approved grant strings → real `capabilitiesFromGrants`. */
+	grants: string[];
+	/** The owning plugin id, baked into the bridge. */
+	pluginId: string;
+}
+
+interface CompanionApi {
+	/** Every `kind` seen on a window message, in order. */
+	announced: string[];
+	/** Set once the host accepted a handshake and transferred the port. */
+	connected: () => boolean;
+	mount: (options: MountOptions) => void;
+	/** The composed srcdoc, so the spec can assert the injection landed. */
+	srcdoc: () => string;
+}
+
+const announced: string[] = [];
+let connected = false;
+let lastSrcdoc = "";
+let root: Root | null = null;
+
+// Record EVERY inbound window message, not just the accepted one: a `ready` that
+// arrives and is rejected (nonce mismatch) is a completely different bug from a
+// `ready` that never arrives (the frame's bridge script never ran).
+window.addEventListener("message", (event: MessageEvent) => {
+	const kind = (event.data as { kind?: unknown } | null)?.kind;
+	if (typeof kind === "string") {
+		announced.push(kind);
+	}
+});
+
+function mount(options: MountOptions): void {
+	announced.length = 0;
+	connected = false;
+	const nonce =
+		typeof crypto?.randomUUID === "function"
+			? crypto.randomUUID()
+			: `nonce-${Date.now()}`;
+	const granted: ReadonlySet<Capability> = capabilitiesFromGrants(
+		options.grants
+	);
+	// Path B apps drive Core through host-side verbs. This cert is about the
+	// handshake, not the verbs, so only the two REQUIRED members are implemented —
+	// the rest are optional, and an unbound call replies with an error over the same
+	// live port, exactly as it would in the shell.
+	const services: HostServices = {
+		listAgents: () => Promise.resolve([]),
+		registerRoute: (claim) =>
+			validatePluginRoute(options.pluginId, claim)
+				? Promise.resolve({ path: claim.path })
+				: Promise.reject(
+						new Error(`route '${claim.path}' is not this plugin's own surface`)
+					),
+	};
+
+	lastSrcdoc = htmlCompanionSrcdoc(nonce, options.appHtml, options.pluginId);
+
+	const container = document.getElementById("host-root");
+	if (!container) {
+		throw new Error("harness #host-root missing");
+	}
+	if (root) {
+		root.unmount();
+	}
+	root = createRoot(container);
+	root.render(
+		createElement(ExtensionHost, {
+			srcdoc: lastSrcdoc,
+			nonce,
+			granted,
+			services,
+			onConnected: () => {
+				connected = true;
+			},
+			title: "Companion cert",
+		})
+	);
+}
+
+const api: CompanionApi = {
+	announced,
+	connected: () => connected,
+	mount,
+	srcdoc: () => lastSrcdoc,
+};
+(window as unknown as { __ryuCompanion: CompanionApi }).__ryuCompanion = api;
+
+document.body.setAttribute("data-harness-ready", "1");

@@ -2144,6 +2144,28 @@ export interface ProvidesEntry {
 	 */
 	target?: ProviderTarget | null;
 	/**
+	 * The human name of the **capability** (not of this provider): `"Search"` for
+	 * `web.search`, `"Document Parsing"` for `document.parse`. What a layer picker
+	 * puts above the provider list.
+	 *
+	 * Declared here, on the provider, because the capability itself is not a
+	 * manifest — it exists only as the string its providers agree on — and there is
+	 * nowhere else to hang the name. So every provider of a capability should carry
+	 * the same `title`, and the layer keeps its name when the default provider is
+	 * uninstalled.
+	 *
+	 * Deliberately NOT unanimity-checked the way [`Self::selectable`] is: forcing
+	 * six independent `web.search` manifests to spell one cosmetic string
+	 * byte-identically or fail to load trades a real capability for a label. Core
+	 * picks one with the same ladder the binder uses (declared default, else
+	 * lowest plugin id) and disagreement costs at most a differently-worded header.
+	 *
+	 * Absent = the client falls back to its own naming (a built-in table, else the
+	 * capability's last dotted segment). No server-side humaniser derives it from
+	 * the id — that route reads `news.crud` as "News Crud".
+	 */
+	title?: string | null;
+	/**
 	 * Capability **verb → this provider's tool** bindings, the seam that keeps the
 	 * model-visible tool surface stable across a swap.
 	 *

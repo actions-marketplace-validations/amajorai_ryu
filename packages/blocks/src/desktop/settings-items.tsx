@@ -54,6 +54,24 @@ const childDescription = (child: ReactNode): ReactNode => {
  */
 const SURFACE = "rounded-[10px] bg-muted/40";
 
+/**
+ * Read the `bare` opt-out from a group child.
+ *
+ * A control that is ALREADY a box — a tall textarea, a code/JSON editor — put
+ * inside the card surface reads as a box inside a box: the muted card fill draws
+ * one edge, the control's own border draws a second one a few pixels in. `bare`
+ * drops the surface for that one setting so the control's own border is the only
+ * edge, which is the whole reason the escape hatch is a primitive here rather
+ * than a `className` override at each call site. A per-row override is how this
+ * drifts back one file at a time.
+ */
+const childIsBare = (child: ReactNode): boolean => {
+	if (!isValidElement(child)) {
+		return false;
+	}
+	return (child.props as { bare?: boolean }).bare === true;
+};
+
 interface SettingsGroupProps {
 	children: ReactNode;
 	className?: string;
@@ -73,10 +91,27 @@ export const SettingsGroup = ({ children, className }: SettingsGroupProps) => {
 
 	// Partition rows into card slices: rows accumulate until one carries a
 	// description, which terminates its slice (the description becomes the
-	// slice's footer caption).
-	const slices: { caption: ReactNode; rows: ReactNode[] }[] = [];
+	// slice's footer caption). A `bare` row terminates the slice too and is then
+	// rendered OUTSIDE any card, so a tall text control keeps its position in the
+	// column without inheriting the card fill behind it.
+	const slices: {
+		bare?: boolean;
+		caption: ReactNode;
+		rows: ReactNode[];
+	}[] = [];
 	let pending: ReactNode[] = [];
 	for (const child of items) {
+		if (childIsBare(child)) {
+			if (pending.length > 0) {
+				slices.push({ caption: null, rows: pending });
+				pending = [];
+			}
+			// No caption here: a bare row renders its OWN description, so it looks the
+			// same whether it sits inside a group or stands alone in a section.
+			// Rendering it in both places would print the caption twice.
+			slices.push({ bare: true, caption: null, rows: [child] });
+			continue;
+		}
 		pending.push(child);
 		const caption = childDescription(child);
 		if (caption) {
@@ -110,7 +145,7 @@ export const SettingsGroup = ({ children, className }: SettingsGroupProps) => {
 		</ItemGroup>
 	);
 
-	if (slices.length === 1 && !slices[0].caption) {
+	if (slices.length === 1 && !(slices[0].caption || slices[0].bare)) {
 		return renderCard(slices[0].rows);
 	}
 
@@ -119,7 +154,7 @@ export const SettingsGroup = ({ children, className }: SettingsGroupProps) => {
 			{slices.map((slice, sliceIndex) => (
 				// biome-ignore lint/suspicious/noArrayIndexKey: slice order is static within a render
 				<Fragment key={sliceIndex}>
-					{renderCard(slice.rows)}
+					{slice.bare ? slice.rows : renderCard(slice.rows)}
 					{slice.caption ? (
 						<p className="px-3.5 pb-1.5 text-muted-foreground text-xs leading-snug">
 							{slice.caption}
@@ -132,6 +167,18 @@ export const SettingsGroup = ({ children, className }: SettingsGroupProps) => {
 };
 
 interface SettingsCardProps {
+	/**
+	 * Drop the card surface: no fill, no padding, so the child's own border is
+	 * the only edge. For a setting whose ONLY control already draws a box that
+	 * fills the card — a tall textarea (system prompt, custom instructions), a
+	 * JSON/code editor — where the surface just adds a second edge a few pixels
+	 * outside the first.
+	 *
+	 * The discriminator is "is the big control alone in here?". A card holding a
+	 * textarea AND other fields still needs its surface: baring it strips the
+	 * card from the siblings too, which is a regression, not a fix.
+	 */
+	bare?: boolean;
 	children: ReactNode;
 	className?: string;
 }
@@ -141,13 +188,37 @@ interface SettingsCardProps {
  * arbitrary (non-row) content — sliders, color pickers, selects, forms, an
  * avatar uploader. Use this instead of letting custom content float bare so
  * every section reads as a consistent card.
+ *
+ * `bare` keeps the call site reading as a settings card while painting no
+ * surface — see the prop's own note for when that is the right answer.
  */
-export const SettingsCard = ({ children, className }: SettingsCardProps) => (
-	<div className={cn(SURFACE, "p-3.5", className)}>{children}</div>
-);
+export const SettingsCard = ({
+	bare,
+	children,
+	className,
+}: SettingsCardProps) =>
+	bare ? (
+		<div className={className}>{children}</div>
+	) : (
+		<div className={cn(SURFACE, "p-3.5", className)}>{children}</div>
+	);
 
 interface SettingsItemProps {
 	actions?: ReactNode;
+	/**
+	 * Render this row OUTSIDE its group's card: title on its own line, `children`
+	 * full-width beneath it, no card fill behind either. For a row whose control
+	 * is a tall text area — a prompt, an instruction block, a JSON blob — which
+	 * inside the card reads as a box in a box, and squeezed into `actions` reads
+	 * as a text field pretending to be a textarea.
+	 *
+	 * Pass the big control as `children`, not `actions`: `actions` is the row's
+	 * right-hand column and stays narrow even here.
+	 *
+	 * {@link SettingsGroup} reads this off the child, so a bare row still sits in
+	 * the same place in the same group — it just breaks the card around itself.
+	 */
+	bare?: boolean;
 	children?: ReactNode;
 	className?: string;
 	/**
@@ -176,30 +247,60 @@ interface SettingsItemProps {
  */
 export const SettingsItem = ({
 	actions,
+	bare,
 	children,
 	className,
+	description,
 	settingsId,
 	title,
-}: SettingsItemProps) => (
-	<Item
-		className={cn(
-			"flex-col items-stretch gap-2 rounded-none border-0 px-3.5 py-2.5",
-			className
-		)}
-		data-setting-id={settingsId}
-		size="sm"
-	>
-		<div className="flex w-full items-center justify-between gap-3">
-			<div className="flex min-w-0 flex-1 flex-col gap-0.5">
+}: SettingsItemProps) =>
+	bare ? (
+		// No `Item` here: its padding is what insets a row from the card edge, and
+		// a bare row has no card to be inset from. The title keeps the standard
+		// 3.5 gutter so it lines up with every section header and caption; the
+		// control runs the full width, flush with the cards above and below it.
+		//
+		// A bare row also renders its own `description`, unlike a carded one whose
+		// group renders it as the card's footer — there is no card here to hang a
+		// footer off, and a bare row is equally valid standing alone in a section
+		// where no group would see it at all.
+		<div
+			className={cn("flex w-full flex-col gap-1.5", className)}
+			data-setting-id={settingsId}
+		>
+			<div className="flex items-center justify-between gap-3 px-3.5">
 				<ItemTitle className="font-medium text-sm">{title}</ItemTitle>
+				{actions ? (
+					<ItemActions className="shrink-0">{actions}</ItemActions>
+				) : null}
 			</div>
-			{actions ? (
-				<ItemActions className="shrink-0">{actions}</ItemActions>
+			{children}
+			{description ? (
+				<p className="px-3.5 text-muted-foreground text-xs leading-snug">
+					{description}
+				</p>
 			) : null}
 		</div>
-		{children}
-	</Item>
-);
+	) : (
+		<Item
+			className={cn(
+				"flex-col items-stretch gap-2 rounded-none border-0 px-3.5 py-2.5",
+				className
+			)}
+			data-setting-id={settingsId}
+			size="sm"
+		>
+			<div className="flex w-full items-center justify-between gap-3">
+				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
+					<ItemTitle className="font-medium text-sm">{title}</ItemTitle>
+				</div>
+				{actions ? (
+					<ItemActions className="shrink-0">{actions}</ItemActions>
+				) : null}
+			</div>
+			{children}
+		</Item>
+	);
 
 interface SettingsSectionProps {
 	/** Optional caption rendered below the group, in muted text. */

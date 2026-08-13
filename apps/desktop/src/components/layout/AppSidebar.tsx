@@ -7,14 +7,12 @@ import {
 	ArrowUpRight01Icon,
 	BubbleChatIcon,
 	Cancel01Icon,
-	ChatAdd01Icon,
 	ClipboardIcon,
 	ConnectIcon,
 	CpuIcon,
 	DatabaseIcon,
 	Delete01Icon,
 	DeliverySecure01Icon,
-	Download01Icon,
 	File01Icon,
 	Folder01Icon,
 	Folder03Icon,
@@ -39,6 +37,7 @@ import {
 	Square01Icon,
 	Store01Icon,
 	Tick02Icon,
+	Upload01Icon,
 	UserGroupIcon,
 	ViewOffSlashIcon,
 	WorkflowCircle06Icon,
@@ -66,11 +65,12 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@ryu/ui/components/alert-dialog.tsx";
-import { BorderBeam } from "@ryu/ui/components/border-beam.tsx";
 import {
 	ContextMenu,
 	ContextMenuContent,
 	ContextMenuItem,
+	ContextMenuRadioGroup,
+	ContextMenuRadioItem,
 	ContextMenuSeparator,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu.tsx";
@@ -89,7 +89,6 @@ import {
 import { asGlyphValue, type GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
-import { Logo } from "@ryu/ui/components/logo.tsx";
 import {
 	Popover,
 	PopoverContent,
@@ -120,7 +119,6 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useTheme } from "next-themes";
 import {
 	type Dispatch,
 	type DragEvent as ReactDragEvent,
@@ -142,6 +140,7 @@ import {
 } from "@/src/components/chat/ProjectPicker.tsx";
 import { AddIdentityDialog } from "@/src/components/identities/AddIdentityDialog.tsx";
 import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
+import { SplitPresetMenuItems } from "@/src/components/layout/SplitPresetMenu.tsx";
 import {
 	ProjectGlyph,
 	ProjectIconDialog,
@@ -156,7 +155,11 @@ import {
 } from "@/src/components/teams/TeamDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
-import type { Split, Tab } from "@/src/contexts/TabsContext.tsx";
+import type {
+	Split,
+	SplitOrientation,
+	Tab,
+} from "@/src/contexts/TabsContext.tsx";
 import {
 	findSplit,
 	splitPaneTabs,
@@ -190,6 +193,7 @@ import { useSidebarMode } from "@/src/hooks/useSidebarMode.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
+import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
 import { useUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import {
@@ -209,13 +213,13 @@ import {
 	type TitleHistoryEntry,
 } from "@/src/lib/api/conversation-flags.ts";
 import {
+	type PluginContextMenuItem,
 	type PluginSidebarButton,
 	type PluginSidebarSection,
 	pluginHostInvoke,
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
-import { useBuildProfile } from "@/src/lib/build-profile.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	DEFAULT_HIDDEN_CHROME,
@@ -226,14 +230,9 @@ import {
 	persistHiddenChrome,
 	persistHiddenSections,
 } from "@/src/lib/features.ts";
-import { useReleaseChannel } from "@/src/lib/release-channel.ts";
-import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
+import { dedupeFolders, folderKey } from "@/src/lib/folder-path.ts";
 import { compactAge } from "@/src/lib/time.ts";
-import {
-	formatDate,
-	formatTime,
-	startOfTodayMs,
-} from "@/src/lib/timezone.ts";
+import { formatDate, formatTime, startOfTodayMs } from "@/src/lib/timezone.ts";
 import {
 	scheduleJobFor,
 	WorkflowTriggerIcons,
@@ -246,7 +245,8 @@ import type { Conversation, Message } from "@/types/chat.ts";
 import { AnnouncementsSection } from "./AnnouncementsSection.tsx";
 import { CustomizeSidebarDialog } from "./CustomizeSidebarDialog.tsx";
 import { NavUser } from "./NavUser.tsx";
-import { OverflowTooltip } from "./overflow-tooltip.tsx";
+import { FadeLabel, OverflowTooltip } from "./overflow-tooltip.tsx";
+import { SidebarBrandBadge } from "./SidebarBrandBadge.tsx";
 import { SidebarSectionNav } from "./SidebarSectionNav.tsx";
 import {
 	ChatRowSubAccordion,
@@ -363,6 +363,8 @@ function saveIdSet(key: string, ids: Set<string>) {
 }
 
 const PATH_SEP_RE = /[\\/]/;
+/** Trailing `/` or `\` runs, stripped before taking a path's leaf. */
+const TRAILING_SEPARATORS_RE = /[\\/]+$/;
 
 /** Status-dot color class for a conversation's run status. */
 function runStatusDotClass(status: string | undefined): string {
@@ -375,9 +377,16 @@ function runStatusDotClass(status: string | undefined): string {
 	return "bg-primary";
 }
 
-/** Leaf folder name from a workspace path, used as a project's default label. */
+/** Leaf folder name from a workspace path, used as a project's default label.
+ *
+ *  Trailing separators are dropped first. A path only reaches the sidebar as the
+ *  spelling its producer used — the picker, Core, or an imported thread's cwd —
+ *  and `"/x/y/".split(sep).pop()` is the empty string, which renders as a project
+ *  with no name at all. Comparison is `folderKey`'s job; this is the display half
+ *  of the same problem. */
 function projectFolderLeaf(path: string): string {
-	return path.split(PATH_SEP_RE).pop() ?? path;
+	const trimmed = path.replace(TRAILING_SEPARATORS_RE, "");
+	return trimmed.split(PATH_SEP_RE).pop() || trimmed || path;
 }
 
 /** Sidebar/picker label: custom display name when set, otherwise the folder leaf. */
@@ -1119,8 +1128,12 @@ function ChatTitleHistoryPreview({
 	return <SidebarPreviewTitleHistory entries={entries} />;
 }
 
-/** A single-line chat row, Codex style: title only, actions on hover. */
-function ChatRow({
+/** A single-line chat row, Codex style: title only, actions on hover.
+ *
+ *  Exported for `e2e/harness/chat-row-menus-story.tsx`, which mounts the real row
+ *  to prove its ⋯ dropdown and its right-click menu list the SAME app-contributed
+ *  rows — a fact no type-check can see, and one the two menus had already lost. */
+export function ChatRow({
 	conv,
 	handlers,
 }: {
@@ -1151,9 +1164,35 @@ function ChatRow({
 	const isUnread = unreadIds.has(conv.id);
 	const isPinned = pinnedIds.has(conv.id);
 	const isArchived = archivedIds.has(conv.id);
-	// Unread badge always shows when marked unread; color still reflects run status.
-	const showDot = isUnread;
+	// Unread badge always shows when marked unread; a failed run badges itself too
+	// (in destructive red, via runStatusDotClass) — a run that died is exactly the
+	// thing a glance down the sidebar has to catch, and it does not need the chat
+	// to also be marked unread to be worth pointing at.
+	const showDot = isUnread || conv.runStatus === "failed";
 	const isRunning = conv.runStatus === "running";
+	// Who last took this thread. The row leads with that agent's mark — the same
+	// avatar the Messages sub-accordion puts on each turn — so a sidebar full of
+	// chats says WHO is on each one before it says anything else.
+	//
+	// A council thread (more than one participant) reads its LAST entry: Core
+	// appends on join and never sorts (`add_participant`), so that is the most
+	// recent joiner. Anything else prefers `agentId`, which tracks the agent the
+	// chat is bound to NOW — on a thread whose agent was swapped, a one-entry
+	// participants list still holds the original.
+	const participants = conv.participants ?? [];
+	const latestAgentId =
+		participants.length > 1
+			? participants[participants.length - 1]
+			: (conv.agentId ?? participants[0] ?? null);
+	const latestAgent = latestAgentId
+		? agents.find((a) => a.id === latestAgentId)
+		: undefined;
+	// Ring colour matches the surface the badge sits ON, which is the sidebar at
+	// rest and `muted` once the row is hovered or active — a fixed sidebar-coloured
+	// ring would read as a mis-tinted halo on exactly the row being pointed at.
+	const dotRingClass = isActive
+		? "ring-2 ring-muted"
+		: "ring-2 ring-sidebar group-hover/row:ring-muted";
 
 	const pinLabel = isPinned ? "Unpin" : "Pin";
 	const pinIcon = isPinned ? PinOffIcon : PinIcon;
@@ -1177,6 +1216,32 @@ function ChatRow({
 						(b.order ?? Number.MAX_SAFE_INTEGER)
 				),
 		[context_menu_items]
+	);
+
+	// One dispatcher, both surfaces. The ⋯ dropdown and the right-click menu are
+	// separate primitives (`DropdownMenuItem` vs `ContextMenuItem`, so the rendered
+	// rows genuinely cannot be shared), but the *action* must be defined once —
+	// they had already drifted, with the right-click menu shipping no contributed
+	// rows at all.
+	const runContributedRow = useCallback(
+		(item: PluginContextMenuItem) => {
+			const feedback = item.feedback;
+			const run = () =>
+				pluginHostInvoke(target, item.plugin, item.capability ?? "", {
+					...item.args,
+					conversation_id: conv.id,
+				});
+			// `success` is passed unconditionally. That collapses what used to be two
+			// branches here without changing behavior: `toastPromise` already falls
+			// back to `loading` when `success` is omitted (`sileo.tsx`), so the
+			// no-feedback case resolved to this exact label before too.
+			toast.promise(run(), {
+				loading: feedback?.loading ?? item.label,
+				success: feedback?.success ?? item.label,
+				error: feedback?.error ?? `${item.label} failed`,
+			});
+		},
+		[conv.id, target]
 	);
 
 	// Inline rename: when `isEditing`, the title is replaced by a text input.
@@ -1218,9 +1283,11 @@ function ChatRow({
 		}
 	}, [isEditing]);
 
-	const folderLeaf = conv.folderPath
-		? (conv.folderPath.split(PATH_SEP_RE).pop() ?? conv.folderPath)
-		: null;
+	// The FULL folder path, not its leaf. The leaf is the project name the row is
+	// already filed under, so it carried no information at all; the path is the
+	// only place the user can see which of two same-named folders a chat belongs
+	// to (and the only way to tell an imported thread's folder from a native one).
+	const folderPath = conv.folderPath || null;
 	const worktreeLeaf = conv.worktreePath
 		? (conv.worktreePath.split(PATH_SEP_RE).pop() ?? conv.worktreePath)
 		: null;
@@ -1229,14 +1296,17 @@ function ChatRow({
 			{conv.branch ? (
 				<SidebarPreviewMeta label="Branch" value={conv.branch} />
 			) : null}
-			{folderLeaf ? (
-				<SidebarPreviewMeta label="Folder" value={folderLeaf} />
+			{folderPath ? (
+				<SidebarPreviewMeta label="Folder" value={folderPath} wrap />
 			) : null}
 			{worktreeLeaf ? (
 				<SidebarPreviewMeta label="Worktree" value={worktreeLeaf} />
 			) : null}
 			{(conv.participants?.length || conv.agentId) && (
-				<div className="flex min-w-0 items-baseline gap-2 text-xs">
+				// `items-center`, not `items-baseline`: the value column holds avatars,
+				// and a baseline box aligns the text's baseline while the 14px image sits
+				// on it — which reads as the logo hanging below its own name.
+				<div className="flex min-w-0 items-center gap-2 text-xs">
 					<span className="shrink-0 text-muted-foreground">Agents</span>
 					<span className="flex min-w-0 flex-wrap items-center gap-1.5">
 						{(conv.participants ?? (conv.agentId ? [conv.agentId] : [])).map(
@@ -1314,18 +1384,46 @@ function ChatRow({
 							}}
 							type="button"
 						>
-							{/* Status dot sits over the chevron slot: shown at rest, it
-							    crossfades out on hover (and stays hidden while expanded) so
-							    the disclosure chevron can morph in. */}
-							{showDot && (
-								<span
-									className={`absolute inset-0 m-auto size-1.5 rounded-full transition-opacity ${
+							{/* The agent that last took this thread, in the same slot the
+							    chevron lives in: shown at rest, crossfading out on hover (and
+							    hidden while expanded) so the disclosure affordance can morph
+							    in exactly as it did when this slot held only a dot. */}
+							{latestAgent && (
+								<AgentAvatar
+									avatarUrl={latestAgent.avatarUrl}
+									className={`absolute inset-0 m-auto size-4 rounded-[3px] object-contain transition-opacity ${
 										rowExpanded
 											? "opacity-0"
 											: "opacity-100 group-hover/row:opacity-0"
-									} ${runStatusDotClass(conv.runStatus)}`}
+									}`}
+									engine={engineForAgent(latestAgent)}
+									size="16px"
 								/>
 							)}
+							{/* Status dot. With an avatar it becomes a badge pinned to the
+							    avatar's top-right corner, ringed in the colour of whatever
+							    surface is behind it, and stays put through hover — the avatar
+							    fades to reveal the chevron, but "unread" / "this run failed"
+							    must not blink out from under the pointer. Without an agent
+							    there is nothing to badge, so it keeps its original behaviour:
+							    centred in the slot, crossfading out for the chevron.
+							    Deliberately outside the `latestAgent` branch — an agentless
+							    chat losing its unread state entirely is the bug this shape
+							    exists to avoid. */}
+							{showDot &&
+								(latestAgent ? (
+									<span
+										className={`absolute -top-0.5 -right-0.5 size-1.5 rounded-full ${dotRingClass} ${runStatusDotClass(conv.runStatus)}`}
+									/>
+								) : (
+									<span
+										className={`absolute inset-0 m-auto size-1.5 rounded-full transition-opacity ${
+											rowExpanded
+												? "opacity-0"
+												: "opacity-100 group-hover/row:opacity-0"
+										} ${runStatusDotClass(conv.runStatus)}`}
+									/>
+								))}
 							{/* Chevron: hidden at rest, fades in on hover; always shown (and
 							    un-rotated) once expanded so it can be collapsed again. */}
 							<HugeiconsIcon
@@ -1376,25 +1474,17 @@ function ChatRow({
 									startEditing();
 								}}
 							>
+								{/* One label for both states (FadeLabel, not OverflowTooltip —
+								    the row already has the hover-card preview, and a second
+								    popup would fight it). Running only swaps the shimmer onto
+								    the same clipped line, so the title dissolves at the edge in
+								    either state and the row cannot jump when a run starts. */}
 								<SidebarItemPreview content={previewContent}>
-									{isRunning ? (
-										// align-bottom, not the default baseline: an inline-block with
-										// `overflow:hidden` takes its bottom edge as its baseline, so a
-										// baseline-aligned shimmer sits ON the line's baseline and the
-										// strut's descender is reserved *below* it — the trigger box grows
-										// to 25px and the title reads as sitting high. The resting branch
-										// is a plain inline span (20px), so without this the row would
-										// also jump the moment a run starts or ends.
-										<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate align-bottom text-sm [animation-duration:2s]">
-											{conv.title}
-										</span>
-									) : (
-										<span
-											className={`min-w-0 flex-1 overflow-hidden truncate whitespace-nowrap text-sm ${isUnread ? "font-medium" : ""}`}
-										>
-											{conv.title}
-										</span>
-									)}
+									<FadeLabel
+										className={`flex-1 text-sm ${isUnread ? "font-medium" : ""}`}
+										shimmer={isRunning}
+										text={conv.title}
+									/>
 								</SidebarItemPreview>
 							</span>
 						)}
@@ -1517,29 +1607,7 @@ function ChatRow({
 										key={item.id}
 										onClick={(e) => {
 											e.stopPropagation();
-											const feedback = item.feedback;
-											const run = () =>
-												pluginHostInvoke(
-													target,
-													item.plugin,
-													item.capability ?? "",
-													{
-														...item.args,
-														conversation_id: conv.id,
-													}
-												);
-											if (feedback) {
-												toast.promise(run(), {
-													loading: feedback.loading ?? item.label,
-													success: feedback.success ?? item.label,
-													error: feedback.error ?? `${item.label} failed`,
-												});
-											} else {
-												toast.promise(run(), {
-													loading: item.label,
-													error: `${item.label} failed`,
-												});
-											}
+											runContributedRow(item);
 										}}
 									>
 										{item.icon ? (
@@ -1610,6 +1678,27 @@ function ChatRow({
 						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
 						{archiveLabel}
 					</ContextMenuItem>
+					{/* Same contributed rows the ⋯ dropdown renders, in the same slot and
+					    order. Right-clicking a chat is the more discoverable gesture of the
+					    two, so an app-registered row missing here read as the app simply
+					    not contributing anything. */}
+					{contributedMenuRows.length > 0 && <ContextMenuSeparator />}
+					{contributedMenuRows.map((item) => (
+						<ContextMenuItem
+							key={item.id}
+							onClick={() => runContributedRow(item)}
+						>
+							{item.icon ? (
+								<Icon className="mr-2 size-4" icon={item.icon} size={16} />
+							) : (
+								<HugeiconsIcon
+									className="mr-2 size-4"
+									icon={MoreHorizontalIcon}
+								/>
+							)}
+							{item.label}
+						</ContextMenuItem>
+					))}
 					<ContextMenuSeparator />
 					<ContextMenuItem
 						className="text-destructive"
@@ -1708,6 +1797,9 @@ function groupByProject(convs: Conversation[]): {
 	projects: ProjectBucket[];
 	loose: Conversation[];
 } {
+	// Keyed by `folderKey`, not the raw string: an imported thread's cwd and a
+	// native run's folder are produced by different writers and differ by
+	// punctuation often enough that raw equality split one project in two.
 	const projects = new Map<string, ProjectBucket>();
 	const loose: Conversation[] = [];
 	for (const conv of convs) {
@@ -1715,11 +1807,11 @@ function groupByProject(convs: Conversation[]): {
 			loose.push(conv);
 			continue;
 		}
-		const existing = projects.get(conv.folderPath);
+		const existing = projects.get(folderKey(conv.folderPath));
 		if (existing) {
 			existing.conversations.push(conv);
 		} else {
-			projects.set(conv.folderPath, {
+			projects.set(folderKey(conv.folderPath), {
 				name: conv.folderPath.split(PATH_SEP_RE).pop() ?? conv.folderPath,
 				path: conv.folderPath,
 				conversations: [conv],
@@ -2147,24 +2239,15 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 								icon={Cancel01Icon}
 							/>
 						</button>
-						{busy && !tab.unloaded ? (
-							<span
-								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState}`}
-							>
-								{/* align-bottom: see the chat-row shimmer above — a baseline-aligned
-								    overflow-hidden inline-block reserves the strut descender below the
-								    text, which pushes the busy title off the row's vertical centre. */}
-								<span className="an-text-shimmer an-text-shimmer--active inline-block max-w-full truncate align-bottom [animation-duration:2s]">
-									{tab.title}
-								</span>
-							</span>
-						) : (
-							<OverflowTooltip
-								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
-								fade
-								text={tab.title}
-							/>
-						)}
+						{/* Busy and resting share one label: the shimmer rides the same
+						    faded clip line, so a streaming title never falls back to an
+						    ellipsis and the row cannot jump as a run starts or ends. */}
+						<OverflowTooltip
+							className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
+							fade
+							shimmer={busy && !tab.unloaded}
+							text={tab.title}
+						/>
 					</div>
 				</ContextMenuTrigger>
 				<ContextMenuContent>
@@ -2235,7 +2318,8 @@ function VerticalSplitBlock({
 	members: Tab[];
 	split: Split;
 }) {
-	const { tabs, addTabToSplit, unsplit } = useTabsContext();
+	const { tabs, addTabToSplit, setSplitOrientation, unsplit } =
+		useTabsContext();
 	const dnd = useTabDnd();
 	const [joinHover, setJoinHover] = useState(false);
 	const canJoin =
@@ -2250,44 +2334,71 @@ function VerticalSplitBlock({
 		split.root.orientation === "columns" ? "Side by side" : "Stacked";
 	return (
 		<div className="rounded-lg bg-primary/5 p-0.5 ring-1 ring-primary/25">
-			{/* biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop join target; the same action exists in the tab context menus */}
-			<div
-				className={`flex h-6 items-center gap-1.5 rounded-md px-2 text-primary/70 ${joinHover ? "bg-primary/20 text-primary" : ""}`}
-				onDragLeave={() => setJoinHover(false)}
-				onDragOver={(e: ReactDragEvent) => {
-					if (!canJoin) {
-						return;
-					}
-					e.preventDefault();
-					e.stopPropagation();
-					e.dataTransfer.dropEffect = "move";
-					setJoinHover(true);
-				}}
-				onDrop={(e: ReactDragEvent) => {
-					setJoinHover(false);
-					if (!(canJoin && dnd.draggingId)) {
-						return;
-					}
-					e.preventDefault();
-					e.stopPropagation();
-					addTabToSplit(split.id, dnd.draggingId);
-					dnd.onEnd();
-				}}
-			>
-				<HugeiconsIcon className="size-3" icon={Folder01Icon} />
-				<span className="font-medium text-xs">
-					{canJoin && joinHover
-						? "Drop to add"
-						: `${label} · ${members.length}`}
-				</span>
-				<button
-					className="ml-auto rounded px-1 text-muted-foreground text-xs hover:text-foreground"
-					onClick={() => unsplit(members[0]?.id ?? "")}
-					type="button"
-				>
-					Unsplit
-				</button>
-			</div>
+			{/* The header row carries the split's own verbs, mirroring the strip's
+			    split bracket — orientation, layout presets, equalize, unsplit —
+			    so the vertical layout is not a second-class surface. */}
+			<ContextMenu>
+				<ContextMenuTrigger>
+					{/* biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop join target; the same action exists in the tab context menus */}
+					<div
+						className={`flex h-6 items-center gap-1.5 rounded-md px-2 text-primary/70 ${joinHover ? "bg-primary/20 text-primary" : ""}`}
+						onDragLeave={() => setJoinHover(false)}
+						onDragOver={(e: ReactDragEvent) => {
+							if (!canJoin) {
+								return;
+							}
+							e.preventDefault();
+							e.stopPropagation();
+							e.dataTransfer.dropEffect = "move";
+							setJoinHover(true);
+						}}
+						onDrop={(e: ReactDragEvent) => {
+							setJoinHover(false);
+							if (!(canJoin && dnd.draggingId)) {
+								return;
+							}
+							e.preventDefault();
+							e.stopPropagation();
+							addTabToSplit(split.id, dnd.draggingId);
+							dnd.onEnd();
+						}}
+					>
+						<HugeiconsIcon className="size-3" icon={Folder01Icon} />
+						<span className="font-medium text-xs">
+							{canJoin && joinHover
+								? "Drop to add"
+								: `${label} · ${members.length}`}
+						</span>
+						<button
+							className="ml-auto rounded px-1 text-muted-foreground text-xs hover:text-foreground"
+							onClick={() => unsplit(members[0]?.id ?? "")}
+							type="button"
+						>
+							Unsplit
+						</button>
+					</div>
+				</ContextMenuTrigger>
+				<ContextMenuContent>
+					<ContextMenuRadioGroup
+						onValueChange={(value) =>
+							setSplitOrientation(split.id, value as SplitOrientation)
+						}
+						value={split.root.orientation}
+					>
+						<ContextMenuRadioItem value="columns">
+							Side by side
+						</ContextMenuRadioItem>
+						<ContextMenuRadioItem value="rows">Stacked</ContextMenuRadioItem>
+					</ContextMenuRadioGroup>
+					<ContextMenuSeparator />
+					<SplitPresetMenuItems split={split} />
+					<ContextMenuSeparator />
+					<ContextMenuItem onClick={() => unsplit(members[0]?.id ?? "")}>
+						<HugeiconsIcon className="mr-2 size-4" icon={GridIcon} />
+						Unsplit
+					</ContextMenuItem>
+				</ContextMenuContent>
+			</ContextMenu>
 			{ordered.map((tab) => (
 				<VerticalTabRow
 					isActive={tab.id === activeTabId}
@@ -3361,10 +3472,33 @@ function SpaceSidebarRow({
 						Change icon…
 					</ContextMenuItem>
 					<ContextMenuSeparator />
-					<ContextMenuItem onClick={onRequestDelete} variant="destructive">
-						<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
-						Delete space
-					</ContextMenuItem>
+					{/* A Ryu-owned system Space (Artifacts, Meetings, Uploads…) is a node
+					    singleton Core refuses to delete — `SpaceStore::delete_space`
+					    bails on `system = 1`, so offering the action here could only ever
+					    produce the "Couldn't delete this space" toast. Disabled rather
+					    than hidden: a menu that silently loses a row reads as a bug, and
+					    the tooltip is where the reason belongs. The wrapper span carries
+					    the tooltip because a disabled item is `pointer-events-none` and
+					    would never see the hover itself. */}
+					{space.system ? (
+						<Tooltip>
+							<TooltipTrigger render={<span className="block" />}>
+								<ContextMenuItem disabled variant="destructive">
+									<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
+									Delete space
+								</ContextMenuItem>
+							</TooltipTrigger>
+							<TooltipContent className="max-w-56">
+								System spaces can't be deleted — Ryu creates and maintains this
+								one.
+							</TooltipContent>
+						</Tooltip>
+					) : (
+						<ContextMenuItem onClick={onRequestDelete} variant="destructive">
+							<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
+							Delete space
+						</ContextMenuItem>
+					)}
 				</ContextMenuContent>
 			</ContextMenu>
 			{expanded && (
@@ -5640,6 +5774,7 @@ function SubSection({
 	label,
 	onToggleCollapsed,
 	sectionKey,
+	size = "sm",
 	wrapHeader,
 }: {
 	action?: ReactNode;
@@ -5653,6 +5788,15 @@ function SubSection({
 	label: string;
 	onToggleCollapsed: (key: string) => void;
 	sectionKey: string;
+	/**
+	 * `sm` (default) is the quiet date-bucket header inside Chats — a divider for
+	 * rows that are themselves the content. `md` matches a ChatRow exactly (h-8,
+	 * `text-sm`, 16px icon) and is for a sub-section that IS an entity in its own
+	 * right, like a project folder: those sit beside Chats and Spaces in the same
+	 * scan, so rendering them two steps smaller made them read as sub-labels of
+	 * the section above rather than peers of it.
+	 */
+	size?: "sm" | "md";
 	/** Optional wrapper for the header row — e.g. a right-click "Delete all
 	 *  chats" context menu. Defaults to identity (no wrapper). */
 	wrapHeader?: (header: ReactNode) => ReactNode;
@@ -5700,7 +5844,11 @@ function SubSection({
 				const headerRow = (
 					<div className="relative flex items-center">
 						<button
-							className="group/hdr flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-md px-2 py-1 text-foreground text-xs transition-colors active:cursor-grabbing"
+							className={`group/hdr flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-md px-2 text-foreground transition-colors active:cursor-grabbing ${
+								size === "md"
+									? "h-8 text-sm hover:bg-muted"
+									: "py-1 text-xs"
+							}`}
 							draggable
 							onClick={() => onToggleCollapsed(sectionKey)}
 							onDragEnd={() => dnd.onDragEnd()}
@@ -5713,7 +5861,10 @@ function SubSection({
 						>
 							{iconNode ??
 								(icon && (
-									<HugeiconsIcon className="size-3.5 shrink-0" icon={icon} />
+									<HugeiconsIcon
+										className={`shrink-0 ${size === "md" ? "size-4" : "size-3.5"}`}
+										icon={icon}
+									/>
 								))}
 							<span className="min-w-0 truncate">{label}</span>
 							{typeof count === "number" && (
@@ -5931,18 +6082,20 @@ function ChatsSection({
 	return (
 		<SidebarSection
 			action={
-				<div className="mr-1 flex items-center gap-0.5">
-					<SectionActionButton
-						icon={Download01Icon}
-						onClick={onImport}
-						title="Import a past agent thread"
-					/>
-					<SectionActionButton
-						icon={Add01Icon}
-						onClick={onNew}
-						title="New chat"
-					/>
-				</div>
+				// Two actions, spaced exactly like every single-action section: each
+				// button carries the same `mr-1` {@link SectionAddButton} puts between
+				// itself and the overflow "…" trigger, so import → + → … are evenly
+				// pitched instead of the + hugging the import button.
+				<>
+					<span className="mr-1">
+						<SectionActionButton
+							icon={Upload01Icon}
+							onClick={onImport}
+							title="Import a past agent thread"
+						/>
+					</span>
+					<SectionAddButton onClick={onNew} title="New chat" />
+				</>
 			}
 			collapsed={collapsed}
 			dnd={dnd}
@@ -6029,7 +6182,7 @@ function ProjectRow({
 					<SubSection
 						action={
 							<SubSectionActionButton
-								icon={ChatAdd01Icon}
+								icon={Add01Icon}
 								onClick={() => onNewChat(bucket.path)}
 								title="New chat in this folder"
 							/>
@@ -6046,6 +6199,7 @@ function ProjectRow({
 						label={label}
 						onToggleCollapsed={onToggleCollapsed}
 						sectionKey={bucket.path}
+						size="md"
 					>
 						{count === 0 ? (
 							<p className="px-2 py-1 text-muted-foreground/70 text-xs">
@@ -6291,8 +6445,13 @@ function ProjectsSection({
 						No projects yet. Click + to import a folder.
 					</p>
 				) : (
+					// No `ml-2` here, unlike the Chats date buckets. Those buckets are
+					// dividers INSIDE a section, so the indent says "these belong to
+					// Chats"; a project folder is a top-level entity like a chat or a
+					// space, and indenting it left a gap on the left edge that nothing
+					// else in the sidebar has.
 					<>
-						<div className="ml-2 space-y-0.5">
+						<div className="space-y-0.5">
 							{renderProjectRows(paged.visible)}
 						</div>
 						<SectionPagingControls
@@ -6301,9 +6460,7 @@ function ProjectsSection({
 								items: paged.items,
 								label: "projects",
 								renderList: (list) => (
-									<div className="ml-2 space-y-0.5">
-										{renderProjectRows(list)}
-									</div>
+									<div className="space-y-0.5">{renderProjectRows(list)}</div>
 								),
 							}}
 							paged={paged}
@@ -6741,10 +6898,6 @@ export function SidebarPanelContent({
 	} = useChatHistoryContext();
 	const { openTab, updateTabsIconWhere, requestScrollToMessage } =
 		useTabsContext();
-	const { resolvedTheme } = useTheme();
-	const beamTheme = resolvedTheme === "light" ? "light" : "dark";
-	const { dev } = useBuildProfile();
-	const [channel] = useReleaseChannel();
 	const activeNode = useActiveNode();
 	const { agents } = useAgents();
 	// Plugin enabled-state, used to hide a plugin-owned section (Meetings/Spaces)
@@ -6999,17 +7152,18 @@ export function SidebarPanelContent({
 	// minus any folders the user removed from the app. Folders with no chats still
 	// appear (rendering a "No chats" hint). Chats whose folder was removed fall back
 	// into the loose Chats section so no conversation is hidden.
-	const bucketByPath = new Map(projects.map((p) => [p.path, p]));
-	const removedSet = new Set(removedProjects);
-	const projectPaths = [
-		...new Set([
-			...(workspaceFolder ? [workspaceFolder] : []),
-			...recentFolders,
-			...projects.map((p) => p.path),
-		]),
-	].filter((path) => !removedSet.has(path));
+	// Every one of these three sources spells the same directory its own way, so
+	// the union, the removed-set and the bucket lookup all compare by `folderKey`.
+	// Keyed on the raw string, `~/x` and `~/x/` were two folders with one name.
+	const bucketByPath = new Map(projects.map((p) => [folderKey(p.path), p]));
+	const removedSet = new Set(removedProjects.map(folderKey));
+	const projectPaths = dedupeFolders([
+		...(workspaceFolder ? [workspaceFolder] : []),
+		...recentFolders,
+		...projects.map((p) => p.path),
+	]).filter((path) => !removedSet.has(folderKey(path)));
 	const projectList: ProjectBucket[] = projectPaths.map((path) => {
-		const existing = bucketByPath.get(path);
+		const existing = bucketByPath.get(folderKey(path));
 		const name = projectName(path, projectNames);
 		if (existing) {
 			return existing.name === name ? existing : { ...existing, name };
@@ -7023,7 +7177,7 @@ export function SidebarPanelContent({
 	const looseChats: Conversation[] = [
 		...loose,
 		...projects
-			.filter((p) => removedSet.has(p.path))
+			.filter((p) => removedSet.has(folderKey(p.path)))
 			.flatMap((p) => p.conversations),
 	];
 
@@ -7350,7 +7504,7 @@ export function SidebarPanelContent({
 							className="h-8 rounded-md"
 							onClick={handleNewConversation}
 						>
-							<HugeiconsIcon className="size-4" icon={ChatAdd01Icon} />
+							<HugeiconsIcon className="size-4" icon={Add01Icon} />
 							<span>New chat</span>
 						</SidebarMenuButton>
 					</ChromeHideMenu>
@@ -7609,36 +7763,10 @@ export function SidebarPanelContent({
 						</div>
 					</div>
 				)}
-				{/* Logo lockup + Research Preview pill. BorderBeam matches BuildBadge
-				    (metal-fx freezes after first paint in the sidebar WebView). */}
 				{!hiddenChrome.has("logo") && (
-					<div
-						className={`flex w-full items-center gap-4 px-3 py-1.5 ${
-							hiddenChrome.has("node-selector") ? "pt-2" : ""
-						}`}
-					>
-						<div className="shrink-0 text-left">
-							<Logo className="text-foreground" size="20px" variant="outline" />
-						</div>
-						<BorderBeam
-							borderRadius={10}
-							className="inline-flex shrink-0 overflow-visible"
-							colorVariant="colorful"
-							size="sm"
-							strength={0.85}
-							style={{ borderRadius: "999px 999px 999px 0" }}
-							theme={beamTheme}
-						>
-							<div
-								className="inline-flex h-5 items-center bg-muted px-2 font-medium text-xs leading-none"
-								style={{ borderRadius: "999px 999px 999px 0" }}
-							>
-								{dev || channel !== "stable"
-									? `Research Preview (${dev ? "Dev" : channel === "canary" ? "Canary" : channel === "nightly" ? "Nightly" : "Beta"})`
-									: "Research Preview"}
-							</div>
-						</BorderBeam>
-					</div>
+					<SidebarBrandBadge
+						className={hiddenChrome.has("node-selector") ? "pt-2" : ""}
+					/>
 				)}
 				<SidebarMenu>
 					{effectiveChromeOrder

@@ -232,6 +232,13 @@
       "tsHost": false
     },
     {
+      "capability": "hooks.run",
+      "grant": "hook:run-self",
+      "method": "hooks.run",
+      "streaming": false,
+      "tsHost": false
+    },
+    {
       "capability": "agent.run",
       "grant": "hook:run-agent",
       "method": "agent.run.stream",
@@ -244,6 +251,13 @@
       "method": "agent.cancel",
       "streaming": false,
       "tsHost": true
+    },
+    {
+      "capability": "spaces.docs",
+      "grant": "spaces:docs",
+      "method": "spaces.ensureSpace",
+      "streaming": false,
+      "tsHost": false
     },
     {
       "capability": "spaces.docs",
@@ -1079,9 +1093,23 @@
       "tsHost": true
     },
     {
+      "capability": "subtitles.crud",
+      "grant": "subtitles:crud",
+      "method": "subtitles.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "reasoning.check",
       "grant": "reasoning:check",
       "method": "reasoning.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
+      "capability": "rlm.query",
+      "grant": "rlm:query",
+      "method": "rlm.request",
       "streaming": false,
       "tsHost": true
     },

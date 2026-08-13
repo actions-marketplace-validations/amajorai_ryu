@@ -13,7 +13,6 @@ import {
 	PuzzleIcon,
 	Settings01Icon,
 	Sun01Icon,
-	WebhookIcon,
 } from "@hugeicons/core-free-icons";
 import { renderTemplate } from "@ryu/app-host/views";
 import { CommandPalette as SharedCommandPalette } from "@ryu/command/CommandPalette";
@@ -30,7 +29,7 @@ import {
 	AlertDialogTitle,
 } from "@ryu/ui/components/alert-dialog";
 import { toast } from "@ryu/ui/components/sileo";
-import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
 import { useAuthContext } from "@/contexts/auth-context.tsx";
@@ -39,6 +38,7 @@ import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { parseContributedTarget } from "@/src/contributions/contributed-target.ts";
 import { contributionRegistry } from "@/src/contributions/registry.ts";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useContributedSectionItems } from "@/src/hooks/useContributedCommands.ts";
@@ -55,6 +55,7 @@ import { fireActivationEvent } from "@/src/lib/api/plugins.ts";
 import { indexChunk } from "@/src/lib/api/retrieval.ts";
 import { type ShadowSearchResult, searchShadow } from "@/src/lib/api/shadow.ts";
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
+import { listenWhenReady } from "@/src/lib/tauri-ready.ts";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 
 /** Safely read a string field off an opaque plugin-contribution record. */
@@ -186,19 +187,58 @@ export function CommandPalette() {
 	}, []);
 
 	// Tray quick actions (Rust emits these from src-tauri/src/tray.rs).
+	//
+	// `/timeline` is an app-owned path resolved through the companion-alias
+	// catch-all, and the owning app is default-OFF — so the tray item is gated on
+	// the same live feed the route mounts from, and does nothing when no enabled
+	// app claims it rather than opening an "App not enabled" tab. Same AFFORDANCE
+	// rule the `nav.timeline` hotkey in `Layout.tsx` already follows.
+	const timelineCompanion = useCompanionAlias("/timeline");
 	useEffect(() => {
-		const unlistenTimeline = listen("tray-open-timeline", () => {
-			openTab("/timeline");
-		});
-		const unlistenPalette = listen("tray-open-palette", () => setOpen(true));
-		const ignore = () => {
-			// Unlisten can fail if the window is already torn down; nothing to do.
+		// Routed through the ready-gate. This effect runs on the first render of the
+		// shell, which on a cold start can beat Tauri's injection of
+		// `window.__TAURI_INTERNALS__` — and a bare `listen()` then rejects reaching
+		// for `transformCallback`, which is the most frequent production signature
+		// (RUST-C, 66 events). The gate queues the subscribe until the bridge lands
+		// and degrades to a no-op unlisten when there is no bridge at all.
+		//
+		// The `.catch` is attached at subscribe time, NOT only in the cleanup: the
+		// palette stays mounted for the whole session, so its cleanup never runs on
+		// the boot path, and a rejection parked on an un-terminated promise fires
+		// `unhandledrejection` at the window before any later `.catch` could adopt it.
+		let disposed = false;
+		const unlisteners: UnlistenFn[] = [];
+		const track = (unlisten: UnlistenFn) => {
+			// Unmounted while the subscribe was still in flight — drop it immediately
+			// rather than leaking a listener with no owner.
+			if (disposed) {
+				unlisten();
+				return;
+			}
+			unlisteners.push(unlisten);
 		};
+		const ignore = (error: unknown) => {
+			console.error("tray event subscription failed", error);
+		};
+		listenWhenReady("tray-open-timeline", () => {
+			if (timelineCompanion) {
+				openTab("/timeline");
+			}
+		})
+			.then(track)
+			.catch(ignore);
+		listenWhenReady("tray-open-palette", () => setOpen(true))
+			.then(track)
+			.catch(ignore);
 		return () => {
-			unlistenTimeline.then((u) => u()).catch(ignore);
-			unlistenPalette.then((u) => u()).catch(ignore);
+			disposed = true;
+			for (const unlisten of unlisteners) {
+				unlisten();
+			}
 		};
-	}, [openTab]);
+		// `timelineCompanion` is a plain string|null, so this only re-subscribes
+		// when the owning app is actually enabled or disabled.
+	}, [openTab, timelineCompanion]);
 
 	// Debounced "search everything" against Shadow's captured context (window
 	// titles, clipboard, files, git, terminal, OCR). Resolves to [] when Shadow
@@ -504,15 +544,15 @@ export function CommandPalette() {
 				value: "navigate extensions browser desktop add-ons",
 				icon: PuzzleIcon,
 				onSelect: () => handleNavigate("/extensions"),
-			},
-			{
-				id: "nav-webhooks",
-				group: "Navigation",
-				title: "Webhooks",
-				value: "navigate webhooks endpoints ingress public url triggers",
-				icon: WebhookIcon,
-				onSelect: () => handleNavigate("/webhooks"),
 			}
+			// "Webhooks" used to be a fourth row here. `/webhooks` is owned by the
+			// `@ryu/webhooks` app, which declares a companion — so the loop below
+			// already lists it, live, exactly when the app is enabled. The hardcoded
+			// row was the same mistake NAV_ITEMS' comment describes (it rendered on a
+			// fresh install, where the app is off, and led to "App not enabled"), and
+			// worse: sitting in a hardcoded list put it in `navTargets`, whose dedupe
+			// then SUPPRESSED the app's own declaration. Deleting it is what makes
+			// the real entry appear.
 		);
 
 		// Companion surfaces contributed by enabled plugins — navigable entries

@@ -11,9 +11,9 @@
 // authoring bit re-key the memoized host. Web mounts its own read-only host with
 // `install: null`.
 
-import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
-import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
-import { fitStyle } from "@ryu/blocks/desktop/model-catalog";
+import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown.tsx";
+import { InstallProgressButton } from "@ryu/blocks/desktop/install-button.tsx";
+import { fitStyle } from "@ryu/blocks/desktop/model-catalog.tsx";
 import { DependencyLookupProvider } from "@ryu/marketplace/catalog/detail/dependency-graph";
 import {
 	type CatalogHost,
@@ -41,6 +41,7 @@ import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
 import { fetchPluginVersionDetail } from "@/src/lib/api/plugins.ts";
 import { installSidecar } from "@/src/lib/services-api.ts";
 import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
+import { useInstallingLookup } from "@/src/store/useInstallStore.ts";
 
 /** The install button the shared sections render, wired to the desktop downloads
  *  store: it looks up the live percent for the item and renders the progress
@@ -57,7 +58,8 @@ function DesktopInstallButton({
 }: CatalogInstallButtonProps) {
 	const { percent } = useInstallProgress(
 		progress.kinds as DownloadKind[],
-		progress.name
+		progress.name,
+		progress.taskId
 	);
 	return (
 		<InstallProgressButton
@@ -72,6 +74,14 @@ function DesktopInstallButton({
 		</InstallProgressButton>
 	);
 }
+
+/** The desktop's shared install state, exposed to the shared sections through the
+ *  install seam. Module-level (like {@link DesktopInstallButton}) so the memoized
+ *  host never hands the sections a new hook identity on a node switch. */
+const desktopInstall = {
+	InstallButton: DesktopInstallButton,
+	useInstallingLookup,
+};
 
 /** Active node identity, normalized to the shared seam's `{url, token}` shape. */
 function useCatalogNode(): CatalogNode {
@@ -118,7 +128,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	const host = useMemo<CatalogHost>(
 		() => ({
 			canAuthorSkills: skillEditorOwner !== null,
-			install: { InstallButton: DesktopInstallButton },
+			install: desktopInstall,
 			Markdown,
 			// Reads the listing's repo at a version tag. Bound to the active node
 			// here so the shared panel stays node-agnostic, matching how

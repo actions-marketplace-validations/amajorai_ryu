@@ -6,7 +6,7 @@
 // the platform release bundle into `~/.ryu/island/` (extracting the `.app` on macOS),
 // then spawns it detached. Island self-guards with a single-instance lock, so calling
 // this when it is already running just focuses the existing window.
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "../tauri-ready.ts";
 
 /**
  * Ensure the Island companion is installed, then launch it. Resolves to the launched
@@ -15,4 +15,4 @@ import { invoke } from "@tauri-apps/api/core";
  * non-fatal (Island is a companion, not required for the app to function).
  */
 export const installAndLaunchIsland = (): Promise<string> =>
-	invoke("install_and_launch_island");
+	invokeWhenReady("install_and_launch_island");

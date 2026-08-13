@@ -206,8 +206,9 @@ pub(crate) struct GithubTopicRecord {
 ///   topic-squatting repo may title itself anything and still renders as
 ///   `<owner>`'s unreviewed listing under the community trust notice.
 /// - **Bounded and scrubbed.** Every string is control-char-stripped and length
-///   capped, `iconUrl` goes through [`sanitize_url`], and `icon` must look like a
-///   glyph id ([`scrub_icon_id`]) — a card renders whatever it is handed.
+///   capped, `iconUrl` goes through [`sanitize_url`], `icon` must look like a
+///   glyph id ([`scrub_icon_id`]), and the `banner` is rebuilt key by key
+///   ([`scrub_banner`]) — a card renders whatever it is handed.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RepoManifestDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,6 +225,40 @@ pub(crate) struct RepoManifestDisplay {
     tagline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     category: Option<String>,
+    /// The icon square's painted plate — the same two keys every first-party
+    /// manifest declares. Without them a community card falls through `AppIcon`'s
+    /// flat `bg-muted` branch while every listing beside it gets a coloured
+    /// gradient, which is the whole reason the community shelf read as a different
+    /// component. Validated, never passed through: see [`scrub_icon_dither`] /
+    /// [`scrub_css_color`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_dither: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_background: Option<String>,
+    /// The hero band's own art — the `banner` key a first-party manifest declares,
+    /// including the `animated-gradient` style and its preset/config. Dropping it
+    /// was why a community listing could never open with anything but the wash
+    /// derived from its icon, no matter what its manifest said.
+    ///
+    /// `#[serde(default)]` matters here beyond the usual: an existing disk cache
+    /// was written before this field existed, so every cached record has to keep
+    /// deserializing — a banner simply stays `None` until the repo is re-probed.
+    ///
+    /// Rebuilt key by key, never passed through ([`scrub_banner`]): the colours
+    /// reach a CSS background AND a WebGL uniform, and the numbers reach the
+    /// shader, where an unbounded value is a frozen tab rather than an ugly card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    banner: Option<Value>,
+    /// Does the manifest claim a UI DESTINATION — a companion runnable, a dock
+    /// panel, or a top-level sidebar-button target? The same three keys Core's own
+    /// `manifest_declares_destination` reads, so one rule decides app-vs-plugin for
+    /// a community repo and for a built-in.
+    ///
+    /// Used for ONE thing: breaking the tie when a repo carries BOTH topics (see
+    /// [`resolve_dual_topic_classification`]). A single-topic repo is classified by
+    /// its topic, full stop — this never overrides a publisher who tagged one topic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    has_destination: bool,
 }
 
 impl RepoManifestDisplay {
@@ -264,6 +299,19 @@ impl RepoManifestDisplay {
                 .and_then(scrub_version),
             tagline: text("tagline", MAX_TAGLINE_CHARS),
             category: text("category", MAX_CATEGORY_CHARS),
+            // Both spellings, because a manifest is authored in camelCase
+            // (`iconDither`) and read back from this cache in snake_case.
+            icon_dither: obj
+                .get("iconDither")
+                .or_else(|| obj.get("icon_dither"))
+                .and_then(scrub_icon_dither),
+            icon_background: obj
+                .get("iconBackground")
+                .or_else(|| obj.get("icon_background"))
+                .and_then(|v| v.as_str())
+                .and_then(scrub_css_color),
+            banner: obj.get("banner").and_then(scrub_banner),
+            has_destination: manifest_claims_destination(obj),
         };
         (out != Self::default()).then_some(out)
     }
@@ -298,6 +346,288 @@ pub(crate) fn scrub_icon_id(value: &str) -> Option<String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '|'))
         .then(|| trimmed.to_string())
+}
+
+/// A CSS colour from an untrusted manifest, for the icon square's flat background.
+///
+/// This one is stricter than its siblings because it lands somewhere they do not:
+/// `AppIcon` puts it in an inline `style={{ background }}`, i.e. straight into CSS.
+/// So the alphabet is closed rather than merely bounded — a hex literal, a bare
+/// CSS colour keyword, or one colour function (`rgb`/`hsl`/`oklch`/…) whose body is
+/// digits, units and separators. Everything else, `url(…)`/`expression(…)`/`;`/
+/// comment syntax included, is dropped rather than sanitized: a card that renders
+/// the publisher's colour is worth having, and one that renders their CSS is not.
+pub(crate) fn scrub_css_color(value: &str) -> Option<String> {
+    const MAX_CSS_COLOR_CHARS: usize = 64;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_CSS_COLOR_CHARS {
+        return None;
+    }
+    // `#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`.
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        let ok = matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+        return ok.then(|| trimmed.to_string());
+    }
+    // A bare keyword (`rebeccapurple`, `transparent`).
+    if trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Some(trimmed.to_string());
+    }
+    // One colour function, and nothing after its closing paren — so a value can
+    // never carry a second declaration.
+    let (name, rest) = trimmed.split_once('(')?;
+    let known = matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "lab" | "lch" | "oklab" | "oklch"
+    );
+    let body = rest.strip_suffix(')')?;
+    let body_ok = body
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ' ' | '%' | '/' | '+' | '-'));
+    (known && body_ok).then(|| trimmed.to_string())
+}
+
+/// The dithered-gradient spec from an untrusted manifest, rebuilt field by field.
+///
+/// Never passed through as opaque JSON: the spec reaches `DitherGradient`, which
+/// paints a real gradient, so an unvalidated object from an unsigned repo is a
+/// styling channel. `from`/`to` are a hue number (0–360) or a palette-colour NAME
+/// (the client's `isDitherColor` is the authority on which names exist and falls
+/// back on anything else — the bound here just keeps the alphabet closed);
+/// `direction` is one of the four the kit accepts. Returns `None` unless at least
+/// `from` survives, since the component needs it.
+pub(crate) fn scrub_icon_dither(value: &Value) -> Option<Value> {
+    let obj = value.as_object()?;
+    let color = |key: &str| -> Option<Value> {
+        match obj.get(key)? {
+            Value::Number(n) => n
+                .as_f64()
+                .filter(|h| h.is_finite() && (0.0..=360.0).contains(h))
+                .map(|h| Value::from(h)),
+            Value::String(s) => {
+                let t = s.trim();
+                (!t.is_empty()
+                    && t.len() <= 32
+                    && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                .then(|| Value::String(t.to_ascii_lowercase()))
+            }
+            _ => None,
+        }
+    };
+    let from = color("from")?;
+    let mut out = serde_json::Map::new();
+    out.insert("from".to_string(), from);
+    if let Some(to) = color("to") {
+        out.insert("to".to_string(), to);
+    }
+    if let Some(direction) = obj
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| matches!(s.as_str(), "up" | "down" | "left" | "right"))
+    {
+        out.insert("direction".to_string(), Value::String(direction));
+    }
+    Some(Value::Object(out))
+}
+
+/// The styles a banner may declare. `animated-gradient` is the only one that
+/// selects a RENDERER (the WebGL field) rather than describing which key the
+/// author meant, which is why an unknown token is dropped rather than passed on:
+/// a card must not be able to name a renderer this build has never heard of.
+const BANNER_STYLES: [&str; 5] = ["gradient", "animated-gradient", "dither", "flat", "image"];
+/// The six named looks the animated gradient ships. Anything else falls back to
+/// the default on the client, so an unknown preset costs a look, not a banner.
+const BANNER_GRADIENT_PRESETS: [&str; 6] =
+    ["lava", "prism", "plasma", "pulse", "vortex", "mist"];
+/// The base patterns the gradient warps over.
+const BANNER_GRADIENT_SHAPES: [&str; 3] = ["checks", "stripes", "edge"];
+/// A ramp is a handful of stops; a manifest declaring hundreds is not a banner.
+const MAX_BANNER_COLORS: usize = 8;
+
+/// A finite number from an untrusted manifest, clamped into range.
+///
+/// The clamp is the point. These values become shader uniforms on the client, and
+/// `swirlIterations: 1e6` or `scale: 1e9` is a loop the GPU runs — a frozen tab,
+/// not a bad-looking listing. The client clamps again on paint (a banner can also
+/// arrive from a source that never came through here); this is the near end of
+/// that same guard, so a hostile value is never even cached.
+fn scrub_banner_number(value: Option<&Value>, min: f64, max: f64) -> Option<Value> {
+    let n = value?.as_f64()?;
+    n.is_finite().then(|| Value::from(n.clamp(min, max)))
+}
+
+/// One closed-set token, lowercased, or `None`.
+fn scrub_enum(value: Option<&Value>, allowed: &[&str]) -> Option<Value> {
+    let token = value?.as_str()?.trim().to_ascii_lowercase();
+    allowed
+        .contains(&token.as_str())
+        .then(|| Value::String(token))
+}
+
+/// The animated-gradient spec inside a banner, rebuilt field by field.
+///
+/// Keys are emitted in the camelCase the client's `CatalogBannerGradient`
+/// declares (`shapeSize`, `swirlIterations`, `color1`) — this JSON is read by the
+/// render layer, not by serde, so the snake_case spelling a Rust struct would
+/// produce would arrive and paint nothing.
+fn scrub_banner_gradient(value: &Value) -> Option<Value> {
+    let obj = value.as_object()?;
+    let mut out = serde_json::Map::new();
+    if let Some(preset) = scrub_enum(obj.get("preset"), &BANNER_GRADIENT_PRESETS) {
+        out.insert("preset".to_string(), preset);
+    }
+    if let Some(shape) = scrub_enum(obj.get("shape"), &BANNER_GRADIENT_SHAPES) {
+        out.insert("shape".to_string(), shape);
+    }
+    for key in ["color1", "color2", "color3"] {
+        if let Some(color) = obj.get(key).and_then(|v| v.as_str()).and_then(scrub_css_color) {
+            out.insert(key.to_string(), Value::String(color));
+        }
+    }
+    // The 0-100 slider form the component's own docs use, which is what an author
+    // copying those docs writes.
+    for key in [
+        "distortion",
+        "proportion",
+        "shapeSize",
+        "softness",
+        "speed",
+        "swirl",
+    ] {
+        if let Some(n) = scrub_banner_number(obj.get(key), 0.0, 100.0) {
+            out.insert(key.to_string(), n);
+        }
+    }
+    if let Some(n) = scrub_banner_number(obj.get("rotation"), 0.0, 360.0) {
+        out.insert("rotation".to_string(), n);
+    }
+    if let Some(n) = scrub_banner_number(obj.get("offset"), -100.0, 100.0) {
+        out.insert("offset".to_string(), n);
+    }
+    if let Some(n) = scrub_banner_number(obj.get("scale"), 0.01, 4.0) {
+        out.insert("scale".to_string(), n);
+    }
+    if let Some(n) = scrub_banner_number(obj.get("swirlIterations"), 0.0, 20.0) {
+        out.insert("swirlIterations".to_string(), n);
+    }
+    (!out.is_empty()).then(|| Value::Object(out))
+}
+
+/// The hero banner from an untrusted manifest, rebuilt key by key.
+///
+/// Community listings used to lose this entirely: every icon field was lifted and
+/// `banner` was not, so a repo could declare a hero and only ever get the wash
+/// derived from its icon. It is presentation only — it changes how the band is
+/// painted, never what the card claims about itself — and it is the same key a
+/// first-party manifest declares, so one shape serves both.
+///
+/// TWO NARROWINGS relative to what a first-party manifest may declare, both
+/// deliberate:
+///
+/// * `background` goes through [`scrub_css_color`], so a community banner may
+///   name a COLOUR but not an arbitrary CSS background. The client's own guard is
+///   a blocklist of fetching functions, which is right for a signed manifest;
+///   from an unsigned repo an allowlist is cheap and a `linear-gradient` can be
+///   expressed with `colors` instead.
+/// * `colors` is all-or-nothing. The stops are joined into ONE ramp downstream, so
+///   keeping the survivors of a rejected palette would paint a gradient the author
+///   never wrote — the same rule the render layer applies.
+pub(crate) fn scrub_banner(value: &Value) -> Option<Value> {
+    let obj = value.as_object()?;
+    let mut out = serde_json::Map::new();
+    if let Some(style) = scrub_enum(obj.get("style"), &BANNER_STYLES) {
+        out.insert("style".to_string(), style);
+    }
+    if let Some(bg) = obj
+        .get("background")
+        .and_then(|v| v.as_str())
+        .and_then(scrub_css_color)
+    {
+        out.insert("background".to_string(), Value::String(bg));
+    }
+    if let Some(stops) = obj.get("colors").and_then(|v| v.as_array()) {
+        let scrubbed: Vec<Value> = stops
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter_map(scrub_css_color)
+            .map(Value::String)
+            .collect();
+        if !stops.is_empty() && stops.len() <= MAX_BANNER_COLORS && scrubbed.len() == stops.len() {
+            out.insert("colors".to_string(), Value::Array(scrubbed));
+        }
+    }
+    // Both spellings on the way IN, camelCase on the way out — the same
+    // asymmetry `iconDither` already has, and for the same reason: a manifest is
+    // authored in camelCase and this cache is read back in snake_case.
+    if let Some(url) = obj
+        .get("imageUrl")
+        .or_else(|| obj.get("image_url"))
+        .and_then(|v| v.as_str())
+        .and_then(sanitize_url)
+    {
+        out.insert("imageUrl".to_string(), Value::String(url));
+    }
+    if let Some(seed) = scrub_banner_number(obj.get("seed"), 0.0, f64::from(u32::MAX)) {
+        out.insert("seed".to_string(), seed);
+    }
+    if let Some(noise) = obj.get("noise").and_then(|v| v.as_object()) {
+        let mut grain = serde_json::Map::new();
+        if let Some(opacity) = scrub_banner_number(noise.get("opacity"), 0.0, 100.0) {
+            grain.insert("opacity".to_string(), opacity);
+        }
+        if let Some(scale) = scrub_banner_number(noise.get("scale"), 0.1, 10.0) {
+            grain.insert("scale".to_string(), scale);
+        }
+        if !grain.is_empty() {
+            out.insert("noise".to_string(), Value::Object(grain));
+        }
+    }
+    if let Some(gradient) = obj.get("gradient").and_then(scrub_banner_gradient) {
+        out.insert("gradient".to_string(), gradient);
+    }
+    (!out.is_empty()).then(|| Value::Object(out))
+}
+
+/// Does a LOOSELY-PARSED third-party manifest claim a UI destination?
+///
+/// The same three keys Core's typed `manifest_declares_destination` reads — a
+/// `companion` runnable, a non-empty `contributes.dock_panels`, or a top-level
+/// `contributes.sidebar_buttons[].target` — restated against raw JSON because a
+/// community manifest is never deserialized into `PluginManifest` (one missing
+/// required field on any typed member would drop the whole thing, and this path
+/// must survive a manifest that is merely sloppy). The route test itself is not
+/// re-implemented: it is [`crate::server::is_top_level_route`].
+fn manifest_claims_destination(obj: &serde_json::Map<String, Value>) -> bool {
+    let has_companion = obj
+        .get("runnables")
+        .and_then(Value::as_array)
+        .is_some_and(|rs| {
+            rs.iter()
+                .any(|r| r.get("kind").and_then(Value::as_str) == Some("companion"))
+        });
+    if has_companion {
+        return true;
+    }
+    let Some(contributes) = obj.get("contributes") else {
+        return false;
+    };
+    let has_dock_panel = contributes
+        .get("dock_panels")
+        .and_then(Value::as_array)
+        .is_some_and(|panels| !panels.is_empty());
+    if has_dock_panel {
+        return true;
+    }
+    contributes
+        .get("sidebar_buttons")
+        .and_then(Value::as_array)
+        .is_some_and(|buttons| {
+            buttons.iter().any(|b| {
+                b.get("target")
+                    .and_then(Value::as_str)
+                    .is_some_and(crate::server::is_top_level_route)
+            })
+        })
 }
 
 /// A version string from an untrusted manifest — semver's alphabet only, so the
@@ -492,13 +822,18 @@ impl GithubTopicSource {
     }
 
     async fn fetch_records(&self, previous: Option<&GithubTopicCache>) -> Result<GithubTopicCache> {
-        // Apps first, then plugins, so a repo carrying BOTH topics is classified as
-        // an app by the first-writer-wins dedupe below.
+        // Apps first, then plugins, so a repo carrying BOTH topics survives the
+        // first-writer-wins dedupe below as ONE row. Which tab that row belongs in
+        // is then decided by evidence rather than by this ordering — see
+        // `resolve_dual_topic_classification`, which runs after hydration because
+        // the evidence is the repo's own manifest.
         let apps = self.fetch_topic(true).await?;
         let plugins = self.fetch_topic(false).await?;
+        let dual_topic = dual_topic_names(&apps, &plugins);
         let mut records = dedupe_records(vec![apps, plugins]);
         carry_manifests(&mut records, previous.map(|c| c.records.as_slice()));
         self.hydrate_manifests(&mut records).await;
+        resolve_dual_topic_classification(&mut records, &dual_topic);
         Ok(GithubTopicCache {
             fetched_at: std::time::Instant::now(),
             records,
@@ -817,9 +1152,61 @@ pub(crate) fn carry_manifests(
     }
 }
 
+/// The repos that answered BOTH topic queries, by lowercased `full_name`.
+///
+/// Publishers routinely tag `ryu-app` AND `ryu-plugin` for discoverability, so this
+/// set is not an edge case — it is the population whose tab used to be decided by
+/// which query this source happened to run first.
+pub(crate) fn dual_topic_names(
+    apps: &[GithubTopicRecord],
+    plugins: &[GithubTopicRecord],
+) -> std::collections::HashSet<String> {
+    let app_names: std::collections::HashSet<String> = apps
+        .iter()
+        .map(|r| r.full_name.to_ascii_lowercase())
+        .collect();
+    plugins
+        .iter()
+        .map(|r| r.full_name.to_ascii_lowercase())
+        .filter(|n| app_names.contains(n))
+        .collect()
+}
+
+/// Decide app-vs-plugin for the repos that carried BOTH topics, from the manifest
+/// instead of from query order.
+///
+/// A SINGLE-topic repo is never touched: the publisher answered the question and
+/// this must not overrule them. For a dual-tagged repo there is no answer in the
+/// topics at all, and the old rule ("apps are queried first, so apps win") meant
+/// every such repo landed in the Apps tab — including four-line tool plugins whose
+/// own manifest says otherwise.
+///
+/// The fallback is deliberately today's behaviour: a repo with no manifest, or one
+/// whose probe timed out or is negatively cached, stays an app. Classification now
+/// depends on a deadline-bounded probe ([`MANIFEST_HYDRATE_DEADLINE`]) with a 7-day
+/// negative cache, so the failure mode has to be "unchanged", never "moves to the
+/// other tab until the network is better".
+pub(crate) fn resolve_dual_topic_classification(
+    records: &mut [GithubTopicRecord],
+    dual_topic: &std::collections::HashSet<String>,
+) {
+    if dual_topic.is_empty() {
+        return;
+    }
+    for record in records.iter_mut() {
+        if !dual_topic.contains(&record.full_name.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(manifest) = record.manifest.as_ref() {
+            record.is_app = manifest.has_destination;
+        }
+    }
+}
+
 /// Merge topic result groups, deduping by lowercased `full_name`, first writer
-/// wins. Called with `[apps, plugins]`, so a repo carrying both topics lands as
-/// an app.
+/// wins. Called with `[apps, plugins]`, so a repo carrying both topics collapses to
+/// the app-topic row — whose classification
+/// [`resolve_dual_topic_classification`] then settles from the manifest.
 pub(crate) fn dedupe_records(groups: Vec<Vec<GithubTopicRecord>>) -> Vec<GithubTopicRecord> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out: Vec<GithubTopicRecord> = Vec::new();
@@ -883,11 +1270,36 @@ pub(crate) fn record_to_item(record: &GithubTopicRecord) -> Value {
         "has_companion": record.is_app,
         "developer": record.owner,
         "owner": record.owner,
-        // The manifest's glyph id, when it declares one. The owner AVATAR stays the
-        // raster fallback: without a declared icon it is still the only thing that
-        // distinguishes one community card from another.
+        // The manifest's own art, and NOTHING else — in particular not the owner's
+        // GitHub avatar, which used to stand in here.
+        //
+        // That fallback is why the community shelf read as a different component
+        // from every other shelf. `AppIcon` gives an art-less listing the generative
+        // tile seeded from its id (a painted square, the same treatment a first-party
+        // listing gets from its declared dither), but ONLY when it has no icon at
+        // all; any `iconUrl` suppresses the tile and takes the flat `bg-muted`
+        // branch. Since a GitHub repo ALWAYS has an owner avatar, every community
+        // card took that branch and every one of them looked flat next to the
+        // painted plates beside it.
+        //
+        // Nothing is lost by dropping it: the avatar is the ORG's, so all of one
+        // publisher's listings shared a single mark and it distinguished nothing
+        // between them — the complaint this struct's doc opens with. The seeded tile
+        // is keyed on the listing's own id, so it distinguishes MORE, and identity
+        // still reads off `developer`/`owner`, which are GitHub's.
         "icon": manifest_str(|m| m.icon.as_ref()),
-        "icon_url": manifest_str(|m| m.icon_url.as_ref()).or_else(|| record.avatar_url.clone()),
+        "icon_url": manifest_str(|m| m.icon_url.as_ref()),
+        // The icon square's plate, declared exactly the way a first-party manifest
+        // declares it. Presentation only — it changes how the tile is painted, never
+        // what the card claims about itself — and both values were rebuilt from a
+        // closed alphabet on the way in, because they reach a CSS gradient.
+        "icon_dither": manifest.and_then(|m| m.icon_dither.clone()),
+        "icon_background": manifest_str(|m| m.icon_background.as_ref()),
+        // The hero band the repo declared for itself. Same posture as the plate
+        // above — presentation only, rebuilt from a closed alphabet on the way in,
+        // and re-guarded again at paint because the render layer can never assume
+        // which source a banner arrived from.
+        "banner": manifest.and_then(|m| m.banner.clone()),
         // "Community" stays the default shelf: it is the provenance disclosure, and
         // a self-declared category only refines it.
         "category": manifest_str(|m| m.category.as_ref()).unwrap_or_else(|| "Community".to_string()),
@@ -964,6 +1376,13 @@ pub(crate) fn manifest_display_fields(manifest: &Value) -> serde_json::Map<Strin
         if let Some(v) = obj.get(key).filter(|v| !v.is_null()) {
             out.insert(key.to_string(), v.clone());
         }
+    }
+    // The detail payload carries the banner too, through the SAME scrub the card
+    // path uses. The hero reads the card's copy, so this is not what paints today —
+    // but a list and a detail that disagree about a listing's own art is the exact
+    // drift this function's doc opens by warning about.
+    if let Some(banner) = obj.get("banner").and_then(scrub_banner) {
+        out.insert("banner".to_string(), banner);
     }
     // Runnable *kinds* only — the shapes, never their code.
     if let Some(runnables) = obj.get("runnables").and_then(|v| v.as_array()) {
@@ -1064,9 +1483,11 @@ impl CatalogSource for GithubTopicSource {
                 .and_then(|m| m.description.clone())
                 .or_else(|| record.description.clone()),
             "icon": declared.and_then(|m| m.icon.clone()),
-            "iconUrl": declared
-                .and_then(|m| m.icon_url.clone())
-                .or_else(|| record.avatar_url.clone()),
+            // No owner-avatar fallback, for the reason spelled out in
+            // `record_to_item`: it suppressed the seeded tile on every art-less
+            // listing. In lockstep with the card so the hero and the row you clicked
+            // paint the same square.
+            "iconUrl": declared.and_then(|m| m.icon_url.clone()),
             "developer": record.owner,
             "homepage": record.homepage,
             "repositoryUrl": record.html_url,
@@ -1249,11 +1670,236 @@ mod tests {
         let as_plugin = repo_item_to_record(&repo("ACME/Dual", 5), false).unwrap();
         let other = repo_item_to_record(&repo("other/one", 1), false).unwrap();
         // Apps group first — the same repo discovered under both topics collapses
-        // to ONE app row.
+        // to ONE row, and it is the app-topic row that survives. Which TAB that row
+        // ends up in is settled separately, from the manifest; see
+        // `a_dual_tagged_repo_is_classified_by_its_manifest_not_by_query_order`.
         let merged = dedupe_records(vec![vec![as_app], vec![as_plugin, other]]);
         assert_eq!(merged.len(), 2);
         assert!(merged[0].is_app, "the app-topic hit must win the dedupe");
         assert_eq!(merged[0].full_name, "acme/dual");
+    }
+
+    /// A repo tagged `ryu-app` AND `ryu-plugin` used to be an app purely because
+    /// this source queries the app topic first — so every publisher who tagged both
+    /// for discoverability (most of them) filled the Apps tab. The tie is now broken
+    /// by the manifest, and ONLY for dual-tagged repos.
+    #[test]
+    fn a_dual_tagged_repo_is_classified_by_its_manifest_not_by_query_order() {
+        let hydrate = |record: &mut GithubTopicRecord, manifest: serde_json::Value| {
+            record.manifest = RepoManifestDisplay::from_manifest(&manifest);
+            record.manifest_probed_at = 1;
+        };
+        let dual = |name: &str| -> std::collections::HashSet<String> {
+            std::collections::HashSet::from([name.to_string()])
+        };
+
+        // Dual-tagged, and its manifest declares nothing but a tool: a plugin.
+        let mut records = vec![repo_item_to_record(&repo("acme/dual", 5), true).unwrap()];
+        hydrate(
+            &mut records[0],
+            serde_json::json!({
+                "name": "Dual",
+                "runnables": [{ "id": "t", "name": "T", "kind": "tool" }]
+            }),
+        );
+        resolve_dual_topic_classification(&mut records, &dual("acme/dual"));
+        assert!(!records[0].is_app);
+        assert_eq!(record_to_item(&records[0])["type"], "plugin");
+
+        // Dual-tagged with a dock panel: still an app.
+        let mut records = vec![repo_item_to_record(&repo("acme/dual", 5), true).unwrap()];
+        hydrate(
+            &mut records[0],
+            serde_json::json!({
+                "name": "Dual",
+                "contributes": { "dock_panels": [
+                    { "id": "p", "title": "P", "placement": "bottom", "panel": "native" }
+                ] }
+            }),
+        );
+        resolve_dual_topic_classification(&mut records, &dual("acme/dual"));
+        assert!(records[0].is_app);
+
+        // Dual-tagged, no manifest (or a probe that timed out / is negatively
+        // cached): unchanged, i.e. still the app the query order made it. The
+        // classification must never flap with network weather.
+        let mut records = vec![repo_item_to_record(&repo("acme/dual", 5), true).unwrap()];
+        resolve_dual_topic_classification(&mut records, &dual("acme/dual"));
+        assert!(records[0].is_app);
+
+        // SINGLE-topic repos are never touched, even carrying a manifest that would
+        // have said otherwise — the publisher answered the question.
+        let mut records = vec![repo_item_to_record(&repo("acme/solo", 5), true).unwrap()];
+        hydrate(
+            &mut records[0],
+            serde_json::json!({ "runnables": [{ "id": "t", "name": "T", "kind": "tool" }] }),
+        );
+        resolve_dual_topic_classification(&mut records, &dual("acme/dual"));
+        assert!(records[0].is_app);
+
+        // And the dual set is exactly the intersection, by lowercased full_name.
+        let apps = vec![
+            repo_item_to_record(&repo("acme/dual", 5), true).unwrap(),
+            repo_item_to_record(&repo("acme/only-app", 1), true).unwrap(),
+        ];
+        let plugins = vec![
+            repo_item_to_record(&repo("ACME/Dual", 5), false).unwrap(),
+            repo_item_to_record(&repo("other/one", 1), false).unwrap(),
+        ];
+        let names = dual_topic_names(&apps, &plugins);
+        assert_eq!(names, dual("acme/dual"));
+    }
+
+    /// The icon plate a community repo declares for itself. Without it the shelf's
+    /// cards fall through `AppIcon`'s flat `bg-muted` branch while every listing
+    /// beside them gets a painted gradient — the same card component looking like
+    /// two different ones.
+    #[test]
+    fn a_manifest_can_declare_its_icon_plate_and_only_within_a_closed_alphabet() {
+        let lifted = RepoManifestDisplay::from_manifest(&serde_json::json!({
+            "name": "Thing",
+            "iconDither": { "from": 288, "to": "transparent", "direction": "down" },
+            "iconBackground": "#0099ff"
+        }))
+        .expect("a declared plate hydrates");
+        let mut record = repo_item_to_record(&repo("acme/thing", 3), false).unwrap();
+        record.manifest = Some(lifted);
+        let item = record_to_item(&record);
+        assert_eq!(
+            item["icon_dither"],
+            serde_json::json!({ "from": 288.0, "to": "transparent", "direction": "down" })
+        );
+        assert_eq!(item["icon_background"], "#0099ff");
+
+        // The background reaches an inline CSS `background`, so the alphabet is
+        // closed: colours in, declarations and `url(…)` out.
+        assert_eq!(scrub_css_color("#abc"), Some("#abc".to_string()));
+        assert_eq!(
+            scrub_css_color("oklch(0.7 0.1 240)"),
+            Some("oklch(0.7 0.1 240)".to_string())
+        );
+        assert_eq!(scrub_css_color("rebeccapurple"), Some("rebeccapurple".into()));
+        assert!(scrub_css_color("url(https://evil.example/x.png)").is_none());
+        assert!(scrub_css_color("red; position:fixed; inset:0").is_none());
+        assert!(scrub_css_color("rgb(0,0,0) /* */; background:url(x)").is_none());
+        assert!(scrub_css_color("#12345").is_none());
+
+        // The dither is rebuilt field by field, never passed through.
+        assert!(scrub_icon_dither(&serde_json::json!({ "to": 12 })).is_none(), "`from` is required");
+        assert_eq!(
+            scrub_icon_dither(&serde_json::json!({
+                "from": 10, "to": 900, "direction": "diagonal", "extra": "dropped"
+            })),
+            Some(serde_json::json!({ "from": 10.0 })),
+            "out-of-range, unknown and unlisted members are dropped, not carried"
+        );
+    }
+
+    /// The hero band a community repo declares for itself. Dropped entirely until
+    /// now: every icon field was lifted and `banner` was not, so a repo could
+    /// declare a hero and only ever get the wash derived from its icon.
+    #[test]
+    fn a_manifest_can_declare_its_hero_banner_including_an_animated_gradient() {
+        let lifted = RepoManifestDisplay::from_manifest(&serde_json::json!({
+            "name": "Thing",
+            "banner": {
+                "style": "animated-gradient",
+                "gradient": {
+                    "preset": "vortex",
+                    "color1": "#0099ff",
+                    "shape": "Stripes",
+                    "swirl": 80,
+                    "shapeSize": 10
+                },
+                "noise": { "opacity": 40, "scale": 2 }
+            }
+        }))
+        .expect("a declared banner hydrates");
+        let mut record = repo_item_to_record(&repo("acme/thing", 3), false).unwrap();
+        record.manifest = Some(lifted);
+        let item = record_to_item(&record);
+        assert_eq!(
+            item["banner"],
+            serde_json::json!({
+                "style": "animated-gradient",
+                "gradient": {
+                    "preset": "vortex",
+                    // Lowercased: the client matches a closed set, and `Stripes` is
+                    // what the component's own docs capitalise it as.
+                    "shape": "stripes",
+                    "color1": "#0099ff",
+                    "shapeSize": 10.0,
+                    "swirl": 80.0
+                },
+                "noise": { "opacity": 40.0, "scale": 2.0 }
+            })
+        );
+    }
+
+    /// Every value in a banner reaches either a CSS sink or a GPU uniform, so the
+    /// object is rebuilt key by key rather than passed through.
+    #[test]
+    fn a_banner_from_an_unsigned_repo_is_rebuilt_never_passed_through() {
+        // An unknown style names a renderer this build does not have; an unknown
+        // preset only names a look, so it is dropped and the client's default
+        // stands. Neither may travel.
+        assert!(scrub_banner(&serde_json::json!({ "style": "iframe" })).is_none());
+        assert_eq!(
+            scrub_banner(&serde_json::json!({
+                "style": "animated-gradient",
+                "gradient": { "preset": "malware", "shape": "hexagons" }
+            })),
+            Some(serde_json::json!({ "style": "animated-gradient" })),
+            "unknown tokens are dropped, and an empty gradient is not carried"
+        );
+
+        // A background that would make the browser fetch turns every viewer of the
+        // listing into a beacon hit. Colours in, declarations and `url(…)` out.
+        assert!(
+            scrub_banner(&serde_json::json!({
+                "background": "url(https://tracker.example/pixel.png)"
+            }))
+            .is_none()
+        );
+        assert!(
+            scrub_banner(&serde_json::json!({ "imageUrl": "javascript:alert(1)" })).is_none()
+        );
+
+        // One bad stop drops the WHOLE ramp — the stops are joined into a single
+        // gradient downstream, so the survivors would paint something unwritten.
+        assert!(
+            scrub_banner(&serde_json::json!({
+                "colors": ["#111111", "url(https://tracker.example/p.png)"]
+            }))
+            .is_none()
+        );
+
+        // The DoS surface: these become shader uniforms, and an unbounded loop
+        // count is a frozen tab rather than an ugly banner.
+        assert_eq!(
+            scrub_banner(&serde_json::json!({
+                "gradient": {
+                    "swirlIterations": 1_000_000,
+                    "scale": 1e9,
+                    "proportion": -50,
+                    "rotation": 5000
+                }
+            })),
+            Some(serde_json::json!({
+                "gradient": {
+                    "swirlIterations": 20.0,
+                    "scale": 4.0,
+                    "proportion": 0.0,
+                    "rotation": 360.0
+                }
+            }))
+        );
+
+        // An existing disk cache predates the field, so a record without one must
+        // still deserialize — the banner simply stays absent until a re-probe.
+        let cached: RepoManifestDisplay =
+            serde_json::from_value(serde_json::json!({ "name": "Thing" })).unwrap();
+        assert!(cached.banner.is_none());
     }
 
     #[test]
@@ -1475,16 +2121,61 @@ mod tests {
     }
 
     #[test]
-    fn an_unhydrated_card_still_falls_back_to_the_repo_slug_and_owner_avatar() {
+    fn an_unhydrated_card_falls_back_to_the_repo_slug_and_carries_no_art() {
         // Hydration is best-effort and deadline-bounded: a listing it has not
         // reached must still render, not blank out.
         let record = repo_item_to_record(&repo("acme/ryu-thing", 4), false).unwrap();
         assert!(record.manifest.is_none());
         let item = record_to_item(&record);
         assert_eq!(item["name"], "ryu-thing");
+        // No art of ANY kind — deliberately including the owner's avatar, which
+        // used to stand in here. `AppIcon` paints the generative tile seeded from
+        // the listing id only for a card with no icon at all, so the avatar was
+        // what forced every community card onto the flat `bg-muted` branch while
+        // the shelves beside it showed painted plates.
         assert_eq!(item["icon"], Value::Null);
-        assert_eq!(item["icon_url"], "https://avatars.githubusercontent.com/u/1");
+        assert_eq!(item["icon_url"], Value::Null);
+        assert_eq!(item["icon_dither"], Value::Null);
+        assert_eq!(item["icon_background"], Value::Null);
         assert_eq!(item["category"], "Community");
+    }
+
+    #[test]
+    fn a_community_card_carries_the_icon_plate_its_manifest_declares() {
+        // The other half of the same shelf-consistency fix: a repo that DOES
+        // declare the plate gets the identical painted square a first-party
+        // listing gets, because both travel the same two keys.
+        let record = hydrated(
+            "acme/ryu-thing",
+            serde_json::json!({
+                "name": "Thing",
+                "iconDither": { "from": 288, "to": "transparent", "direction": "down" },
+                "iconBackground": "#0099ff",
+            }),
+        );
+        let item = record_to_item(&record);
+        assert_eq!(item["icon_dither"]["from"], 288.0);
+        assert_eq!(item["icon_dither"]["to"], "transparent");
+        assert_eq!(item["icon_dither"]["direction"], "down");
+        assert_eq!(item["icon_background"], "#0099ff");
+
+        // …and a plate that is really a CSS payload is dropped, not sanitized: this
+        // JSON is unsigned and lands in an inline `style`.
+        let hostile = hydrated(
+            "acme/ryu-evil",
+            serde_json::json!({
+                // A name so the display record survives at all — the assertions
+                // below are then about the plate being rejected, not about the
+                // whole manifest having been dropped.
+                "name": "Evil",
+                "iconDither": { "from": "red; background: url(https://x/y)" },
+                "iconBackground": "url(https://x/y); position: fixed",
+            }),
+        );
+        let item = record_to_item(&hostile);
+        assert_eq!(item["name"], "Evil");
+        assert_eq!(item["icon_dither"], Value::Null);
+        assert_eq!(item["icon_background"], Value::Null);
     }
 
     #[test]

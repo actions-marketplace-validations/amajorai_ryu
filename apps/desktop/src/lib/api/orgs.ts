@@ -89,6 +89,20 @@ export interface TransferableView {
 export interface OrgListEntry {
 	createdAt: string | null;
 	id: string;
+	/**
+	 * True for the caller's personal workspace. Server-computed (earliest
+	 * membership) rather than derived here from the slug, so there is one rule
+	 * for it rather than a desktop copy that can drift — the same field, from the
+	 * same helper, that `/api/credits/transferable` puts on {@link OrgSummary}.
+	 */
+	isPersonal: boolean;
+	/**
+	 * The org's uploaded logo, exactly as the web dashboard's settings dialog
+	 * writes it. `null` when nobody has set one, which is a real answer and not a
+	 * failure: the UI falls back to the generative avatar seeded by `id`, the same
+	 * placeholder the web shows.
+	 */
+	logo: string | null;
 	name: string;
 	role: string | null;
 	slug: string;
@@ -105,8 +119,23 @@ export async function listOrgs(): Promise<OrgListEntry[]> {
 	if (!response.ok) {
 		throw new Error(await readError(response));
 	}
-	const body = (await response.json()) as { organizations?: OrgListEntry[] };
-	return body.organizations ?? [];
+	const body = (await response.json()) as {
+		organizations?: Partial<OrgListEntry>[];
+	};
+	// Normalized rather than cast straight through: the desktop talks to whatever
+	// control plane it is pointed at, and one older than the field is a plausible
+	// pairing. `undefined` reaching `EntityAvatar` as `src` would be harmless, but
+	// `isPersonal` deciding a branch on `undefined` is not — spell both out here
+	// so the rest of the app sees the declared shape.
+	return (body.organizations ?? []).map((org) => ({
+		createdAt: org.createdAt ?? null,
+		id: org.id ?? "",
+		isPersonal: org.isPersonal ?? false,
+		logo: org.logo ?? null,
+		name: org.name ?? "",
+		role: org.role ?? null,
+		slug: org.slug ?? "",
+	}));
 }
 
 /**

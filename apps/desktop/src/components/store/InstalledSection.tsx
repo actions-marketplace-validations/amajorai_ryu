@@ -14,7 +14,6 @@
 
 import {
 	ArrowDown01Icon,
-	BotIcon,
 	ComputerIcon,
 	Delete02Icon,
 	Download01Icon,
@@ -27,7 +26,6 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Markdown } from "@ryu/blocks/desktop/agent-elements/markdown";
-import AppIcon from "@ryu/marketplace/catalog/chrome/app-icon";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
 import StoreCatalogLayout, {
 	StoreCardGrid,
@@ -838,7 +836,7 @@ function InstalledAppDetail({
 							) : (
 								<HugeiconsIcon className="size-4" icon={Download04Icon} />
 							)}
-							Install
+							Add
 						</Button>
 					)}
 					{isInstalled && !app.mandatory ? (
@@ -850,7 +848,7 @@ function InstalledAppDetail({
 							variant="ghost"
 						>
 							<HugeiconsIcon className="size-4" icon={Delete02Icon} />
-							Uninstall
+							Remove
 						</Button>
 					) : null}
 					{/* A mandatory app gets no toggle at all. Core refuses the disable
@@ -922,21 +920,19 @@ function InstalledAppDetail({
 						app.mandatory ? "Required" : null,
 						app.runnables.some((r) => r.kind === AGENT_KIND) ? "Agent" : null,
 					].filter((b): b is string => Boolean(b))}
-					icon={
-						<AppIcon
-							cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
-							className="size-12 rounded-xl"
-							dither={app.iconDither}
-							fallback={<HugeiconsIcon className="size-8" icon={BotIcon} />}
-							iconBackground={app.iconBackground}
-							iconId={app.icon}
-							iconUrl={app.iconUrl}
-							name={app.name}
-							seedId={app.id}
-							size={28}
-						/>
-					}
+					cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+					dither={app.iconDither}
+					// No `icon` node: an app with no art of its own gets the generative
+					// tile seeded from its id, exactly as its CARD does (StoreCatalogCard
+					// drops the generic glyph for the same reason). Handing a BotIcon over
+					// here would make the hero the one surface showing a stock glyph where
+					// every other surface shows that app's own tile.
+					iconBackground={app.iconBackground}
+					iconId={app.icon}
+					iconName={app.name}
+					iconUrl={app.iconUrl}
 					name={app.name}
+					seedId={app.id}
 					tagline={cardDescription(app) ?? `v${installedVersionOf(app)}`}
 				/>
 			}
@@ -1008,9 +1004,9 @@ function InstalledAppDetail({
 			<AlertDialog onOpenChange={setConfirmUninstall} open={confirmUninstall}>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>Uninstall {app.name}?</AlertDialogTitle>
+						<AlertDialogTitle>Remove {app.name}?</AlertDialogTitle>
 						<AlertDialogDescription>
-							This removes {app.name} and disables it. You can reinstall it from
+							This removes {app.name} and disables it. You can add it again from
 							the store later. Its settings and permission grants are cleared.
 						</AlertDialogDescription>
 					</AlertDialogHeader>
@@ -1023,7 +1019,7 @@ function InstalledAppDetail({
 								});
 							}}
 						>
-							Uninstall
+							Remove
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialogContent>
@@ -1094,7 +1090,7 @@ function BuiltInAppDetail({
 							) : (
 								<HugeiconsIcon className="size-4" icon={Download01Icon} />
 							)}
-							Install
+							Add
 						</Button>
 					)}
 					{isInstalled && !isRunning ? (
@@ -1174,23 +1170,16 @@ function BuiltInAppDetail({
 						app.localOnly ? "Local only" : null,
 						isInstalled ? (isRunning ? "Running" : "Stopped") : "Not installed",
 					].filter((b): b is string => Boolean(b))}
-					icon={
-						<AppIcon
-							cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
-							className="size-12 rounded-xl"
-							dither={app.iconDither}
-							fallback={
-								<HugeiconsIcon className="size-8" icon={ComputerIcon} />
-							}
-							iconBackground={app.iconBackground}
-							iconId={app.icon}
-							iconUrl={app.iconUrl}
-							name={app.name}
-							seedId={app.id}
-							size={28}
-						/>
-					}
+					cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+					dither={app.iconDither}
+					// No `icon` node — see the app hero above: the generative tile is what
+					// this sidecar's card shows for the same artless item.
+					iconBackground={app.iconBackground}
+					iconId={app.icon}
+					iconName={app.name}
+					iconUrl={app.iconUrl}
 					name={app.name}
+					seedId={app.id}
 					tagline={cardDescription(app) ?? `v${installedVersionOf(app)}`}
 				/>
 			}

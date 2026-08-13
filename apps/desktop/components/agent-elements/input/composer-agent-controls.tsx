@@ -28,6 +28,7 @@
 import { Add01Icon, SparklesIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { ComposerModelSection } from "@ryu/blocks/composer/composer-acp-sections";
+import { acpHarnessSuffix } from "@ryu/blocks/composer/composer-trigger-summary";
 import { type ReactNode, useMemo } from "react";
 import { CapabilityBadges } from "@/components/agent-elements/input/capability-badges.tsx";
 import {
@@ -49,6 +50,7 @@ import { useUniversalPicker } from "@/components/agent-elements/input/use-univer
 import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { useRoutingAdvice } from "@/src/hooks/useRoutingAdvice.ts";
 import {
@@ -59,6 +61,10 @@ import {
 import type { AgentSummary } from "@/src/lib/api/agents.ts";
 import { filterEnabledModels } from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
+import {
+	showsComposerTuning,
+	showsModelPicker,
+} from "@/src/lib/interface-level.ts";
 
 /** Sentinel `ModeSelector` value that routes to the "create a new agent" flow. */
 export const CREATE_AGENT_MODE = "__create_agent__";
@@ -152,13 +158,13 @@ export interface ComposerAgentControlsConfig {
 	 */
 	atConversationStart?: boolean;
 	/**
-	 * Compact single-row composer (used once a chat has history). When true the
-	 * whole cluster moves to the composer's RIGHT (`rightActions`), to the left of
-	 * the mic/send, and `leftActions` is `null` so only the "+" stays on the left.
-	 * The subscription usage meters — which no longer fit as standalone chips —
-	 * fold into the settings-menu trigger as trailing. Implies the compact
-	 * trigger (agent name + logo + usage). Defaults to the roomy left-aligned
-	 * stacked layout.
+	 * Denser composer (used once a chat has history). It is a DENSITY flag, not a
+	 * layout one: the control cluster is left-aligned in the stacked controls row
+	 * on every surface, exactly as the launchpad renders it, so compact and full
+	 * cannot drift into two arrangements. What compact still changes is size —
+	 * the settings-menu trigger shortens to `[logo] agent [usage] ⌄` (it implies
+	 * {@link compactTrigger}) and the subscription usage meters fold INTO that
+	 * trigger as trailing rather than sitting beside it as a standalone chip.
 	 */
 	compact?: boolean;
 	/**
@@ -326,13 +332,27 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 			? autoMode
 			: (modes.find((m) => m.id === activeAgentValue) ?? modes[0]);
 
+	const activeAgent = agents.find((a) => a.id === agentId);
+	// Which ACP harness is actually driving, when the agent's own name does not
+	// already say so — `Ryu (pi)`, never `OpenCode (opencode)`. It rides the agent
+	// name rather than taking a bullet of its own, and it is derived from the
+	// agent's advertised engine, so a store-backed custom agent (whose engine
+	// Core's list endpoint omits) gets no suffix rather than a guess.
+	const harness =
+		activeAgent?.transport === "acp"
+			? acpHarnessSuffix(activeMode?.label, engineForAgent(activeAgent))
+			: null;
+
 	// Agent section — grouped, icon'd rows via ModeMenuContent (identical to
 	// ChatPage). The trigger summary shows the active agent/team name.
 	const agentSection: ComposerSettingsSection = {
 		key: "agent",
 		label: "Agent",
 		ariaLabel: "Select agent",
-		activeName: activeMode?.label,
+		activeName:
+			activeMode?.label && harness
+				? `${activeMode.label} (${harness})`
+				: activeMode?.label,
 		items: modes.map((m) => ({
 			id: m.id,
 			name: m.label,
@@ -352,7 +372,6 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// Model section — caller override (ChatPage's ACP/config/engine chain) or the
 	// built-in engine catalog. ACP agents advertise their own models in-chat, so
 	// with no override their catalog section is empty (and thus auto-hidden).
-	const activeAgent = agents.find((a) => a.id === agentId);
 	// Per-model visibility for THIS agent (Settings → Providers → Agents), from
 	// the shared Pi catalog query.
 	const agentModelOverrides = agentId
@@ -404,9 +423,24 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// outlives whichever agent is selected. Empty when the node has no styles, and
 	// every consumer auto-hides an empty section.
 	const outputStyleSection = useComposerOutputStyleSection();
+	// Interface level decides how much of this bar exists at all (see
+	// `@/src/lib/interface-level.ts`). At Simple the composer is the agent picker
+	// and nothing else; Standard adds the model; Advanced/Expert add the tuning
+	// sections (approval mode, thinking budget, agent config options, output
+	// style). Gating happens HERE, in the one hook all three composer surfaces
+	// share, so the chat page, the launchpad and the Ask Ryu dock cannot disagree
+	// about what a level means.
+	//
+	// Hidden is not disabled: an agent still runs on whatever model, approval mode
+	// and thinking budget it is configured with — the per-agent settings page is
+	// where those live at any level. This only decides whether the CHAT BAR
+	// carries them.
+	const interfaceLevel = useInterfaceLevel();
+	const showModelSection = showsModelPicker(interfaceLevel);
+	const showTuningSections = showsComposerTuning(interfaceLevel);
 	const bodySections = useMemo(
-		() => [...extraSections, outputStyleSection],
-		[extraSections, outputStyleSection]
+		() => (showTuningSections ? [...extraSections, outputStyleSection] : []),
+		[extraSections, outputStyleSection, showTuningSections]
 	);
 
 	// The trigger summary reads `Ryu · Sonnet · Plan`; a style earns a segment there
@@ -415,12 +449,16 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// composer — while an ACTIVE style genuinely belongs there, since it is the only
 	// signal that the agent's answers are being reshaped.
 	const styleInForce =
+		showTuningSections &&
 		outputStyleSection.items.length > 0 &&
 		outputStyleSection.value !== NO_OUTPUT_STYLE_ID;
+	// The summary has to describe the popover it opens, so it is filtered by the
+	// same level: a trigger reading `Ryu · Sonnet` above a body with no model row
+	// is worse than either half alone.
 	const sections = [
 		agentSection,
-		modelSectionResolved,
-		...extraSections,
+		...(showModelSection ? [modelSectionResolved] : []),
+		...(showTuningSections ? extraSections : []),
 		...(styleInForce ? [outputStyleSection] : []),
 	];
 
@@ -437,7 +475,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		onSelectAgent,
 		onSelectTeam,
 		onCreateAgent,
-		activeModelSection: modelSectionResolved,
+		activeModelSection: showModelSection ? modelSectionResolved : null,
 		activeExtraSections: bodySections,
 	});
 
@@ -462,8 +500,8 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	}
 
 	// Compact trigger: `[logo] agent [usage] ⌄` — model/approval stay inside the
-	// dropdown. Shared by the single-row layout (cluster on the right) and the
-	// narrow-panel roomy layout (cluster stays on the left).
+	// dropdown. Shared by the dense chat-with-history composer and the narrow-panel
+	// (Ask Ryu) one; both keep the cluster left-aligned in the stacked controls row.
 	const settingsMenu = (
 		<ComposerSettingsMenu
 			compact={compact || compactTrigger}
@@ -479,37 +517,21 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		/>
 	);
 
-	// Compact single-row composer: the cluster moves to the RIGHT of the input
-	// (left of the mic/send) so the whole bar fits on one line.
-	if (compact) {
-		const rightActions = (
-			<div className="flex items-center gap-0.5">
-				{/* Read-only capability badges (tools / thinking / vision) — local
-				    models / flagship Ryu only; hidden for external ACP harnesses. */}
-				{showCapabilityBadges && (
-					<CapabilityBadges capabilities={capabilities} />
-				)}
-				{settingsMenu}
-			</div>
-		);
-		return {
-			infoBar,
-			leftActions: null,
-			refreshRoutingAdvice,
-			rightActions,
-			sections,
-			renderBody,
-		};
-	}
-
+	// ONE cluster, one place: the settings menu, the badges and (full trigger only)
+	// the usage chip, left-aligned in the composer's stacked controls row. Compact
+	// used to return a second arrangement here — cluster on the RIGHT, `leftActions`
+	// null — which made the chat page and the launchpad two different composers
+	// behind one flag. Compact is a density now, so there is nothing left to fork.
 	const leftActions = (
 		<div className="flex min-w-0 items-center gap-0.5">
 			{settingsMenu}
 			{/* Read-only capability badges (tools / thinking / vision) — local
 			    models / flagship Ryu only; hidden for external ACP harnesses. */}
 			{showCapabilityBadges && <CapabilityBadges capabilities={capabilities} />}
-			{/* Full trigger still shows usage as a standalone chip beside the menu. */}
-			{compactTrigger ? null : <UsageBar agentId={agentId} />}
+			{/* Only the FULL trigger shows usage as a standalone chip: both compact
+			    modes already fold the same meters into the trigger's `trailing`, so
+			    rendering the chip too would show every meter twice. */}
+			{compact || compactTrigger ? null : <UsageBar agentId={agentId} />}
 		</div>
 	);
 

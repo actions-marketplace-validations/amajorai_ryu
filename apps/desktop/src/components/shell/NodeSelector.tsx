@@ -64,7 +64,7 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { buildRyuDeepLink, parseRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { type ReactNode, useEffect, useState } from "react";
 import QRCode from "react-qr-code";
 import { sileo } from "sileo";
@@ -671,7 +671,7 @@ export function AddNodeDialog({
 		setScanning(true);
 		setDiscovered(null);
 		try {
-			const found = await invoke<DiscoveredNode[]>("discover_lan_nodes");
+			const found = await invokeWhenReady<DiscoveredNode[]>("discover_lan_nodes");
 			// Drop URLs already configured so the picker only shows new candidates.
 			const knownUrls = new Set(nodes.map((n) => n.url.replace(/\/$/, "")));
 			setDiscovered(
@@ -981,7 +981,7 @@ function NodeItem({
 	useEffect(() => {
 		const check = async () => {
 			try {
-				const result = await invoke<{ online: boolean }>("test_node", {
+				const result = await invokeWhenReady<{ online: boolean }>("test_node", {
 					name: node.name,
 				});
 				setOnline(result.online);
@@ -2130,33 +2130,96 @@ function VoiceAndSandboxSection({
 	);
 }
 
-/** The capability layers in display order, with their icon + human label.
+/** The capability layers whose ICON and DISPLAY ORDER this client knows.
  *
  *  A "layer" here is a CAPABILITY (`web.search`, `browser.control`, …) that
  *  several enabled apps can provide at once; picking a row pins the capability to
  *  that app, exactly like swapping the chat engine pins the resident runtime.
  *
- *  This table is presentation only. A selectable capability Core reports that is
- *  NOT listed still renders — it falls back to its raw name and the generic
- *  layers icon — so a third-party app's capability is never silently hidden by a
- *  closed list on the client. */
+ *  It carries NO label. The layer's name comes from the capability's own
+ *  providers now (`ProvidesEntry.title` → Core's `CapabilityInfo.title` →
+ *  {@link CapabilityLayerEntry.title}), because a closed label table on the client
+ *  can only ever name the layers that shipped with it — everything else fell
+ *  through to the raw dotted id, and the dropdown read `document.parse` next to
+ *  five English words.
+ *
+ *  Icon and order stay here because neither is plumbable through a manifest: a
+ *  hugeicons `IconSvgElement` is a module import, not a string, and "which layer
+ *  comes first" is a property of this menu, not of any one app. A capability with
+ *  no row still renders — generic icon, after the known ones — so a third-party
+ *  toolkit is never hidden by this list.
+ *
+ *  `fallbackLabel` is degradation only: it names the layer when Core reports no
+ *  title, which today means an older Core that predates the field. Adding a row
+ *  here is NOT how a new layer gets named — declare `title` on its providers. */
 const CAPABILITY_LAYERS: Array<{
 	capability: string;
+	fallbackLabel: string;
 	icon: IconSvgElement;
-	label: string;
 }> = [
-	{ label: "Search", capability: "web.search", icon: Search01Icon },
-	{ label: "Extract", capability: "web.extract", icon: FileSearchIcon },
-	{ label: "Crawl", capability: "web.crawl", icon: GlobeIcon },
-	{ label: "Browser", capability: "browser.control", icon: BrowserIcon },
-	{ label: "Computer", capability: "computer.control", icon: ComputerIcon },
-	{ label: "Memory", capability: "memory", icon: BrainIcon },
-	// Route-backed, not verb-backed (see `providerDetail`). Listed here for the same
-	// reason as the rest: without a row the fallback branch below labels it with the
-	// raw capability string, so the dropdown read `document.parse` next to five
-	// English words.
-	{ label: "Document Parse", capability: "document.parse", icon: File01Icon },
+	{ capability: "web.search", fallbackLabel: "Search", icon: Search01Icon },
+	{ capability: "web.extract", fallbackLabel: "Extract", icon: FileSearchIcon },
+	{ capability: "web.crawl", fallbackLabel: "Crawl", icon: GlobeIcon },
+	{
+		capability: "browser.control",
+		fallbackLabel: "Browser",
+		icon: BrowserIcon,
+	},
+	{
+		capability: "computer.control",
+		fallbackLabel: "Computer",
+		icon: ComputerIcon,
+	},
+	{ capability: "memory", fallbackLabel: "Memory", icon: BrainIcon },
+	// Route-backed, not verb-backed (see `providerDetail`) — it is a layer like any
+	// other and gets an icon and a place in the order for the same reasons.
+	{
+		capability: "document.parse",
+		fallbackLabel: "Document Parsing",
+		icon: File01Icon,
+	},
 ];
+
+/** Splits a capability's last segment on the separators an id may use. */
+const CAPABILITY_WORD_SPLIT = /[_-]+/;
+
+/** How long a layer label may be before it is clipped. App-supplied text sits in a
+ *  `shrink-0` slot in the dropdown row, so an unbounded one stretches the whole
+ *  menu; long enough for every real name, short enough that no manifest can. */
+const MAX_LAYER_LABEL = 28;
+
+/** Title-cased last segment of a dotted capability id (`acme.pdf_parse` →
+ *  `Pdf Parse`).
+ *
+ *  The bottom rung of the label ladder, and the reason no row can ever show a
+ *  machine name: an undeclared capability reads as words rather than as
+ *  `acme.pdf_parse`. Deliberately NOT applied server-side — humanising the whole
+ *  id there would have printed `News Crud` for an app's private wiring, and the
+ *  right answer for those is a title their author chose or none at all. */
+function humanizeCapability(capability: string): string {
+	const last = capability.split(".").pop() ?? capability;
+	const words = last.split(CAPABILITY_WORD_SPLIT).filter(Boolean);
+	if (words.length === 0) {
+		return capability;
+	}
+	return words
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+		.join(" ");
+}
+
+/** The label ladder for one layer: what its providers call it, else what this
+ *  client knows it as, else its own id read as words. Clipped because the first
+ *  rung is text an app wrote. */
+function capabilityLabel(
+	entry: CapabilityLayerEntry,
+	fallbackLabel?: string
+): string {
+	const label =
+		entry.title ?? fallbackLabel ?? humanizeCapability(entry.capability);
+	return label.length > MAX_LAYER_LABEL
+		? `${label.slice(0, MAX_LAYER_LABEL - 1)}…`
+		: label;
+}
 
 interface CapabilityLayerRow {
 	entry: CapabilityLayerEntry;
@@ -2174,11 +2237,19 @@ function orderCapabilityLayers(
 		const entry = remaining.get(known.capability);
 		if (entry) {
 			remaining.delete(known.capability);
-			rows.push({ entry, icon: known.icon, label: known.label });
+			rows.push({
+				entry,
+				icon: known.icon,
+				label: capabilityLabel(entry, known.fallbackLabel),
+			});
 		}
 	}
 	for (const entry of remaining.values()) {
-		rows.push({ entry, icon: Layers01Icon, label: entry.capability });
+		rows.push({
+			entry,
+			icon: Layers01Icon,
+			label: capabilityLabel(entry),
+		});
 	}
 	return rows;
 }

@@ -712,7 +712,7 @@ function ModelsFilterPanel({
 							onCheckedChange={setInstalledOnly}
 						/>
 						<label className="cursor-pointer" htmlFor="installed-only">
-							Installed only
+							Added only
 						</label>
 					</div>
 				</div>
@@ -774,11 +774,11 @@ function ModelList({
 						<HugeiconsIcon icon={Package01Icon} />
 					</EmptyMedia>
 					<EmptyTitle>
-						{installedOnly ? "No installed models yet" : "No models found"}
+						{installedOnly ? "No models added yet" : "No models found"}
 					</EmptyTitle>
 					<EmptyDescription>
 						{installedOnly
-							? "Turn off “Installed only” to browse and install models."
+							? "Turn off “Added only” to browse and add models."
 							: "Try a different search."}
 					</EmptyDescription>
 				</EmptyHeader>
@@ -814,7 +814,7 @@ function ModelList({
 											</span>
 											{m.installed && (
 												<HugeiconsIcon
-													aria-label="Installed"
+													aria-label="Added"
 													className="size-3.5 shrink-0 text-success"
 													icon={CheckmarkCircle02Icon}
 												/>
@@ -1001,7 +1001,7 @@ function ModelDetailHeader({
 								className="size-3.5 text-success"
 								icon={CheckmarkCircle02Icon}
 							/>
-							Installed
+							Added
 						</Badge>
 					)}
 				</div>
@@ -1208,7 +1208,7 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 			await host.installSidecar(node.url, node.token, "llmfit");
 			setResult(null);
 		} catch (e) {
-			setError(e instanceof Error ? e.message : "Install failed");
+			setError(e instanceof Error ? e.message : "Couldn't add this model");
 		} finally {
 			setBusy("idle");
 		}
@@ -1671,11 +1671,11 @@ function InstalledButton({
 	const [armed, setArmed] = useState(false);
 	// Resolve the three visual states (busy / armed-to-remove / at-rest) without
 	// nested ternaries.
-	let label = "Installed";
+	let label = "Added";
 	if (busy) {
 		label = "Removing…";
 	} else if (armed) {
-		label = "Uninstall";
+		label = "Remove";
 	}
 	return (
 		<Button
@@ -1750,17 +1750,17 @@ function SnapshotInstall({
 							? card.format === "mlx"
 								? "Requires MLX (Apple Silicon) — not available on this computer."
 								: `Requires ${card.needsEngine ?? "another engine"} — not available on this computer.`
-							: repoFitLabel || "Installs the full model repository."}
+							: repoFitLabel || "Adds the full model repository."}
 					</p>
 				</div>
 				{installed ? (
 					<Badge variant="secondary">
 						<HugeiconsIcon className="size-3.5" icon={CheckmarkCircle02Icon} />
-						Installed
+						Added
 					</Badge>
 				) : (
 					<InstallButton
-						busyLabel="Installing…"
+						busyLabel="Adding…"
 						disabled={blocked || installing}
 						idleVariant="ghost"
 						installing={installing}
@@ -1771,7 +1771,7 @@ function SnapshotInstall({
 						progress={{ kinds: ["model"], name: card.id }}
 					>
 						<HugeiconsIcon className="size-4" icon={Download01Icon} />
-						Install repository
+						Add repository
 					</InstallButton>
 				)}
 			</div>
@@ -2003,7 +2003,7 @@ function FileSections({
 							className="size-4 text-success"
 							icon={CheckmarkCircle02Icon}
 						/>
-						Installed
+						Added
 					</h3>
 					<ul className="flex flex-col gap-2">{installed.map(renderRow)}</ul>
 				</section>
@@ -2154,7 +2154,7 @@ function FileRow({
 			progress={{ kinds: ["model"], name: file.filename }}
 		>
 			<HugeiconsIcon className="size-4" icon={Download01Icon} />
-			Install
+			Add
 		</InstallButton>
 	);
 

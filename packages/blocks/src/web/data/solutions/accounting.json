@@ -9,7 +9,7 @@
   "heroTitle": "An AI accountant that respects the numbers.",
   "heroSubtitle": "Reconcile ledgers, chase variances, and draft financial statements with agents that run on your own machine. Client books never leave your device unless you say so, and every model call is governed, logged, and auditable.",
   "visualKey": "GatewayVisual",
-  "intro": "Accounting runs on sensitive financial data that can't be pasted into a public chatbot that trains on what it sees. Ryu runs capable agents locally, connects into your accounting tools to pull real transactions, and records every call in an audit trail, so you can speed up the close without exposing a single client ledger.",
+  "intro": "Accounting runs on sensitive financial data that can't be pasted into a public chatbot that trains on what it sees. Ryu runs capable agents locally, connects into your accounting tools to pull real transactions, and writes down every step it takes, so you can speed up the close without exposing a single client ledger.",
   "highlights": [
     {
       "title": "Books stay on your machine",
@@ -23,7 +23,7 @@
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so you can show exactly what an agent touched.",
+      "description": "Every step is written down as it happens, so you can show exactly what was touched.",
       "icon": "Eye"
     },
     {
@@ -76,10 +76,10 @@
     },
     {
       "q": "Will it post entries on its own?",
-      "a": "No. Ryu drafts reconciliations, entries, and statements for a qualified accountant to review and approve. The audit trail records what the agent saw and proposed, so that review is fast and defensible."
+      "a": "No. Ryu drafts reconciliations, entries, and statements for a qualified accountant to review and approve. The record shows what was looked at and proposed, so that review is fast and defensible."
     }
   ],
   "ctaTitle": "Give your practice an AI accountant.",
   "ctaSubtitle": "Reconcile, analyze, and close faster, with client books kept private and every call on the record.",
-  "ctaNote": "Local-first · PII/DLP redaction · Full audit trail"
+  "ctaNote": "Runs on your machines · Personal details stripped · Every action logged"
 }

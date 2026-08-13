@@ -57,10 +57,10 @@ export function SkillListRow({
 					skill.active === true ? (
 						<Badge variant="secondary">Active</Badge>
 					) : skill.active === false ? (
-						<Badge variant="outline">Installed</Badge>
+						<Badge variant="outline">Added</Badge>
 					) : (
 						<HugeiconsIcon
-							aria-label="Installed"
+							aria-label="Added"
 							className="size-3.5 shrink-0 text-emerald-500"
 							icon={CheckmarkCircle02Icon}
 						/>
@@ -100,7 +100,7 @@ export function SkillInstallControl({
 				) : (
 					<HugeiconsIcon className="size-4" icon={Download01Icon} />
 				)}
-				{installing ? "Installing…" : "Install skill"}
+				{installing ? "Adding…" : "Add skill"}
 			</Button>
 		);
 	}
@@ -111,7 +111,7 @@ export function SkillInstallControl({
 					className="size-3.5 text-emerald-500"
 					icon={CheckmarkCircle02Icon}
 				/>
-				Installed
+				Added
 			</Badge>
 			<label className="flex cursor-pointer items-center gap-2 text-muted-foreground text-xs">
 				<Switch

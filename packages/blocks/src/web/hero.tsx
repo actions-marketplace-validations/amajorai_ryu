@@ -27,8 +27,17 @@ const DEMO_HREF = "https://cal.com/jiaweing/ryu-demo";
  */
 const SHOW_AWARD_BADGE = false;
 
-const HERO_TITLE =
-	"We give companies private, secure, 24/7 agent operations without hiring a platform team.";
+/**
+ * Leads with the buyer's pain, not our category. Nobody wakes up wanting
+ * agents — they wake up buried in paperwork nobody will sign off on. The
+ * safety half of the pitch (the record, the cost ceiling) is why they are
+ * ALLOWED to buy, never why they want to, so it stays out of the hero and
+ * lands in the trust strip directly below it.
+ *
+ * Two lines. Anything longer stops reading as a claim and starts reading as
+ * a paragraph.
+ */
+const HERO_TITLE = "We take the paperwork off your team, so they can sell";
 
 export default function Hero() {
 	return (
@@ -89,16 +98,18 @@ export default function Hero() {
 								titleClassName={landingHeadlineClass}
 							/>
 
+							{/* Demo leads: the sale starts with a free consultation, and the
+							    download is for the person who wants to poke at it first. */}
 							<div className="flex flex-col gap-3 sm:flex-row">
-								<DownloadMenu />
 								<Link
-									className={cn(buttonVariants({ variant: "ghost" }))}
+									className={cn(buttonVariants({ variant: "default" }))}
 									href={DEMO_HREF}
 									rel="noopener noreferrer"
 									target="_blank"
 								>
-									Book a demo
+									Book a free consultation
 								</Link>
+								<DownloadMenu variant="ghost" />
 							</div>
 
 							<HeroAvatarSocialProof />

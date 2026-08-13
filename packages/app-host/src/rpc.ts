@@ -276,6 +276,17 @@ export type Capability =
 	// capability covers the two `social.open`/`openList` shell-navigation verbs, which
 	// cannot be forwarded because opening a tab is the one thing the frame cannot do.
 	| "social.crud"
+	// Subtitles (grant `subtitles:crud`) — the `@ryu/subtitles` app picks a video,
+	// queues a local transcription + translation, and reads the resulting cue list from
+	// its sandboxed companion frame. Host-direct (the monitors pattern) with ONE generic
+	// forwarder (the Outpost pattern): `subtitles.request` carries `{ method, path, body }`
+	// that the host re-issues against Core's `/api/subtitles<path>` public mount. That
+	// mount already answers any client holding the node token — which is what the host
+	// holds — so the forwarder widens nothing; the gates are this capability and Core's
+	// ext-proxy route allowlist. There is no navigation verb: the companion is the whole
+	// surface. Note that the frame never carries the VIDEO — a job names a path and the
+	// sidecar opens it, so a 4 GB film never crosses this boundary.
+	| "subtitles.crud"
 	// Skill authoring (grant `skills:crud`) — the `@ryu/skill-editor` app authors a
 	// user-owned Agent Skill (`SKILL.md`): front-matter form fields + a markdown body +
 	// server-backed version history. Host-direct (the monitors pattern): the host holds
@@ -295,6 +306,16 @@ export type Capability =
 	// allowlist, where an undeclared sub-path is a hard 404. No navigation verb: the
 	// companion is the whole surface and never opens a shell tab.
 	| "reasoning.check"
+	// Deep Read (grant `rlm:query`) — the `@ryu/rlm` app loads a corpus, browses its
+	// outline, asks questions of it and reads run traces from its sandboxed companion
+	// frame. Host-direct with ONE generic forwarder, the same shape as
+	// `reasoning.request` directly above: `rlm.request` carries `{ method, path, body }`
+	// the host re-issues against Core's `/api/rlm<path>` public mount, which already
+	// answers any client holding the node token — so the forwarder widens nothing. The
+	// gates are this capability and Core's ext-proxy route allowlist, where an
+	// undeclared sub-path is a hard 404. No navigation verb: the companion is the whole
+	// surface.
+	| "rlm.query"
 	// Tuition (grant `tuition:crud`) and Wire (grant `news:crud`) — the `@ryu/tuition`
 	// and `@ryu/news` companions. Host-direct with ONE generic forwarder each, the same
 	// shape as `reasoning.request` directly above: `<app>.request` carries
@@ -624,6 +645,15 @@ export interface ReasoningRequestPayload {
 	path: string;
 }
 
+/** One forwarded call onto the `ryu-rlm` sidecar's `/api/rlm` public mount. Same
+ *  contract and the same method union as {@link ReasoningRequestPayload} — `path` is
+ *  relative to the mount and validated by the same resolver. */
+export interface RlmRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "POST" | "PUT";
+	path: string;
+}
+
 /** One forwarded call onto the `ryu-tuition` sidecar's `/api/tuition` public mount.
  *  Same contract as {@link SocialRequestPayload} — `path` is relative to the mount and
  *  validated by the same resolver. The method union carries PATCH as well as PUT: the
@@ -639,6 +669,17 @@ export interface TuitionRequestPayload {
 export interface NewsRequestPayload {
 	body?: unknown;
 	method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
+	path: string;
+}
+
+/** One forwarded call onto the `ryu-subtitles` sidecar's `/api/subtitles` public
+ *  mount. Same contract as {@link SocialRequestPayload} — `path` is relative to the
+ *  mount and validated by the same resolver. The method union carries PUT (settings
+ *  are replaced whole) but no PATCH: nothing in this app edits a field in place, and
+ *  advertising a verb the sidecar answers with 405 helps nobody. */
+export interface SubtitlesRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "POST" | "PUT";
 	path: string;
 }
 
@@ -1241,6 +1282,19 @@ export interface HostServices {
 	 *  URL; it never accepts a host or an absolute URL from the frame. */
 	socialRequest?(input: SocialRequestPayload): Promise<unknown>;
 
+	// --- Subtitles (grant `subtitles:crud`). The `@ryu/subtitles` app picks a video and
+	// watches a local transcription + translation job. Host-direct through ONE
+	// forwarder, the Outpost shape, with no navigation verb — the companion is the whole
+	// surface. Optional so a host without the app is unaffected. ---
+
+	/** Forward one call to `/api/subtitles<path>`. Resolves with the parsed JSON body —
+	 *  or, for `/jobs/:id/download`, the subtitle file's TEXT, since that response is not
+	 *  JSON — and REJECTS on any non-2xx, so the frame uses try/catch rather than a
+	 *  status check. The host validates `path` (see {@link SubtitlesRequestPayload})
+	 *  before building the URL; it never accepts a host or an absolute URL from the
+	 *  frame. */
+	subtitlesRequest?(input: SubtitlesRequestPayload): Promise<unknown>;
+
 	// --- Automated Reasoning (grant `reasoning:check`). The `@ryu/reasoning` app
 	// authors formal policies and runs the solver playground. Host-direct through ONE
 	// forwarder, the Outpost shape: the sidecar's seven routes need no per-route
@@ -1252,6 +1306,18 @@ export interface HostServices {
 	 *  check. The host validates `path` (see {@link ReasoningRequestPayload}) before
 	 *  building the URL; it never accepts a host or an absolute URL from the frame. */
 	reasoningRequest?(input: ReasoningRequestPayload): Promise<unknown>;
+
+	// --- Deep Read (grant `rlm:query`). The `@ryu/rlm` app loads a corpus, browses
+	// its outline and asks questions of it. Host-direct through ONE forwarder, the
+	// same shape as Reasoning above: the sidecar's ten routes need no per-route
+	// service, and a route added to the manifest later needs no host change at all.
+	// Optional, so a host without the app is unaffected. ---
+
+	/** Forward one call to `/api/rlm<path>`. Resolves with the parsed JSON body and
+	 *  REJECTS on any non-2xx, so the frame uses try/catch rather than a status check.
+	 *  The host validates `path` (see {@link RlmRequestPayload}) before building the
+	 *  URL; it never accepts a host or an absolute URL from the frame. */
+	rlmRequest?(input: RlmRequestPayload): Promise<unknown>;
 
 	// --- Tuition (grant `tuition:crud`) and Wire (grant `news:crud`). Both are
 	// host-direct through ONE forwarder, the same shape as Reasoning above: the
@@ -1620,8 +1686,10 @@ const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	"approvals.crud",
 	"meetings.crud",
 	"social.crud",
+	"subtitles.crud",
 	"skills.crud",
 	"reasoning.check",
+	"rlm.query",
 	"blueprint.review",
 	"tuition.crud",
 	"news.crud",
@@ -3696,6 +3764,22 @@ export async function dispatchRpc(
 			services.socialOpen(input);
 			return null;
 		}
+		case "subtitles.request": {
+			const input = asSubtitlesRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"subtitles.request requires a { path: string } beginning with '/' and resolving under /api/subtitles"
+				);
+			}
+			if (!services.subtitlesRequest) {
+				throw new CodedRpcError(
+					"server_error",
+					"subtitles.request is not available"
+				);
+			}
+			return await services.subtitlesRequest(input);
+		}
 		case "reasoning.request": {
 			const input = asReasoningRequestArg(args[0]);
 			if (!input) {
@@ -3711,6 +3795,19 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.reasoningRequest(input);
+		}
+		case "rlm.request": {
+			const input = asRlmRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"rlm.request requires a { path: string } beginning with '/' and resolving under /api/rlm"
+				);
+			}
+			if (!services.rlmRequest) {
+				throw new CodedRpcError("server_error", "rlm.request is not available");
+			}
+			return await services.rlmRequest(input);
 		}
 		case "tuition.request": {
 			const input = asTuitionRequestArg(args[0]);
@@ -5127,6 +5224,58 @@ export function asReasoningRequestArg(
 	};
 }
 
+/** Methods `rlm.request` will forward. The companion creates contexts (POST),
+ *  reads them (GET) and deletes them (DELETE); nothing is edited in place, because a
+ *  context is immutable by construction — but PUT is accepted so a future route does
+ *  not need a change here. A verb outside this set is refused rather than downgraded
+ *  to GET. */
+const RLM_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
+
+/** The mount Core serves the `ryu-rlm` sidecar on. Mirrors `RLM_MOUNT` in
+ *  `apps/desktop/src/lib/api/rlm.ts`, which is the layer that actually builds the
+ *  URL — this one validates the same string one hop earlier. */
+const RLM_MOUNT = "/api/rlm";
+
+/**
+ * Narrow an RPC argument to an `rlm.request` payload, or null.
+ *
+ * The same security boundary as {@link asReasoningRequestArg}, against the RLM mount
+ * — and deliberately routed through the SAME {@link resolveMountedRequestPath} rather
+ * than a second copy of it. That resolver exists because a literal `..` blocklist
+ * loses to the WHATWG URL parser's own decoding (`%2e%2e` and friends collapse into
+ * dot segments after the check runs), and a re-implementation is exactly where that
+ * lesson gets lost a second time.
+ */
+export function asRlmRequestArg(data: unknown): RlmRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveMountedRequestPath(RLM_MOUNT, path);
+	if (resolved === null) {
+		return null;
+	}
+	let method: RlmRequestPayload["method"] = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !RLM_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method as RlmRequestPayload["method"];
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
+}
+
 /** Methods `tuition.request` and `news.request` will forward. Both surfaces patch in
  *  place (a skill's name, a source's title) and replace whole documents (settings), so
  *  both verbs are here. A verb outside the set is refused rather than downgraded to
@@ -5162,6 +5311,59 @@ export function asTuitionRequestArg(data: unknown): TuitionRequestPayload | null
  *  same shared resolver as {@link asTuitionRequestArg}. */
 export function asNewsRequestArg(data: unknown): NewsRequestPayload | null {
 	return asMountedCrudArg(data, NEWS_MOUNT) as NewsRequestPayload | null;
+}
+
+/** The mount Core serves the `ryu-subtitles` sidecar on. Mirrors `SUBTITLES_MOUNT` in
+ *  `apps/desktop/src/lib/api/subtitles.ts`, which is the layer that actually builds
+ *  the URL — this one validates the same string one hop earlier. */
+const SUBTITLES_MOUNT = "/api/subtitles";
+
+/** Methods `subtitles.request` will forward. No PATCH: nothing in this app edits a
+ *  field in place, and a verb outside this set is refused rather than downgraded to
+ *  GET, so a frame asking for one gets an error instead of silently reading where it
+ *  meant to write. */
+const SUBTITLES_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
+
+/**
+ * Narrow an RPC argument to a `subtitles.request` payload, or null.
+ *
+ * The same security boundary as {@link asReasoningRequestArg}, against the subtitles
+ * mount — and deliberately routed through the SAME {@link resolveMountedRequestPath}
+ * rather than a second copy of it. That resolver exists because a literal `..`
+ * blocklist loses to the WHATWG URL parser's own decoding (`%2e%2e` and friends
+ * collapse into dot segments after the check runs), and a re-implementation is exactly
+ * where that lesson gets lost a second time.
+ */
+export function asSubtitlesRequestArg(
+	data: unknown
+): SubtitlesRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const o = data as Record<string, unknown>;
+	const path = o.path;
+	if (typeof path !== "string" || !path.startsWith("/")) {
+		return null;
+	}
+	if (path.startsWith("//") || path.includes("\\")) {
+		return null;
+	}
+	const resolved = resolveMountedRequestPath(SUBTITLES_MOUNT, path);
+	if (resolved === null) {
+		return null;
+	}
+	let method: SubtitlesRequestPayload["method"] = "GET";
+	if (o.method !== undefined) {
+		if (typeof o.method !== "string" || !SUBTITLES_METHODS.has(o.method)) {
+			return null;
+		}
+		method = o.method as SubtitlesRequestPayload["method"];
+	}
+	return {
+		path: resolved,
+		method,
+		...(o.body === undefined ? {} : { body: o.body }),
+	};
 }
 
 /** The shared body of the two validators above. Shared between THEM only — not with

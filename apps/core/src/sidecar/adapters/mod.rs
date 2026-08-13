@@ -7287,6 +7287,17 @@ async fn route_acp_stream(
         // excessive writes on fast token streams.
         const INCREMENTAL_FLUSH_BYTES: usize = 512;
         let mut bytes_since_flush: usize = 0;
+        // Wall-clock companion to the byte threshold. The byte counter only ever
+        // advances on `AcpEvent::Text`, so a turn whose tail is tool calls — or one
+        // that streams slowly — could sit unflushed indefinitely, and the sealed
+        // `parts` column was written at the two TERMINAL points only. A process
+        // killed before either (crash / force-quit / OOM) therefore left the row at
+        // the last 512-byte boundary with `parts` NULL, which is why tool rows and
+        // reasoning vanished entirely from those turns. This timer bounds both
+        // losses to one interval; `parts` is a whole-array overwrite, so writing it
+        // repeatedly is idempotent.
+        const INCREMENTAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        let mut last_flush = std::time::Instant::now();
         const TEXT_ID: &str = "0";
         const THOUGHT_ID: &str = "acp-thought";
         const PLAN_TOOL_ID: &str = "acp-plan";
@@ -7341,11 +7352,25 @@ async fn route_acp_stream(
         // and/or the turn-end `PromptResponse.usage`), re-emitted under the stable
         // `acp-usage` id so the AI SDK reconciles repeated frames into one live meter.
         let turn_start = std::time::Instant::now();
+        // First-response clock: stamped by the first non-empty agent chunk of the
+        // turn, whether that is reply text or a reasoning chunk. ONE clock, not two:
+        // for a reasoning agent the thought IS the first thing the user sees, so
+        // measuring only to the first reply text would report several seconds of
+        // "nothing" that were visibly not nothing. Note this is not comparable to
+        // the local engine's `ttftMs` — on a session's first turn it includes
+        // process spawn and `session/new`, which is why the UI labels it
+        // "First response", not "First token".
+        let mut first_response_at: Option<std::time::Instant> = None;
         let mut usage_used: Option<u64> = None;
         let mut usage_total: Option<u64> = None;
         let mut usage_prompt: Option<u64> = None;
         let mut usage_completion: Option<u64> = None;
         let mut usage_total_tokens: Option<u64> = None;
+        let mut usage_thought: Option<u64> = None;
+        let mut usage_cached_read: Option<u64> = None;
+        let mut usage_cached_write: Option<u64> = None;
+        let mut usage_session_total: Option<u64> = None;
+        let mut usage_cost: Option<(f64, String)> = None;
 
         emit!(ui_start());
 
@@ -7375,7 +7400,77 @@ async fn route_acp_stream(
             };
         }
 
+        // Periodic durability checkpoint: re-seal the reply text AND the structured
+        // parts built so far, at most once per `INCREMENTAL_FLUSH_INTERVAL`. This is
+        // what a crashed turn is recovered from — the terminal writes below only run
+        // when the loop reaches an exit, and a killed process never does.
+        //
+        // Invoked at the TOP of the loop body rather than at the bottom because
+        // several arms `continue`; running one event late is harmless (it persists
+        // whatever has accumulated), running never is not.
+        macro_rules! checkpoint_persist {
+            () => {
+                if last_flush.elapsed() >= INCREMENTAL_FLUSH_INTERVAL {
+                    last_flush = std::time::Instant::now();
+                    if let Some(ref conv_id) = persist_conversation_id {
+                        if persisted_msg_id.is_none() {
+                            // Create the row so the parts below have somewhere to
+                            // go. Gated on TEXT, not on `acc`: a turn that has only
+                            // run tools so far can still be retried on another plan
+                            // (`watch.retryable()`), and a row created here would
+                            // outlive that retry as a phantom assistant turn. Once
+                            // any text has been emitted `watch.mark_content()` has
+                            // already taken retry off the table, which is the same
+                            // line the first-chunk path below draws.
+                            if !reply.is_empty() {
+                                match persist_store
+                                    .append_message_as(
+                                        conv_id,
+                                        "assistant",
+                                        &reply,
+                                        persist_agent_id.as_deref(),
+                                        None,
+                                        None,
+                                        Tenancy::Unattributed, // row exists (stamped by chat_stream)
+                                    )
+                                    .await
+                                {
+                                    Ok(mid) => {
+                                        persisted_msg_id = Some(mid);
+                                        bytes_since_flush = 0;
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        "failed to create checkpoint assistant message: {e:#}"
+                                    ),
+                                }
+                            }
+                        } else if bytes_since_flush > 0 {
+                            if let Some(ref mid) = persisted_msg_id {
+                                if let Err(e) =
+                                    persist_store.update_message_content(mid, &reply).await
+                                {
+                                    tracing::warn!("failed to checkpoint reply text: {e:#}");
+                                }
+                                bytes_since_flush = 0;
+                            }
+                        }
+                        if let Some(ref mid) = persisted_msg_id {
+                            if !acc.is_empty() {
+                                if let Err(e) = persist_store
+                                    .update_message_parts(mid, &acc.to_json())
+                                    .await
+                                {
+                                    tracing::warn!("failed to checkpoint message parts: {e:#}");
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
         while let Some(event) = acp_rx.recv().await {
+            checkpoint_persist!();
             match event {
                 acp::AcpEvent::UserText(text) => {
                     // A replayed USER message chunk (ACP `user_message_chunk`,
@@ -7391,9 +7486,30 @@ async fn route_acp_stream(
                         &serde_json::json!({ "text": text }),
                     ));
                 }
+                acp::AcpEvent::Banner(text) => {
+                    // The agent's `session/new` startup banner (pi-acp's skills /
+                    // commands listing and available-update notice). It arrives as
+                    // an `agent_message_chunk` but is not an answer to anything —
+                    // the user has not spoken yet — so it gets the same treatment
+                    // as the user-echo above: surfaced as a data part the client
+                    // can render as agent chrome, and kept OUT of the assistant
+                    // `reply` buffer so it is never persisted as an assistant
+                    // message row. This is what stopped a fresh chat opening with
+                    // the machine's whole skills list already in it.
+                    if text.is_empty() {
+                        continue;
+                    }
+                    emit!(ui_data(
+                        "ryu-acp-startup",
+                        &serde_json::json!({ "text": text }),
+                    ));
+                }
                 acp::AcpEvent::Text(text) => {
                     if text.is_empty() {
                         continue;
+                    }
+                    if first_response_at.is_none() {
+                        first_response_at = Some(std::time::Instant::now());
                     }
                     close_thought!();
                     reply.push_str(&text);
@@ -7462,6 +7578,9 @@ async fn route_acp_stream(
                 acp::AcpEvent::Thought(text) => {
                     if text.is_empty() {
                         continue;
+                    }
+                    if first_response_at.is_none() {
+                        first_response_at = Some(std::time::Instant::now());
                     }
                     // Thinking is output: it is on screen the moment it streams,
                     // and it also fills `acc`. Not marking it would make the
@@ -7791,14 +7910,37 @@ async fn route_acp_stream(
                     if let Some(v) = u.get("totalTokens").and_then(Value::as_u64) {
                         usage_total_tokens = Some(v);
                     }
+                    if let Some(v) = u.get("thoughtTokens").and_then(Value::as_u64) {
+                        usage_thought = Some(v);
+                    }
+                    if let Some(v) = u.get("cachedReadTokens").and_then(Value::as_u64) {
+                        usage_cached_read = Some(v);
+                    }
+                    if let Some(v) = u.get("cachedWriteTokens").and_then(Value::as_u64) {
+                        usage_cached_write = Some(v);
+                    }
+                    if let Some(v) = u.get("sessionTotalTokens").and_then(Value::as_u64) {
+                        usage_session_total = Some(v);
+                    }
+                    if let (Some(amount), Some(currency)) = (
+                        u.get("sessionCostAmount").and_then(Value::as_f64),
+                        u.get("sessionCostCurrency").and_then(Value::as_str),
+                    ) {
+                        usage_cost = Some((amount, currency.to_owned()));
+                    }
                     let done = u.get("done").and_then(Value::as_bool).unwrap_or(false);
                     let duration_ms = turn_start.elapsed().as_millis() as u64;
                     let round2 = |x: f64| (x * 100.0).round() / 100.0;
+                    // `None`, not 0.0, when the agent reported no output tokens —
+                    // most ACP agents populate none of `unstable_session_usage`, and
+                    // a hard zero rendered as a literal "0 tok/s" in the transcript
+                    // footer. An absent counter must stay absent all the way to the
+                    // UI so the segment can be suppressed instead of lying.
                     let tokens_per_second = match usage_completion {
                         Some(c) if c > 0 && duration_ms > 0 => {
-                            round2(c as f64 / (duration_ms as f64 / 1000.0))
+                            Some(round2(c as f64 / (duration_ms as f64 / 1000.0)))
                         }
-                        _ => 0.0,
+                        _ => None,
                     };
                     let mut stats = serde_json::Map::new();
                     stats.insert("id".into(), serde_json::json!("acp-usage"));
@@ -7821,10 +7963,34 @@ async fn route_acp_stream(
                     if let Some(v) = usage_total_tokens {
                         stats.insert("totalTokens".into(), serde_json::json!(v));
                     }
-                    stats.insert(
-                        "tokensPerSecond".into(),
-                        serde_json::json!(tokens_per_second),
-                    );
+                    if let Some(v) = usage_thought {
+                        stats.insert("thoughtTokens".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = usage_cached_read {
+                        stats.insert("cachedReadTokens".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = usage_cached_write {
+                        stats.insert("cachedWriteTokens".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = usage_session_total {
+                        stats.insert("sessionTotalTokens".into(), serde_json::json!(v));
+                    }
+                    if let Some((amount, ref currency)) = usage_cost {
+                        stats.insert("sessionCostAmount".into(), serde_json::json!(amount));
+                        stats.insert("sessionCostCurrency".into(), serde_json::json!(currency));
+                    }
+                    if let Some(v) = tokens_per_second {
+                        stats.insert("tokensPerSecond".into(), serde_json::json!(v));
+                    }
+                    // Time to the agent's first visible output (text OR reasoning).
+                    // Absent when the turn produced neither, so the UI omits the row
+                    // rather than claiming 0 ms.
+                    if let Some(t) = first_response_at {
+                        stats.insert(
+                            "ttftMs".into(),
+                            serde_json::json!(t.duration_since(turn_start).as_millis() as u64),
+                        );
+                    }
                     stats.insert("durationMs".into(), serde_json::json!(duration_ms));
                     stats.insert("done".into(), serde_json::json!(done));
                     emit!(ui_data("acp-usage", &Value::Object(stats)));
@@ -8040,6 +8206,7 @@ async fn route_acp_stream(
                 crate::server::WorktreeRun {
                     diff,
                     guard: Some(live_guard),
+                    computed_at: std::time::Instant::now(),
                 },
             );
         }

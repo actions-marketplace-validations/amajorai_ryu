@@ -22,7 +22,7 @@ import {
 	fetchAgentCatalog,
 	installAgent,
 } from "@/src/lib/api/agents.ts";
-import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
+import { ApiError, type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 // # 0.1.0: Island disabled — uncomment with the onboarding install below
 // import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
@@ -163,6 +163,47 @@ const LOCAL_STACK = "llamacpp";
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
+ * Was this failure "you are not authenticated" rather than a transient network
+ * blip? Two shapes reach here: the typed {@link ApiError} the node client throws
+ * (`status`), and `services-api`'s plain `Error("catalog fetch failed: 401")`.
+ * Worth distinguishing because a 401 never heals by retrying with the same
+ * credential — it means the token is missing, which on a first run it is.
+ */
+function isUnauthorized(err: unknown): boolean {
+	if (err instanceof ApiError) {
+		return err.status === 401;
+	}
+	return err instanceof Error && /\b401\b/.test(err.message);
+}
+
+/**
+ * Re-read the node store from disk and hand back the LOCAL node as it stands
+ * right now.
+ *
+ * Why this exists rather than a plain `nodes.find(isLocalNode)`: Core mints
+ * `~/.ryu/node-auth.token` on its FIRST boot, and the desktop only attaches that
+ * token to the local node inside the Tauri `list_nodes` command
+ * (`nodes.rs::fill_local_token`) — i.e. at store-load time. On a first run the
+ * store hydrates at app boot, long before onboarding's "run locally" pick has
+ * started a Core, so the local node it holds carries `token: null`. Every Core
+ * call made with that captured object then 401s (`require_auth` rejects a
+ * tokenless `/api/*` since the node-token work landed), which silently emptied
+ * the agent catalog and made the "Add your agents" step look deleted.
+ *
+ * So: never capture the local node before Core has booted. Call this after, and
+ * again per leg, so a token minted mid-flow is picked up.
+ */
+async function refreshLocalNode(): Promise<Node> {
+	try {
+		await useNodeStore.getState().refresh();
+	} catch {
+		// Not in Tauri, or the store command failed — fall through to whatever the
+		// store already holds rather than failing the whole pick.
+	}
+	return useNodeStore.getState().nodes.find(isLocalNode) ?? LOCAL_FALLBACK;
+}
+
+/**
  * Poll the control plane for a managed (Ryu Cloud) node the active org can
  * already reach, hydrating the node store on each tick. Resolves the first
  * managed node found, or undefined once the budget elapses or the flow is
@@ -210,11 +251,18 @@ async function waitForLocalStack(
 	const poll = async () => {
 		const deadline = Date.now() + MAX_BLOCK_MS;
 		let triggered = false;
+		// The credential this loop authenticates with. Mutable because Core may
+		// have minted the node token only moments ago (first run): if a poll comes
+		// back 401 we re-read it once rather than spending the whole 45s budget on
+		// requests that can never succeed — which is what made the local pick look
+		// like it stalled and then skipped the agents step.
+		let auth = node.token ?? null;
+		let reauthed = false;
 		while (Date.now() < deadline && !isCancelled()) {
 			try {
 				const catalog = await fetchCatalog(
 					node.url,
-					node.token ?? null,
+					auth,
 					AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 				);
 				const entry = catalog.find((c) => c.name === LOCAL_STACK);
@@ -237,14 +285,21 @@ async function waitForLocalStack(
 					report.status("Installing the local AI engine…", STAGE_ENGINE);
 					await installSidecar(
 						node.url,
-						node.token ?? null,
+						auth,
 						LOCAL_STACK,
 						false,
 						AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 					).catch(() => undefined);
 				}
-			} catch {
-				// Keep polling on transient network errors.
+			} catch (err) {
+				// A 401 is not transient — it means we are holding the wrong (or no)
+				// credential, and every remaining poll would fail identically. Re-read
+				// the node once; only then fall back to "keep polling".
+				if (isUnauthorized(err) && !reauthed) {
+					reauthed = true;
+					auth = (await refreshLocalNode()).token;
+				}
+				// Otherwise keep polling on transient network errors.
 			}
 			await sleep(POLL_INTERVAL_MS);
 			if (isCancelled()) {
@@ -474,20 +529,71 @@ function nodeNameForUrl(url: string, taken: readonly string[]): string {
 // detectable but not on this list is too niche for onboarding and is hidden.
 // Ids are matched against the live catalog, so entries that don't exist yet
 // (e.g. a future Cursor agent) simply don't render until Core ships them.
-const SUGGESTED_AGENT_IDS: readonly string[] = [
-	"acp:claude",
-	"acp:codex",
-	"acp:cursor",
-	"acp:gemini",
-	"acp:opencode",
-	"acp:copilot",
-	"hermes",
-	"openclaw",
+//
+// The names/registry ids here are ONLY used when the catalog is unreachable
+// (see `fallbackSuggestedAgents`): the live catalog wins whenever it answers.
+// They exist because this list is static curation — it never needed a network
+// call to be shown, and letting one delete the whole step is what made "Add
+// your agents" disappear.
+const SUGGESTED_AGENTS: readonly {
+	id: string;
+	name: string;
+	registryId: string | null;
+}[] = [
+	{ id: "acp:claude", name: "Claude Code", registryId: "claude-acp" },
+	{ id: "acp:codex", name: "Codex", registryId: "codex-acp" },
+	{ id: "acp:cursor", name: "Cursor", registryId: "cursor" },
+	{ id: "acp:gemini", name: "Gemini CLI", registryId: "gemini" },
+	{ id: "acp:opencode", name: "opencode", registryId: "opencode" },
+	{
+		id: "acp:copilot",
+		name: "GitHub Copilot CLI",
+		registryId: "github-copilot-cli",
+	},
+	{ id: "hermes", name: "Hermes", registryId: null },
+	{ id: "openclaw", name: "OpenClaw", registryId: null },
 ];
+
+/**
+ * The curated rows rendered when the catalog could not be reached — the same
+ * agents, minus the live `detected`/`added` flags Core would have filled in.
+ * The logo resolver keys off `id`/`engine`/`registryId`, all of which are known
+ * statically, so these rows look identical to the live ones.
+ */
+function fallbackSuggestedAgents(): AgentCatalogEntry[] {
+	return SUGGESTED_AGENTS.map((a) => ({
+		added: false,
+		available: true,
+		bridgeVersionStatus: null,
+		description: null,
+		detected: null,
+		engine: null,
+		gatewayBypass: false,
+		iconUrl: null,
+		id: a.id,
+		installedBridgeVersion: null,
+		installedVersion: null,
+		installHint: null,
+		latestBridgeVersion: null,
+		latestVersion: null,
+		name: a.name,
+		recommended: false,
+		registryId: a.registryId,
+		transport: null,
+		versionStatus: null,
+	}));
+}
 
 interface OnboardingAgents {
 	/** Agents detected on the user's PATH — shown first, pre-selected. */
 	found: AgentCatalogEntry[];
+	/**
+	 * False when the catalog call FAILED (401, timeout, node down) rather than
+	 * genuinely returning nothing. The distinction is the whole bug: the two were
+	 * conflated, so an unreachable Core read as "no agents to offer" and the step
+	 * was dropped from the flow with no error, no toast and no log.
+	 */
+	ok: boolean;
 	/** Curated popular agents not already present — opt-in, not pre-selected. */
 	suggested: AgentCatalogEntry[];
 }
@@ -495,8 +601,11 @@ interface OnboardingAgents {
 /**
  * Split the agent catalog into the two onboarding buckets: agents already found
  * on the system, and the curated "suggested" set the user can opt into. Ryu and
- * already-added agents are excluded from both. Best-effort: returns empty lists
- * on any error.
+ * already-added agents are excluded from both.
+ *
+ * On failure this returns `ok: false` WITH the static curated set, so the step
+ * still has something to render. Callers must never treat a failure as a reason
+ * to skip the step — a network error must not delete a step from a wizard.
  */
 async function loadOnboardingAgents(
 	target: ApiTarget
@@ -516,15 +625,34 @@ async function loadOnboardingAgents(
 		);
 		const installable = agents.filter((a) => a.id !== "ryu" && !a.added);
 		const found = installable.filter((a) => a.detected === true);
-		const suggested = SUGGESTED_AGENT_IDS.map((id) =>
+		const suggested = SUGGESTED_AGENTS.map(({ id }) =>
 			installable.find((a) => a.id === id)
 		).filter(
 			(a): a is AgentCatalogEntry => a !== undefined && a.detected !== true
 		);
-		return { found, suggested };
-	} catch {
-		return { found: [], suggested: [] };
+		return { found, ok: true, suggested };
+	} catch (err) {
+		// Never silent: this exact swallow is how a 401 turned into a missing step.
+		track({
+			event: "onboarding_agent_catalog_failed",
+			reason: failReason(err),
+		});
+		return { found: [], ok: false, suggested: fallbackSuggestedAgents() };
 	}
+}
+
+/** Why the catalog call failed, as one of the analytics enum's literals. */
+function failReason(err: unknown): "unauthorized" | "timeout" | "unreachable" {
+	if (isUnauthorized(err)) {
+		return "unauthorized";
+	}
+	if (
+		err instanceof Error &&
+		(err.name === "TimeoutError" || /timed? ?out/i.test(err.message))
+	) {
+		return "timeout";
+	}
+	return "unreachable";
 }
 
 export default function OnboardingPage() {
@@ -649,6 +777,13 @@ export default function OnboardingPage() {
 		[]
 	);
 	const [selected, setSelected] = useState<Set<string>>(new Set());
+	// The catalog call failed, so the rows on screen are the curated fallback and
+	// "Found on your system" could not be computed. Drives an inline notice with a
+	// Retry — the step is still shown, because a step is not a query result.
+	const [agentsUnavailable, setAgentsUnavailable] = useState(false);
+	// Which node the agents step is talking to, so Retry can re-ask the same one.
+	const [agentsNode, setAgentsNode] = useState<Node | null>(null);
+	const [agentsRetrying, setAgentsRetrying] = useState(false);
 	const [submitting, setSubmitting] = useState(false);
 	// Agents chosen on the picker, held while the later steps are shown.
 	const [pendingAgents, setPendingAgents] = useState<string[]>([]);
@@ -711,46 +846,94 @@ export default function OnboardingPage() {
 		}
 	};
 
+	/**
+	 * Land on the interactive agents step with whatever detection could tell us.
+	 *
+	 * Unconditional, on purpose. Both call sites used to gate this on
+	 * `found.length > 0 || suggested.length > 0`, which made a static, curated
+	 * offer depend on a live network call: one 401 (or one slow catalog) and the
+	 * "Add your agents" step vanished from the wizard with no error, no toast and
+	 * no log — the step looked deleted. A failed lookup now degrades the CONTENT
+	 * of the step (curated rows plus a retry), never its existence.
+	 */
+	const showAgentsStep = useCallback((node: Node, result: OnboardingAgents) => {
+		setAgentsNode(node);
+		setAgentsUnavailable(!result.ok);
+		setFoundAgents(result.found);
+		setSuggestedAgents(result.suggested);
+		// Pre-select the ones already found on the user's system.
+		setSelected(new Set(result.found.map((a) => a.id)));
+		setPhase("agents");
+	}, []);
+
+	// Re-run detection from the step itself, after the inline "couldn't check
+	// what's already installed" notice. Re-resolves the local node first, so a
+	// token Core minted since the first attempt is picked up.
+	const handleRetryAgents = useCallback(() => {
+		if (!agentsNode || agentsRetrying) {
+			return;
+		}
+		setAgentsRetrying(true);
+		(async () => {
+			const node = isLocalNode(agentsNode)
+				? await refreshLocalNode()
+				: agentsNode;
+			const result = await loadOnboardingAgents(toTarget(node));
+			if (cancelledRef.current) {
+				return;
+			}
+			setAgentsRetrying(false);
+			setAgentsNode(node);
+			setAgentsUnavailable(!result.ok);
+			setFoundAgents(result.found);
+			setSuggestedAgents(result.suggested);
+			// Keep whatever the user already ticked; add the newly-detected ones.
+			setSelected((prev) => {
+				const next = new Set(prev);
+				for (const a of result.found) {
+					next.add(a.id);
+				}
+				return next;
+			});
+		})().catch(() => {
+			if (!cancelledRef.current) {
+				setAgentsRetrying(false);
+			}
+		});
+	}, [agentsNode, agentsRetrying]);
+
 	// The local (bring-your-own-keys) path: wait for the local stack, then detect
-	// installable CLI agents and move to the interactive 'agents' step (or
-	// straight to the feature wizard when none are installable / the catalog is
-	// unreachable). This is the pre-WS8 behaviour, unchanged; it now runs from the
-	// user's explicit "local" pick rather than automatically on Core coming up.
-	const beginLocalSetup = useCallback(
-		async (node: Node) => {
-			const target = toTarget(node);
+	// installable CLI agents and move to the interactive 'agents' step. It takes
+	// no node argument any more: the caller's node object predates Core's first
+	// boot (and therefore its minted token), so the node is resolved HERE, after
+	// the boot, and again per leg.
+	const beginLocalSetup = useCallback(async () => {
+		setPhase("installing");
+		const node = await refreshLocalNode();
+		if (cancelledRef.current) {
+			return;
+		}
+		// # 0.1.0: Island disabled — uncomment when re-enabling Island onboarding
+		// Best-effort: get the Island companion installed + launched during
+		// onboarding so it's ready by first chat. Fire-and-forget (no `await`) and
+		// non-fatal — it must never block or fail onboarding, and dev is a no-op.
+		// installAndLaunchIsland().catch(() => undefined);
+		await waitForLocalStack(node, () => cancelledRef.current, localReport);
+		if (cancelledRef.current) {
+			return;
+		}
 
-			setPhase("installing");
-			// # 0.1.0: Island disabled — uncomment when re-enabling Island onboarding
-			// Best-effort: get the Island companion installed + launched during
-			// onboarding so it's ready by first chat. Fire-and-forget (no `await`) and
-			// non-fatal — it must never block or fail onboarding, and dev is a no-op.
-			// installAndLaunchIsland().catch(() => undefined);
-			await waitForLocalStack(node, () => cancelledRef.current, localReport);
-			if (cancelledRef.current) {
-				return;
-			}
-
-			localReport.status("Looking for agents on your system…", STAGE_AGENTS);
-			const { found, suggested } = await loadOnboardingAgents(target);
-			localReport.status(null);
-			if (cancelledRef.current) {
-				return;
-			}
-
-			if (found.length > 0 || suggested.length > 0) {
-				setFoundAgents(found);
-				setSuggestedAgents(suggested);
-				// Pre-select the ones already found on the user's system.
-				setSelected(new Set(found.map((a) => a.id)));
-				setPhase("agents");
-				return;
-			}
-
-			goToFeatures([]);
-		},
-		[goToFeatures, localReport]
-	);
+		localReport.status("Looking for agents on your system…", STAGE_AGENTS);
+		// Re-resolve once more: `waitForLocalStack` can run for 45s, and on a first
+		// run the token may only have appeared inside that window.
+		const detectNode = await refreshLocalNode();
+		const result = await loadOnboardingAgents(toTarget(detectNode));
+		localReport.status(null);
+		if (cancelledRef.current) {
+			return;
+		}
+		showAgentsStep(detectNode, result);
+	}, [localReport, showAgentsStep]);
 
 	// Present the local / cloud / existing-node fork immediately. This used to
 	// wait for `coreStatus === "running"`, which made a local Core a hard
@@ -795,8 +978,6 @@ export default function OnboardingPage() {
 		setLocalPercent(STAGE_PREPARING);
 		setPhase("installing");
 		(async () => {
-			const nodes = useNodeStore.getState().nodes;
-			const node = nodes.find(isLocalNode) ?? LOCAL_FALLBACK;
 			// `startLocalCore` resolves only once `/api/health` on the local Core
 			// answered, so this IS the reachability proof — no second probe, and no
 			// dependency on `nodes.json` existing yet (on a fresh install the file is
@@ -817,10 +998,15 @@ export default function OnboardingPage() {
 			}
 			setLocalError(null);
 			setLocalUnreachable(false);
+			// Resolve the local node only NOW. Core has just booted, and on a first
+			// run that boot is what minted `node-auth.token`; the store was hydrated
+			// before it existed, so anything captured earlier is tokenless and every
+			// Core call made with it 401s.
+			const node = await refreshLocalNode();
 			// Point the app at the node we just verified, so the rest of onboarding
 			// and the app itself talk to it rather than a stale cloud default.
 			await setDefault(node.name).catch(() => undefined);
-			await beginLocalSetup(node).catch(() => undefined);
+			await beginLocalSetup().catch(() => undefined);
 		})().catch(() => {
 			if (!cancelledRef.current) {
 				setLocalChecking(false);
@@ -928,18 +1114,11 @@ export default function OnboardingPage() {
 					token: token === "" ? null : token,
 					url,
 				};
-				const { found, suggested } = await loadOnboardingAgents(toTarget(node));
+				const result = await loadOnboardingAgents(toTarget(node));
 				if (cancelledRef.current) {
 					return;
 				}
-				if (found.length > 0 || suggested.length > 0) {
-					setFoundAgents(found);
-					setSuggestedAgents(suggested);
-					setSelected(new Set(found.map((a) => a.id)));
-					setPhase("agents");
-					return;
-				}
-				goToFeatures([]);
+				showAgentsStep(node, result);
 			})().catch(() => {
 				if (!cancelledRef.current) {
 					setRemoteChecking(false);
@@ -947,7 +1126,7 @@ export default function OnboardingPage() {
 				}
 			});
 		},
-		[goToFeatures, remoteChecking, setDefault]
+		[remoteChecking, setDefault, showAgentsStep]
 	);
 
 	// Managed (Ryu Cloud) pick. Gated on the plan entitlement: if not entitled
@@ -1025,9 +1204,9 @@ export default function OnboardingPage() {
 					setPhase("choose");
 					return undefined;
 				}
-				return beginLocalSetup(
-					useNodeStore.getState().nodes.find(isLocalNode) ?? LOCAL_FALLBACK
-				);
+				// No node argument: `beginLocalSetup` re-reads the store itself, after
+				// the boot that mints the local node's token.
+				return beginLocalSetup();
 			})
 			.catch(() => undefined);
 	}, [
@@ -1186,7 +1365,15 @@ export default function OnboardingPage() {
 			return;
 		}
 		setSubmitting(true);
-		finish(toTarget(getActiveNode()), pendingAgents);
+		(async () => {
+			// Re-resolve the local node one last time: this is the call that actually
+			// ADDS the agents the user picked, and a tokenless target would 401 every
+			// one of them into `Promise.allSettled`'s silent rejected bucket — the
+			// picker would have been for nothing.
+			const active = getActiveNode();
+			const node = isLocalNode(active) ? await refreshLocalNode() : active;
+			await finish(toTarget(node), pendingAgents);
+		})().catch(() => undefined);
 	}, [submitting, getActiveNode, finish, pendingAgents]);
 
 	if (coreFailed) {
@@ -1243,6 +1430,8 @@ export default function OnboardingPage() {
 		<div className="size-full" data-tauri-drag-region="true">
 			<OnboardingView
 				agents={foundAgents.map(withAgentLogo)}
+				agentsRetrying={agentsRetrying}
+				agentsUnavailable={agentsUnavailable}
 				currentFeature={TOGGLEABLE_FEATURES[featureIndex]}
 				featureStepIndex={featureIndex + 1}
 				featureStepTotal={TOGGLEABLE_FEATURES.length}
@@ -1263,6 +1452,7 @@ export default function OnboardingPage() {
 				onContinueMic={handleAllowMic}
 				onDownloadDesktop={handleDownloadDesktop}
 				onEnableFeature={() => applyFeatureChoice(true)}
+				onRetryAgents={handleRetryAgents}
 				onSkipAgents={() => goToFeatures([])}
 				onSkipFeature={() => applyFeatureChoice(false)}
 				onSkipMic={handleSkipMic}

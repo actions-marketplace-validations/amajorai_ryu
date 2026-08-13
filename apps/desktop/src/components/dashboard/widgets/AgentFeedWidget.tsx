@@ -1,6 +1,7 @@
 // Agent-feed widget: renders the latest reply from an agent-bound source as a
 // scrolling text feed with a freshness timestamp.
 
+import { formatTime } from "@/src/lib/timezone.ts";
 import { asRecord } from "./data.ts";
 
 function resolveText(value: unknown): string {
@@ -33,7 +34,7 @@ export function AgentFeedBody({
 			</div>
 			{refreshedAt && (
 				<span className="text-muted-foreground text-xs">
-					Updated {new Date(refreshedAt).toLocaleTimeString()}
+					Updated {formatTime(refreshedAt)}
 				</span>
 			)}
 		</div>

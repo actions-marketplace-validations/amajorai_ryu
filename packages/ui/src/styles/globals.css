@@ -82,14 +82,18 @@
 }
 
 /* Dialog transparent mode is OPT-OUT — the dimmed, blurred backdrop above is the
-   base state, so it is what every surface paints on the very first frame with no
-   JS involved. Only the desktop's "Blur dialog backgrounds" Appearance toggle can
-   turn it off, by stamping data-dialog-overlay-blur="off" on <html>
-   (hooks/use-dialog-overlay-blur.ts); the off branch drops the backdrop and the
+   CSS base state, so it is what a surface paints on the very first frame with no
+   JS involved. `apps/web` has no toggle and never bootstraps the store, so the
+   base state is exactly what it ships.
+
+   The DESKTOP default is the opposite: "Blur dialog backgrounds" is OFF, and the
+   desktop reaches that by stamping data-dialog-overlay-blur="off" on <html> from
+   `apps/desktop/src/main.tsx` module scope, before the first render
+   (hooks/use-dialog-overlay-blur.ts). The off branch drops the backdrop and the
    panel shadow for a flat transparent look.
 
-   The polarity is load-bearing: an "on"-gated version could only ever blur after
-   an effect ran, which is exactly the flash this avoids. Do not invert it back. */
+   Do NOT invert this to an "on"-gated rule to match the desktop default: that
+   would unblur every apps/web dialog, since nothing there stamps an attribute. */
 html[data-dialog-overlay-blur="off"] .ryu-dialog-overlay {
 	display: none;
 }
@@ -1116,4 +1120,72 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 		filter: none;
 		transform: none;
 	}
+}
+
+/* --- Like button (Transitions.dev) ---
+   Lives HERE, in the one stylesheet both surfaces import (`apps/web/src/index.css`
+   and `apps/desktop/src/index.css` each `@import "@ryu/ui/globals.css"`), rather
+   than in a component-local sheet next to the React component. The component
+   itself ships from `@ryu/marketplace`, which is consumed by desktop AND web —
+   a sheet imported from the .tsx would need a CSS-capable bundler on both, and
+   the desktop Vite build and the Next build do not treat package CSS the same.
+   Every other Transitions.dev animation in this file (`t-toggle`, `t-morph`,
+   `t-badge-slide-in`, …) is here for exactly that reason; a second home for one
+   of them is how the family drifts.
+
+   The block below is the supplied CSS verbatim. Two notes in it are load-bearing
+   and the component honours both:
+     1. the pop scale is on `.t-like-icon`, an HTML WRAPPER, never on the <svg>;
+     2. the per-particle custom properties are set in JS per like, and
+        `.is-bursting` must be REMOVED after the particle duration or a second
+        like cannot re-fire the burst.
+   `.t-like` needs `position: relative` for the absolutely-positioned particle
+   layer to centre on the heart; the component supplies it as a utility class so
+   this block stays byte-identical to the source. */
+
+:root {
+  --like-color: #f40051;
+  --like-fill: 150ms;
+  --like-pop: 350ms;
+  --like-pop-ease: cubic-bezier(0.34, 1.96, 0.64, 1);
+  --like-particle-dur: 600ms;
+  --like-particle-dist: 20px;
+  --like-particle-size: 2.5px;
+  --like-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-like-heart { color: currentColor; transition: color var(--like-fill) var(--like-ease); }
+.t-like-heart path {
+  fill: transparent; stroke: currentColor;
+  transition: fill var(--like-fill) var(--like-ease), stroke var(--like-fill) var(--like-ease);
+}
+.t-like[data-liked="true"] .t-like-heart { color: var(--like-color); }
+.t-like[data-liked="true"] .t-like-heart path { fill: currentColor; }
+/* Pop scale lives on an HTML wrapper, never the <svg> itself:
+   transforming an inline SVG makes Chromium rasterise it at 1×
+   (pixelated on hi-DPI). Wrapping keeps the vector crisp. */
+.t-like[data-liked="true"] .t-like-icon { animation: t-like-pop var(--like-pop) var(--like-pop-ease); }
+@keyframes t-like-pop { 0% { transform: scale(1); } 30% { transform: scale(0.82); } 100% { transform: scale(1); } }
+
+/* Particle burst — 8 dots flung along per-particle vectors. */
+.t-like-particles { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; color: var(--like-color); }
+.t-like-particles i {
+  position: absolute;
+  left: calc(var(--like-particle-size) * var(--psize, 1) / -2);
+  top: calc(var(--like-particle-size) * var(--psize, 1) / -2);
+  width: calc(var(--like-particle-size) * var(--psize, 1));
+  height: calc(var(--like-particle-size) * var(--psize, 1));
+  border-radius: 50%; background: currentColor; opacity: 0;
+}
+@keyframes t-like-burst {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.4); }
+  20%  { opacity: 1; transform: translate(calc(var(--px) * 0.25), calc(var(--py) * 0.25)) scale(1); }
+  100% { opacity: 0; transform: translate(var(--px), var(--py)) scale(var(--p-end-scale, 0.6)); }
+}
+.t-like.is-bursting .t-like-particles i {
+  animation: t-like-burst var(--pdur, var(--like-particle-dur)) ease-out var(--pdelay, 0ms) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-like-icon, .t-like-particles i { animation: none !important; }
 }

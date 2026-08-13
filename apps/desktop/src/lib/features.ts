@@ -41,6 +41,13 @@ export const DEFAULT_HIDDEN_SECTIONS = [
 	"mcp",
 	"tools",
 	"engines",
+	// Plugins is opt-in rather than always-present: installing and managing
+	// plugins already lives in the Store/Customize page, so the sidebar section is
+	// a shortcut, not the capability. Hiding it by default keeps the sidebar about
+	// the user's own work; it stays discoverable as a line-through row in the
+	// Customize sidebar dialog (and the onboarding features step), and un-hiding
+	// it sticks — the seeded ledger below never re-hides a section twice.
+	"plugins",
 ] as const;
 
 // Header chrome buttons that start hidden until the user opts in. (Empty: Memory is

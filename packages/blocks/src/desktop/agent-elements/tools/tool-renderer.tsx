@@ -200,7 +200,9 @@ export const ToolRenderer = memo(function ToolRenderer({
 			);
 		}
 		case "tool-Thinking":
-			return <ThinkingTool part={part} />;
+			// chatStatus is what stops the "Thinking" shimmer + elapsed counter on a
+			// turn that ended without its closing frame.
+			return <ThinkingTool chatStatus={chatStatus} part={part} />;
 	}
 
 	// A failed tool whose error is a real JS/Node stack trace renders as the

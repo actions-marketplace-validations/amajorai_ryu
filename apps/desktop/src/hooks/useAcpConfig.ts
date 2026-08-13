@@ -19,16 +19,36 @@ export interface UseAcpConfigResult {
 }
 
 export function useAcpConfig(
-	agentId: string | null | undefined
+	agentId: string | null | undefined,
+	/**
+	 * The config-option picks the probe should apply first. Pass the agent's
+	 * current model pick: an agent's option SET can depend on it (opencode offers
+	 * its reasoning `effort` option only while the model has effort levels), so
+	 * probing without it reports a real but incomplete set.
+	 */
+	selections?: Record<string, string> | null
 ): UseAcpConfigResult {
 	const node = useActiveNode();
 	const target = useMemo(() => toTarget(node), [node]);
+	// Sorted + stringified so the key is by VALUE: a fresh object literal from the
+	// caller's render must not look like a new query.
+	const selectionKey = useMemo(
+		() =>
+			JSON.stringify(
+				Object.entries(selections ?? {}).sort(([a], [b]) => a.localeCompare(b))
+			),
+		[selections]
+	);
 
 	const enabled = Boolean(agentId);
 	const query = useQuery({
-		queryKey: ["acp-config", node.url, agentId],
-		queryFn: () => fetchAcpConfig(target, agentId as string),
+		queryKey: ["acp-config", node.url, agentId, selectionKey],
+		queryFn: () => fetchAcpConfig(target, agentId as string, selections),
 		enabled,
+		// Switching model changes the key, and a probe of the new selection can
+		// take seconds. Keep the previous answer on screen while it runs so the
+		// pickers the user is looking at do not blank out mid-interaction.
+		placeholderData: (previous) => previous,
 		// The advertised set is static per agent binary; cache aggressively and
 		// don't refetch on focus (probing spawns the agent subprocess).
 		staleTime: 5 * 60 * 1000,

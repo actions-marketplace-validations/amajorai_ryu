@@ -85,11 +85,11 @@ function RowStatus({
 		return <Badge variant="secondary">Indexed</Badge>;
 	}
 	if (active === false) {
-		return <Badge variant="outline">Installed</Badge>;
+		return <Badge variant="outline">Added</Badge>;
 	}
 	return (
 		<HugeiconsIcon
-			aria-label="Installed"
+			aria-label="Added"
 			className="size-3.5 shrink-0 text-emerald-500"
 			icon={CheckmarkCircle02Icon}
 		/>
@@ -158,7 +158,7 @@ export function KnowledgeInstallControl({
 				percent={percent}
 			>
 				<HugeiconsIcon className="size-4" icon={Download01Icon} />
-				Install bundle
+				Add bundle
 			</InstallProgressButton>
 		);
 	}
@@ -169,7 +169,7 @@ export function KnowledgeInstallControl({
 					className="size-3.5 text-emerald-500"
 					icon={CheckmarkCircle02Icon}
 				/>
-				Installed
+				Added
 			</Badge>
 			<Switch
 				aria-label={
@@ -245,7 +245,7 @@ export function KnowledgeCard({
 								className="size-3.5 text-emerald-500"
 								icon={CheckmarkCircle02Icon}
 							/>
-							Installed
+							Added
 						</Badge>
 						<Button
 							className="ml-auto"
@@ -266,7 +266,7 @@ export function KnowledgeCard({
 						{installing ? null : (
 							<HugeiconsIcon className="size-4" icon={Download01Icon} />
 						)}
-						Install
+						Add
 					</InstallProgressButton>
 				)}
 			</div>

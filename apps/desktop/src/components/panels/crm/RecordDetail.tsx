@@ -44,6 +44,7 @@ import type {
 	ObjectWithFields,
 	RelatedGroup,
 } from "@/src/lib/api/crm.ts";
+import { formatDateTime } from "@/src/lib/timezone.ts";
 
 const TIMELINE_LIMIT = 100;
 
@@ -551,7 +552,7 @@ function TimelineEntry({
 	const when = new Date(activity.created_at);
 	const stamp = Number.isNaN(when.getTime())
 		? activity.created_at
-		: when.toLocaleString();
+		: formatDateTime(when);
 
 	if (activity.kind === "field_change" || activity.kind === "stage_change") {
 		const field = activity.field_id
@@ -609,7 +610,7 @@ function TimelineEntry({
 							<span className="tabular-nums">{stamp}</span>
 							{activity.assignee && <span>· {activity.assignee}</span>}
 							{activity.due_at && (
-								<span>· due {new Date(activity.due_at).toLocaleString()}</span>
+								<span>· due {formatDateTime(activity.due_at)}</span>
 							)}
 						</div>
 					</div>

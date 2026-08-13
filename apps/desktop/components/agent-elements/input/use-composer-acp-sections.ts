@@ -197,14 +197,44 @@ export function useComposerAcpSections({
 		: undefined;
 	const activeStem = activeModelQuery.data?.active ?? null;
 
+	// What this agent's config-option pickers currently hold, straight from the
+	// per-agent store the pickers below write through. Read every render (a pick
+	// re-renders through `useAcpSections`' own state) and keyed by value so a
+	// fresh object identity is not mistaken for a change.
+	//
+	// These are sent to the probe because an agent's advertised option SET is not
+	// a constant of its binary: ACP lets `session/set_config_option` answer with a
+	// refreshed list, and opencode uses that to offer its reasoning `effort`
+	// option only while the session's model has effort levels. Probing with no
+	// picks therefore reports a real but incomplete set — which is exactly why
+	// opencode showed a Model picker and no Effort one. Nothing here knows an
+	// agent's name or an option's id: whatever the user picked is replayed.
+	const selectionsKey = JSON.stringify(
+		Object.entries(agentId ? getAcpConfig(agentId) : {}).sort(([a], [b]) =>
+			a.localeCompare(b)
+		)
+	);
+	const acpSelections = useMemo<Record<string, string> | null>(() => {
+		const entries = JSON.parse(selectionsKey) as [string, string][];
+		return entries.length > 0 ? Object.fromEntries(entries) : null;
+	}, [selectionsKey]);
+
 	// The active agent's advertised permission modes / reasoning-effort config
 	// options / models. A picker renders only for what the agent reports.
-	const { config: acpSessionConfig, loading: acpConfigLoading } =
-		useAcpConfig(agentId);
+	const { config: acpSessionConfig, loading: acpConfigLoading } = useAcpConfig(
+		agentId,
+		acpSelections
+	);
 	// The active agent's effective capabilities — a reasoning-off override
 	// suppresses the thinking picker (Jan-style). Pass the engine model so
-	// vision/tools detection follows the composer's model selection.
-	const { capabilities } = useAgentCapabilities(agentId, engineModel);
+	// vision/tools detection follows the composer's model selection, and the SAME
+	// ACP picks the config read used: `reasoning` comes off the same probe, so
+	// probing them apart would advertise an effort option and then hide it.
+	const { capabilities } = useAgentCapabilities(
+		agentId,
+		engineModel,
+		acpSelections
+	);
 	const reasoningOff = capabilities?.reasoning === false;
 
 	const [friendly] = useFriendlyMode();

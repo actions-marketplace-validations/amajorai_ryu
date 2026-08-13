@@ -351,7 +351,7 @@ function McpCardAction({
 						className="size-3.5 text-success"
 						icon={CheckmarkCircle02Icon}
 					/>
-					Installed
+					Added
 				</Button>
 				<StoreItemOverflowMenu onOpenSettings={onOpenSettings ?? undefined} />
 			</div>
@@ -453,7 +453,7 @@ function McpDetailPanel({
 								className="size-3.5 text-success"
 								icon={CheckmarkCircle02Icon}
 							/>
-							Installed
+							Added
 						</Badge>
 					) : (
 						<InstallProgressButton
@@ -464,7 +464,7 @@ function McpDetailPanel({
 							percent={percent}
 						>
 							<HugeiconsIcon className="size-4" icon={Download01Icon} />
-							Install server
+							Add server
 						</InstallProgressButton>
 					)}
 					{card.installed ? (
@@ -492,7 +492,7 @@ function McpDetailPanel({
 			}
 			hero={
 				<ListingHero
-					badges={[card.installed ? "Installed" : null, ...transports].filter(
+					badges={[card.installed ? "Added" : null, ...transports].filter(
 						(b): b is string => Boolean(b)
 					)}
 					icon={

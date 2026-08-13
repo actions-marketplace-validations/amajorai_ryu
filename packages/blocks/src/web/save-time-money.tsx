@@ -21,27 +21,27 @@ const COLUMNS: Column[] = [
 	{
 		icon: Clock,
 		tone: "yellow",
-		eyebrow: "Save time",
-		title: "Skip the platform-team project.",
-		body: "Bring an agent or install one from the catalog. The control layer around it is ready instead of becoming another internal project.",
+		eyebrow: "Take back the hours",
+		title: "Your team stops doing the paperwork.",
+		body: "The document work that fills the day gets done in the background, with your people reviewing instead of typing.",
 		points: [
-			"Agents, tools, and skills without weeks of glue code",
-			"Sessions, memory, workflows, and audit in one layer",
-			"Ready-made agents for real workflows instead of a blank prompt",
-			"Rollout support when your team wants help",
+			"Set up around your document types and your rules",
+			"Your reviewers stay in the loop where it counts",
+			"Ready in days, not a six month project",
+			"We build the first workflow with you, not for you to figure out",
 		],
 	},
 	{
 		icon: Wallet,
 		tone: "teal",
-		eyebrow: "Save money",
-		title: "Make the bill a setting, not a surprise.",
-		body: "Routine work runs local and free. A frontier model gets called only when the task earns it, with a ceiling on every agent and team.",
+		eyebrow: "Know the bill first",
+		title: "Cost is a setting, not a surprise.",
+		body: "You set the ceiling. Routine work runs on your own machines at no per-job cost, and the expensive models get used only when the job earns it.",
 		points: [
-			"Route simple work away from premium cloud models",
-			"Per-agent and per-team budgets with visible spend",
-			"One control layer instead of separate infrastructure projects",
-			"Bring your own keys and subscriptions with no lock-in",
+			"A monthly ceiling per person and per team",
+			"See what a job cost before you quote the client",
+			"Routine work runs on your machines instead of billing per request",
+			"Keep the subscriptions you already pay for",
 		],
 	},
 ];
@@ -55,10 +55,10 @@ export default function SaveTimeMoney() {
 						suffix={
 							<span className="text-muted-foreground">
 								{" "}
-								Ryu turns the missing layer into a product.
+								You get the work done and the receipts, not another project.
 							</span>
 						}
-						title="Run agents without hiring the platform team."
+						title="You are buying output, not software."
 					/>
 				</div>
 

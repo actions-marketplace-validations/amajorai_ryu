@@ -631,6 +631,42 @@ pub fn import_zip(archive: &Path, to: &Path) -> std::io::Result<()> {
 
 // ── CLI subcommand entry ───────────────────────────────────────────────────────────
 
+/// True when `value` names a profile the stack actually knows.
+///
+/// Every profile flag on this CLI (`--profile`, `--from-profile`, `--to-profile`)
+/// is turned into a directory by `suffix_for(name)`, which has NO notion of a
+/// valid name — it maps anything that is not `release` to `-<name>` verbatim. So
+/// an unvalidated flag aims a destructive command at `~/.ryu-<whatever the user
+/// typed>`:
+///
+///   * `--profile ""` → `~/.ryu-`, and `--profile canry` → `~/.ryu-canry`. Both
+///     pass the `components().count() == 1` containment guard, so the command
+///     reports success having cleaned NOTHING — the user believes their canary
+///     profile was reset and it was not.
+///   * `copy-profile` is the sharp end: `--to-profile` names the directory that
+///     gets OVERWRITTEN, master key included, and a typo silently creates a new
+///     junk root instead of failing.
+///
+/// `scripts/wipe.mjs` has guarded this with a name regex plus an empty check
+/// since it was written; the Rust path did not. Pure and public so the rejection
+/// is testable without driving `std::process::exit`.
+pub fn is_known_profile_arg(value: &str) -> bool {
+    crate::profile::offset_of(value).is_some()
+}
+
+/// Exit rather than aim a destructive path at the release data dir by accident.
+fn require_known_profile(flag_name: &str, value: &str) {
+    if is_known_profile_arg(value) {
+        return;
+    }
+    eprintln!(
+        "data-path: {flag_name} '{value}' is not a known profile (known: {}). \
+         Refusing — an unknown or empty profile name resolves to the RELEASE data dir.",
+        crate::profile::known_profiles()
+    );
+    std::process::exit(2);
+}
+
 /// Handle `ryu-core data-path <migrate|import|export> …`. Returns `true` if it
 /// consumed the args (caller should exit), `false` if this isn't a data-path
 /// invocation. Errors print to stderr and exit non-zero.
@@ -669,6 +705,9 @@ pub fn run_cli(args: &[String]) -> bool {
             // data touched, shared roots included.
             let profile =
                 flag("--profile").unwrap_or_else(|| crate::profile::profile().to_string());
+            // Before ANY path is computed from it: an unknown or empty name maps
+            // to the release suffix and would aim this recursive delete at ~/.ryu.
+            require_known_profile("--profile", &profile);
             let suffix = crate::profile::suffix_for(&profile);
             let depth = match flag("--depth").as_deref() {
                 None | Some("none") => CleanDepth::None,
@@ -711,6 +750,11 @@ pub fn run_cli(args: &[String]) -> bool {
                 eprintln!("data-path copy-profile: source and target are the same profile");
                 std::process::exit(2);
             }
+            // Same unvalidated-name hole as deep-clean, one step worse: an unknown
+            // `--to-profile` resolves to ~/.ryu and this command OVERWRITES the
+            // target's files (and its master key) with the source profile's.
+            require_known_profile("--from-profile", &from_profile);
+            require_known_profile("--to-profile", &to_profile);
             let from_suffix = crate::profile::suffix_for(&from_profile);
             let to_suffix = crate::profile::suffix_for(&to_profile);
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -1094,6 +1138,60 @@ mod tests {
         assert!(!dir.exists(), "full removes the data dir outright");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Task #101. Every destructive profile flag on this CLI must be rejected
+    /// unless it NAMES a known profile — because `suffix_for` silently maps an
+    /// unknown or empty name onto the release suffix.
+    #[test]
+    fn an_unknown_or_empty_profile_flag_is_rejected() {
+        assert!(!is_known_profile_arg(""), "the empty-string hole itself");
+        assert!(!is_known_profile_arg("   "));
+        assert!(!is_known_profile_arg("canary "), "no implicit trimming");
+        assert!(!is_known_profile_arg("Canary"), "no implicit lowercasing");
+        assert!(!is_known_profile_arg("typo"));
+        assert!(
+            !is_known_profile_arg("."),
+            "a path fragment is not a profile"
+        );
+        assert!(!is_known_profile_arg(".."));
+        // The names that must keep working.
+        assert!(is_known_profile_arg("release"));
+        assert!(is_known_profile_arg("dev"));
+        assert!(is_known_profile_arg("canary"));
+        assert!(is_known_profile_arg("nightly"));
+        assert!(is_known_profile_arg("beta"));
+    }
+
+    /// WHY that guard is load-bearing, as assertions rather than a comment.
+    ///
+    /// `suffix_for` maps an unknown name to `-<name>` verbatim, so an unvalidated
+    /// flag names a REAL, containment-legal directory that is simply the wrong
+    /// one — and the containment guard cannot object, because `~/.ryu-canry` is a
+    /// perfectly legal single component under home. The failure mode is a
+    /// destructive command that reports success having touched nothing (or, for
+    /// `copy-profile`, having written a junk root).
+    #[test]
+    fn an_unvalidated_profile_name_aims_at_a_real_but_wrong_directory() {
+        // Not the release suffix — but not rejected by anything downstream either.
+        assert_eq!(crate::profile::suffix_for(""), "-");
+        assert_eq!(crate::profile::suffix_for("canry"), "-canry");
+        assert_ne!(
+            crate::profile::suffix_for("canry"),
+            crate::profile::suffix_for("canary"),
+            "a typo silently names a DIFFERENT profile root"
+        );
+
+        let home = std::env::temp_dir().join(format!("ryu-unvalidated-{}", uniq()));
+        for name in ["", "canry", "Canary"] {
+            let dir = home.join(format!(".ryu{}", crate::profile::suffix_for(name)));
+            assert_eq!(
+                dir.strip_prefix(&home).map(|r| r.components().count()),
+                Ok(1),
+                "'{name}' passes the containment guard, so only a name check can stop it"
+            );
+            assert!(!is_known_profile_arg(name));
+        }
     }
 
     /// The default depth touches no data at all — the original behaviour before

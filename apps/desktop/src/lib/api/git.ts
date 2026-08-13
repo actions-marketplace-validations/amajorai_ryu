@@ -1,11 +1,11 @@
 // apps/desktop/src/lib/api/git.ts
 //
 // Typed client for Core's git endpoints:
-//   - `GET /api/git/status?cwd=<path>` (consumed by WorkspaceHeader)
+//   - `GET /api/git/status?cwd=<path>` (consumed by WorkspacePicker)
 //   - `GET /api/worktree/:run_id/diff` (consumed by DiffReviewPane)
 //   - `POST /api/worktree/:run_id/apply` (consumed by DiffReviewPane)
 
-import { type ApiTarget, apiUrl, makeHeaders } from "./client.ts";
+import { type ApiTarget, apiUrl, makeHeaders, readJsonBody } from "./client.ts";
 
 export interface GitStatus {
 	ahead: number;
@@ -129,23 +129,24 @@ export async function checkoutBranch(
 ): Promise<CheckoutResult> {
 	const url = apiUrl(target, "/api/git/checkout");
 	try {
+		// `makeHeaders` ALREADY sets `Content-Type: application/json`. Re-adding a
+		// lowercase `content-type` key here produced TWO record entries, which
+		// `fetch` combines into `application/json, application/json` — a value
+		// axum's `Json` extractor rejects with a 415 and a text/plain body.
 		const resp = await fetch(url, {
 			method: "POST",
-			headers: {
-				...makeHeaders(target.token),
-				"content-type": "application/json",
-			},
+			headers: makeHeaders(target.token),
 			body: JSON.stringify({ cwd, branch }),
 			signal,
 		});
-		const json = (await resp.json()) as Partial<CheckoutResult>;
-		if (!resp.ok) {
-			return {
-				success: false,
-				error: json.error ?? `checkout failed: ${resp.status}`,
-			};
+		const { data, error } = await readJsonBody<Partial<CheckoutResult>>(
+			resp,
+			"checkout"
+		);
+		if (error) {
+			return { success: false, error };
 		}
-		return { success: true, branch: json.branch ?? branch };
+		return { success: true, branch: data?.branch ?? branch };
 	} catch (e) {
 		return {
 			success: false,
@@ -170,21 +171,18 @@ export async function createBranch(
 	try {
 		const resp = await fetch(url, {
 			method: "POST",
-			headers: {
-				...makeHeaders(target.token),
-				"content-type": "application/json",
-			},
+			headers: makeHeaders(target.token),
 			body: JSON.stringify({ cwd, branch }),
 			signal,
 		});
-		const json = (await resp.json()) as Partial<CheckoutResult>;
-		if (!resp.ok) {
-			return {
-				success: false,
-				error: json.error ?? `create branch failed: ${resp.status}`,
-			};
+		const { data, error } = await readJsonBody<Partial<CheckoutResult>>(
+			resp,
+			"create branch"
+		);
+		if (error) {
+			return { success: false, error };
 		}
-		return { success: true, branch: json.branch ?? branch };
+		return { success: true, branch: data?.branch ?? branch };
 	} catch (e) {
 		return {
 			success: false,
@@ -223,10 +221,7 @@ export async function commitPush(
 	try {
 		const resp = await fetch(url, {
 			method: "POST",
-			headers: {
-				...makeHeaders(target.token),
-				"content-type": "application/json",
-			},
+			headers: makeHeaders(target.token),
 			body: JSON.stringify({
 				cwd,
 				message,
@@ -235,18 +230,18 @@ export async function commitPush(
 			}),
 			signal,
 		});
-		const json = (await resp.json()) as Partial<CommitPushResult>;
-		if (!resp.ok) {
-			return {
-				success: false,
-				error: json.error ?? `commit/push failed: ${resp.status}`,
-			};
+		const { data, error } = await readJsonBody<Partial<CommitPushResult>>(
+			resp,
+			"commit/push"
+		);
+		if (error) {
+			return { success: false, error };
 		}
 		return {
 			success: true,
-			committed: json.committed ?? false,
-			pushed: json.pushed ?? false,
-			commit: json.commit ?? null,
+			committed: data?.committed ?? false,
+			pushed: data?.pushed ?? false,
+			commit: data?.commit ?? null,
 		};
 	} catch (e) {
 		return {
@@ -379,30 +374,31 @@ export async function applyWorktree(
 	);
 	const resp = await fetch(url, {
 		method: "POST",
-		headers: {
-			...makeHeaders(target.token),
-			"content-type": "application/json",
-		},
+		headers: makeHeaders(target.token),
 		body: JSON.stringify(opts),
 		signal,
 	});
-	const json = (await resp.json()) as Record<string, unknown>;
-	if (resp.status === 409) {
+	// This one still THROWS on failure by contract (DiffReviewPane catches), but
+	// the throw must carry the server's reason — never a raw `SyntaxError` from
+	// parsing a text/plain rejection body.
+	const { data, error, status } = await readJsonBody<Record<string, unknown>>(
+		resp,
+		"apply"
+	);
+	if (status === 409) {
 		return {
 			success: false,
 			error: "merge_conflict",
-			conflicted_files: (json.conflicted_files as string[] | undefined) ?? [],
+			conflicted_files: (data?.conflicted_files as string[] | undefined) ?? [],
 		};
 	}
-	if (!resp.ok) {
-		throw new Error(
-			(json.error as string | undefined) ?? `apply failed: ${resp.status}`
-		);
+	if (error) {
+		throw new Error(error);
 	}
 	return {
 		success: true,
-		commit: (json.commit as string | null) ?? null,
-		pr_url: (json.pr_url as string | null) ?? null,
+		commit: (data?.commit as string | null) ?? null,
+		pr_url: (data?.pr_url as string | null) ?? null,
 	};
 }
 

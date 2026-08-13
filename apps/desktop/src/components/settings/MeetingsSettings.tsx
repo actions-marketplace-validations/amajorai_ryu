@@ -241,7 +241,9 @@ export function MeetingsSettings() {
 				caption="Customize how notes are written. Leave blank to use the built-in prompt."
 				title="Notes prompt"
 			>
-				<SettingsCard>
+				{/* `bare`: the textarea is the card's only child and draws its own
+				    border, so the card surface would just double it. */}
+				<SettingsCard bare>
 					<Textarea
 						className="min-h-32 font-mono text-xs"
 						onBlur={savePrompt}

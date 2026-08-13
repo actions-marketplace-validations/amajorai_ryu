@@ -285,6 +285,113 @@ pub fn is_selectable(candidates: &[PluginManifest], capability: &str) -> bool {
     any
 }
 
+/// Whether `capability` is owned by a **host facade** — something Core itself serves
+/// on the provider's behalf, so the provider is genuinely interchangeable behind a
+/// stable surface.
+///
+/// Derived from the canonical verb table rather than a re-listed set of capability
+/// names, so adding a verb for a new capability makes it a toolkit automatically and
+/// nothing here has to be remembered. [`crate::document_parse::CAP_DOCUMENT_PARSE`]
+/// is the one facade that serves over the sidecar route instead of verbs, so it is
+/// named explicitly.
+fn is_facade_capability(capability: &str) -> bool {
+    capability == crate::document_parse::CAP_DOCUMENT_PARSE
+        || crate::sidecar::mcp::capability_tools::verbs()
+            .iter()
+            .any(|v| v.capability == capability)
+}
+
+/// Whether a capability should render as a **toolkit** — a swappable layer in the
+/// node dropdown — computed over the KNOWN manifest set.
+///
+/// Two independent grounds, either of which makes the pick meaningful:
+///
+/// 1. A host facade owns it ([`is_facade_capability`]): the verbs (or the parse
+///    route) stay the same whichever provider is bound, so swapping is the feature.
+/// 2. At least two DISTINCT manifests provide it. Even with no facade, a user faced
+///    with two implementations of one contract has a real choice to express.
+///
+/// A sole provider with no facade is one app's private wiring — `news.crud` is the
+/// news app talking to its own sidecar. Nothing picks it, nothing swaps it, and
+/// listing it as a toolkit only makes the picker look broken.
+///
+/// Counted over distinct manifest ids, not `provides[]` entries, so a manifest that
+/// declares a capability twice cannot promote itself to a toolkit alone.
+pub fn is_toolkit(known: &[PluginManifest], capability: &str) -> bool {
+    if is_facade_capability(capability) {
+        return true;
+    }
+    known
+        .iter()
+        .filter(|m| {
+            m.provided_capabilities()
+                .iter()
+                .any(|p| p.capability == capability)
+        })
+        .count()
+        >= 2
+}
+
+/// The capability's human name, picked over the KNOWN manifest set.
+///
+/// A capability has no manifest of its own — it is only the string its providers
+/// agree on — so its name is declared on every provider
+/// ([`crate::plugin_manifest::ProvidesEntry::title`]) and one is chosen here. The
+/// KNOWN set, not the enabled one, for the same reason [`is_toolkit`] uses it: a
+/// toolkit whose providers all ship opt-in must still be NAMED on a fresh install,
+/// or the row that points at the Store is headed by a raw dotted id.
+///
+/// The pick is the ladder [`pick_selectable`] uses, minus the unanimity gate: the
+/// provider declaring [`crate::plugin_manifest::ProvidesEntry::default_provider`]
+/// wins, else the lexicographically-lowest plugin id, else `None`. Both rungs are
+/// pure functions of the set, so uninstalling a provider re-picks deterministically
+/// instead of dropping the name.
+///
+/// Unanimity is deliberately NOT copied from `is_selectable`. There it is
+/// fail-closed for a reason — a third-party manifest must not be able to loosen a
+/// strict capability — but here the "safe" reading would make six independently
+/// authored `web.search` manifests fail to agree on a cosmetic string, and the cost
+/// of disagreement is one differently-worded header, not a mis-binding.
+///
+/// Blank and whitespace-only titles are treated as undeclared: an empty header is
+/// worse than the client's fallback, and this is app-supplied text.
+pub fn capability_title(known: &[PluginManifest], capability: &str) -> Option<String> {
+    // (plugin id, declares default, title) — flattened so the pick is one min_by
+    // over the same shape `pick_selectable` reduces.
+    let mut named: Vec<(&str, bool, &str)> = Vec::new();
+    for m in known {
+        for p in m.provided_capabilities() {
+            if p.capability != capability {
+                continue;
+            }
+            let Some(title) = p
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            else {
+                continue;
+            };
+            named.push((m.id.as_str(), p.default_provider, title));
+        }
+    }
+    let lowest = |set: &[(&str, bool, &str)]| -> Option<String> {
+        set.iter()
+            .min_by(|a, b| a.0.cmp(b.0))
+            .map(|(_, _, title)| (*title).to_string())
+    };
+    let defaults: Vec<(&str, bool, &str)> = named
+        .iter()
+        .copied()
+        .filter(|(_, is_default, _)| *is_default)
+        .collect();
+    if defaults.is_empty() {
+        lowest(&named)
+    } else {
+        lowest(&defaults)
+    }
+}
+
 /// One provider row in a [`CapabilityInfo`] — what a layer picker renders.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CapabilityProvider {
@@ -343,8 +450,32 @@ pub struct CapabilityProvider {
 pub struct CapabilityInfo {
     /// The capability name (`"web.search"`, `"rag"`, …).
     pub capability: String,
+    /// The capability's human name (`"Search"`, `"Document Parsing"`), declared by
+    /// its providers ([`crate::plugin_manifest::ProvidesEntry::title`]) and picked
+    /// here with [`capability_title`]. `None` = no provider names it, and the client
+    /// falls back to its own naming.
+    ///
+    /// A capability is not a manifest, so the only place its name can live is on the
+    /// providers — which is why this is picked rather than read. The alternative the
+    /// desktop shipped was a closed `{capability → label}` table in the node
+    /// dropdown: everything outside it rendered as its raw dotted id, so a
+    /// third-party toolkit could never be named at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Whether many providers may be enabled at once and one is picked.
     pub selectable: bool,
+    /// Whether this capability is a **toolkit** — a swappable layer a user picks a
+    /// provider for — as opposed to one app's private back door.
+    ///
+    /// COMPUTED by Core (see [`is_toolkit`]), never declared in a manifest, and that
+    /// is the whole point. The layer picker used to filter on [`Self::selectable`],
+    /// which is the binder's *tie-break* flag: `is_selectable` is a unanimity check
+    /// across a capability's providers, so it is trivially true for a sole provider.
+    /// Four app-private capabilities (`news.crud`, `plan.review`, `reasoning.check`,
+    /// `tuition.crud`) became "toolkits" in the node dropdown purely by copying
+    /// `"selectable": true` from a manifest that had a reason to declare it. A
+    /// declared field would let the next app do the same; a computed one cannot.
+    pub toolkit: bool,
     /// Every ENABLED candidate provider, sorted by id.
     pub providers: Vec<CapabilityProvider>,
     /// Providers that serve this capability but are NOT enabled, sorted by id.
@@ -472,6 +603,18 @@ pub fn describe_capabilities(
                 // from the enabled set would report `false` for every such
                 // capability and hide it from the picker a second time.
                 selectable: is_selectable(known, &capability),
+                // Same reason, and the same set: a toolkit whose every provider ships
+                // opt-in must still report `toolkit: true` on a fresh install, or the
+                // picker hides the one row that would have told the user the Store has
+                // candidates. Computing this over `candidates` would reproduce the
+                // `web.search` disappearance only for users who had installed nothing
+                // — the hardest case to notice and the one that matters most.
+                toolkit: is_toolkit(known, &capability),
+                // KNOWN again, and for the third time the same reason: the name has
+                // to survive its providers being disabled or uninstalled, or the
+                // picker loses the header exactly when it is showing the "nothing
+                // serves this yet" state and needs it most.
+                title: capability_title(known, &capability),
                 overridden: config.overrides.contains_key(&capability),
                 providers,
                 available,
@@ -735,6 +878,69 @@ mod tests {
         }
     }
 
+    /// The `toolkit` flag's SECOND arm, on a synthetic set — because the shipped
+    /// manifests cannot discriminate it.
+    ///
+    /// Over the built-in set every facade capability also happens to have two or
+    /// more providers, and every non-facade one has exactly one. So a `toolkit`
+    /// implemented as *only* `is_facade_capability` and a `toolkit` implemented as
+    /// *only* `providers >= 2` both satisfy the built-in regression test in
+    /// `plugins::builtins`. This is the test that says the second arm exists at all:
+    /// two manifests providing one capability no facade has ever heard of must still
+    /// come back a toolkit, because the user has a real choice to express.
+    ///
+    /// `selectable` is left OFF on both providers on purpose. The two flags answer
+    /// different questions — this one is "should the picker list it", not "may the
+    /// binder auto-pick between them" — and a `toolkit` accidentally derived from
+    /// `selectable` would report `false` here.
+    #[test]
+    fn two_providers_make_a_non_facade_capability_a_toolkit() {
+        const CAP: &str = "invoice.parse";
+        assert!(
+            !is_facade_capability(CAP),
+            "this test only proves anything while '{CAP}' is NOT facade-owned"
+        );
+
+        let sole = vec![provider("solo", CAP, "1.0.0")];
+        assert!(
+            !is_toolkit(&sole, CAP),
+            "a lone provider of a capability no facade owns is that app's private \
+             wiring, not a layer anyone picks"
+        );
+
+        let pair = vec![
+            provider("solo", CAP, "1.0.0"),
+            provider("other", CAP, "1.0.0"),
+        ];
+        assert!(
+            is_toolkit(&pair, CAP),
+            "two independent implementations of one contract IS a choice, facade or \
+             not — if this fails the predicate has collapsed to its facade arm and \
+             third-party layers can never appear in the picker"
+        );
+        assert!(
+            !is_selectable(&pair, CAP),
+            "neither provider declares `selectable`, so this proves `toolkit` is not \
+             just reading that flag under a new name"
+        );
+
+        // The read model must carry it, not just the predicate: `describe_capabilities`
+        // computes `toolkit` over `known`, and a version computed over `candidates`
+        // would report `false` here for the very capability whose providers are all
+        // disabled — the fresh-install case.
+        let described = describe_capabilities(&[], &pair, &BindingConfig::default());
+        let row = described
+            .iter()
+            .find(|c| c.capability == CAP)
+            .expect("a capability with zero ENABLED providers must still be described");
+        assert!(row.providers.is_empty() && row.available.len() == 2);
+        assert!(
+            row.toolkit,
+            "a toolkit whose every provider is disabled must still report `toolkit` — \
+             that row is the only thing telling the user the Store has candidates"
+        );
+    }
+
     #[test]
     fn overrides_json_round_trips_and_tolerates_garbage() {
         let mut cfg = BindingConfig::default();
@@ -948,6 +1154,85 @@ mod tests {
         // Selectability is read off the KNOWN set; reading it from the empty enabled
         // set would report false and hide the row from the picker a second time.
         assert!(search.selectable);
+    }
+
+    /// The capability NAME follows the binder's ladder, not a unanimity rule.
+    ///
+    /// Both halves matter. Copying `is_selectable`'s unanimity check here would
+    /// make one differently-worded (or silent) manifest erase the layer's name for
+    /// everyone, which is a hostile trade for a cosmetic string. And a plain
+    /// "first one wins" would make the header change when an unrelated provider is
+    /// installed — the declared default has to outrank id order the same way it
+    /// does when the binder picks a provider.
+    #[test]
+    fn capability_title_prefers_the_default_provider_then_the_lowest_id() {
+        let mut exa = selectable_provider("@ryu/exa", "web.search", true);
+        exa.provides[0].title = Some("Search".to_owned());
+        let mut brave = selectable_provider("@ryu/brave", "web.search", false);
+        // Lower id than the default, and a different word: id order must lose.
+        brave.provides[0].title = Some("Web Search".to_owned());
+        let mut tavily = selectable_provider("@ryu/tavily", "web.search", false);
+        tavily.provides[0].title = None;
+
+        let known = vec![exa.clone(), brave.clone(), tavily.clone()];
+        assert_eq!(
+            capability_title(&known, "web.search").as_deref(),
+            Some("Search"),
+            "the provider declaring `default` names the layer"
+        );
+
+        // Uninstall the default: the layer keeps a name rather than losing one,
+        // which is the whole reason every provider declares it.
+        assert_eq!(
+            capability_title(&[brave.clone(), tavily.clone()], "web.search").as_deref(),
+            Some("Web Search"),
+            "with no default, the lexicographically-lowest declaring id wins"
+        );
+
+        // A provider that declares nothing must not shadow one that does, and a
+        // blank title is treated as undeclared — an empty header is worse than the
+        // client's own fallback naming.
+        let mut blank = selectable_provider("@ryu/aaa", "web.search", false);
+        blank.provides[0].title = Some("   ".to_owned());
+        assert_eq!(
+            capability_title(&[blank, brave], "web.search").as_deref(),
+            Some("Web Search"),
+            "blank and absent titles are both 'undeclared'"
+        );
+
+        assert_eq!(
+            capability_title(&[tavily], "web.search"),
+            None,
+            "nobody names it ⇒ None, and the client falls back to its own naming"
+        );
+    }
+
+    /// The title travels on the read model, and is read off the KNOWN set.
+    ///
+    /// Same trap as `toolkit`: computing it over the ENABLED set would leave every
+    /// opt-in toolkit (all five `web.search` providers ship off) headed by a raw
+    /// dotted id on a fresh install — exactly the state where the row exists only
+    /// to point the user at the Store.
+    #[test]
+    fn described_capability_is_titled_from_the_known_set_not_the_enabled_one() {
+        let mut exa = selectable_provider("@ryu/exa", "web.search", true);
+        exa.provides[0].title = Some("Search".to_owned());
+        let known = vec![exa];
+        let enabled: Vec<PluginManifest> = Vec::new();
+
+        let described = describe_capabilities(&enabled, &known, &BindingConfig::default());
+        let search = described
+            .iter()
+            .find(|c| c.capability == "web.search")
+            .expect("web.search is described");
+        assert_eq!(search.title.as_deref(), Some("Search"));
+
+        // And it must SHIP. `/api/capabilities` serialises this struct straight into
+        // its response body, so the field only reaches the picker if serde emits it —
+        // a flag computed correctly and dropped on the wire looks exactly like a flag
+        // that was never computed.
+        let wire = serde_json::to_value(search).expect("CapabilityInfo serialises");
+        assert_eq!(wire["title"], serde_json::json!("Search"));
     }
 
     #[test]

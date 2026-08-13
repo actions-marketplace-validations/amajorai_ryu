@@ -75,6 +75,7 @@ import ToolsLibrary from "@/src/components/tools/ToolsLibrary.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
+import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
@@ -289,7 +290,7 @@ function LibraryCollections({
 		loading: spacesLoading,
 		create: createSpace,
 	} = useSpacesContext();
-	const { conversations } = useChatHistoryContext();
+	const { conversations, conversationsLoading } = useChatHistoryContext();
 	const { channels, loading: channelsLoading } = useChannels();
 	const { profiles, loading: identitiesLoading } = useIdentities();
 
@@ -610,7 +611,11 @@ function LibraryCollections({
 	const loadingByType: Record<LibraryItemType, boolean> = {
 		agent: agentsLoading,
 		workflow: workflowsLoading,
-		chat: false,
+		// Chats are no exception to the rule every other collection follows: until
+		// the list has actually come back, an empty one means "not loaded", not
+		// "you have none". Hardcoding `false` here flashed the "nothing here"
+		// empty state over a node that was still booting.
+		chat: conversationsLoading && conversations.length === 0,
 		space: spacesLoading,
 		team: false,
 		meeting: meetingsLoading,
@@ -646,7 +651,8 @@ function LibraryCollections({
 		spacesLoading ||
 		meetingsLoading ||
 		channelsLoading ||
-		identitiesLoading;
+		identitiesLoading ||
+		conversationsLoading;
 	const loading = isMixed
 		? anySourceLoading && baseItems.length === 0
 		: // A custom-surface section owns its own loading state.
@@ -694,6 +700,10 @@ function LibraryCollections({
 
 	const handleNewChat = () => openTab("/chat", { forceNew: true });
 
+	// Which enabled app answers to `/meetings` right now (null → none). Read here
+	// because `ctaForSection` is a plain function, not a component.
+	const meetingsCompanion = useCompanionAlias("/meetings");
+
 	const ctaForSection = (): {
 		label: string;
 		onCta: () => void;
@@ -717,10 +727,17 @@ function LibraryCollections({
 			case "team":
 				return { label: "New team", onCta: () => openTeam(null) };
 			case "meeting":
-				return {
-					label: "Record a meeting",
-					onCta: () => openTab("/meetings", { title: "Meetings" }),
-				};
+				// `/meetings` is owned by the default-OFF `@ryu/meetings` app and
+				// resolves through the companion-alias catch-all, so with no enabled
+				// app claiming it this button's only outcome was an "App not enabled"
+				// tab. No CTA at all is the honest answer — same AFFORDANCE gate the
+				// `nav.timeline` hotkey uses in `Layout.tsx`.
+				return meetingsCompanion
+					? {
+							label: "Record a meeting",
+							onCta: () => openTab("/meetings", { title: "Meetings" }),
+						}
+					: null;
 			case "channel":
 				return {
 					label: "New channel",

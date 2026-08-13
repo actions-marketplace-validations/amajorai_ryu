@@ -428,7 +428,7 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 								<ContextMenuSeparator />
 								<ContextMenuItem onClick={() => openSettings("appearance")}>
 									<HugeiconsIcon icon={Settings01Icon} />
-									Appearance settings…
+									Appearance settings
 								</ContextMenuItem>
 							</ContextMenuSubContent>
 						</ContextMenuSub>
@@ -439,7 +439,7 @@ export function GlobalContextMenu({ children }: GlobalContextMenuProps) {
 					<ContextMenuGroup>
 						<ContextMenuItem onClick={() => openSettings()}>
 							<HugeiconsIcon icon={Settings01Icon} />
-							Settings…
+							Settings
 							<ContextMenuShortcut>{mod}+,</ContextMenuShortcut>
 						</ContextMenuItem>
 						<ContextMenuItem onClick={handleReload}>

@@ -23,7 +23,7 @@
     },
     {
       "title": "Auditable by default",
-      "description": "Every model and tool call is logged in the Gateway audit trail, so each claim decision has a clear record of what the agent saw.",
+      "description": "Every step is written down as it happens, so each claim decision has a clear record of what was looked at.",
       "icon": "Eye"
     },
     {
@@ -76,10 +76,10 @@
     },
     {
       "q": "Does it decide claims on its own?",
-      "a": "No. Ryu drafts triage, coverage notes, and correspondence for a qualified handler or underwriter to decide. The audit trail records what the agent saw, so each decision has a clear paper trail."
+      "a": "No. Ryu drafts triage, coverage notes, and correspondence for a qualified handler or underwriter to decide. The record shows what was looked at, so each decision has a clear paper trail."
     }
   ],
   "ctaTitle": "Give your team an AI adjuster.",
   "ctaSubtitle": "Triage, assess, and respond faster, with policyholder data kept private and every call on the record.",
-  "ctaNote": "Local-first · PII/DLP redaction · Full audit trail"
+  "ctaNote": "Runs on your machines · Personal details stripped · Every action logged"
 }

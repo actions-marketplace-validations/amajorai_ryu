@@ -1,9 +1,17 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { DEFAULT_CORE_URL } from "@/lib/core-url.ts";
 import { fetchManagedNodes } from "@/src/lib/api/managed-nodes.ts";
 import { enforcePlanCap } from "@/src/lib/gating/planCapBridge.ts";
+// `init()` runs from App.tsx's first effect, so `refresh()` was the earliest IPC
+// the app made — early enough that Tauri had not always injected its bridge, which
+// is how "Object.refresh → window.__TAURI_INTERNALS__.invoke is undefined" became
+// one of the top production errors. Every command here goes through the gate, so a
+// too-early call queues behind the bridge instead of rejecting.
+import {
+	invokeWhenReady,
+	listenWhenReady,
+	TauriUnavailableError,
+} from "@/src/lib/tauri-ready.ts";
 
 export interface Node {
 	/**
@@ -364,7 +372,7 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 	},
 
 	setDefault: async (name) => {
-		await invoke("set_default_node", { name });
+		await invokeWhenReady("set_default_node", { name });
 		set({ defaultNode: name });
 	},
 
@@ -375,12 +383,12 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 		// uncapped. Throws PlanCapError + opens the upgrade modal when over cap.
 		const remoteCount = get().localNodes.filter((n) => !isLocalNode(n)).length;
 		enforcePlanCap("maxRemoteNodes", remoteCount);
-		await invoke("add_node", { name, url, token: token ?? null });
+		await invokeWhenReady("add_node", { name, url, token: token ?? null });
 		await get().refresh();
 	},
 
 	removeNode: async (name) => {
-		await invoke("remove_node", { name });
+		await invokeWhenReady("remove_node", { name });
 		await get().refresh();
 	},
 
@@ -485,7 +493,22 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 	},
 
 	refresh: async () => {
-		const data = await invoke<NodesData>("list_nodes");
+		// Safe to call at boot: the gate queues the command until Tauri's bridge
+		// exists. Only when there IS no bridge at all (a plain browser — the
+		// Playwright story harness, browser-mode QA) does this give up, and then it
+		// LEAVES STATE ALONE rather than writing an empty node list: an untouched
+		// store still resolves `getActiveNode()` to LOCAL_FALLBACK, whereas a wipe
+		// would drop every node the user has. A genuine `list_nodes` failure still
+		// propagates.
+		let data: NodesData;
+		try {
+			data = await invokeWhenReady<NodesData>("list_nodes");
+		} catch (error) {
+			if (error instanceof TauriUnavailableError) {
+				return;
+			}
+			throw error;
+		}
 		set((s) => ({
 			localNodes: data.nodes,
 			defaultNode: data.default,
@@ -583,7 +606,7 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 		if (get().autoSelect) {
 			startAutoSelectProbe();
 		}
-		const unlisten = await listen("nodes-changed", async () => {
+		const unlisten = await listenWhenReady("nodes-changed", async () => {
 			await get().refresh();
 			// The node set changed (added/removed/renamed) — re-pick immediately
 			// instead of waiting out the interval. No-ops while auto-select is off.

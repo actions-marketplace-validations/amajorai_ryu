@@ -492,6 +492,18 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `CORE_DEFAULT_ON`: unlike the `match`-gated hooks above, a recap is a real
     // model call per long turn, so it has to be a thing the user asked for.
     include_str!("../../../../plugins-store/recap/manifest.json"),
+    // `no-more-mistakes` is the memory counterpart to those: instead of steering or
+    // summarizing a turn, it mines the moment the user CORRECTS one. A `pre_user_turn`
+    // hook turns the correction into one durable rule and files it as a document in a
+    // Space (`spaces:docs` — this is the first turn hook to use that grant, and the
+    // reason `host.spaces.ensureSpace` exists: every other Space method needs a uuid a
+    // sandboxed hook has no way to learn). A `session_start` hook reads the ledger back
+    // at the top of every later conversation, because a rule that only surfaces when
+    // the wording happens to retrieve it is not a rule. Community-tier and opt-in: the
+    // capture hook cannot be `match`-gated — the pre-gate grammar has no "this message
+    // reads like a complaint" — so it costs a sandbox spawn per user turn, `recap`'s
+    // reason exactly.
+    include_str!("../../../../plugins-store/no-more-mistakes/manifest.json"),
     // `no-ai-slop` bundles the editing skill of the same name and runs it on the
     // turn that just finished. It is the one turn hook here with NO `match` gate:
     // "every completed answer" is the feature, so it cannot pre-gate on a flag or a
@@ -645,6 +657,16 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // row, and none of the per-app bridge rows in `rpc.ts`/`host_api.rs` that a
     // CSP-sandboxed companion would have forced. OPT-IN: not in `CORE_DEFAULT_ON`.
     include_str!("../../../../apps-store/crm/manifest.json"),
+    // Deep Read — Recursive Language Models over the `ryu-rlm` sidecar (a `local`
+    // sibling binary on 8014). Same zero-coupling posture as Outpost: Core links no
+    // RLM code, the crate does not path-depend on `apps/core`, and the one line back
+    // is the generic `/api/host/model/complete` callback gated on `hook:side-model`.
+    // Its client surface IS a full-page Companion (`ui_format:"html"`, Path B) driving
+    // the sidecar through the `rlm:query` bridge forwarder, so it ships a UI bundle
+    // and DOES need a `plugins::seed` row. It also contributes a `post_assistant_turn`
+    // hook, so it has a `builtin_code` row. OPT-IN: not in `CORE_DEFAULT_ON`, so a
+    // normal install never spawns the sidecar unless a user enables the app.
+    include_str!("../../../../apps-store/rlm/manifest.json"),
     // The Whiteboard app — a full-page Companion (`ui_format:"html"`, Path B) that
     // OWNS its Space documents via `spaces:docs`. Ships default-on with a UI bundle
     // + host-bridge grants seeded in `main.rs` (the generic CORE_DEFAULT_ON loop
@@ -1008,6 +1030,26 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // other way — the sidecar publishes a ranked snapshot the `pre_user_turn` hook
     // reads.
     include_str!("../../../../apps-store/news/manifest.json"),
+    // Subtitles — pick a video on this machine, transcribe it, translate the
+    // transcript, and write a timed `.srt`/`.vtt` beside the file. Same zero-coupling
+    // posture as Outpost: the whole pipeline (container demux, the 16 kHz downmix,
+    // the windowed whisper pass, the translation call, cue layout, the job queue)
+    // lives out-of-process in the `ryu-subtitles` sidecar on 8013, and Core reaches
+    // `/api/subtitles/*` through the generic ext-proxy `public_mount`. Core links no
+    // subtitle code and the crate does not path-depend on `apps/core`.
+    //
+    // Both model hops are LOCAL by default and that is the point of the app: the
+    // transcription goes through the extracted `ryu-stt` crate to local whisper.cpp,
+    // and the translation goes to the local gateway's on-device model — so a node
+    // with no provider configured still subtitles a film, and a file the user has not
+    // shared with anyone stays that way.
+    //
+    // Its client surface IS a full-page Companion (`ui_format:"html"`, Path B)
+    // driving the sidecar through the `subtitles:crud` bridge forwarder, so it ships
+    // a UI bundle and DOES need a `plugins::seed` row. OPT-IN: not in
+    // `CORE_DEFAULT_ON`, so a normal install never spawns the sidecar unless a user
+    // enables the app.
+    include_str!("../../../../apps-store/subtitles/manifest.json"),
 ];
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
@@ -1208,6 +1250,31 @@ pub const MEETINGS_UI_HTML: &str = include_str!("fixtures/meetings.ui.html");
 /// `bun run --cwd apps-store/social/ui build` (or `scripts/sync-app-fixtures.sh
 /// social`) and copy `dist/index.html` to `fixtures/social.ui.html` to refresh it.
 pub const SOCIAL_UI_HTML: &str = include_str!("fixtures/social.ui.html");
+
+/// The Deep Read (`@ryu/rlm`) app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/rlm/ui`, all JS/CSS inlined).
+/// Seeded as the plugin's `ui_code` onto a DISABLED record, so enabling the opt-in
+/// `@ryu/rlm` app from the store mounts the sandboxed companion (load a corpus →
+/// outline → ask → trace). The frame reaches its own `ryu-rlm` sidecar ONLY through
+/// the `rlm:query` bridge forwarder — its CSP is `connect-src 'none'` and it
+/// declares no `csp` widening, so it has no network of its own. Rebuild with
+/// `bun run --cwd apps-store/rlm/ui build` (or `scripts/sync-app-fixtures.sh rlm`)
+/// and copy `dist/index.html` to `fixtures/rlm.ui.html` to refresh it.
+pub const RLM_UI_HTML: &str = include_str!("fixtures/rlm.ui.html");
+
+/// The Subtitles app's prebuilt, self-contained UI bundle (a
+/// `vite-plugin-singlefile` build of `apps-store/subtitles/ui`, all JS/CSS — incl.
+/// the tree-shaken `@ryu/ui` components — inlined). Seeded as the plugin's `ui_code`
+/// onto a DISABLED record, so enabling the opt-in `@ryu/subtitles` app from the store
+/// mounts the sandboxed companion on `/subtitles` + `/subtitles/:id` (pick a video →
+/// watch the job → read the transcript). The frame reaches its own `ryu-subtitles`
+/// sidecar ONLY through the `subtitles:crud` bridge forwarder — its CSP is
+/// `connect-src 'none'` and it declares no `csp` widening, so it has no network of its
+/// own, and the video it names is opened by the SIDECAR rather than uploaded through
+/// the frame. Rebuild with `bun run --cwd apps-store/subtitles/ui build` (or
+/// `scripts/sync-app-fixtures.sh subtitles`) and copy `dist/index.html` to
+/// `fixtures/subtitles.ui.html` to refresh it.
+pub const SUBTITLES_UI_HTML: &str = include_str!("fixtures/subtitles.ui.html");
 
 /// The Inbox (Approvals) app's prebuilt, self-contained UI bundle (a
 /// `vite-plugin-singlefile` build of `apps-store/approvals/ui`, all JS/CSS — incl. the
