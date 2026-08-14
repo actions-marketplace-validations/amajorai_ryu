@@ -579,6 +579,18 @@ export interface PassCardShellProps {
 	/** {@link PassEdge}. Defaults to the static brushed ramp. */
 	edge?: PassEdge;
 	/**
+	 * Track a specular highlight across the card face under the pointer. Defaults
+	 * to on.
+	 *
+	 * The invite pass turns it off. On a hero card the glare is the last proof the
+	 * thing is laminated; on a card sitting inside a panel it is a white wash that
+	 * fades in over the content the moment the pointer crosses it, and the code —
+	 * the one string on the card anyone has to read — is what it washes out. The
+	 * hover LIFT stays either way: the shadow says the card responded, without
+	 * painting over what it says.
+	 */
+	glare?: boolean;
+	/**
 	 * Which tuning of the metal ring to paint. `"auto"` follows
 	 * `prefers-color-scheme`, which is wrong wherever the app has a manual theme
 	 * toggle that can disagree with the OS — callers pass their resolved theme.
@@ -595,7 +607,8 @@ export interface PassCardShellProps {
 	/**
 	 * Kill the card's SELF-motion: the idle revolution, the float, and the
 	 * drag-to-turn that writes into the same angle. Hover is untouched — the
-	 * tilt, the lift, the shadow and the glare all still answer the pointer, so
+	 * tilt, the lift, the shadow and the glare ({@link PassCardShellProps.glare},
+	 * where it is left on) all still answer the pointer, so
 	 * the card is still a card you can handle, it just does nothing on its own.
 	 *
 	 * For grids. One pass on a settings page turning forever reads as an object;
@@ -652,6 +665,7 @@ export function PassCardShell({
 	backdrop = "dither",
 	children,
 	edge = "brushed",
+	glare = true,
 	ringed = true,
 	className,
 	ditherSeed,
@@ -914,14 +928,17 @@ export function PassCardShell({
 						>
 							{children}
 							{/* Specular glare, tracked to the pointer. Fades out on leave rather
-					    than snapping, so the highlight follows the hand off the card. */}
-							<motion.div
-								animate={{ opacity: hovered && !reduceMotion ? 1 : 0 }}
-								aria-hidden="true"
-								className="pointer-events-none absolute inset-0"
-								style={{ background: glareBackground }}
-								transition={{ duration: 0.25 }}
-							/>
+					    than snapping, so the highlight follows the hand off the card.
+					    Opt-out per card — see `PassCardShellProps.glare`. */}
+							{glare ? (
+								<motion.div
+									animate={{ opacity: hovered && !reduceMotion ? 1 : 0 }}
+									aria-hidden="true"
+									className="pointer-events-none absolute inset-0"
+									style={{ background: glareBackground }}
+									transition={{ duration: 0.25 }}
+								/>
+							) : null}
 						</PassFace>
 					</div>
 

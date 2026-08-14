@@ -202,6 +202,49 @@ describe("source-fetched items", () => {
 		expect(items[1]?.item.subtitle).toBeUndefined();
 	});
 
+	// The avatar/icon pair is what lets a contributed section draw the avatar-led
+	// roster row the shell's own Agents section draws, instead of approximating it.
+	it("maps an avatar and a glyph, defaulting the glyph to the `icon` key", () => {
+		const items = sourceItemsFromResponse(
+			{
+				http: { path: "/api/bots" },
+				items: "bots",
+				map: { avatar: "avatar_url", subtitle: "last_message" },
+			},
+			{
+				bots: [
+					{
+						id: "b-1",
+						title: "Researcher",
+						avatar_url: "data:image/png;base64,AAA",
+						last_message: "on it",
+					},
+					// No avatar: the row still maps, and the renderer falls back to the
+					// section glyph rather than dropping the row or changing its shape.
+					{ id: "b-2", title: "Editor", icon: "lucide:pencil" },
+				],
+			}
+		);
+		expect(items[0]?.item.avatar).toBe("data:image/png;base64,AAA");
+		expect(items[0]?.item.icon).toBeUndefined();
+		expect(items[1]?.item.avatar).toBeUndefined();
+		// Unmapped `icon` still reads the raw row's `icon`, which is what every
+		// section written before the field existed relies on.
+		expect(items[1]?.item.icon).toBe("lucide:pencil");
+	});
+
+	it("reads the glyph from a declared key instead of the default", () => {
+		const items = sourceItemsFromResponse(
+			{
+				http: { path: "/api/bots" },
+				items: "bots",
+				map: { icon: "glyph" },
+			},
+			{ bots: [{ id: "b-1", title: "Researcher", glyph: "lucide:bot" }] }
+		);
+		expect(items[0]?.item.icon).toBe("lucide:bot");
+	});
+
 	it("degrades bad payloads and rows to empty/skipped, never throws", () => {
 		expect(sourceItemsFromResponse(source, null)).toEqual([]);
 		expect(sourceItemsFromResponse(source, { quests: "nope" })).toEqual([]);

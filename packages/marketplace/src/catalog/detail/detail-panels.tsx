@@ -313,7 +313,7 @@ export function VersionsPanel({
 				const href = safeHttpUrl(version.url);
 				const published = formatDate(version.publishedAt);
 				return (
-					<li className="rounded-md border px-3 py-2" key={version.version}>
+					<li className="rounded-md bg-muted px-3 py-2" key={version.version}>
 						<div className="flex flex-wrap items-baseline gap-2">
 							<span className="font-medium font-mono text-sm">
 								{version.version}
@@ -397,9 +397,18 @@ export function hasDependencies(
 export function DependenciesPanel({
 	detail,
 	entry,
+	showTechnical = true,
 }: {
 	detail: PluginCatalogDetail | null;
 	entry: CatalogEntry;
+	/** Show the machine-readable half: the raw grant id beside its label, the
+	 *  engine semver range, the capability strings this plugin publishes.
+	 *
+	 *  The plain-English grant LABEL and DESCRIPTION are never gated by this.
+	 *  `grant-labels.ts` exists so a non-technical user understands what they are
+	 *  approving, and hiding that from the least-technical audience would be a
+	 *  security regression dressed as simplification — only the identifier goes. */
+	showTechnical?: boolean;
 }) {
 	const requires = detail?.requires ?? entry.requires ?? null;
 	const apps = requires?.apps ?? [];
@@ -415,6 +424,7 @@ export function DependenciesPanel({
 			    dependency-graph.tsx. Renders nothing when nothing is declared. */}
 			<RequiredPluginsSection
 				apps={apps}
+				showTechnical={showTechnical}
 				subjectId={entry.id}
 				subjectName={entry.name}
 			/>
@@ -430,14 +440,16 @@ export function DependenciesPanel({
 					</h3>
 					<ul className="flex flex-col gap-1.5">
 						{grants.map((grant) => (
-							<li className="rounded-md border px-3 py-2" key={grant}>
+							<li className="rounded-md bg-muted px-3 py-2" key={grant}>
 								<div className="flex items-baseline justify-between gap-3">
 									<span className="min-w-0 truncate text-sm">
 										{grantLabel(grant)}
 									</span>
-									<code className="shrink-0 truncate font-mono text-muted-foreground text-xs">
-										{grant}
-									</code>
+									{showTechnical ? (
+										<code className="shrink-0 truncate font-mono text-muted-foreground text-xs">
+											{grant}
+										</code>
+									) : null}
 								</div>
 								<p className="mt-0.5 text-muted-foreground text-xs leading-relaxed">
 									{grantDescription(grant)}
@@ -448,7 +460,7 @@ export function DependenciesPanel({
 				</section>
 			) : null}
 
-			{engineReq ? (
+			{engineReq && showTechnical ? (
 				<section className="flex flex-col gap-2">
 					<h3 className="font-medium text-sm">Requires Ryu</h3>
 					<p className="text-muted-foreground text-sm">
@@ -459,13 +471,13 @@ export function DependenciesPanel({
 				</section>
 			) : null}
 
-			{detail?.apiSurface?.provides?.length ? (
+			{detail?.apiSurface?.provides?.length && showTechnical ? (
 				<section className="flex flex-col gap-2">
 					<h3 className="font-medium text-sm">Provides to other plugins</h3>
 					<ul className="flex flex-col gap-1.5">
 						{detail.apiSurface.provides.map((entryProvides) => (
 							<li
-								className="rounded-md border px-3 py-2 text-sm"
+								className="rounded-md bg-muted px-3 py-2 text-sm"
 								key={entryProvides.capability}
 							>
 								<code className="font-mono">{entryProvides.capability}</code>

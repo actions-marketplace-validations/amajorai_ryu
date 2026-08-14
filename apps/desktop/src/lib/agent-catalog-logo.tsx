@@ -4,6 +4,7 @@ import {
 	AgentLogo,
 	engineForAgent,
 	hasBrandedEngineLogo,
+	REGISTRY_LOGO_SLUGS,
 } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry } from "@/src/lib/api/agents.ts";
 
@@ -22,18 +23,11 @@ const svglUrl = (slug: string) => `/assets/logos/${slug}.svg`;
  * squares). Solid brand colours (amp's blue, jetbrains' gradient) read on both
  * themes, so they stay single-asset — a dark variant would only mis-colour them.
  */
-const REGISTRY_SVGL: Record<string, SvglSpec> = {
-	"amp-acp": "amp",
-	cursor: { light: "cursor_light", dark: "cursor_dark" },
-	"github-copilot-cli": { light: "copilot", dark: "copilot_dark" },
-	"grok-build": { light: "grok-light", dark: "grok-dark" },
-	junie: "jetbrains",
-	kilo: { light: "kilocode-light", dark: "kilocode-dark" },
-	kimi: { light: "kimi-icon", dark: "kimi-icon-dark" },
-	"mistral-vibe": { light: "mistral-ai_logo", dark: "mistral-ai_logo_dark" },
-	opencode: { light: "opencode", dark: "opencode-dark" },
-	"qwen-code": { light: "qwen_light", dark: "qwen_dark" },
-};
+// Re-exported from `agent-logos`, NOT declared here. It used to live in this file
+// alone, which meant the marks existed only while a CATALOG ROW was on screen: the
+// Cursor agent that installing Cursor creates rendered through `AgentLogo`
+// everywhere else and fell back to the Ryu ghost. One table, both paths.
+const REGISTRY_SVGL: Record<string, SvglSpec> = REGISTRY_LOGO_SLUGS;
 
 function SvglLogo({
 	spec,
@@ -87,7 +81,12 @@ export function AgentCatalogLogo({
 	className,
 	size = "16px",
 }: {
-	entry: AgentCatalogEntry;
+	/** Only four fields are ever read — `id`, `name`, `engine`, `registryId` — so
+	 *  the parameter is typed as that subset rather than the whole catalog entry.
+	 *  The Store's Home shelf has a normalized `HomeCard`, not an
+	 *  `AgentCatalogEntry`, and widening here is honest where a cast at the call
+	 *  site would have claimed fields that are simply absent. */
+	entry: Pick<AgentCatalogEntry, "engine" | "id" | "name" | "registryId">;
 	className?: string;
 	size?: string;
 }) {

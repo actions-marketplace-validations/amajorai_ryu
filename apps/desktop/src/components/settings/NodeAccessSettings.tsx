@@ -328,8 +328,8 @@ export function NodeAccessSettings() {
 					<h3 className="font-medium text-sm">This node's access token</h3>
 					<p className="text-muted-foreground text-xs">
 						Apps on this computer pick this up automatically. You only need to
-						copy it by hand for something that cannot ask to be approved — a
-						headless server you reach over SSH, for example.
+						copy it by hand for something that cannot ask to be approved, like a
+						headless server you reach over SSH.
 					</p>
 				</div>
 
@@ -365,7 +365,7 @@ export function NodeAccessSettings() {
 						<p className="text-muted-foreground text-xs">
 							This token comes from the <code>RYU_TOKEN</code> environment
 							variable, which takes priority over the stored one. To change it,
-							change that variable — rotating here would have no effect.
+							change that variable; rotating here would have no effect.
 						</p>
 					) : (
 						<div className="flex items-center gap-2">

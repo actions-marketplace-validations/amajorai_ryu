@@ -99,7 +99,7 @@ export function MessageInput({
 	// would only fit once on mount and the textarea would never grow past one row.
 	useEffect(() => {
 		autosize();
-	}, [autosize]);
+	}, [autosize, value]);
 
 	// Report the composer row's height to the island so the compact bar tracks it.
 	useEffect(() => {

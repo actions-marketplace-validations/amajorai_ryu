@@ -34,6 +34,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sileo } from "sileo";
@@ -48,6 +49,7 @@ import type {
 } from "@/src/lib/api/pi-config.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 import { AgentModelsSettings } from "./AgentModelsSettings.tsx";
+import { CapabilityProvidersSettings } from "./CapabilityProvidersSettings.tsx";
 import { ProviderLoginDialog } from "./dialogs/ProviderLoginDialog.tsx";
 import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 
@@ -199,6 +201,25 @@ interface ProviderCardProps {
 	thinkingLevels: string[];
 }
 
+/** The one managed pool with no donated allowance behind it — retail
+ *  pass-through, paid for out of subscription/top-up credit. Every OTHER pool is
+ *  donated supply that grants land in, so it needs no plan. Mirrors the
+ *  `openrouter` id in `packages/auth/src/lib/credit-pools.ts`. */
+const RETAIL_CREDIT_POOL = "openrouter";
+
+/** What a managed row's chip says.
+ *
+ *  Three states, not two: a pool-backed row is neither "included with your plan"
+ *  (it is not — it is donated supply you may hold a grant of) nor "requires a
+ *  subscription" (it does not). Saying either of the old two about it is wrong in
+ *  a way that costs the user the credit they already have. */
+function managedBadgeLabel(needsPlan: boolean, poolBacked: boolean): string {
+	if (poolBacked) {
+		return "Ryu credits";
+	}
+	return needsPlan ? "Requires Ryu subscription" : "Included with your plan";
+}
+
 function ProviderCard({
 	activeConfig,
 	check,
@@ -218,12 +239,23 @@ function ProviderCard({
 	const isSubscription =
 		provider.authKind === "subscription" && !provider.managed;
 	const needsKey = provider.authKind === "api-key";
-	// The managed provider is always `configured` (wallet-gated server-side), so its
+	// A managed provider is always `configured` (wallet-gated server-side), so its
 	// upsell gates on the paid-plan entitlement. When the user has no plan, the card
 	// leads with an Upgrade CTA instead of presenting it as ready to use.
+	//
+	// …but ONLY the retail row. The pool-backed rows ("Ryu Fast", "Ryu Frontier")
+	// are backed by donated supply, and free-tier and referral grants land in them —
+	// so a user with no plan can hold credit that is spendable there right now.
+	// Gating on `managed` alone put "Requires Ryu subscription" on the one supply
+	// such a user can actually spend, which is precisely backwards.
 	const { verdict, requestUpgrade } = useEntitlementContext();
+	const isPoolBacked = Boolean(
+		provider.creditPool && provider.creditPool !== RETAIL_CREDIT_POOL
+	);
 	const managedNeedsPlan =
-		Boolean(provider.managed) && !(verdict?.managedInference ?? false);
+		Boolean(provider.managed) &&
+		!isPoolBacked &&
+		!(verdict?.managedInference ?? false);
 	// The subscription login dialog owns the OAuth flow end to end.
 	const [loginOpen, setLoginOpen] = useState(false);
 
@@ -452,14 +484,13 @@ function ProviderCard({
 						<div className="flex min-w-0 flex-col gap-1">
 							<div className="flex flex-wrap items-center gap-2">
 								<span className="font-medium text-sm">{provider.label}</span>
-								{isActive ? (
-									<Badge className="text-[10px]">Active</Badge>
-								) : null}
+								{/* The shared status glyph, same as every catalog row. "Managed"
+								    and "Requires Ryu subscription" beside it stay prose: those are
+								    facts about the PROVIDER, not a state it is in. */}
+								{isActive ? <StatusBadge kind="active" /> : null}
 								{provider.managed ? (
 									<Badge className="text-[10px]" variant="secondary">
-										{managedNeedsPlan
-											? "Requires Ryu subscription"
-											: "Included with your plan"}
+										{managedBadgeLabel(managedNeedsPlan, isPoolBacked)}
 									</Badge>
 								) : null}
 								{provider.configured && !provider.managed ? (
@@ -487,9 +518,9 @@ function ProviderCard({
 								Every model, one subscription
 							</span>
 							<span className="text-muted-foreground text-xs">
-								Ryu's managed OpenRouter routes to every major model with no API
+								Ryu's managed inference reaches every major model with no API
 								keys and no per-provider setup. Upgrade to use it, or add your
-								own OpenRouter key below.
+								own key below.
 							</span>
 							<div className="flex justify-start">
 								<Button onClick={() => requestUpgrade()} size="sm">
@@ -523,7 +554,7 @@ function ProviderCard({
 									<span className="text-muted-foreground text-xs">
 										Sign in with your{" "}
 										{provider.label.replace(/\s*\([^)]*\)\s*$/, "")}{" "}
-										subscription — no API key needed.
+										subscription. No API key needed.
 									</span>
 								</div>
 								<Button
@@ -877,8 +908,8 @@ export function LlmProvidersSettings() {
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption="Configure any number of providers, then pick one to power the Ryu agent. The Gateway toggle governs each provider's egress independently (firewall · budget · audit); the managed provider is always Gateway-routed. Model, credential, and routing choices all live in Core's isolated Pi config."
-				title="Providers"
+				caption="The providers that answer chat. Configure any number, then pick one to power the Ryu agent. The Gateway toggle governs each provider's egress independently (firewall · budget · audit); the managed provider is always Gateway-routed. Model, credential, and routing choices all live in Core's isolated Pi config."
+				title="Chat"
 			>
 				<div className="space-y-2.5">
 					{ordered.map((provider) => (
@@ -904,8 +935,15 @@ export function LlmProvidersSettings() {
 				onToggleModel={toggleModelEnabled}
 			/>
 
+			{/* The rest of the capability surface — image, speech, video, and the
+			    retrieval pair. Split out because a provider list that only ever
+			    meant "chat" gave no answer to "what actually does text-to-speech
+			    here?", and the answer lived in a node dialog most people never
+			    open. */}
+			<CapabilityProvidersSettings />
+
 			<SettingsSection
-				caption="Point Ryu at any OpenAI-compatible endpoint — a local llama.cpp / Ollama / vLLM server or a hosted gateway. It joins the list above and can be activated like any built-in provider."
+				caption="Point Ryu at any OpenAI-compatible endpoint: a local llama.cpp / Ollama / vLLM server, or a hosted gateway. It joins the list above and can be activated like any built-in provider."
 				title="Custom OpenAI-compatible provider"
 			>
 				<CustomProviderForm

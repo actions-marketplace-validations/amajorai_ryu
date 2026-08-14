@@ -11,15 +11,17 @@ import { EntityAvatar } from "@ryu/ui/components/entity-avatar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronsUpDown, User } from "lucide-react";
+import { Check, ChevronsUpDown } from "lucide-react";
 import { useSession } from "@/lib/auth-client.ts";
 import {
-	getActiveOrgId,
+	ACTIVE_ORG_KEY,
 	hasOrgAuth,
 	listOrgs,
 	type OrgListEntry,
 	setActiveOrg,
+	useActiveOrgId,
 } from "@/src/lib/api/orgs.ts";
+import { queryClient as appQueryClient } from "@/src/lib/query-client.ts";
 
 /**
  * The workspace picker that sits at the top of the settings dialog's SERVICES
@@ -40,25 +42,43 @@ import {
  * than a hand-picked list of keys invalidated — the switch changes the meaning
  * of every org-scoped response in flight, and enumerating them here would leave
  * the next org-scoped tab someone adds silently stale.
+ *
+ * BOTH CACHES, not one. The blanket invalidation used to run only against the
+ * ambient client, which inside this dialog is the ISOLATED `new QueryClient()`
+ * that `SettingsDialog.tsx` creates. The gateway dialog is mounted outside that
+ * provider, so its workspace roster and its `gateway.configure` gate read the
+ * app-wide client and stayed scoped to the previous org INDEFINITELY, not for a
+ * paint. Dropping both is the only version of "everything org-scoped" that is
+ * actually everything.
+ *
+ * Neither drop can reach the surfaces that are not queries at all — the wallet
+ * balance, the auto-recharge and low-balance cards are plain state behind an
+ * effect. Those re-run because `useActiveOrgId()` is one of their effect
+ * dependencies, and its key is dropped here like any other. Every one of them
+ * CLEARS to its empty state before it reloads, which is the rule the whole
+ * change turns on: an org-scoped surface may show this org's data or nothing,
+ * never the last org's while the new one is in flight.
+ *
+ * WHY THE ORDER BELOW. The active-org id is re-read and AWAITED before anything
+ * else is touched, because it is the key half of every org-keyed query here. An
+ * invalidation that runs while those queries are still mounted under the
+ * PREVIOUS org's id refetches them under that id and stores the new org's answer
+ * there — so switching back a minute later is served the wrong org's numbers
+ * from cache, which is the exact flash the keys were added to remove.
  */
 
 const ORGS_KEY = ["settings", "orgs"] as const;
-const ACTIVE_ORG_KEY = ["settings", "orgs", "active"] as const;
 
 export function ServicesOrgSwitcher() {
 	const queryClient = useQueryClient();
 	const authed = hasOrgAuth();
 	const { data: session } = useSession();
+	const activeOrgId = useActiveOrgId();
 
 	const orgsQuery = useQuery({
 		enabled: authed,
 		queryFn: listOrgs,
 		queryKey: ORGS_KEY,
-	});
-	const activeQuery = useQuery({
-		enabled: authed,
-		queryFn: getActiveOrgId,
-		queryKey: ACTIVE_ORG_KEY,
 	});
 
 	const switchMutation = useMutation({
@@ -69,9 +89,34 @@ export function ServicesOrgSwitcher() {
 					error instanceof Error ? error.message : "Couldn't switch workspace",
 			}),
 		onSuccess: async () => {
-			// Everything org-scoped is now about a different org. See the note above
-			// on why this is a blanket invalidation.
+			// 1. WHICH org, first and on its own. Until this lands, every org-keyed
+			//    query in the dialog is still mounted under the previous org's id.
+			await appQueryClient
+				.refetchQueries({ queryKey: ACTIVE_ORG_KEY })
+				.catch(() => undefined);
+
+			// 2. Everything org-scoped is now about a different org. See the note
+			//    above on why this is a blanket invalidation, and why it is two of
+			//    them. Only the DIALOG's client is awaited: the spinner on this
+			//    trigger is a promise about the tabs directly below it, and the
+			//    app-wide client backs the whole shell — catalogs, model lists, node
+			//    reads — so awaiting it would hold the switcher disabled until the
+			//    slowest unrelated query in the app resolved.
+			appQueryClient.invalidateQueries().catch(() => undefined);
 			await queryClient.invalidateQueries();
+
+			// 3. Sweep what the switch left behind: the entries left under the
+			//    PREVIOUS org's key once the tabs re-keyed onto the new one. Nothing
+			//    observes them, so nothing on screen changes — but they survive the
+			//    default 5-minute gcTime, and a switch BACK inside that window would
+			//    be served from them. Restricted to `inactive` for that reason (a
+			//    live query must reload, not disappear) and to the DIALOG's client,
+			//    whose org-keyed queries are the ones the switch strands; anything
+			//    else swept here is a settings tab nobody has open, which costs one
+			//    refetch when it is next opened. Safe here and not earlier: the
+			//    awaited invalidation above has settled, so no refetch is still in
+			//    flight that could repopulate a stale key behind the sweep.
+			queryClient.removeQueries({ type: "inactive" });
 		},
 	});
 
@@ -85,7 +130,7 @@ export function ServicesOrgSwitcher() {
 	// The server's own fallback, mirrored: a session with no active org resolves
 	// to the EARLIEST membership. Showing "Select…" instead would imply the tabs
 	// below are unscoped, when they are already reading that org's numbers.
-	const activeId = activeQuery.data ?? orgs[0]?.id ?? null;
+	const activeId = activeOrgId ?? orgs[0]?.id ?? null;
 	const active = orgs.find((org) => org.id === activeId) ?? orgs[0];
 
 	// The web dashboard's own rule, mirrored rather than re-invented (see
@@ -168,10 +213,6 @@ export function ServicesOrgSwitcher() {
 					))}
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<p className="mt-1 flex items-center gap-1 px-0.5 text-[11px] text-muted-foreground">
-				<User className="size-3 shrink-0" />
-				Billing, credits and referrals below are for this workspace.
-			</p>
 		</div>
 	);
 }

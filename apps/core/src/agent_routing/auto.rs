@@ -45,6 +45,43 @@ pub const DEFAULT_FALLBACK_AGENT: &str = "ryu";
 /// `embedding_model` empty (matches the local nomic-embed sidecar default).
 const DEFAULT_EMBED_MODEL: &str = "nomic-embed-text-v1.5";
 
+/// Fallback classifier model for the `Llm` strategy. Kept in lockstep with
+/// [`crate::registry::DEFAULT_LOCAL_CLASSIFIER_MODEL_ID`] — the id the classify
+/// tier actually serves — the same way the Gateway documents its
+/// `DEFAULT_INSPECTOR_MODEL`. Cheap and local, so a default classifier never
+/// leaks a turn to a hosted provider or spends a cent.
+///
+/// Unlike [`DEFAULT_EMBED_MODEL`], which is applied at call time, this one is
+/// applied at DESERIALIZATION (see [`de_classifier_model`]): a blank classifier
+/// makes [`AgentAutoConfig::is_active`] return false, so a call-time fallback
+/// would never be reached.
+fn default_classifier_model() -> String {
+    crate::registry::DEFAULT_LOCAL_CLASSIFIER_MODEL_ID.to_owned()
+}
+
+/// Resolve a blank `classifier_model` to [`default_classifier_model`] as the
+/// value is read off the wire.
+///
+/// Mirrors the Gateway's `de_classifier_model`, and exists for the same reason:
+/// `#[serde(default = …)]` alone only covers an *absent* field, but the desktop
+/// writes an explicit `""` into the [`AGENT_AUTO_ROUTING_PREF_KEY`] preference
+/// whenever an operator clears the model box. A config saved that way parsed as
+/// "enabled" while [`AgentAutoConfig::is_active`] read false and
+/// [`classify_llm`] bailed on the empty id — a feature switched on that silently
+/// did nothing. Normalizing at this single construction seam is what makes
+/// "enabled" mean "working".
+fn de_classifier_model<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(if raw.trim().is_empty() {
+        default_classifier_model()
+    } else {
+        raw
+    })
+}
+
 /// Cap the user message fed to the classifier / embedder so a huge paste stays
 /// cheap (mirrors the Gateway smart router's cap).
 const MAX_CLASSIFIER_INPUT_CHARS: usize = 2000;
@@ -93,7 +130,13 @@ pub struct AgentAutoConfig {
     #[serde(default)]
     pub strategy: RouteStrategy,
     /// Model id for the `Llm` strategy (resolved via Core's gateway chat path).
-    #[serde(default)]
+    /// Blank or absent resolves to [`default_classifier_model`] at
+    /// deserialization (see [`de_classifier_model`]), so this is never empty in
+    /// practice and "enabled" cannot mean "silently inert".
+    #[serde(
+        default = "default_classifier_model",
+        deserialize_with = "de_classifier_model"
+    )]
     pub classifier_model: String,
     /// Embedder id for the `Embedding` strategy; empty → the default local embedder.
     #[serde(default)]
@@ -116,6 +159,10 @@ pub struct AgentAutoConfig {
 impl AgentAutoConfig {
     /// Whether agent-auto routing should run at all: enabled, has rules, and (for
     /// `Llm`) a non-empty classifier model. `Embedding`/`Keyword` need only rules.
+    ///
+    /// The classifier check is the last line of defence, not a gate an operator
+    /// hits: [`de_classifier_model`] resolves a blank one as it comes off the
+    /// wire, so only a config built in Rust can still trip this arm.
     pub fn is_active(&self) -> bool {
         if !self.enabled || self.rules.is_empty() {
             return false;
@@ -597,6 +644,54 @@ mod tests {
         let mut c = cfg(RouteStrategy::Keyword);
         c.rules.clear();
         assert!(!c.is_active());
+    }
+
+    /// REGRESSION: agent-auto routing saved as "on" with the classifier box
+    /// cleared parsed fine, then did nothing — `is_active()` read false and
+    /// [`classify_llm`] bailed on the empty id.
+    ///
+    /// This has to go through serde. The test above sets `classifier_model` in
+    /// Rust, which bypasses `de_classifier_model` entirely; it keeps passing
+    /// after the fix while proving nothing about the wire path the desktop
+    /// actually writes into `agent-auto-routing`.
+    #[test]
+    fn a_blank_classifier_from_the_preference_resolves_to_a_working_model() {
+        // The JSON the desktop stores when an operator clears the model box.
+        let from_wire: AgentAutoConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "strategy": "llm",
+            "classifier_model": "",
+            "rules": [{ "description": "code", "agent_id": "claude-code" }],
+        }))
+        .expect("an explicit empty classifier must still parse");
+        assert_eq!(
+            from_wire.classifier_model,
+            crate::registry::DEFAULT_LOCAL_CLASSIFIER_MODEL_ID
+        );
+        assert!(
+            from_wire.is_active(),
+            "enabled + rules must mean agent-auto routing actually runs"
+        );
+
+        // An ABSENT key resolves the same way — the `default = \"fn\"` half of
+        // the pair. One without the other leaves half the hole open.
+        let absent: AgentAutoConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "strategy": "llm",
+            "rules": [{ "description": "code", "agent_id": "claude-code" }],
+        }))
+        .expect("an absent classifier must parse");
+        assert_eq!(absent.classifier_model, from_wire.classifier_model);
+
+        // An operator's own pick is untouched.
+        let explicit: AgentAutoConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "strategy": "llm",
+            "classifier_model": "gemma-local",
+            "rules": [{ "description": "code", "agent_id": "claude-code" }],
+        }))
+        .expect("parses");
+        assert_eq!(explicit.classifier_model, "gemma-local");
     }
 
     #[test]

@@ -28,7 +28,10 @@ import {
 	BouncyAccordion,
 	type BouncyAccordionItem,
 } from "@/src/components/ui/bouncy-accordion.tsx";
-import { applyReleaseUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import {
+	applyReleaseUpdate,
+	scheduleReleaseUpdate,
+} from "@/src/components/updater/AutoUpdater.tsx";
 import { useEngines } from "@/src/hooks/useEngines.ts";
 import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
@@ -44,7 +47,7 @@ import { checkForUpdate, type UpdateCheck } from "@/src/lib/api/update.ts";
 import { copyDiagnostics, reportIssue } from "@/src/lib/preflight.ts";
 import { restartSidecar, startSidecar } from "@/src/lib/services-api.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
-import { useNodeStore } from "@/src/store/useNodeStore.ts";
+import { isLocalNode, useNodeStore } from "@/src/store/useNodeStore.ts";
 
 /** The Island Electron companion's loopback control server (see apps/island). */
 const ISLAND_CONTROL_URL = "http://127.0.0.1:7989/control";
@@ -375,6 +378,30 @@ export function PreflightPage({
 									}
 								}}
 								variant="default"
+							/>
+						) : null}
+						{/* Only for a REMOTE node. A local node's Core ships inside this
+						    app bundle and is installed by the native updater with its own
+						    restart flow, so there is nothing on it to defer — offering the
+						    choice there would be a button that always errors. */}
+						{coreUpdateAvailable &&
+						health.coreUpdate &&
+						!isLocalNode(useNodeStore.getState().getActiveNode()) ? (
+							<ActionButton
+								busyLabel="Scheduling…"
+								label="Update tonight"
+								onRun={async () => {
+									// Deferred to the NODE's quiet hour, not the viewer's:
+									// the machine that restarts is the one whose night
+									// matters. The confirmation names the zone.
+									const message = await scheduleReleaseUpdate(
+										target,
+										useNodeStore.getState().getActiveNode(),
+										health.coreUpdate as UpdateCheck
+									);
+									toast.info(message);
+								}}
+								variant="outline"
 							/>
 						) : null}
 					</div>

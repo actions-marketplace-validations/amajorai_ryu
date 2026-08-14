@@ -303,7 +303,7 @@ export function AgentAccessPanel({ agentId, target }: AgentAccessPanelProps) {
 				<>
 					Cross-app reach for <strong>{agent.name}</strong>. Spaces feed
 					retrieval; app tool groups unlock that app&apos;s MCP tools (Ghost,
-					Spaces pages, Browser, …). Same allowlists as Agent edit — changes
+					Spaces pages, Browser, …). Same allowlists as Agent edit. Changes
 					apply everywhere this agent runs, including agent-ask.
 				</>
 			}

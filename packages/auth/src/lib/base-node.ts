@@ -44,6 +44,126 @@ export const planIncludesBaseNode = (
 ): boolean => Boolean(plan && PLANS_INCLUDING_BASE_NODE.includes(plan));
 
 /**
+ * The Hetzner type each plan's FREE node is provisioned at.
+ *
+ * Max gets a genuinely bigger machine — this is one of the things a top-up
+ * cannot sell you, and therefore one of the reasons Max exists at all now that
+ * it is no longer a credit pack. `cx33` is 4 vCPU · 8 GB · 80 GB against the
+ * `cx23`'s 2 vCPU · 4 GB · 40 GB: double the compute and memory.
+ *
+ * NOT `cpx22`, which reads like the obvious upgrade and is a trap: Hetzner's
+ * June 2026 repricing took it from €7.99 to **€19.49**, while `cx33` is €8.49
+ * for twice the cores and twice the RAM. Always price the type against the live
+ * catalog before promoting one into a plan — the intuition that "cpx > cx" has
+ * not been true since that change.
+ */
+export const BASE_NODE_TYPE_BY_PLAN: Readonly<Record<string, string>> = {
+	pro: "cx23",
+	max: "cx33",
+	teams: "cx23",
+};
+
+/**
+ * The type a plan's free node is provisioned at, or null when it gets none.
+ * Teams resolves through the seat ladder; everything else is fixed per plan.
+ */
+export const baseNodeTypeForPlan = (
+	plan: PlanId | null | undefined,
+	seats = 1
+): string | null => {
+	if (!(plan && planIncludesBaseNode(plan))) {
+		return null;
+	}
+	if (plan === "teams") {
+		return teamsNodeTierForSeats(seats).type;
+	}
+	return BASE_NODE_TYPE_BY_PLAN[plan] ?? "cx23";
+};
+
+/**
+ * TEAMS COMPUTE SCALES WITH THE ORG — by SIZE, not by count.
+ *
+ * The first attempt granted "one `cx23` per 10 seats", which fixed the wrong
+ * variable. Ten 2-vCPU boxes for a hundred people is ten small machines, not one
+ * adequate one: a single node serves the org's shared agent traffic, so what a
+ * bigger team needs is a bigger node, and only past a point a second one.
+ *
+ * The distinction that matters, because it is easy to conflate: a VM per SEAT is
+ * not industry practice and mostly buys idle hardware — seats are human
+ * licences. Capacity that scales with org size IS standard (Vercel, Databricks:
+ * seats are licences, compute is sized separately). This ladder is the second
+ * thing, not the first.
+ *
+ * The cost stays trivial against revenue — ~$77/mo of hardware at 100 seats
+ * against $4,165 of subscription — and it is both cheaper AND more useful than
+ * ten idle `cx23`s.
+ *
+ * REVERSIBILITY IS WHY THIS IS SAFE TO SCALE DOWN. Hetzner's `change_type` can
+ * move a server between types in place, but a resize that GROWS THE DISK is
+ * permanent — such a server can never be downgraded again. `resizeServerSEAM`
+ * in `cloud-provision.ts` therefore always passes `upgrade_disk: false`, so the
+ * disk stays at its original size and the CPU/RAM tier remains free to move in
+ * both directions. Never change that flag to satisfy a disk request: growing a
+ * disk is a separate, explicit, ONE-WAY decision, and folding it into an
+ * automatic seat-driven resize would silently strand the org on its current tier
+ * forever.
+ */
+export interface TeamsNodeTier {
+	/** How many nodes at this tier. */
+	readonly count: number;
+	/** Seat count at which this tier starts. */
+	readonly minSeats: number;
+	/** Hetzner type. */
+	readonly type: string;
+}
+
+/**
+ * Ascending. Disk sizes are deliberately NOT part of the promise — see the
+ * reversibility note above; a `cx23` resized up keeps its 40 GB.
+ */
+export const TEAMS_NODE_TIERS: readonly TeamsNodeTier[] = [
+	{ minSeats: 2, type: "cx23", count: 1 },
+	{ minSeats: 10, type: "cx33", count: 1 },
+	{ minSeats: 25, type: "cpx32", count: 1 },
+	{ minSeats: 50, type: "cpx32", count: 2 },
+];
+
+/** The Teams node tier in force at `seats` — the highest one reached. */
+export const teamsNodeTierForSeats = (seats: number): TeamsNodeTier => {
+	let tier = TEAMS_NODE_TIERS[0] as TeamsNodeTier;
+	for (const candidate of TEAMS_NODE_TIERS) {
+		if (seats >= candidate.minSeats) {
+			tier = candidate;
+		}
+	}
+	return tier;
+};
+
+/**
+ * How many free nodes a plan grants at `seats`.
+ *
+ * Everything except Teams gets exactly one, which is what the platform enforces
+ * today: `POST /api/servers` refuses a second node for an org with a 409.
+ *
+ * NOTE FOR WHOEVER IMPLEMENTS THE 2-NODE TIER: that 409 is currently
+ * unconditional, so granting more than one requires relaxing it to read this
+ * function rather than assuming 1. Until then the 50+ tier's second node is a
+ * DECLARED entitlement, not a provisioned one.
+ */
+export const baseNodeCountForPlan = (
+	plan: PlanId | null | undefined,
+	seats = 1
+): number => {
+	if (!(plan && planIncludesBaseNode(plan))) {
+		return 0;
+	}
+	if (plan !== "teams") {
+		return 1;
+	}
+	return teamsNodeTierForSeats(seats).count;
+};
+
+/**
  * How the qualifying plans are NAMED in customer-facing copy ("…is included
  * with Pro, Max or Teams"). Presentational only — never parse it. Every string
  * that used to hardcode "Max" reads this, so widening or narrowing the set is

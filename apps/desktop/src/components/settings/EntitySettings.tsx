@@ -36,6 +36,7 @@ import { PredictSettings } from "./PredictSettings.tsx";
 import { QuestsSettings } from "./QuestsSettings.tsx";
 import { ShadowSettings } from "./ShadowSettings.tsx";
 import { SettingsSection } from "./shared/settings-items.tsx";
+import { SpacesSettings } from "./SpacesSettings.tsx";
 
 /**
  * First-party settings views, keyed by the OWNING plugin id. Mirrors the
@@ -57,6 +58,7 @@ const SETTINGS_VIEWS: Record<string, ComponentType> = {
 	"@ryu/memory": MemoryTab,
 	"@ryu/quests": QuestsSettings,
 	"@ryu/shadow": ShadowSettings,
+	"@ryu/spaces": SpacesSettings,
 	dictation: DictationSettings,
 	predict: PredictSettings,
 };
@@ -96,7 +98,7 @@ function DisabledNotice({ entity }: { entity: ScopedNavEntity }) {
 		<Alert>
 			<AlertTitle>{entity.label} is turned off</AlertTitle>
 			<AlertDescription>
-				You can set it up now — what you save here is kept and takes effect as
+				You can set it up now. What you save here is kept and takes effect as
 				soon as you turn it on.
 			</AlertDescription>
 			<AlertAction>

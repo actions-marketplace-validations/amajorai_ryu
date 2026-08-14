@@ -13,7 +13,7 @@ import {
 import { passPageUrl } from "@ryu/ui/lib/pass-share";
 import { waitlistShareFacts } from "@ryu/ui/lib/waitlist-share-facts";
 import { useTheme } from "next-themes";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	authClient,
 	clearSessionToken,
@@ -55,12 +55,16 @@ export default function WaitlistPage({
 	avatarSeed,
 	avatarUrl,
 	userName,
+	userNameLoading = false,
 }: {
 	/** Canonical dither seed for the signed-in user (`ditherAvatarSeed`), so the
 	 *  pass shows the same placeholder glyph as the sidebar's account row. */
 	avatarSeed?: string | null;
 	avatarUrl?: string | null;
 	userName?: string | null;
+	/** True while the session is still resolving, so a null `userName` means "not
+	 *  known yet" rather than "this account has no display name". */
+	userNameLoading?: boolean;
 }) {
 	// The metal ring ships its own light/dark tunings, and its `auto` default
 	// follows the OS — wrong here, because the app's theme toggle can disagree
@@ -209,7 +213,30 @@ export default function WaitlistPage({
 	// screen uses — which is what applies the position gate. Reading `me.position`
 	// straight (what this screen used to do) posted "spot #42" off a queue the web
 	// page was still hiding.
-	const shareFacts = waitlistShareFacts(me, { reserved, userName });
+	// Sticky: once a real display name has been seen, it is never given back.
+	//
+	// `session.user.name` is null on the first hydrate and fills in a tick later,
+	// and the pass falls back to `@handle` when it has no name — so the card
+	// printed the user's HANDLE for that tick and then swapped to their name. Two
+	// different identities on a card whose whole job is to be screenshotted.
+	//
+	// Suppressing the handle fallback while the session is still resolving is not
+	// enough on its own: the name can also blank out on a later refetch, and this
+	// covers both.
+	const lastKnownName = useRef<string | null>(null);
+	if (userName?.trim()) {
+		lastKnownName.current = userName;
+	}
+	const resolvedName = userName?.trim()
+		? userName
+		: (lastKnownName.current ??
+			// Nothing yet AND the session may still deliver one — say "Member"
+			// rather than promoting the handle to a display name it will lose.
+			(userNameLoading ? "Member" : null));
+	const shareFacts = waitlistShareFacts(me, {
+		reserved,
+		userName: resolvedName,
+	});
 
 	// The web app's host, not the shell's: `window.location.host` inside Tauri is
 	// `tauri.localhost`, which would print a dead address under every shared card.
@@ -294,7 +321,7 @@ export default function WaitlistPage({
 				signingOut={signingOut}
 				subtitle={subtitle}
 				totalWaiting={me?.totalWaiting ?? null}
-				userName={userName}
+				userName={resolvedName}
 			/>
 			<WaitlistShareDialog
 				avatarUrl={avatarUrl}

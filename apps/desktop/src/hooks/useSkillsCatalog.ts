@@ -97,6 +97,51 @@ const SEARCH_DEBOUNCE_MS = 300;
 const FETCH_LIMIT = 120;
 const PAGE_SIZE = 40;
 
+// ── Query descriptors ────────────────────────────────────────────────────────
+//
+// The hook AND the Store's warm-up path (`useStorePrefetch`) build their queries
+// from these, so a prefetch can never land under a key no hook reads — which is
+// the one failure mode of prefetching that looks like it worked and warms
+// nothing. Anything in the key must be an ARGUMENT here, not read from a closure.
+
+export function skillSourcesQuery(target: ApiTarget) {
+	return {
+		queryKey: ["skills", "sources", target.url],
+		queryFn: () => fetchSkillSources(target),
+	};
+}
+
+export function skillListQuery(
+	target: ApiTarget,
+	params: { installedOnly: boolean; query: string; source: string }
+) {
+	return {
+		queryKey: [
+			"skills",
+			"list",
+			target.url,
+			{
+				q: params.query,
+				installedOnly: params.installedOnly,
+				source: params.source,
+			},
+		],
+		queryFn: () =>
+			searchSkills(target, {
+				query: params.query,
+				installedOnly: params.installedOnly,
+				limit: FETCH_LIMIT,
+			}),
+	};
+}
+
+export function installedSkillsQuery(target: ApiTarget) {
+	return {
+		queryKey: ["skills", "installed", target.url],
+		queryFn: () => listSkills(target),
+	};
+}
+
 export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -116,16 +161,15 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	const [togglingSkill, setTogglingSkill] = useState<string | null>(null);
 
 	// Any change to the query/filter/sort/org starts the reveal window over.
+	// These four deps ARE that sentence: without them the reset only runs at
+	// mount, so a new search inherits the previous search's expanded window.
 	useEffect(() => {
 		setVisibleCount(PAGE_SIZE);
-	}, []);
+	}, [debouncedQuery, installedOnly, sort, org]);
 
 	// Catalog sources: list + active selection live in Core. Selecting a source
 	// or adding a marketplace re-keys the skills list against the new source.
-	const sourcesQuery = useQuery({
-		queryKey: ["skills", "sources", url],
-		queryFn: () => fetchSkillSources({ url, token }),
-	});
+	const sourcesQuery = useQuery(skillSourcesQuery(target));
 	const activeSource = sourcesQuery.data?.active ?? "";
 
 	const selectSourceMutation = useMutation({
@@ -160,17 +204,11 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	);
 
 	const listQuery = useQuery({
-		queryKey: [
-			"skills",
-			"list",
-			url,
-			{ q: debouncedQuery, installedOnly, source: activeSource },
-		],
-		queryFn: () =>
-			searchSkills(
-				{ url, token },
-				{ query: debouncedQuery, installedOnly, limit: FETCH_LIMIT }
-			),
+		...skillListQuery(target, {
+			query: debouncedQuery,
+			installedOnly,
+			source: activeSource,
+		}),
 		placeholderData: keepPreviousData,
 	});
 
@@ -214,10 +252,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	// Installed skills + their enabled (active) state. Distinct from the catalog
 	// list (which is the browsable directory): this reflects what's on disk and
 	// whether each skill is active. Drives the enable/disable toggle.
-	const installedQuery = useQuery({
-		queryKey: ["skills", "installed", url],
-		queryFn: () => listSkills({ url, token }),
-	});
+	const installedQuery = useQuery(installedSkillsQuery(target));
 
 	const setActiveMutation = useMutation({
 		mutationFn: (vars: { id: string; active: boolean }) =>
@@ -281,7 +316,11 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		[]
 	);
 
-	const select = useCallback((id: string) => setSelectedId(id), []);
+	// An empty id means "nothing selected" — the store sections close a preview by
+	// calling `select("")`. Storing that verbatim left a selection that is neither
+	// null nor resolvable: the detail query fired for the empty id, and any
+	// `selectedId != null` test upstream read the closed preview as open.
+	const select = useCallback((id: string) => setSelectedId(id || null), []);
 
 	const install = useCallback(async () => {
 		if (!selectedId) {

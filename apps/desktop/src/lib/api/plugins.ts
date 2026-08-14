@@ -286,7 +286,21 @@ export type DependencyError =
 			reason: string;
 	  }
 	| { code: "cycle"; cycle: string[] }
-	| { code: "blocked_by_dependents"; plugin: string; dependents: string[] };
+	| { code: "blocked_by_dependents"; plugin: string; dependents: string[] }
+	| {
+			/** An UPDATE was refused because it would break an installed dependent.
+			 *  The reverse of `version_mismatch`: the offending version is NOT
+			 *  installed yet, so it is reported as `incoming`, never `installed`. */
+			code: "dependent_version_mismatch";
+			/** The installed dependent that would be left broken. */
+			plugin: string;
+			/** The plugin being updated. */
+			dependency: string;
+			/** The requirement `plugin` declares, as written. */
+			required: string;
+			/** The version `dependency` would be moved to. */
+			incoming: string;
+	  };
 
 /** Structured error from enable/disable — used to surface Gateway denial,
  *  unreachability, or an unsatisfiable dependency graph via the UI without
@@ -323,6 +337,8 @@ export function describeDependencyError(
 		}
 		case "version_mismatch":
 			return `${displayName(err.plugin)} needs ${displayName(err.dependency)} ${err.required} or newer, but ${err.installed} is installed. Update it first.`;
+		case "dependent_version_mismatch":
+			return `Updating ${displayName(err.dependency)} to ${err.incoming} would break ${displayName(err.plugin)}, which needs ${err.required}. Update ${displayName(err.plugin)} first, or force the update.`;
 		case "invalid_version_req":
 			return `${displayName(err.plugin)} declares an invalid version requirement for ${displayName(err.dependency)} ("${err.requirement}"): ${err.reason}.`;
 		case "cycle":
@@ -555,6 +571,9 @@ export interface PluginContributions {
 	settings_tabs: Record<string, unknown>[];
 	/** App-registered sidebar buttons (single nav rows), tagged with `plugin`. */
 	sidebar_buttons: PluginSidebarButton[];
+	/** App-registered sidebar MODES (named arrangements of the whole sidebar),
+	 *  tagged with `plugin`. See {@link PluginSidebarMode}. */
+	sidebar_modes: PluginSidebarMode[];
 	/** App-registered sidebar sections (header + live list), tagged with `plugin`. */
 	sidebar_sections: PluginSidebarSection[];
 	slash_commands: Record<string, unknown>[];
@@ -586,6 +605,26 @@ export interface PluginSidebarSection {
 	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
 	plugin: string;
 	spec?: SidebarSectionSpec;
+	title: string;
+}
+
+/** An app-registered sidebar MODE as served by Core (`contributes.sidebar_modes[]`),
+ *  tagged with its owning `plugin`.
+ *
+ *  A mode names sections, it does not render anything: `sections` holds the shell's
+ *  own section keys (`agents`, `chats`, …) or another contributed section's
+ *  namespaced `plugin:<pluginId>:<sectionId>`. The shell drops names it cannot
+ *  resolve rather than dropping the mode, so naming a section from a sibling app the
+ *  user has not installed costs a tab, not the arrangement. */
+export interface PluginSidebarMode {
+	default_section?: string;
+	description?: string;
+	icon?: string;
+	id: string;
+	order?: number;
+	/** The owning plugin's manifest id (added by Core's contributions endpoint). */
+	plugin: string;
+	sections: string[];
 	title: string;
 }
 
@@ -956,6 +995,7 @@ export async function getPluginContributions(
 		hook_events: json.hook_events ?? [],
 		views: json.views ?? [],
 		sidebar_sections: json.sidebar_sections ?? [],
+		sidebar_modes: json.sidebar_modes ?? [],
 		sidebar_buttons: json.sidebar_buttons ?? [],
 		themes: json.themes ?? [],
 		dock_panels: json.dock_panels ?? [],

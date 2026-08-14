@@ -236,12 +236,14 @@ paths:
               $ref: "#/components/schemas/SpeechRequest"
       responses:
         "200":
-          description: Binary audio stream.
+          description: >-
+            Normalized audio envelope. Providers that answer with audio bytes
+            (OpenAI) are returned inline as base64 under `b64_json`; job-based
+            providers (fal, replicate) return a hosted `url` instead.
           content:
-            audio/mpeg:
-              schema: { type: string, format: binary }
-            audio/ogg:
-              schema: { type: string, format: binary }
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeechResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/audio/transcriptions:
     post:
@@ -1032,10 +1034,29 @@ components:
         model: { type: string }
         input: { type: string }
         voice: { type: string, examples: [alloy] }
-        response_format: { type: string, enum: [mp3, opus, aac, flac] }
+        response_format: { type: string, enum: [mp3, opus, aac, flac, wav, pcm] }
         speed: { type: number, format: float, minimum: 0.25, maximum: 4.0 }
       required: [model, input]
       additionalProperties: true
+    SpeechResponse:
+      type: object
+      properties:
+        object: { type: string, examples: [audio] }
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              b64_json:
+                type: string
+                description: Base64 audio bytes, when the provider returned audio inline.
+              url:
+                type: string
+                description: Hosted audio URL, when the provider is job-based.
+              content_type: { type: string, examples: [audio/wav] }
+        raw:
+          description: The provider's own payload when it answered in JSON.
+          nullable: true
     TranscriptionRequest:
       type: object
       properties:

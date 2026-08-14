@@ -1,4 +1,38 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
+
+/**
+ * `bun test` is this package's runner (`"test": "bun test src"`), and its vitest
+ * shim covers `describe`/`it`/`expect` but NOT `vi.stubGlobal`,
+ * `vi.unstubAllGlobals`, or a `mock()` that `expect(...).toHaveBeenCalled()`
+ * recognises. Importing from "vitest" therefore threw at the first stub and made
+ * four cases here unrunnable. Ported to bun's own primitives rather than adding a
+ * vitest runner for one file.
+ */
+const stubbedGlobals = new Map<string, PropertyDescriptor | undefined>();
+
+/** `vi.stubGlobal`: install a global, remembering how to put it back. */
+function stubGlobal(name: string, value: unknown): void {
+	if (!stubbedGlobals.has(name)) {
+		stubbedGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+	}
+	Object.defineProperty(globalThis, name, {
+		configurable: true,
+		writable: true,
+		value,
+	});
+}
+
+/** `vi.unstubAllGlobals`: restore every global this file replaced. */
+function unstubAllGlobals(): void {
+	for (const [name, descriptor] of stubbedGlobals) {
+		if (descriptor) {
+			Object.defineProperty(globalThis, name, descriptor);
+		} else {
+			delete (globalThis as Record<string, unknown>)[name];
+		}
+	}
+	stubbedGlobals.clear();
+}
 import {
 	clearDevMetrics,
 	getDevMetricsText,
@@ -7,6 +41,7 @@ import {
 	instrumentedFetch,
 	normalizePath,
 	recordHttpSample,
+	refreshDevMetricsGate,
 	subscribeDevMetrics,
 	summarizeHttp,
 	summarizeTurns,
@@ -21,7 +56,30 @@ const sample = (path: string, ms: number, status = 200): HttpSample => ({
 });
 
 beforeEach(() => {
+	// ARM THE GATE. Recording is a no-op unless `isDevMetricsEnabled()`, which
+	// reads `import.meta.env.DEV` first — true under vite/vitest, UNDEFINED under
+	// `bun test` — and then falls back to the Developer Mode key in localStorage,
+	// which bun does not provide either. So every `recordHttpSample` here silently
+	// did nothing and the subscriber/text cases asserted against an empty store.
+	//
+	// Stubbed at the real seam rather than bypassed: this drives the same
+	// localStorage branch a release build uses when a user flips Developer Mode,
+	// so the gate itself stays covered instead of being assumed away.
+	stubGlobal("localStorage", {
+		getItem: (key: string) => (key === "ryu_developer_mode" ? "true" : null),
+	});
+	refreshDevMetricsGate();
 	clearDevMetrics();
+});
+
+// PUT THE GLOBALS BACK. `bun test` runs every file in this package in ONE
+// process, so a `localStorage` left stubbed here is the `localStorage` the next
+// file inherits — and the files after this one expect happy-dom's real one.
+// Leaving it installed is what turns one file's fixture into three other files'
+// failures, visible only in the full run and never when they are run alone.
+afterAll(() => {
+	unstubAllGlobals();
+	refreshDevMetricsGate();
 });
 
 describe("normalizePath", () => {
@@ -121,9 +179,9 @@ describe("instrumentedFetch", () => {
 				controller.close();
 			},
 		});
-		vi.stubGlobal(
+		stubGlobal(
 			"fetch",
-			vi.fn(() => Promise.resolve(new Response(body, { status: 200 })))
+			mock(() => Promise.resolve(new Response(body, { status: 200 })))
 		);
 
 		const response = await instrumentedFetch("http://localhost:7980/api/chat");
@@ -137,25 +195,25 @@ describe("instrumentedFetch", () => {
 		expect(turn.bytes).toBe(11);
 		expect(turn.chunks).toBe(2);
 		expect(turn.ttftMs).not.toBeNull();
-		vi.unstubAllGlobals();
+		unstubAllGlobals();
 	});
 
 	it("records a failed request as status 0 and rethrows", async () => {
-		vi.stubGlobal(
+		stubGlobal(
 			"fetch",
-			vi.fn(() => Promise.reject(new Error("offline")))
+			mock(() => Promise.reject(new Error("offline")))
 		);
 		await expect(
 			instrumentedFetch("http://localhost:7980/api/chat")
 		).rejects.toThrow("offline");
 		expect(getTurnSamples()[0].status).toBe(0);
-		vi.unstubAllGlobals();
+		unstubAllGlobals();
 	});
 });
 
 describe("subscribers and text output", () => {
 	it("notifies on a recorded sample", () => {
-		const listener = vi.fn();
+		const listener = mock();
 		const unsubscribe = subscribeDevMetrics(listener);
 		recordHttpSample(sample("/api/health", 3));
 		expect(listener).toHaveBeenCalled();

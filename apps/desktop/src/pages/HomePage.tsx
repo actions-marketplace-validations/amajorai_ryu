@@ -238,7 +238,7 @@ export default function HomePage() {
 	// grid never renders the "empty" state on top of a failed fetch.
 	const [error, setError] = useState<string | null>(null);
 	// Bumped to re-trigger the initial load effect from the Retry affordance.
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 	const [builderOpen, setBuilderOpen] = useState(false);
 	// A one-shot prompt handed to the AI builder when the user clicks "Generate a
 	// dashboard for me"; consumed (cleared) by the builder once sent.
@@ -314,7 +314,9 @@ export default function HomePage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [refreshList]);
+		// `reloadKey` is load-bearing: `handleRetry`'s no-dashboard-selected branch
+		// only bumps it, so dropping it leaves that retry on a permanent spinner.
+	}, [refreshList, reloadKey]);
 
 	const reload = useCallback(
 		async (id: string) => {

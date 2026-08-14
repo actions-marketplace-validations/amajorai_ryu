@@ -365,4 +365,61 @@ describe("managed cloud node credentials", () => {
 
 		expect(useNodeStore.getState().nodes[0]?.token).toBe("stored");
 	});
+
+	// A managed node's `orgId`/`serverId` are the ONLY way any desktop surface can
+	// address its server row (`/api/servers/orgs/:orgId/servers/:serverId/...`) —
+	// the quiet-hour picker reads them off `getActiveNode()`. They arrive on the
+	// cloud record, but the display set is built by folding cloud onto the
+	// LOCAL record, which Tauri persists with only name/url/token. Spreading the
+	// local record alone therefore drops both ids silently, and every surface that
+	// needs them reads `undefined` and hides itself: a feature that looks shipped
+	// and does nothing. This asserts they survive the fold.
+	test("a managed node keeps the ids that address its server row", async () => {
+		useNodeStore.setState({
+			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			nodes: [LOCAL],
+		});
+		managedNodes = [
+			{
+				name: "prod",
+				url: CLOUD_URL,
+				token: "jwt",
+				orgId: "org_1",
+				serverId: "srv_1",
+			},
+		];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const node = useNodeStore.getState().nodes[0];
+		expect(node?.managed).toBe(true);
+		expect(node?.orgId).toBe("org_1");
+		expect(node?.serverId).toBe("srv_1");
+	});
+
+	// Adopted and resumed nodes are never linked to a server row, so the control
+	// plane sends `serverId: null`. That must arrive as null rather than
+	// `undefined`-by-omission or, worse, a leftover id from another node — the
+	// picker's whole gate is "hide unless both ids are present".
+	test("an unlinked managed node reports no server row rather than a stale one", async () => {
+		useNodeStore.setState({
+			localNodes: [{ name: "cloud-prod", url: CLOUD_URL, token: "stored" }],
+			nodes: [LOCAL],
+		});
+		managedNodes = [
+			{
+				name: "prod",
+				url: CLOUD_URL,
+				token: "jwt",
+				orgId: "org_1",
+				serverId: null,
+			},
+		];
+
+		await useNodeStore.getState().hydrateCloudNodes();
+
+		const node = useNodeStore.getState().nodes[0];
+		expect(node?.orgId).toBe("org_1");
+		expect(node?.serverId).toBeNull();
+	});
 });

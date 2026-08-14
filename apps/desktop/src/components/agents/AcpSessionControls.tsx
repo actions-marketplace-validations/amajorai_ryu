@@ -352,12 +352,21 @@ function AcpAuthSection({ agentId }: { agentId: string }) {
 
 function AcpSessionsSection({ agentId }: { agentId: string }) {
 	const { data, loading, remove, removing } = useAcpSessions(agentId);
+	// Same call the auth section above makes, so this is a cached read rather
+	// than a second probe of the agent.
+	const { config } = useAcpConfig(agentId);
 	const [pendingId, setPendingId] = useState<string | null>(null);
 
 	// Nothing to show for agents that don't persist sessions (the common case).
 	if (loading || !data || data.unsupported || data.sessions.length === 0) {
 		return null;
 	}
+
+	// Strict `!== false`: only a Core that positively reported "no close" hides
+	// the button. `undefined` — an older Core with no `sessionCapabilities` key —
+	// keeps today's behaviour rather than silently removing a working control.
+	const canDelete =
+		config?.agentCapabilities?.sessionCapabilities?.close !== false;
 
 	const handleDelete = async (sessionId: string) => {
 		setPendingId(sessionId);
@@ -410,14 +419,19 @@ function AcpSessionsSection({ agentId }: { agentId: string }) {
 									</span>
 								) : null}
 							</div>
-							<Button
-								disabled={busy}
-								onClick={() => handleDelete(session.sessionId)}
-								size="sm"
-								variant="outline"
-							>
-								{busy ? "Deleting…" : "Delete"}
-							</Button>
+							{/* Hidden outright, not disabled: this section's posture is
+							    silent self-hiding, and a greyed-out Delete invites a
+							    hunt for the setting that would enable it. */}
+							{canDelete ? (
+								<Button
+									disabled={busy}
+									onClick={() => handleDelete(session.sessionId)}
+									size="sm"
+									variant="outline"
+								>
+									{busy ? "Deleting…" : "Delete"}
+								</Button>
+							) : null}
 						</div>
 					);
 				})}

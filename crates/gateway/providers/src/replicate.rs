@@ -141,7 +141,10 @@ impl ReplicateProvider {
             let err = current["error"].as_str().unwrap_or("prediction failed");
             return Err(ProviderError::Provider(format!("replicate: {err}")));
         }
-        Ok(super::normalize_media_output(&current["output"]))
+        Ok(super::with_media_usage(
+            super::normalize_media_output(&current["output"]),
+            &current["metrics"],
+        ))
     }
 
     fn video_from_prediction(prediction: &Value) -> VideoJob {
@@ -149,7 +152,10 @@ impl ReplicateProvider {
         let provider_ref = prediction["id"].as_str().unwrap_or_default().to_string();
         let (output, error) = match status {
             JobStatus::Succeeded => (
-                Some(super::normalize_media_output(&prediction["output"])),
+                Some(super::with_media_usage(
+                    super::normalize_media_output(&prediction["output"]),
+                    &prediction["metrics"],
+                )),
                 None,
             ),
             JobStatus::Failed => (
@@ -211,6 +217,10 @@ impl Provider for ReplicateProvider {
         Box::pin(async move { self.run_inline(model, body).await })
     }
 
+    /// replicate is job-based: `run_inline` normalizes to `{data:[{url}],raw}`,
+    /// so this always hands back a HOSTED URL, never inline audio bytes. That is
+    /// the URL arm of the audio envelope Core decodes — Core fetches the link
+    /// itself rather than expecting `b64_json`.
     fn synthesize_speech<'a>(
         &'a self,
         model: &'a str,

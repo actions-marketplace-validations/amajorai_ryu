@@ -1527,6 +1527,7 @@ impl ConversationStore {
     /// Callers writing into a row that already exists pass [`Tenancy::Unattributed`];
     /// the choke point's COALESCE preserves the owner already stamped (this is the
     /// property `append_does_not_wipe_a_claimed_owner` asserts).
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_message_as(
         &self,
         conversation_id: &str,
@@ -1537,7 +1538,41 @@ impl ConversationStore {
         author_name: Option<&str>,
         tenancy: Tenancy,
     ) -> Result<String> {
-        let now = now_millis();
+        self.append_message_at(
+            conversation_id,
+            role,
+            content,
+            agent_id,
+            author_user_id,
+            author_name,
+            tenancy,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::append_message_as`], but with an explicit `created_at` (epoch
+    /// millis) instead of "now".
+    ///
+    /// Exists for IMPORT, which is a restore rather than a new exchange: the
+    /// agent's own transcript records when each turn happened, and stamping the
+    /// import time instead made a three-week-old thread land as if it had just
+    /// occurred — wrong in the row, wrong in the chat's date separators, and wrong
+    /// for anything that orders on it. `None` means "now", which is what every
+    /// live-chat caller wants and why that stays the default.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_message_at(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        author_user_id: Option<&str>,
+        author_name: Option<&str>,
+        tenancy: Tenancy,
+        created_at: Option<i64>,
+    ) -> Result<String> {
+        let now = created_at.unwrap_or_else(now_millis);
         let message_id = uuid::Uuid::new_v4().to_string();
 
         // Index the message body for semantic search — best-effort, fail-open.

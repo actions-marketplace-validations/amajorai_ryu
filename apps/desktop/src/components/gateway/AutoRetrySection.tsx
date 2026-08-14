@@ -121,7 +121,7 @@ export function AutoRetrySection({
 
 	return (
 		<SettingsSection
-			caption="Only runs when a turn actually fails, and only after Core re-reads the vendor's own 5-hour and weekly windows to confirm the plan really is out of room — so an unrelated failure never moves you off your agent."
+			caption="Only runs when a turn actually fails, and only after Core re-reads the vendor's own 5-hour and weekly windows to confirm the plan really is out of room, so an unrelated failure never moves you off your agent."
 			title="Auto-retry on another plan"
 		>
 			{policyQuery.isLoading ? (
@@ -184,7 +184,7 @@ export function AutoRetrySection({
 									<p className="text-muted-foreground text-xs">
 										{pool.length === 0
 											? "No subscription agents with readable usage windows are set up on this node yet."
-											: "Pick none to use any plan with room. Picking some makes them a priority order — the first one listed that has room wins."}
+											: "Pick none to use any plan with room. Picking some makes them a priority order. The first one listed that has room wins."}
 									</p>
 									<div className="flex flex-wrap gap-2 pt-1">
 										{pool.map((id) => {

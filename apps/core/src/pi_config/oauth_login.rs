@@ -25,7 +25,7 @@
 //! The bridge never writes `auth.json` — Core merges the credential itself, so
 //! the file keeps the single 0600-owning writer it already had.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -51,6 +51,20 @@ const BRIDGE_FILE: &str = "ryu-oauth-login.mjs";
 /// an abandoned attempt cannot hold its callback port (see [`start`]) forever.
 const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// How many of the bridge's stderr lines to keep for the failure message. A Node
+/// crash prints a handful of frames; twenty covers the throw and its stack
+/// without letting a chatty flow grow the buffer without bound.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Ceiling on how much of that tail goes into the message the user reads. Past
+/// this it stops being a diagnosis and becomes a wall of text in a dialog.
+const STDERR_TAIL_CHARS: usize = 1000;
+
+/// How long to wait for the exit status of a bridge that already closed stdout.
+/// It has EOF'd, so it is either gone or microseconds from it; this only exists
+/// so a wedged child cannot hold the error event hostage.
+const EXIT_STATUS_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// One in-flight login: the child process, its event history, and a live feed.
 pub struct LoginSession {
     /// Live events for subscribers attached now.
@@ -73,6 +87,16 @@ pub struct LoginSession {
     /// pi-ai provider id this login is for, so a second attempt at the same
     /// provider can retire the first before it re-binds the callback port.
     provider: String,
+    /// The bridge's most recent stderr lines, bounded to [`STDERR_TAIL_LINES`].
+    ///
+    /// This is the only record of a HARD death — an unresolvable
+    /// `@earendil-works/pi-ai` import, a throw at module load, an OOM, an
+    /// external kill. It used to go nowhere but `tracing::debug!`, which is why
+    /// "the login flow exited before completing" was a dead end: one generic
+    /// sentence for every one of those causes, with the diagnosis thrown away
+    /// four lines from where the sentence was written. Keeping the tail here
+    /// lets [`exit_message`] say what actually happened.
+    stderr_tail: Mutex<VecDeque<String>>,
 }
 
 impl LoginSession {
@@ -101,6 +125,37 @@ impl LoginSession {
         self.finished.load(Ordering::SeqCst)
     }
 
+    /// Record one stderr line from the bridge, dropping the oldest past the cap.
+    fn push_stderr(&self, line: String) {
+        if let Ok(mut tail) = self.stderr_tail.lock() {
+            while tail.len() >= STDERR_TAIL_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    }
+
+    /// The recorded stderr, oldest line first, trimmed to [`STDERR_TAIL_CHARS`].
+    ///
+    /// Trimming keeps the END, not the start: Node prints the failing specifier
+    /// and the `code:` field after the stack, so the tail is where the answer is.
+    fn recent_stderr(&self) -> String {
+        let joined = self
+            .stderr_tail
+            .lock()
+            .map(|tail| tail.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default();
+        let chars = joined.chars().count();
+        if chars <= STDERR_TAIL_CHARS {
+            return joined;
+        }
+        let start = joined
+            .char_indices()
+            .nth(chars - STDERR_TAIL_CHARS)
+            .map_or(0, |(index, _)| index);
+        format!("…{}", &joined[start..])
+    }
+
     /// Answer the prompt with the given id. The value is forwarded verbatim: a
     /// `select` prompt (Copilot asks one) expects the chosen option's **id**, not
     /// its index or label.
@@ -116,7 +171,15 @@ impl LoginSession {
     }
 
     /// Kill the flow and release its callback port. Idempotent.
+    ///
+    /// `finished` is set FIRST, before the kill, and the order is load-bearing.
+    /// It used to be set last, which left a window in which the reader task saw
+    /// the killed child's stdout EOF while `finished` was still `false` and
+    /// reported "the login flow exited before completing" for a flow the app had
+    /// deliberately cancelled. That made the message ambiguous between "the
+    /// bridge died" and "we killed it" — the two cases with opposite fixes.
     pub fn cancel(&self) {
+        self.finished.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.child.lock() {
             if let Some(child) = guard.as_mut() {
                 let _ = child.start_kill();
@@ -126,7 +189,50 @@ impl LoginSession {
         if let Ok(mut guard) = self.stdin.try_lock() {
             *guard = None;
         }
-        self.finished.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The message for a bridge whose stdout closed without a terminal event.
+///
+/// Both arguments are best-effort — a child killed by a signal has no exit code
+/// worth printing, and a process that died before it could write has no stderr —
+/// so this degrades to the bare sentence rather than inventing detail. When
+/// there IS evidence it goes in the message, because this string is all the user
+/// and the support thread ever see; the alternative is asking someone to reason
+/// about an OAuth failure from four words.
+fn exit_message(status: Option<std::process::ExitStatus>, stderr: &str) -> String {
+    let mut message = String::from("the login flow exited before completing");
+    if let Some(status) = status {
+        message.push_str(&format!(" ({status})"));
+    }
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        message.push_str(&format!(" — the sign-in helper reported: {stderr}"));
+    }
+    message
+}
+
+/// Wait up to `wait` for the exit status of a child whose stdout already EOF'd,
+/// **killing it** if that wait does not reap it.
+///
+/// The kill is load-bearing, not belt-and-braces. By the time this runs the
+/// child has been taken out of [`LoginSession::child`], so `cancel()` and the
+/// 15-minute backstop can no longer reach it, and `tokio` does not kill a
+/// `Child` on drop unless `kill_on_drop` is set. Both non-status paths —
+/// the `wait` elapsing, and `wait()` itself returning `Err` — would otherwise
+/// drop a live child, which is precisely the leak [`LoginSession::child`]
+/// documents: an orphan holding the fixed OAuth callback port, so every later
+/// login for that provider fails with `EADDRINUSE`.
+async fn reap_or_kill(
+    child: &mut Child,
+    wait: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    match tokio::time::timeout(wait, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        _ => {
+            let _ = child.start_kill();
+            None
+        }
     }
 }
 
@@ -346,6 +452,7 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
         child: Mutex::new(Some(child)),
         finished: AtomicBool::new(false),
         provider: provider.to_owned(),
+        stderr_tail: Mutex::new(VecDeque::new()),
     });
 
     let session_id = format!("login_{}", uuid::Uuid::new_v4().simple());
@@ -392,12 +499,36 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
                 _ => reader_session.emit(event),
             }
         }
-        // Stream closed. If the child died without a terminal event, say so
-        // rather than leaving the desktop on a spinner forever.
+        // Stream closed. If the child died without a terminal event, say so —
+        // and say WHY. `cancel()` marks `finished` before it kills, so reaching
+        // here means the bridge died on its own, and the only evidence of that
+        // is its exit status plus whatever it managed to print on stderr.
         if !reader_session.is_finished() {
+            // Take the child OUT of the session before waiting on it: `child` is
+            // a std `Mutex`, and holding its guard across an `.await` would make
+            // this future non-`Send` and refuse to spawn. Taking it also means
+            // `cancel()` below — and the 15-minute backstop — can no longer
+            // reach this child, so [`reap_or_kill`] has to leave it dead on
+            // every path out.
+            let orphan = reader_session
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take());
+            let status = match orphan {
+                Some(mut child) => reap_or_kill(&mut child, EXIT_STATUS_WAIT).await,
+                None => None,
+            };
+            // Reading stderr after the wait is a best-effort ordering, NOT a
+            // barrier: nothing synchronizes this task with the stderr task, and
+            // `wait()` on a child that has already exited returns immediately.
+            // What it buys is an await point, which is usually enough for the
+            // stderr readiness already queued behind Node's own "print the
+            // stack, then exit" to be polled first. When it is not, the tail is
+            // empty and `exit_message` degrades to the bare sentence.
             reader_session.emit(json!({
                 "type": "error",
-                "message": "the login flow exited before completing",
+                "message": exit_message(status, &reader_session.recent_stderr()),
             }));
             reader_session.finished.store(true, Ordering::SeqCst);
         }
@@ -405,10 +536,12 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
     });
 
     if let Some(stderr) = stderr {
+        let stderr_session = Arc::clone(&session);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::debug!("pi oauth bridge stderr: {line}");
+                stderr_session.push_stderr(line);
             }
         });
     }
@@ -434,6 +567,184 @@ pub async fn start(ryu_provider_id: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A session with no child, for the bookkeeping the flow does around one.
+    fn bare_session() -> LoginSession {
+        let (tx, _rx) = broadcast::channel(8);
+        LoginSession {
+            tx,
+            history: Mutex::new(Vec::new()),
+            stdin: tokio::sync::Mutex::new(None),
+            child: Mutex::new(None),
+            finished: AtomicBool::new(false),
+            provider: "anthropic".to_owned(),
+            stderr_tail: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    /// The stderr tail is what turns "exited before completing" from a dead end
+    /// into a diagnosis, so it has to keep the LAST lines (a Node crash prints
+    /// the useful `code:`/specifier after the stack) and stay bounded.
+    #[test]
+    fn the_stderr_tail_keeps_the_last_lines_in_order() {
+        let session = bare_session();
+        for i in 0..(STDERR_TAIL_LINES + 5) {
+            session.push_stderr(format!("line {i}"));
+        }
+        let tail = session.recent_stderr();
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), STDERR_TAIL_LINES, "the tail is bounded");
+        assert_eq!(lines.first().copied(), Some("line 5"), "oldest dropped");
+        assert_eq!(
+            lines.last().copied(),
+            Some(format!("line {}", STDERR_TAIL_LINES + 4).as_str()),
+            "newest kept, in order"
+        );
+    }
+
+    /// A cancelled session is finished the instant `cancel` returns, and saying
+    /// so twice changes nothing (the reader task calls `cancel` after the
+    /// registry already has).
+    ///
+    /// This is the POSTCONDITION only, and it held under the old buggy ordering
+    /// too. The ordering itself is guarded by
+    /// [`cancelling_publishes_finished_before_it_touches_the_child`].
+    #[test]
+    fn cancelling_marks_the_session_finished() {
+        let session = bare_session();
+        assert!(!session.is_finished());
+        session.cancel();
+        assert!(session.is_finished());
+        // Idempotent: the reader task calls this after the registry already has.
+        session.cancel();
+        assert!(session.is_finished());
+    }
+
+    /// `cancel` must publish `finished` BEFORE it reaches for the child, so the
+    /// reader task cannot see the killed child's stdout EOF while `finished` is
+    /// still `false` and report a deliberate cancellation as "the login flow
+    /// exited before completing" — the message that is supposed to mean the
+    /// bridge died on its own.
+    ///
+    /// Asserting that ordering by racing the real reader task would be useless:
+    /// the buggy window is a couple of instructions wide against an OS signal
+    /// delivery, so it would pass under the bug almost every run. This uses the
+    /// `child` mutex as a deterministic interposition point instead. While the
+    /// test holds that lock, `cancel` is parked on it, and under the buggy order
+    /// the store is downstream of the park and therefore CANNOT have happened.
+    /// So a `false` reading here is proof of the bug, not of bad luck; the sleep
+    /// only bounds the other direction (giving the thread time to enter
+    /// `cancel`), and 200 ms is orders of magnitude more than an atomic store.
+    #[test]
+    fn cancelling_publishes_finished_before_it_touches_the_child() {
+        let session = Arc::new(bare_session());
+        let guard = session.child.lock().expect("take the child lock first");
+
+        let canceller = Arc::clone(&session);
+        let handle = std::thread::spawn(move || canceller.cancel());
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Read before releasing: the whole point is what is observable WHILE
+        // `cancel` is parked. Assert after the join so a failure cannot panic
+        // with the lock held and poison it on the way out.
+        let observed = session.is_finished();
+        drop(guard);
+        handle.join().expect("the cancelling thread must not panic");
+
+        assert!(
+            observed,
+            "`cancel` reached the child before publishing `finished`; move \
+             `self.finished.store(…)` back to the top of `cancel()`"
+        );
+        assert!(session.is_finished(), "and it stays finished afterwards");
+    }
+
+    /// A sleeper long enough to outlive any wait these tests use.
+    fn long_sleeper() -> tokio::process::Command {
+        #[cfg(unix)]
+        let mut command = {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c").arg("sleep 30");
+            c
+        };
+        // `timeout` refuses to run with redirected stdin ("input redirection is
+        // not supported"), so it would exit instantly and false-pass; `ping`
+        // sleeps without needing a console.
+        #[cfg(windows)]
+        let mut command = {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/c", "ping", "-n", "31", "127.0.0.1"]);
+            c
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// A child that outlives the exit-status wait must be KILLED, not dropped.
+    /// By that point it has been taken out of the session, so `cancel()` and the
+    /// 15-minute backstop can no longer reach it, and tokio does not kill on
+    /// drop — a survivor keeps the fixed OAuth callback port bound for the rest
+    /// of the machine's uptime and every later login 400s with `EADDRINUSE`.
+    #[tokio::test]
+    async fn a_child_that_outlives_the_status_wait_is_killed_not_dropped() {
+        let mut child = long_sleeper().spawn().expect("spawn the sleeper");
+        let status = reap_or_kill(&mut child, std::time::Duration::from_millis(50)).await;
+        assert!(
+            status.is_none(),
+            "a child still running at the ceiling has no exit status to report"
+        );
+        // If the kill did not land this hangs for the sleeper's full 30 s.
+        let reaped = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("the kill must land, so the child is immediately reapable")
+            .expect("wait on the killed child");
+        assert!(
+            !reaped.success(),
+            "the child was killed, not left to finish on its own"
+        );
+    }
+
+    /// The normal path is unchanged: a child that has already exited yields its
+    /// status, and nothing is killed.
+    #[tokio::test]
+    async fn a_child_that_already_exited_reports_its_status() {
+        #[cfg(unix)]
+        let mut command = tokio::process::Command::new("sh");
+        #[cfg(unix)]
+        command.arg("-c").arg("exit 3");
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/c", "exit", "3"]);
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let status = reap_or_kill(&mut child, EXIT_STATUS_WAIT)
+            .await
+            .expect("an exited child reports a status");
+        assert_eq!(status.code(), Some(3), "the real exit code reaches the user");
+    }
+
+    /// With no evidence the message is exactly what it always was; with evidence
+    /// it carries it, because that string is all the user ever sees.
+    #[test]
+    fn the_exit_message_folds_in_whatever_evidence_exists() {
+        assert_eq!(
+            exit_message(None, ""),
+            "the login flow exited before completing"
+        );
+        assert_eq!(
+            exit_message(None, "  Cannot find package '@earendil-works/pi-ai'  "),
+            "the login flow exited before completing — the sign-in helper reported: \
+             Cannot find package '@earendil-works/pi-ai'"
+        );
+    }
 
     /// The pi-ai OAuth provider id for a Ryu provider is its `auth.json` key.
     /// These coincide by construction, and the login writes the credential under

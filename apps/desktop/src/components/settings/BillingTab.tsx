@@ -38,6 +38,7 @@ import {
 	putAutoTopup,
 	putCreditAlert,
 } from "@/src/lib/api/credits.ts";
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import {
 	getSandboxDefaultRunBudgetMicroUsd,
 	setSandboxDefaultRunBudgetMicroUsd,
@@ -86,6 +87,17 @@ const ALERT_RECIPIENT_OPTIONS: {
 ];
 
 /**
+ * What an org with NO saved low-balance alert reads as. Named rather than
+ * inlined twice because it is used for the initial mount AND for the reset that
+ * every workspace switch performs — the two must not drift, or a switch would
+ * land somewhere the first paint never does.
+ */
+const ALERT_DEFAULTS = {
+	recipients: "none" as CreditAlertRecipients,
+	thresholdText: "5",
+};
+
+/**
  * Low-balance email alert card. Emails the org's owners (or owners+admins) when
  * the managed wallet balance drops below a threshold. Independent of auto-recharge
  * (no saved card needed): `recipients: "none"` is the off state. Admin-only on
@@ -93,32 +105,63 @@ const ALERT_RECIPIENT_OPTIONS: {
  */
 function LowBalanceAlertCard() {
 	const { authed } = useCreditsWallet();
-	const [recipients, setRecipients] = useState<CreditAlertRecipients>("none");
-	const [thresholdText, setThresholdText] = useState("5");
+	const activeOrgId = useActiveOrgId();
+	const [recipients, setRecipients] = useState<CreditAlertRecipients>(
+		ALERT_DEFAULTS.recipients
+	);
+	const [thresholdText, setThresholdText] = useState(
+		ALERT_DEFAULTS.thresholdText
+	);
 	const [lastError, setLastError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
+	const [loadingSettings, setLoadingSettings] = useState(false);
 
 	useEffect(() => {
+		// CLEAR FIRST, THEN LOAD. `activeOrgId` is a RE-RUN key, not an argument:
+		// the alert config is stored per org and `/api/credits/alert` resolves that
+		// org from the session, so switching workspace changes the answer without
+		// changing the request. This card is plain state rather than a query, so
+		// the switcher's cache invalidation cannot reach it — the dependency is
+		// what reloads it.
+		//
+		// The reset is the load-bearing half. Every path out of the fetch below can
+		// decline to set state — `fetchCreditAlert` resolves to NULL when the org
+		// has no alert row, and the `.catch` covers a 403 in an org where the user
+		// is not an admin — and without this the card would keep rendering the
+		// PREVIOUS org's recipients and threshold as if they were this org's. Worse
+		// than a stale read: `handleThresholdBlur` would then commit that mixture,
+		// writing the old org's threshold onto the new org's alert.
+		setRecipients(ALERT_DEFAULTS.recipients);
+		setThresholdText(ALERT_DEFAULTS.thresholdText);
+		setLastError(null);
 		if (!authed) {
 			return;
 		}
 		let cancelled = false;
+		setLoadingSettings(true);
 		fetchCreditAlert()
 			.then((s) => {
 				if (cancelled || !s) {
 					return;
 				}
 				setRecipients(s.recipients);
+				// A stored 0 means "never configured", so the DEFAULT above stands —
+				// deliberately not the value that was on screen a moment ago.
 				if (s.thresholdCents > 0) {
 					setThresholdText(centsToDollarText(s.thresholdCents));
 				}
 				setLastError(s.lastError);
 			})
-			.catch(() => undefined);
+			.catch(() => undefined)
+			.finally(() => {
+				if (!cancelled) {
+					setLoadingSettings(false);
+				}
+			});
 		return () => {
 			cancelled = true;
 		};
-	}, [authed]);
+	}, [authed, activeOrgId]);
 
 	const commit = useCallback(
 		async (nextRecipients: CreditAlertRecipients): Promise<boolean> => {
@@ -169,7 +212,10 @@ function LowBalanceAlertCard() {
 		}
 	}, [recipients, commit]);
 
-	const fieldsDisabled = !authed || saving;
+	// Locked while the new org's row is in flight as well as while saving: the
+	// fields are showing defaults at that moment, and a save from them would
+	// write those defaults onto whichever org is now active.
+	const fieldsDisabled = !authed || saving || loadingSettings;
 	const off = recipients === "none";
 
 	return (
@@ -304,6 +350,18 @@ const AUTOTOPUP_MIN_CENTS = MIN_TOPUP_DOLLARS * 100;
 const AUTOTOPUP_MAX_CENTS = MAX_TOPUP_DOLLARS * 100;
 
 /**
+ * What an org with NO auto-recharge record reads as — the same values the card
+ * mounts with. Named for the same reason as {@link ALERT_DEFAULTS}: the mount
+ * and the per-switch reset must land in the identical place.
+ */
+const AUTOTOPUP_DEFAULTS = {
+	capText: "0",
+	enabled: false,
+	thresholdText: centsToDollarText(AUTOTOPUP_MIN_CENTS),
+	topupText: centsToDollarText(AUTOTOPUP_MIN_CENTS * 2),
+};
+
+/**
  * Spend controls (sandbox metering & billing rail, area E). Shows the live
  * wallet balance, an "Automatic recharge" card (off-session Polar top-up when the
  * balance runs low, bounded by an optional monthly cap), and the per-run default
@@ -312,25 +370,52 @@ const AUTOTOPUP_MAX_CENTS = MAX_TOPUP_DOLLARS * 100;
  * preference ("what runs"), written here and read by Core per run.
  */
 function SpendControlsSection() {
-	const { wallet, authed, loading: walletLoading } = useCreditsWallet();
+	const {
+		wallet,
+		authed,
+		loading: walletLoading,
+		refresh: refreshWallet,
+	} = useCreditsWallet();
+	const activeOrgId = useActiveOrgId();
 
 	const [settings, setSettings] = useState<AutoTopupSettings | null>(null);
-	const [enabled, setEnabled] = useState(false);
-	const [thresholdText, setThresholdText] = useState("5");
-	const [topupText, setTopupText] = useState("10");
-	const [capText, setCapText] = useState("0");
+	const [enabled, setEnabled] = useState(AUTOTOPUP_DEFAULTS.enabled);
+	const [thresholdText, setThresholdText] = useState(
+		AUTOTOPUP_DEFAULTS.thresholdText
+	);
+	const [topupText, setTopupText] = useState(AUTOTOPUP_DEFAULTS.topupText);
+	const [capText, setCapText] = useState(AUTOTOPUP_DEFAULTS.capText);
 	const [saving, setSaving] = useState(false);
+	const [loadingSettings, setLoadingSettings] = useState(false);
 	const [portalPending, setPortalPending] = useState(false);
 
 	const [budgetText, setBudgetText] = useState("0");
 
 	// Load the org's auto-recharge settings (control plane). A non-authed user has
 	// no wallet to recharge, so skip the fetch and leave the defaults in place.
+	//
+	// CLEAR FIRST, THEN LOAD. `activeOrgId` is a re-run key for the same reason as
+	// the alert card above: auto-recharge is stored per org, resolved from the
+	// session, and this card holds it in plain state that no cache invalidation
+	// can reach. The reset in front of the fetch is what makes that re-run mean
+	// anything — BOTH paths out of the fetch can decline to set state
+	// (`fetchAutoTopup` resolves to NULL for an org that never configured
+	// auto-recharge, and the `.catch` covers a 403 for a non-admin / offline), so
+	// without it the card would assert the previous org's ON switch and amounts
+	// over an org that has no record at all. And `handleFieldBlur` would then POST
+	// that record — including `settings?.cooldownSec`, which is why `settings`
+	// itself must be cleared too — silently ENABLING auto-recharge on the new org.
 	useEffect(() => {
+		setSettings(null);
+		setEnabled(AUTOTOPUP_DEFAULTS.enabled);
+		setThresholdText(AUTOTOPUP_DEFAULTS.thresholdText);
+		setTopupText(AUTOTOPUP_DEFAULTS.topupText);
+		setCapText(AUTOTOPUP_DEFAULTS.capText);
 		if (!authed) {
 			return;
 		}
 		let cancelled = false;
+		setLoadingSettings(true);
 		fetchAutoTopup()
 			.then((s) => {
 				if (cancelled || !s) {
@@ -347,13 +432,34 @@ function SpendControlsSection() {
 				setCapText(centsToDollarText(s.monthlyCapCents));
 			})
 			.catch(() => {
-				// A load failure (offline / no org) just leaves the defaults; the user
-				// can still see the card. Save errors surface their own toast.
+				// A load failure (offline / no org) just leaves the defaults reset
+				// above; the user can still see the card. Saves surface their own toast.
+			})
+			.finally(() => {
+				if (!cancelled) {
+					setLoadingSettings(false);
+				}
 			});
 		return () => {
 			cancelled = true;
 		};
-	}, [authed]);
+	}, [authed, activeOrgId]);
+
+	// The balance printed below comes from `useCreditsWallet`, which is also plain
+	// state — and its own load effect has no active-org dependency, so it is
+	// frozen to whichever org was active when it first ran. Re-pull it here on a
+	// switch, or this card keeps showing the previous workspace's money next to
+	// the new workspace's recharge settings.
+	//
+	// Deliberately a LOCAL re-pull and not the single-point fix: the same hook
+	// backs the nav-user chip, the credits page, the node selector and onboarding,
+	// all of which stay stale until the hook keys its own load on the active org.
+	useEffect(() => {
+		if (!activeOrgId) {
+			return;
+		}
+		refreshWallet().catch(() => undefined);
+	}, [activeOrgId, refreshWallet]);
 
 	// Load the per-run default sandbox budget (Core node preference).
 	useEffect(() => {
@@ -463,16 +569,44 @@ function SpendControlsSection() {
 		}
 	}, [budgetText]);
 
+	// WHOSE money is on screen — answered by the wallet the server handed back,
+	// not by a local "the re-pull finished" marker. `/api/credits/wallet` always
+	// returns the ACTIVE ORG's wallet (`ownerType: "org"`, `ownerId` = that org),
+	// so the record carries its own provenance and the check cannot drift from it.
+	//
+	// A marker would lie on exactly the path this card must not lie on:
+	// `useCreditsWallet.refresh` records a failed fetch in its `error` and
+	// RESOLVES rather than rejecting, so a `.then()` after the re-pull runs even
+	// when the new org's wallet 403'd (non-admin) or never arrived (offline) —
+	// leaving the PREVIOUS org's balance on screen while the marker claimed the
+	// new one. Comparing ids means a failed re-pull simply leaves the number
+	// unclaimed, and the card prints "…".
+	//
+	// It covers the live stream too: `useWalletStream` opens once per mount and
+	// stays scoped to the org it connected as, but its frames are MERGED into the
+	// wallet in hand, so a post-switch push keeps the old `ownerId` and stays
+	// correctly disowned here.
+	//
+	// `activeOrgId` null is not that case: a session with no active org resolves
+	// server-side to the earliest membership, and the wallet already reflects it.
+	// Nor is "no wallet yet" — that is the load/error state below, not another
+	// org's money.
+	const walletIsOtherOrg =
+		Boolean(activeOrgId) && Boolean(wallet) && wallet?.ownerId !== activeOrgId;
+
 	let balanceLabel = "—";
 	if (!authed) {
 		balanceLabel = "Sign in";
-	} else if (walletLoading && !wallet) {
+	} else if (walletIsOtherOrg || (walletLoading && !wallet)) {
 		balanceLabel = "…";
 	} else if (wallet) {
 		balanceLabel = formatMicroUsd(wallet.balanceMicroUsd, wallet.currency);
 	}
 
-	const fieldsDisabled = !authed || saving;
+	// Locked while this org's record is in flight as well as while saving: the
+	// fields are showing defaults then, and a save from them would write those
+	// defaults — and an `enabled: true` — onto whichever org is now active.
+	const fieldsDisabled = !authed || saving || loadingSettings;
 
 	return (
 		<>
@@ -637,12 +771,18 @@ export function BillingTab() {
 		isLoading: subLoading,
 	} = useSubscription();
 
+	const activeOrgId = useActiveOrgId();
+
 	const [pendingAction, setPendingAction] = useState<
 		"manage" | "lifetime" | null
 	>(null);
 
 	const { data: invoicesData, isLoading: invoicesLoading } = useQuery({
-		queryKey: ["billing-invoices"],
+		// Keyed on the active org even though the request carries no org: invoices
+		// are billed to the org the session is scoped to, so without the id in the
+		// key the previous workspace's invoices are served from cache for a paint
+		// after a switch, before the invalidation's refetch lands.
+		queryKey: ["billing-invoices", activeOrgId],
 		queryFn: settingsApi.billing.getInvoices,
 	});
 

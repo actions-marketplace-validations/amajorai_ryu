@@ -476,6 +476,14 @@
           },
           "type": "array"
         },
+        "sidebar_modes": {
+          "default": [],
+          "description": "App-registered sidebar **modes** — a named preset of the whole left sidebar:\nwhich sections it offers as tabs, and which one it opens on.\n\nThe third axis of the sidebar contract, after \"what sections exist\"\n([`Contributes::sidebar_sections`]) and \"what nav rows exist\"\n([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is\narranged**. The shell ships three modes of its own (every section stacked;\nevery section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and\nbefore this member an app could add a section to that list but could not\npropose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture\nhad to ask for a shell change. See [`SidebarModeContribution`].\n\nSelf-contained (it names sections, not runnables), so it stays out of\n[`Contributes::referenced_ids`]; served + tagged with the owning `plugin` id\nat `GET /api/plugins/contributions`.",
+          "items": {
+            "$ref": "#/$defs/SidebarModeContribution"
+          },
+          "type": "array"
+        },
         "sidebar_sections": {
           "default": [],
           "description": "App-registered sidebar **sections** — a header plus a live list of rows the\nshell fetches from a declared Core `/api/` path. Lets an app own its sidebar\nsection (Canvas/Whiteboard/Meetings recent-doc lists) instead of the shell\nhardcoding it. Self-contained + opaque `spec` (see [`SidebarSectionContribution`]),\nso a new section capability needs no Core change; served + tagged with the\nowning `plugin` id at `GET /api/plugins/contributions`.",
@@ -735,11 +743,60 @@
       ]
     },
     "EnginesReq": {
-      "description": "`engines` block — the required Ryu version, mirroring VS-Code's\n`engines.vscode`. `ryu` is a semver **requirement** string.",
+      "description": "`engines` block — the **host** version floors, mirroring VS-Code's\n`engines.vscode`. Every value is a semver **requirement** string.\n\n`ryu` is the Core floor and is the only required key (every manifest written\nbefore per-surface floors existed carries just that one). The rest are optional\nper-[`Surface`] floors: a plugin that needs a Gateway API added in 0.1.5 and a\ndesktop panel API added in 0.2.0 says so, instead of over-declaring one Core\nfloor and hoping the release train kept them in step.\n\n## Why this is a flat struct and not a `BTreeMap<Surface, String>`\n\nThe [`PluginManifest::surfaces`] map would be the obvious home, but it is\n**absent from the SDK's zod mirror** (`packages/sdk/src/manifest.ts`), and zod\nstrips unlisted keys — so a floor declared there would be silently dropped from\nevery bundle `ryu pack` produces. `engines` is the block that already means\n\"host floor\", it is what a manifest author reaches for, and mirroring it costs\none schema addition rather than a nested map.\n\n## Unknown ≠ unsatisfied\n\nCore observes its own version and (via `/health`) the Gateway's. It does NOT\nknow the desktop, island, mobile, extension or web version — those are separate\ninstalls that never report in. A floor against a surface whose version is\nunknown is therefore **advisory, never blocking**: see\n`HostVersions::evaluate`. Blocking on unknown would delist every plugin from\nevery surface Core cannot see, which is most of them.",
       "properties": {
+        "cli": {
+          "description": "Floor for the **terminal** (`cli`) surface — the TUI that dispatches\n`ryu <app> <cmd>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desktop": {
+          "description": "Floor for the **desktop** app (Tauri shell).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extension": {
+          "description": "Floor for the **browser extension** surface.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gateway": {
+          "description": "Floor for the **Gateway**. The one non-Core surface Core can actually\nobserve (it spawns the Gateway and reads `version` from its `/health`), so a\nfloor here is genuinely enforceable rather than advisory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "island": {
+          "description": "Floor for the **island** (the always-on overlay surface).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mobile": {
+          "description": "Floor for the **mobile** app. The one surface with a genuinely independent\nrelease train (App Store / Play review lag), so it is the floor most likely\nto be unsatisfied in practice.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "ryu": {
-          "description": "Semver requirement the running Core version must satisfy (e.g. `\">=0.3.0\"`,\n`\"^1.2\"`). Parsed as a [`semver::VersionReq`]; an unparseable value or an\nunsatisfied requirement causes the loader to reject the manifest.",
+          "description": "Semver requirement the running **Core** version must satisfy (e.g.\n`\">=0.3.0\"`, `\"^1.2\"`). Parsed as a [`semver::VersionReq`]; an unparseable\nvalue causes the loader to reject the manifest, and an unsatisfied one moves\nit to the incompatible lane (shown in the marketplace, refused at install).\n\nNamed `ryu` rather than `core` for backwards compatibility: every manifest\nin the wild spells it this way. [`EnginesReq::floor_for`] maps\n[`Surface::Core`] onto it.",
           "type": "string"
+        },
+        "web": {
+          "description": "Floor for the **web** surface.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1889,6 +1946,61 @@
       ],
       "type": "object"
     },
+    "SidebarModeContribution": {
+      "description": "One app-registered **sidebar mode** — a named arrangement of the whole left\nsidebar: the sections it offers as tabs, and the one it opens on.\n\nThe shape is deliberately thin, and every field it does NOT have is the point:\n\n- **No renderer, no code.** A mode names existing sections. It cannot draw a row,\n  which is why it needs no grants and cannot be a carriage channel — the worst a\n  hostile mode can do is offer a tab list the user does not want, one menu row\n  away from being switched off.\n- **No row style.** How a section's rows draw belongs to that SECTION\n  (`SidebarSectionSpec.rowStyle` in `@ryu/app-host/views`), because it is a\n  property of the feed, not of an arrangement: a roster of named bots wants\n  avatars whether or not the user is in a mode that features it. Putting it here\n  would also mean a mode reaching across into another contribution's rendering,\n  which is the coupling this member exists to avoid.\n- **No `hidden` list.** A mode is a positive statement about what to show. The\n  sections it does not name are simply not tabs in it.\n\nSection ids are the shell's own keys (`agents`, `chats`, `spaces`, …) or another\ncontributed section's namespaced key (`plugin:<pluginId>:<sectionId>`). A named\nsection that does not resolve is dropped rather than failing the mode — an app\nmay legitimately name a section from a sibling app the user has not installed,\nand losing one tab is a better answer than losing the mode.",
+      "properties": {
+        "default_section": {
+          "description": "Which of `sections` the mode opens on. Absent (or naming a section not in\n`sections`) = the first one. This is the field that makes a mode an opinion\nrather than a filter: the shell's own Agent mode lists Sessions first but\nopens on Agents, because the roster is what the mode is for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "description": "One-line description shown under the title where the mode is offered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this mode within the plugin (namespaced by the shell into the\nstored mode key as `plugin:<pluginId>:<id>`, so two apps can both ship a\n`bots` mode).",
+          "type": "string"
+        },
+        "order": {
+          "description": "Optional ordering hint among the modes on offer (lower = earlier).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sections": {
+          "default": [],
+          "description": "The sections this mode offers as tabs, in display order. Empty = the mode is\ninert and the shell ignores it; a mode with one entry is a legitimate\nsingle-surface arrangement, not an error.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "Label shown in the sidebar's mode menu and the Appearance tab.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
     "SidebarSectionContribution": {
       "description": "One app-registered **sidebar section** — a header plus a live list of rows the\ndesktop's compact sidebar renderer draws (the app-owned replacement for the\nhardcoded Canvas/Whiteboard/Meetings sections). A typed envelope around an opaque\n`spec` (the `SidebarSectionSpec` in `@ryu/app-host/views`: a `ViewSource` for the\nrows, an `itemTarget` route template for `openTab`, optional `itemActions` and a\n`create` action). Core stores it verbatim and tags it with the owning `plugin` id;\nthe `spec` stays opaque so a new section capability is a renderer change, not a\nCore change.",
       "properties": {
@@ -2562,6 +2674,13 @@
     },
     "iconDither": {
       "description": "Dithered-gradient background for the card's icon square (Ryu extension:\n`iconDither`). Opaque passthrough `{ from, to?, direction? }` mirroring\ndither-kit's `DitherGradient` props (`from`/`to` are a palette-colour name or\na hue number, `direction` is up|down|left|right). Kept as raw JSON like\n`banner` so an untrusted/typo'd value never fails the manifest parse — the\nrender layer validates and falls back before painting."
+    },
+    "iconPadding": {
+      "description": "Inset for the card's icon square (Ryu extension: `iconPadding`).\n\nA product LOGO that is edge-to-edge in its own art has no breathing room\ninside the square and reads as a sticker rather than an icon. One of\n`none` | `sm` | `md` | `lg`.\n\nAny value other than `none` ALSO letterboxes the art (`object-contain`)\ninstead of cropping it. That coupling is load-bearing, not a convenience:\na listing declaring a bare `iconUrl` (no `icon`) is not in the brand lane,\nso it is painted `object-cover` — inset alone would be silently inert for\nexactly the raw-logo case this field exists for.\n\n`Option<String>` rather than a Rust enum, for the same forward-compat\nreason `icon_dither` is raw JSON: an unknown value must never fail the\nmanifest parse. The render layer validates and falls back.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "iconUrl": {
       "description": "Logo URL (contract key `iconUrl`; Ryu extension).",

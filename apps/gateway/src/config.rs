@@ -471,34 +471,70 @@ pub struct CreditsConfig {
     #[serde(default)]
     pub markup_bps: u64,
     /// Per-tool-call cost in micro-USD for billable (Composio) tool executions.
-    /// Composio charges per action execution, so on the managed plan each
-    /// executed `composio__*` tool call debits the org wallet by this amount
-    /// (× the count of calls in the request), at cost — the same `debit_amount`
-    /// markup that token usage uses. Default: 0 ⇒ tool calls are free until a
-    /// deployment provisions a real rate (managed nodes set it via
-    /// `GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD`). Builtin/MCP/app tools are
-    /// never billed here — only Composio executions.
-    #[serde(default)]
+    ///
+    /// AT COST, and that is the whole pricing position: Composio charges per
+    /// action execution at $0.299/1k on the overage rate, so this defaults to
+    /// 299 micro-USD per call and the customer is billed exactly what the
+    /// provider bills us. Margin lives in the deposit fee, never in a per-unit
+    /// markup (`markup_bps` is 0) — see `docs/pricing-remaining-work.md` item 6.
+    ///
+    /// ONE FLAT CLASS, deliberately. Composio's premium tools bill at 3x, but
+    /// nothing in an execution response says which class a tool is, so telling
+    /// them apart would mean a hand-maintained list of toolkit slugs that
+    /// silently under-bills whatever it omits and has to be re-checked whenever
+    /// Composio moves a tool. A single at-cost rate is honest, needs no
+    /// maintenance, and cannot restrict which toolkits work.
+    ///
+    /// Overridable per deployment with
+    /// `GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD` for a different Composio
+    /// contract.
+    #[serde(default = "default_cost_per_tool_call_micro_usd")]
     pub cost_per_tool_call_micro_usd: u64,
-    /// Per-call cost in micro-USD for a successful image generation. Cloud media
-    /// providers (Replicate/Fal/OpenRouter) do not report a usage.cost the way
-    /// chat does, so managed nodes meter media at a configured flat rate per
-    /// call, debited through the same at-cost + markup path as tokens. Default: 0
-    /// ⇒ media is free until a deployment provisions a rate
+    /// Micro-USD per second of provider compute, used to price a media call from
+    /// the compute time the provider actually reported.
+    ///
+    /// Replicate's published Nvidia L40S rate ($0.000975/sec) is the default —
+    /// its most common serverless GPU, and a real published figure rather than
+    /// an invented one. Override per deployment with
+    /// `GATEWAY_CREDITS_COST_PER_GPU_SECOND_MICRO_USD` if you route to different
+    /// hardware.
+    ///
+    /// This is what makes media metering track the TRANSACTION. A flat per-call
+    /// rate charges a two-second image and a sixty-second video identically; the
+    /// same configured number is then wrong by up to ~30x in both directions,
+    /// and no single value fixes it.
+    #[serde(default = "default_cost_per_gpu_second_micro_usd")]
+    pub cost_per_gpu_second_micro_usd: u64,
+
+    /// Per-call cost in micro-USD for a successful image generation — THE
+    /// FALLBACK the flat path charges when the provider reported no compute time.
+    /// Cloud media providers (Replicate/Fal/OpenRouter) do not report a
+    /// usage.cost the way chat does, so a call the metered path cannot price is
+    /// debited at this flat rate through the same at-cost + markup path as
+    /// tokens. Default: [`default_cost_per_image_micro_usd`]
     /// (`GATEWAY_CREDITS_COST_PER_IMAGE_MICRO_USD`).
-    #[serde(default)]
+    ///
+    /// These four defaulted to 0, which is what a fallback must never be: the
+    /// media debit is guarded by `if cost > 0`, so a fallback that prices to
+    /// nothing does not charge a small amount — it skips the debit entirely,
+    /// silently, while the provider still invoices us. That combination already
+    /// shipped once (the async video job, see `media_cost_micro_usd`).
+    #[serde(default = "default_cost_per_image_micro_usd")]
     pub cost_per_image_micro_usd: u64,
-    /// Per-call cost in micro-USD for a successful video generation job.
-    /// `GATEWAY_CREDITS_COST_PER_VIDEO_MICRO_USD`. Default: 0.
-    #[serde(default)]
+    /// Per-call fallback cost in micro-USD for a successful video generation job.
+    /// `GATEWAY_CREDITS_COST_PER_VIDEO_MICRO_USD`. Default:
+    /// [`default_cost_per_video_micro_usd`].
+    #[serde(default = "default_cost_per_video_micro_usd")]
     pub cost_per_video_micro_usd: u64,
-    /// Per-call cost in micro-USD for a successful TTS synthesis.
-    /// `GATEWAY_CREDITS_COST_PER_TTS_MICRO_USD`. Default: 0.
-    #[serde(default)]
+    /// Per-call fallback cost in micro-USD for a successful TTS synthesis.
+    /// `GATEWAY_CREDITS_COST_PER_TTS_MICRO_USD`. Default:
+    /// [`default_cost_per_tts_micro_usd`].
+    #[serde(default = "default_cost_per_tts_micro_usd")]
     pub cost_per_tts_micro_usd: u64,
-    /// Per-call cost in micro-USD for a successful STT transcription.
-    /// `GATEWAY_CREDITS_COST_PER_STT_MICRO_USD`. Default: 0.
-    #[serde(default)]
+    /// Per-call fallback cost in micro-USD for a successful STT transcription.
+    /// `GATEWAY_CREDITS_COST_PER_STT_MICRO_USD`. Default:
+    /// [`default_cost_per_stt_micro_usd`].
+    #[serde(default = "default_cost_per_stt_micro_usd")]
     pub cost_per_stt_micro_usd: u64,
     /// What the budget layer does when an org's wallet is empty: `stop` (default)
     /// aborts the next request; `downgrade` reroutes to `wallet_empty_downgrade_to`.
@@ -729,11 +765,12 @@ impl Default for CreditsConfig {
             base_url: default_control_plane_url(),
             internal_secret: None,
             markup_bps: 0,
-            cost_per_tool_call_micro_usd: 0,
-            cost_per_image_micro_usd: 0,
-            cost_per_video_micro_usd: 0,
-            cost_per_tts_micro_usd: 0,
-            cost_per_stt_micro_usd: 0,
+            cost_per_tool_call_micro_usd: default_cost_per_tool_call_micro_usd(),
+            cost_per_gpu_second_micro_usd: default_cost_per_gpu_second_micro_usd(),
+            cost_per_image_micro_usd: default_cost_per_image_micro_usd(),
+            cost_per_video_micro_usd: default_cost_per_video_micro_usd(),
+            cost_per_tts_micro_usd: default_cost_per_tts_micro_usd(),
+            cost_per_stt_micro_usd: default_cost_per_stt_micro_usd(),
             wallet_empty_action: WalletEmptyAction::default(),
             wallet_empty_downgrade_to: None,
             wallet_empty_alert: AlertTier::default(),
@@ -772,18 +809,173 @@ impl CreditsConfig {
             / BPS_DENOM
     }
 
+    /// The inverse of [`Self::debit_amount`]: the raw provider cost whose debit
+    /// would come to at most `debit_micro_usd`.
+    ///
+    /// Needed to size a spend ceiling. A budget is denominated in CHARGED
+    /// micro-USD, but a token ceiling has to be computed from RAW provider cost,
+    /// so converting the wrong way round (or not at all) hands out a ceiling the
+    /// subsequent debit then exceeds — which is precisely the overdraft the
+    /// ceiling exists to prevent.
+    ///
+    /// Rounds DOWN, deliberately, and does not round-half-up the way
+    /// `debit_amount` does: this is a ceiling, so the error must fall on the side
+    /// of charging less than the budget rather than a hair more.
+    pub fn undo_debit_amount(&self, debit_micro_usd: u64) -> u64 {
+        const BPS_DENOM: u64 = 10_000;
+        let scale = BPS_DENOM.saturating_add(self.markup_bps);
+        if scale == 0 {
+            return debit_micro_usd;
+        }
+        debit_micro_usd.saturating_mul(BPS_DENOM) / scale
+    }
+
     /// The raw (pre-markup) cost in micro-USD for `n` billable tool calls. Pass
     /// the result through [`Self::debit_amount`] to apply the platform markup,
+    /// Refuse a configuration that meters money but charges nothing for it.
+    ///
+    /// A per-call rate of 0 means the customer's wallet is debited NOTHING while
+    /// the upstream provider still invoices us — Composio bills per action
+    /// execution, and image/video/TTS/STT all carry real per-call costs. Every
+    /// one of those rates used to default to 0; they now default to a real
+    /// number, so reaching 0 takes an explicit key in the deploy config.
+    ///
+    /// That old default was justified as protecting OSS self-hosters. It did not:
+    /// `enabled` is ALSO false by default, so a self-hosted gateway performs no
+    /// debits at all regardless of the rates. The only deployment that reaches
+    /// these fields is one that deliberately switched billing ON — which makes a
+    /// zero rate a misconfiguration in every case that can actually occur, not a
+    /// supported mode. It is a silent one, too: nothing errors, requests succeed,
+    /// and the loss shows up as a provider invoice with no matching revenue.
+    ///
+    /// So: with credits enabled, an EXPLICIT zero on a synchronously-served rate
+    /// is a hard startup failure. An *unset* rate is not — it resolves to the
+    /// field's `default = "fn"`, which is the change that let this gate be widened
+    /// back out without keeping nodes down while an operator invents numbers. The
+    /// escape hatch is explicit rather than implicit — set
+    /// `GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1` to deliberately give a modality
+    /// away, which leaves a decision in the deploy config instead of a blank.
+    pub fn validate_metered_rates(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if std::env::var("GATEWAY_CREDITS_ALLOW_FREE_MODALITIES")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            return Ok(());
+        }
+
+        // A ZERO IS ONLY EVER A DELIBERATE ONE NOW.
+        //
+        // This used to hard-fail on all five per-call rates, and was then cut
+        // back to the tool rate alone because a managed node would not boot until
+        // an operator had invented numbers — a gate demanding configuration that
+        // kept nodes down at exactly the moment someone was restarting one. That
+        // reason is gone: every rate this checks now carries a real `default =
+        // "fn"`, so an unset key resolves to a working number and the gate can
+        // only trip when a deployment writes an explicit `0`. Refusing an
+        // explicit 0 costs a booting node nothing and is the whole point.
+        //
+        // The premise the cut-back was argued on was WRONG, and it is worth
+        // stating plainly because it let a zero rate through twice: the claim was
+        // that "image and video are metered from the provider's REPORTED cost, so
+        // a flat rate of 0 there is a fallback that is never reached". That is
+        // true of the SYNCHRONOUS media path only. The async video job debits
+        // after the render, out of band, and its provider payload may carry no
+        // compute time at all — so it lands on the flat rate, hits the `if cost >
+        // 0` guard, and bills nothing. See
+        // `an_async_video_job_bills_from_the_provider_payload_not_the_flat_rate`.
+        //
+        // TTS and STT are gated here alongside tool calls because they are served
+        // synchronously and have no second cost source at all. Image and video
+        // are deliberately NOT gated: their real payer is the metered path, so
+        // an operator who zeroes them is choosing a fallback of 0 on a surface
+        // that usually prices itself — a defensible choice, unlike a zeroed
+        // surface that can only ever bill from the flat rate.
+        if self.cost_per_tool_call_micro_usd == 0 {
+            anyhow::bail!(
+                "credits are ENABLED but GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD is 0, \
+so every Composio tool call bills the customer nothing while Composio still charges us. \
+Unset it to take the at-cost default (299 = $0.299/1k), or set \
+GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give tool calls away on purpose."
+            );
+        }
+        if self.cost_per_tts_micro_usd == 0 {
+            anyhow::bail!(
+                "credits are ENABLED but GATEWAY_CREDITS_COST_PER_TTS_MICRO_USD is 0, \
+so every TTS synthesis bills the customer nothing while the provider still charges us. \
+Unset it to take the derived default, or set \
+GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give TTS away on purpose."
+            );
+        }
+        if self.cost_per_stt_micro_usd == 0 {
+            anyhow::bail!(
+                "credits are ENABLED but GATEWAY_CREDITS_COST_PER_STT_MICRO_USD is 0, \
+so every STT transcription bills the customer nothing while the provider still charges us. \
+Unset it to take the derived default, or set \
+GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give STT away on purpose."
+            );
+        }
+        Ok(())
+    }
+
     /// exactly like token cost. Saturating to avoid overflow.
     pub fn tool_call_cost_micro_usd(&self, n: u64) -> u64 {
         self.cost_per_tool_call_micro_usd.saturating_mul(n)
     }
 
+
     /// The raw (pre-markup) flat cost in micro-USD for one successful media call
     /// of `modality`. Chat is never metered here (it uses real token/usage.cost);
     /// returns 0 for Chat and for any modality whose per-call rate is unset. Pass
     /// through [`Self::debit_amount`] to apply the platform markup, like tokens.
-    pub fn media_cost_micro_usd(&self, modality: &Modality) -> u64 {
+    /// Cost for one media call, priced from the provider's REPORTED compute time
+    /// when the response carries it, else the configured flat rate.
+    ///
+    /// Returns the amount and whether it was ESTIMATED. The flag is not
+    /// decoration: a flat-rate fallback is a guess, and recording which ledger
+    /// rows were guesses is what makes a later reconciliation against the
+    /// provider's own invoice possible. Without it, an estimate and a measured
+    /// charge are indistinguishable after the fact.
+    pub fn media_cost_from_response(
+        &self,
+        modality: &Modality,
+        response: &serde_json::Value,
+    ) -> (u64, bool) {
+        let seconds = response
+            .get("usage")
+            .and_then(|u| u.get("compute_seconds"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|s| *s > 0.0);
+        if let Some(seconds) = seconds {
+            if self.cost_per_gpu_second_micro_usd > 0 {
+                // Round UP: a partial second of GPU time is a second we are
+                // billed for, and rounding down would leak a sliver on every
+                // call.
+                let micro =
+                    (seconds * self.cost_per_gpu_second_micro_usd as f64).ceil();
+                return (micro.max(0.0) as u64, false);
+            }
+        }
+        (self.media_cost_micro_usd(modality), true)
+    }
+
+    /// The flat configured rate for a modality — THE FALLBACK, never the price.
+    ///
+    /// PRIVATE ON PURPOSE. Call {@link media_cost_from_response} instead, which
+    /// prefers the provider's reported compute time and returns a flag saying
+    /// which of the two paid, so the ledger can mark an estimated row.
+    ///
+    /// This was `pub`, and the async video-job debit reached past
+    /// `media_cost_from_response` to call it directly. `cost_per_video_micro_usd`
+    /// then defaulted to 0 and the debit is guarded by `if cost > 0`, so every
+    /// completed async video job billed NOTHING under the default config — while
+    /// the startup gate had stopped guarding the video rate precisely because
+    /// video was believed to be metered from provider cost. Narrowing the
+    /// visibility is what makes that combination unrepresentable rather than
+    /// merely fixed; giving all four rates a non-zero default is what removes the
+    /// other half of it.
+    fn media_cost_micro_usd(&self, modality: &Modality) -> u64 {
         match modality {
             Modality::Image => self.cost_per_image_micro_usd,
             Modality::Video => self.cost_per_video_micro_usd,
@@ -1046,6 +1238,28 @@ impl ControlPlaneConfig {
         (input.saturating_add(output)).saturating_mul(self.cost_per_1k_micro_usd) / 1000
     }
 
+    /// The OUTPUT price per 1k tokens for `model`, falling back to the flat
+    /// `cost_per_1k_micro_usd` when the table has no entry.
+    ///
+    /// The spend ceiling is computed from this rather than from the flat rate,
+    /// and the difference is the whole point: output prices span roughly 500x
+    /// across the catalog, so one blended rate makes the ceiling far too
+    /// generous on a frontier model — which is exactly where an overdraft is
+    /// worth having — and needlessly tight on a cheap one, truncating
+    /// completions that were affordable all along.
+    ///
+    /// OUTPUT only, not the blend `cost_for` uses: the ceiling bounds how many
+    /// tokens the model may still GENERATE. The prompt is already paid for by
+    /// the time this is asked, so charging the ceiling for input tokens would
+    /// shrink it for a reason that has nothing to do with what remains to be
+    /// spent.
+    pub fn output_price_per_1k_micro_usd(&self, model: &str) -> u64 {
+        self.price_for_model(model)
+            .map(|p| p.output_per_1k_micro_usd)
+            .filter(|p| *p > 0)
+            .unwrap_or(self.cost_per_1k_micro_usd)
+    }
+
     /// Exact match first, then the longest matching prefix (so `"claude-sonnet"`
     /// covers `"claude-sonnet-4-5-20250929"`).
     fn price_for_model(&self, model: &str) -> Option<&ModelPrice> {
@@ -1060,6 +1274,59 @@ impl ControlPlaneConfig {
         }
         best.map(|(_, v)| v)
     }
+}
+
+/// Composio's own overage rate, $0.299 per 1000 executions, in micro-USD per
+/// call. Billed straight through at cost.
+fn default_cost_per_tool_call_micro_usd() -> u64 {
+    299
+}
+
+/// Replicate's published Nvidia L40S rate, $0.000975/sec, in micro-USD.
+fn default_cost_per_gpu_second_micro_usd() -> u64 {
+    975
+}
+
+// ─── Media fallback rates (micro-USD per call) ───────────────────────────────
+// The four flat per-call rates the media debit falls back to when the provider
+// reported no compute time. Each is DERIVED from the one published price this
+// file already holds — Replicate's L40S GPU-second — times the nominal duration
+// of that kind of job, so there is exactly one number to re-check when the
+// hardware rate changes and no invented figures at all.
+//
+// Image and video take their durations from the derivation already written down
+// on `cost_per_gpu_second_micro_usd`: "a two-second image and a sixty-second
+// video". Nothing in this file publishes a per-character, per-second-of-audio or
+// per-minute rate for speech, so TTS and STT take the shortest job the fallback
+// can honestly represent — one GPU-second.
+//
+// These are FALLBACKS, not prices. The metered path
+// ([`CreditsConfig::media_cost_from_response`]) is what should pay for a real
+// call; a rate here only has to be non-zero, because zero is the one value that
+// turns "charge a little" into "skip the debit" under the `if cost > 0` guard.
+// Every one is overridable per deployment with the matching
+// `GATEWAY_CREDITS_COST_PER_*_MICRO_USD`.
+
+/// A nominal two-second image on L40S: `2 x $0.000975/sec`.
+fn default_cost_per_image_micro_usd() -> u64 {
+    default_cost_per_gpu_second_micro_usd() * 2
+}
+
+/// A nominal sixty-second video render on L40S: `60 x $0.000975/sec`.
+fn default_cost_per_video_micro_usd() -> u64 {
+    default_cost_per_gpu_second_micro_usd() * 60
+}
+
+/// One L40S second, the shortest job the fallback can represent. TTS is the
+/// urgent half of this pair with STT: both are served synchronously, and neither
+/// has a published per-audio-unit rate anywhere in this config.
+fn default_cost_per_tts_micro_usd() -> u64 {
+    default_cost_per_gpu_second_micro_usd()
+}
+
+/// One L40S second — see [`default_cost_per_tts_micro_usd`].
+fn default_cost_per_stt_micro_usd() -> u64 {
+    default_cost_per_gpu_second_micro_usd()
 }
 
 fn default_control_plane_url() -> String {
@@ -1324,6 +1591,37 @@ fn local_base_url() -> String {
 /// with Core's `llamacpp::classify::CLASSIFY_PORT_BASE` (chat 8080, embed 8081,
 /// rerank 8082, classify 8083).
 pub const DEFAULT_CLASSIFY_PORT: u16 = 8083;
+
+/// Loopback port the embed tier listens on — the second slot in the same port map
+/// as [`DEFAULT_CLASSIFY_PORT`].
+pub const DEFAULT_EMBED_PORT: u16 = 8081;
+
+/// Where to embed text when no `[providers.openai]` is configured.
+///
+/// The embedding-backed paths — smart routing's `Embedding` strategy and the
+/// semantic cache — were written to take a bare `(base_url, api_key)` OpenAI
+/// endpoint, so with no OpenAI provider they logged "no embedder configured" and
+/// gave up. On a Core-spawned gateway that is wrong twice over: an embed sidecar
+/// IS running on loopback, speaking the same OpenAI-compatible `/embeddings`
+/// shape, and it is the embedder the model default (`nomic-embed-text-v1.5`)
+/// names. So the absence of a cloud key made a local-first feature silently inert.
+///
+/// `RYU_EMBED_LLM_URL` overrides, mirroring `RYU_CLASSIFY_LLM_URL` for the
+/// classify tier; the port is profile-aware for the same reason
+/// [`classify_base_url`] is, so a dev gateway reaches `:9081`, not the release
+/// sidecar on `:8081`.
+pub fn local_embed_base_url() -> String {
+    std::env::var("RYU_EMBED_LLM_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "http://127.0.0.1:{}/v1",
+                crate::profile::port(DEFAULT_EMBED_PORT)
+            )
+        })
+}
 
 /// The classify tier's connection config — the same single-field shape as
 /// [`LocalProviderConfig`], kept as a distinct type purely so it carries its own
@@ -1764,9 +2062,32 @@ pub struct SmartRoutingConfig {
 
     /// The cheap model used to classify each request. Resolved to a provider via
     /// the normal model router, so it can be a local model (e.g. `"gemma-…"`), a
-    /// hosted mini model, or an `openrouter/…` slug. Empty ⇒ smart routing is
-    /// inert (fail-open). Nothing hardcoded.
-    #[serde(default)]
+    /// hosted mini model, or an `openrouter/…` slug. Nothing hardcoded.
+    ///
+    /// Defaults to [`classify_model_id`] — the same classify-tier id the
+    /// inspector takes — and an **empty value is resolved to that default at
+    /// deserialization** (see [`de_classifier_model`]), so this field is never
+    /// blank in practice.
+    ///
+    /// It used to default to `""` with a doc comment claiming "empty ⇒ smart
+    /// routing is inert (fail-open)". Inert is the charitable reading; the real
+    /// behaviour was worse. [`Self::is_active`] returns false on a blank
+    /// classifier, and `pipeline::apply_smart_routing` treats a per-agent
+    /// override as *present* the moment the agent has one — so an agent saved
+    /// with routing switched on and the model box left empty did not fall back to
+    /// the global smart router, it took the early return and DISABLED routing
+    /// that would otherwise have worked. Resolving the blank here — the one
+    /// construction seam every reader flows through — is what makes "enabled"
+    /// mean "working", exactly as [`de_inspector_model`] does for the inspector.
+    ///
+    /// The behavioural shift is small and stays inside the module's fail-open
+    /// contract: enabled + rules + blank was previously a silent no-op, and is
+    /// now an attempt against the local classify tier whose failure lands on the
+    /// same untouched-model outcome — minus the silence.
+    #[serde(
+        default = "default_classifier_model",
+        deserialize_with = "de_classifier_model"
+    )]
     pub classifier_model: String,
 
     /// Ordered natural-language rules. The classifier returns the index of the
@@ -1795,6 +2116,34 @@ fn default_smart_routing_timeout_ms() -> u64 {
     4000
 }
 
+/// The classify tier, same id the inspector defaults to. Cheap, local, and
+/// already resolvable through the model router, so "enabled" needs no second
+/// decision from the operator.
+fn default_classifier_model() -> String {
+    classify_model_id()
+}
+
+/// Resolve a blank `smart_routing.classifier_model` to [`classify_model_id`] as
+/// the value is read off the wire — the sibling of [`de_inspector_model`], and
+/// for the same reason: `#[serde(default = …)]` alone only covers an *absent*
+/// field, while the desktop editor and the `PUT /v1/config` overlay both send an
+/// explicit `""` when an operator clears the box.
+///
+/// It matters more here than for the inspector, because the per-agent override
+/// map is keyed on *presence*: a blank model does not degrade to the global
+/// router, it shadows it.
+fn de_classifier_model<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(if raw.trim().is_empty() {
+        default_classifier_model()
+    } else {
+        raw
+    })
+}
+
 fn default_route_similarity_threshold() -> f32 {
     0.35
 }
@@ -1806,7 +2155,7 @@ impl Default for SmartRoutingConfig {
             embedding_model: String::new(),
             similarity_threshold: default_route_similarity_threshold(),
             enabled: false,
-            classifier_model: String::new(),
+            classifier_model: default_classifier_model(),
             rules: Vec::new(),
             default_model: None,
             cache_by_session: true,
@@ -1820,7 +2169,10 @@ impl SmartRoutingConfig {
     /// and whatever the chosen strategy needs to reach a decision. Anything short
     /// of this is a no-op (fail-open).
     ///
-    /// - `Llm` needs a non-empty `classifier_model`.
+    /// - `Llm` needs a non-empty `classifier_model`. [`de_classifier_model`]
+    ///   resolves a blank one to the classify tier as it comes off the wire, so
+    ///   in practice this arm only trips on a config built in Rust — the check
+    ///   stays as the last line of defence, not as the thing an operator hits.
     /// - `Embedding` needs an embedder (its own `embedding_model` or the semantic
     ///   cache's), validated at call time; here we only require rules.
     /// - `Keyword` needs nothing beyond rules.
@@ -2919,6 +3271,39 @@ impl GatewayConfig {
             config.auth.require_auth = true;
         }
 
+        // Admin key WITHOUT flipping base auth.
+        //
+        // `GATEWAY_MASTER_KEY` above does two things at once — provisions an admin
+        // credential and turns on auth for EVERY route. That coupling is right for
+        // an operator hardening a deployment, and wrong for the one caller that
+        // needs an admin credential by construction: Core, which spawns this
+        // gateway as its own child.
+        //
+        // The problem it solves: the admin surface (`/v1/config`, audit,
+        // budget/spend) is otherwise reachable only by loopback trust, and
+        // `admin_loopback_allowed` deliberately revokes that trust whenever the
+        // MESH is on — mesh peers arrive as `127.0.0.1`, so loopback would
+        // otherwise fail open to them. Correct, but it also locked out Core, which
+        // had no admin credential to fall back on: every gateway settings tab
+        // answered 401 the moment the user enabled the mesh.
+        //
+        // Core cannot use `GATEWAY_MASTER_KEY` for this, because flipping
+        // `require_auth` would demand a bearer on every ordinary call (chat,
+        // media, titles, widgets, …) that Core and its sidecars make without one.
+        // So this sets the credential alone: admin routes start demanding it,
+        // everything else is untouched.
+        //
+        // Ignored when `GATEWAY_MASTER_KEY` already provisioned one — an explicit
+        // operator key outranks the one Core mints for itself.
+        if config.auth.master_key.is_none() {
+            if let Ok(key) = std::env::var("GATEWAY_ADMIN_KEY") {
+                let key = key.trim().to_owned();
+                if !key.is_empty() {
+                    config.auth.master_key = Some(key);
+                }
+            }
+        }
+
         // Provider prompt caching. Every knob is independently overridable so a
         // managed node can set a posture without shipping a gateway.toml.
         if let Ok(mode) = std::env::var("GATEWAY_PROMPT_CACHE") {
@@ -3406,6 +3791,25 @@ impl GatewayConfig {
             if let Some(enabled) = parse_bool_env(&raw) {
                 config.credits.enabled = enabled;
             }
+        } else if config.credits.internal_secret.is_some() {
+            // MANAGED NODES BILL BY DEFAULT; self-hosted ones never do.
+            //
+            // `enabled` defaults to false, which is right for a self-hoster and
+            // catastrophic for us: a managed node that simply forgot
+            // GATEWAY_CREDITS_ENABLED serves every request — tokens, tools,
+            // media, sandbox — and debits NOTHING. That is a bigger hole than any
+            // unset per-call rate, and it fails silently in the same way.
+            //
+            // The internal secret is the discriminator, and it is the right one
+            // because it is not a preference: it is the service-to-service
+            // credential the control plane issues so this gateway may debit an
+            // ARBITRARY org's wallet. Only a Ryu-provisioned node is given one. A
+            // self-hoster has no secret, so this branch never fires for them and
+            // their gateway stays free exactly as before.
+            //
+            // An explicit GATEWAY_CREDITS_ENABLED still wins in both directions,
+            // so a managed node can be deliberately un-metered when needed.
+            config.credits.enabled = true;
         }
         if let Ok(url) = std::env::var("GATEWAY_CREDITS_URL") {
             if !url.trim().is_empty() {
@@ -3427,7 +3831,10 @@ impl GatewayConfig {
                 config.credits.cost_per_tool_call_micro_usd = cost;
             }
         }
-        // Per-modality flat media rates (managed metering; 0 = free by default).
+        // Per-modality flat media rates. Each has a real non-zero default, so an
+        // unset var never lands on 0; setting one of these to 0 explicitly is
+        // REFUSED at boot for TTS and STT (see `validate_metered_rates`), the two
+        // whose only cost source is the flat rate.
         for (var, slot) in [
             (
                 "GATEWAY_CREDITS_COST_PER_IMAGE_MICRO_USD",
@@ -3549,6 +3956,11 @@ impl GatewayConfig {
                 config.fleet = enabled;
             }
         }
+
+        // Money config is validated at BOOT, not at first debit: a gateway that
+        // starts and silently gives away metered surfaces is the failure mode
+        // this whole check exists to prevent.
+        config.credits.validate_metered_rates()?;
 
         Ok(config)
     }
@@ -4264,6 +4676,147 @@ pub(crate) mod test_config_path {
 }
 
 #[cfg(test)]
+mod local_embed_endpoint_tests {
+    use super::{local_embed_base_url, DEFAULT_EMBED_PORT};
+
+    struct EnvVar(&'static str, Option<std::ffi::OsString>);
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self(name, prior)
+        }
+        fn cleared(name: &'static str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self(name, prior)
+        }
+    }
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(prior) => std::env::set_var(self.0, prior),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    /// The default must be the PROFILE-ADJUSTED embed port, not a bare 8081. A dev
+    /// gateway that dials the release sidecar embeds against whatever model the
+    /// other profile happens to be serving, which is a silently wrong vector rather
+    /// than an error.
+    #[test]
+    fn defaults_to_the_profile_adjusted_embed_port() {
+        let _env = EnvVar::cleared("RYU_EMBED_LLM_URL");
+        let expected = format!(
+            "http://127.0.0.1:{}/v1",
+            crate::profile::port(DEFAULT_EMBED_PORT)
+        );
+        assert_eq!(local_embed_base_url(), expected);
+    }
+
+    /// `RYU_EMBED_LLM_URL` wins, mirroring `RYU_CLASSIFY_LLM_URL` for the classify
+    /// tier — that is how a Core-spawned gateway is repointed.
+    #[test]
+    fn env_override_wins() {
+        let _env = EnvVar::set("RYU_EMBED_LLM_URL", "http://10.0.0.4:9999/v1");
+        assert_eq!(local_embed_base_url(), "http://10.0.0.4:9999/v1");
+    }
+
+    /// A blank or whitespace-only override is not an endpoint. Treating it as one
+    /// would send every embed call to the empty string and fail every request,
+    /// where falling back to the local sidecar still works.
+    #[test]
+    fn blank_override_falls_back_to_the_local_sidecar() {
+        let _env = EnvVar::set("RYU_EMBED_LLM_URL", "   ");
+        let expected = format!(
+            "http://127.0.0.1:{}/v1",
+            crate::profile::port(DEFAULT_EMBED_PORT)
+        );
+        assert_eq!(local_embed_base_url(), expected);
+    }
+}
+
+#[cfg(test)]
+mod admin_key_env_tests {
+    use super::test_config_path::ConfigPathGuard;
+    use super::GatewayConfig;
+
+    /// Restore one env var on drop, so a panicking test cannot leak it into the
+    /// rest of the binary. The `ConfigPathGuard` the caller also holds serializes
+    /// these windows against each other.
+    struct EnvVar(&'static str, Option<std::ffi::OsString>);
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self(name, prior)
+        }
+        fn cleared(name: &'static str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self(name, prior)
+        }
+    }
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(prior) => std::env::set_var(self.0, prior),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    /// The whole point of `GATEWAY_ADMIN_KEY`: provision the admin credential
+    /// WITHOUT turning on base auth.
+    ///
+    /// If this ever starts flipping `require_auth`, every ordinary call Core and
+    /// its sidecars make without a bearer (chat, media, titles, widgets, …) starts
+    /// answering 401 — which is exactly why Core could not just use
+    /// `GATEWAY_MASTER_KEY` for this.
+    #[test]
+    fn admin_key_sets_master_key_without_enabling_require_auth() {
+        let _path = ConfigPathGuard::isolated("admin-key");
+        let _master = EnvVar::cleared("GATEWAY_MASTER_KEY");
+        let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "gwadm_test");
+
+        let cfg = GatewayConfig::load().expect("gateway config loads");
+        assert_eq!(cfg.auth.master_key.as_deref(), Some("gwadm_test"));
+        assert!(
+            !cfg.auth.require_auth,
+            "GATEWAY_ADMIN_KEY must not turn on base auth"
+        );
+    }
+
+    /// An operator's explicit master key outranks the one Core mints for itself —
+    /// and keeps its `require_auth` semantics.
+    #[test]
+    fn explicit_master_key_outranks_admin_key() {
+        let _path = ConfigPathGuard::isolated("admin-key-precedence");
+        let _master = EnvVar::set("GATEWAY_MASTER_KEY", "operator-key");
+        let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "gwadm_test");
+
+        let cfg = GatewayConfig::load().expect("gateway config loads");
+        assert_eq!(cfg.auth.master_key.as_deref(), Some("operator-key"));
+        assert!(cfg.auth.require_auth);
+    }
+
+    /// Blank is not a credential. An empty value must leave the admin surface on
+    /// its previous behaviour rather than provisioning an unusable empty key that
+    /// would neutralize loopback trust and lock everyone out.
+    #[test]
+    fn blank_admin_key_is_ignored() {
+        let _path = ConfigPathGuard::isolated("admin-key-blank");
+        let _master = EnvVar::cleared("GATEWAY_MASTER_KEY");
+        let _admin = EnvVar::set("GATEWAY_ADMIN_KEY", "   ");
+
+        let cfg = GatewayConfig::load().expect("gateway config loads");
+        assert_eq!(cfg.auth.master_key, None);
+        assert!(!cfg.auth.require_auth);
+    }
+}
+
+#[cfg(test)]
 mod prompt_cache_config_tests {
     use super::{GatewayConfig, PromptCacheConfig};
     use ryu_gw_providers::PromptCacheMode;
@@ -4463,7 +5016,9 @@ mod capacity_config_tests {
 
 #[cfg(test)]
 mod credits_config_tests {
-    use super::{CreditsConfig, GpuKind, Modality, OsKind, WalletEmptyAction};
+    use super::{
+        CreditsConfig, GpuKind, Modality, OsKind, WalletEmptyAction,
+    };
 
     #[test]
     fn debit_amount_passthrough_at_zero_bps() {
@@ -4497,6 +5052,37 @@ mod credits_config_tests {
             ..Default::default()
         };
         assert_eq!(c.debit_amount(100), 101);
+    }
+
+    #[test]
+    fn undo_debit_amount_inverts_the_markup_without_overshooting() {
+        // Sizes a spend ceiling, so it must never return a raw cost whose DEBIT
+        // exceeds the budget it was derived from — that would hand out a ceiling
+        // the charge then breaks through, which is the overdraft it exists to
+        // prevent. Round DOWN, and verify the round trip stays inside.
+        let c = CreditsConfig {
+            markup_bps: 10_000, // +100%: charged = 2x raw
+            ..Default::default()
+        };
+        assert_eq!(c.undo_debit_amount(50_000), 25_000);
+        assert!(c.debit_amount(c.undo_debit_amount(50_000)) <= 50_000);
+
+        // Pass-through at zero bps.
+        let free = CreditsConfig::default();
+        assert_eq!(free.markup_bps, 0);
+        assert_eq!(free.undo_debit_amount(1_234), 1_234);
+
+        // Odd rates must still not overshoot after the round trip.
+        let odd = CreditsConfig {
+            markup_bps: 333,
+            ..Default::default()
+        };
+        for budget in [1_u64, 7, 99, 1000, 999_999] {
+            assert!(
+                odd.debit_amount(odd.undo_debit_amount(budget)) <= budget,
+                "round trip overshot the budget at {budget}"
+            );
+        }
     }
 
     #[test]
@@ -4566,6 +5152,74 @@ enabled = true
     }
 
     #[test]
+    fn the_tool_call_rate_defaults_to_composios_cost() {
+        // AT COST. Composio's overage is $0.299/1k executions, so the default is
+        // 299 micro-USD per call and the customer pays exactly what we pay.
+        // Margin is the deposit fee, never a per-unit markup.
+        assert_eq!(CreditsConfig::default().cost_per_tool_call_micro_usd, 299);
+        assert_eq!(CreditsConfig::default().markup_bps, 0);
+    }
+
+    #[test]
+    fn the_boot_gate_passes_on_the_default_rates() {
+        // The boot failure the gate was cut back to avoid — a node refusing to
+        // start until someone invented numbers — cannot happen now that every
+        // gated rate carries a real default. Nothing set, credits on, boots.
+        let c = CreditsConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(c.validate_metered_rates().is_ok());
+    }
+
+    #[test]
+    fn zeroing_tts_or_stt_fails_the_boot_gate() {
+        // TTS and STT are served synchronously and have NO second cost source, so
+        // a flat rate of 0 there is not an unreached fallback — it is the only
+        // number the debit will ever see, and `if cost > 0` then skips it. An
+        // explicit 0 is a deliberate give-away and must be stated as one via
+        // GATEWAY_CREDITS_ALLOW_FREE_MODALITIES, not left in a blank.
+        let tts = CreditsConfig {
+            enabled: true,
+            cost_per_tts_micro_usd: 0,
+            ..Default::default()
+        };
+        assert!(tts.validate_metered_rates().is_err());
+
+        let stt = CreditsConfig {
+            enabled: true,
+            cost_per_stt_micro_usd: 0,
+            ..Default::default()
+        };
+        assert!(stt.validate_metered_rates().is_err());
+    }
+
+    #[test]
+    fn zeroing_image_or_video_still_boots() {
+        // Deliberately NOT gated: their real payer is the metered path
+        // (`media_cost_from_response`), so choosing a 0 fallback on a surface
+        // that usually prices itself from the provider's reported compute time is
+        // a defensible deploy choice rather than a blank.
+        let c = CreditsConfig {
+            enabled: true,
+            cost_per_image_micro_usd: 0,
+            cost_per_video_micro_usd: 0,
+            ..Default::default()
+        };
+        assert!(c.validate_metered_rates().is_ok());
+    }
+
+    #[test]
+    fn zeroing_the_tool_rate_still_fails_the_boot_gate() {
+        let c = CreditsConfig {
+            enabled: true,
+            cost_per_tool_call_micro_usd: 0,
+            ..Default::default()
+        };
+        assert!(c.validate_metered_rates().is_err());
+    }
+
+    #[test]
     fn tool_call_cost_is_flat_per_call_and_saturates() {
         let c = CreditsConfig {
             cost_per_tool_call_micro_usd: 500,
@@ -4575,6 +5229,91 @@ enabled = true
         assert_eq!(c.tool_call_cost_micro_usd(3), 1500);
         // Saturating on overflow rather than wrapping.
         assert_eq!(c.tool_call_cost_micro_usd(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn media_is_priced_from_the_compute_time_the_provider_reported() {
+        // THE POINT OF THE WHOLE CHANGE. A flat per-call rate charges a 2s image
+        // and a 60s video the same; this bills what the transaction actually
+        // consumed.
+        let c = CreditsConfig {
+            cost_per_gpu_second_micro_usd: 1000,
+            cost_per_image_micro_usd: 40_000,
+            ..Default::default()
+        };
+        let response = serde_json::json!({ "usage": { "compute_seconds": 2.5 } });
+        let (cost, estimated) = c.media_cost_from_response(&Modality::Image, &response);
+        assert_eq!(cost, 2500);
+        assert!(!estimated);
+    }
+
+    #[test]
+    fn a_partial_gpu_second_rounds_up_rather_than_leaking() {
+        let c = CreditsConfig {
+            cost_per_gpu_second_micro_usd: 1000,
+            ..Default::default()
+        };
+        let response = serde_json::json!({ "usage": { "compute_seconds": 0.0011 } });
+        let (cost, _) = c.media_cost_from_response(&Modality::Image, &response);
+        assert_eq!(cost, 2);
+    }
+
+    #[test]
+    fn a_response_with_no_usage_falls_back_and_is_marked_estimated() {
+        // The flag is what lets a later reconciliation tell a guess from a
+        // measurement; without it the two rows are identical.
+        let c = CreditsConfig {
+            cost_per_gpu_second_micro_usd: 1000,
+            cost_per_video_micro_usd: 90_000,
+            ..Default::default()
+        };
+        let (cost, estimated) =
+            c.media_cost_from_response(&Modality::Video, &serde_json::json!({ "data": [] }));
+        assert_eq!(cost, 90_000);
+        assert!(estimated);
+    }
+
+    #[test]
+    fn an_async_video_job_bills_from_the_provider_payload_not_the_flat_rate() {
+        // REGRESSION. The async video-job debit (submit + poll, in
+        // `pipeline::mod`) called the flat `media_cost_micro_usd` directly and
+        // then guarded on `if cost > 0`. `cost_per_video_micro_usd` defaults to
+        // 0, so under a default config every completed async video job billed
+        // NOTHING — while the startup gate had stopped guarding the video rate
+        // precisely because video was believed to be metered from provider cost.
+        // That belief was true of the synchronous path only.
+        //
+        // The payload shape here is the one those call sites now pass:
+        // `MediaJob::to_response()` flattens the provider's output, so
+        // `usage.compute_seconds` sits at the top level next to `data`.
+        let c = CreditsConfig {
+            cost_per_gpu_second_micro_usd: 975,
+            // Explicitly zeroed — the shape that was silent back when 0 was also
+            // the default for this field.
+            cost_per_video_micro_usd: 0,
+            ..Default::default()
+        };
+        let flattened_job_response = serde_json::json!({
+            "id": "vid_1",
+            "status": "succeeded",
+            "data": [{ "url": "https://example.invalid/v.mp4" }],
+            "usage": { "compute_seconds": 12.0 },
+        });
+        let (cost, estimated) =
+            c.media_cost_from_response(&Modality::Video, &flattened_job_response);
+        assert_eq!(cost, 11_700, "12s x $0.000975/s");
+        assert!(!estimated);
+        // And the property that actually failed: a real charge, not zero.
+        assert!(cost > 0, "an async video job must never bill nothing");
+    }
+
+    #[test]
+    fn the_gpu_second_rate_defaults_to_replicates_published_l40s_price() {
+        // $0.000975/sec. A real published figure, not an invented one.
+        assert_eq!(
+            CreditsConfig::default().cost_per_gpu_second_micro_usd,
+            975
+        );
     }
 
     #[test]
@@ -4825,6 +5564,67 @@ mod pure_helper_tests {
         assert!(cfg.is_active());
         cfg.strategy = RouteStrategy::Embedding;
         assert!(cfg.is_active());
+    }
+
+    /// REGRESSION: a per-agent smart-routing override saved with the classifier
+    /// box left empty used to save as "on" and be inert — and worse than inert,
+    /// because `pipeline::apply_smart_routing` treats a per-agent override as
+    /// present the moment the agent has one, takes its early return, and skips
+    /// the GLOBAL smart router that would otherwise have run. Turning the feature
+    /// on actively DISABLED routing.
+    ///
+    /// This must go through serde, not field assignment. The sibling test above
+    /// sets `classifier_model` in Rust, which bypasses `de_classifier_model`
+    /// entirely — it would keep passing after the fix while proving nothing about
+    /// any wire path, the same structural blindness the credits round-trip test
+    /// has. The desktop editor and `PUT /v1/config` both send an explicit `""`.
+    #[test]
+    fn smart_routing_saved_with_a_blank_classifier_deserializes_to_a_working_one() {
+        // The wire shape an operator produces by clearing the model box.
+        let from_wire: SmartRoutingConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "strategy": "llm",
+            "classifier_model": "",
+            "rules": [{ "description": "code", "model": "claude" }],
+        }))
+        .expect("an explicit empty classifier must still parse");
+        assert!(
+            !from_wire.classifier_model.trim().is_empty(),
+            "a blank classifier must resolve to the classify tier, not stay blank"
+        );
+        assert_eq!(from_wire.classifier_model, super::classify_model_id());
+        assert!(
+            from_wire.is_active(),
+            "enabled + rules must mean routing actually runs"
+        );
+
+        // An ABSENT key takes the same value — the `default = \"fn\"` half of the
+        // pair. One without the other leaves half the hole open.
+        let absent: SmartRoutingConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "rules": [{ "description": "code", "model": "claude" }],
+        }))
+        .expect("an absent classifier must parse");
+        assert_eq!(absent.classifier_model, from_wire.classifier_model);
+
+        // And `Default` agrees, so a config built in Rust cannot drift from one
+        // read off the wire.
+        assert_eq!(
+            SmartRoutingConfig::default().classifier_model,
+            from_wire.classifier_model
+        );
+
+        // An operator's own pick is still honored untouched.
+        let explicit: SmartRoutingConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "classifier_model": "openrouter/google/gemini-2.5-flash",
+            "rules": [{ "description": "code", "model": "claude" }],
+        }))
+        .expect("parses");
+        assert_eq!(
+            explicit.classifier_model,
+            "openrouter/google/gemini-2.5-flash"
+        );
     }
 
     #[test]
@@ -5229,6 +6029,112 @@ timeout_ms = 3000
         // than only `!= 0` so a future "default" of 1 nano-USD is caught too.
         assert_eq!(credits.cost_per_sandbox_vcpu_second_nano_usd, 14_000);
         assert_eq!(credits.cost_per_sandbox_gpu_h200_second_nano_usd, 1_261_000);
+    }
+
+    /// The same fixture, for the four MEDIA rates — the second half of the bug
+    /// the sandbox test above covers, and the one that already reached production.
+    ///
+    /// `cost_per_image/video/tts/stt_micro_usd` were bare `#[serde(default)]`, so
+    /// the published `[credits]` table below — present, partial, naming none of
+    /// them — deserialized all four to 0. The media debit is guarded by
+    /// `if cost > 0`, so a 0 rate does not bill a little, it SKIPS THE DEBIT, and
+    /// the provider invoices us anyway. That exact shape shipped once already as
+    /// the async video job (see
+    /// `an_async_video_job_bills_from_the_provider_payload_not_the_flat_rate`).
+    ///
+    /// ## Why the round-trip test cannot catch this
+    ///
+    /// Same structural reason spelled out on
+    /// [`published_credits_doc_toml_keeps_the_documented_sandbox_rates`]:
+    /// `default_config_survives_toml_roundtrip` serializes a fully-populated
+    /// `GatewayConfig::default()` first, and `toml::to_string_pretty` EMITS every
+    /// non-skipped field — so the re-parse reads all four keys as *present* and
+    /// serde never runs the absent-key branch. A round-trip can only prove that a
+    /// value serde wrote survives being read back; it is blind to a wrong
+    /// `#[serde(default)]` by construction. Only a hand-authored TOML that OMITS
+    /// the keys exercises the default path, which is why this fixture is pasted
+    /// from the docs verbatim rather than generated.
+    #[test]
+    fn published_credits_doc_toml_keeps_nonzero_media_rates() {
+        // Verbatim from docs/gateway/configuration.mdx ("## Credits"), the block
+        // an operator self-hosting a metered gateway copies.
+        let doc_toml = r#"
+[credits]
+enabled = false
+base_url = "http://127.0.0.1:3000/api"  # defaults to control_plane.base_url
+internal_secret = "..."                 # also RYU_CREDITS_INTERNAL_SECRET
+markup_bps = 0                          # platform markup in basis points (0 = pass-through)
+wallet_empty_action = "stop"            # "stop" | "downgrade"
+wallet_empty_downgrade_to = ""
+timeout_ms = 3000
+"#;
+
+        let credits = toml::from_str::<GatewayConfig>(doc_toml)
+            .expect("the documented [credits] table parses")
+            .credits;
+        let want = CreditsConfig::default();
+
+        // The keys the doc DOES set are honored, so the assertions below are not
+        // passing on a fragment serde quietly ignored.
+        assert!(!credits.enabled);
+        assert_eq!(credits.timeout_ms, 3000);
+
+        // Both halves, deliberately: `want` alone would still pass if the serde
+        // attribute and `impl Default` were BOTH left at 0, and the literal alone
+        // would not catch the two drifting apart.
+        assert_eq!(credits.cost_per_image_micro_usd, want.cost_per_image_micro_usd);
+        assert_eq!(credits.cost_per_video_micro_usd, want.cost_per_video_micro_usd);
+        assert_eq!(credits.cost_per_tts_micro_usd, want.cost_per_tts_micro_usd);
+        assert_eq!(credits.cost_per_stt_micro_usd, want.cost_per_stt_micro_usd);
+
+        // Pinned against the derivation written on the accessor fns — each is a
+        // nominal job duration times Replicate's published L40S GPU-second
+        // ($0.000975/sec) — so a future "default" of 1 micro-USD is caught too.
+        assert_eq!(credits.cost_per_image_micro_usd, 1_950, "2s x $0.000975/s");
+        assert_eq!(credits.cost_per_video_micro_usd, 58_500, "60s x $0.000975/s");
+        assert_eq!(credits.cost_per_tts_micro_usd, 975, "1s x $0.000975/s");
+        assert_eq!(credits.cost_per_stt_micro_usd, 975, "1s x $0.000975/s");
+
+        // THE PROPERTY THAT ACTUALLY FAILED. Stated on its own so it survives any
+        // later re-derivation of the numbers above: none of these may be 0, or
+        // the `if cost > 0` debit guard silently gives the modality away.
+        for (name, rate) in [
+            ("image", credits.cost_per_image_micro_usd),
+            ("video", credits.cost_per_video_micro_usd),
+            ("tts", credits.cost_per_tts_micro_usd),
+            ("stt", credits.cost_per_stt_micro_usd),
+        ] {
+            assert!(rate > 0, "{name} must never fall back to a rate of 0");
+        }
+    }
+
+    /// The two neighbouring shapes the fixture above does not cover: an ABSENT
+    /// `[credits]` table (which takes `impl Default for CreditsConfig` wholesale,
+    /// the other half of the "same number by construction" invariant), and the
+    /// minimal present-but-partial table. A fix applied to only one of the serde
+    /// attribute or the `Default` impl passes one of these and fails the other.
+    #[test]
+    fn credits_media_rates_are_nonzero_whether_the_table_is_absent_or_partial() {
+        let absent = CreditsConfig::default();
+        assert!(absent.cost_per_image_micro_usd > 0);
+        assert!(absent.cost_per_video_micro_usd > 0);
+        assert!(absent.cost_per_tts_micro_usd > 0);
+        assert!(absent.cost_per_stt_micro_usd > 0);
+
+        // A present `[credits]` table naming no media rate at all.
+        let partial = toml::from_str::<GatewayConfig>(
+            r#"
+[credits]
+enabled = false
+timeout_ms = 3000
+"#,
+        )
+        .expect("parses")
+        .credits;
+        assert_eq!(partial.cost_per_image_micro_usd, absent.cost_per_image_micro_usd);
+        assert_eq!(partial.cost_per_video_micro_usd, absent.cost_per_video_micro_usd);
+        assert_eq!(partial.cost_per_tts_micro_usd, absent.cost_per_tts_micro_usd);
+        assert_eq!(partial.cost_per_stt_micro_usd, absent.cost_per_stt_micro_usd);
     }
 
     /// A non-zero sandbox rate is what makes the wallet kill-switch reachable at

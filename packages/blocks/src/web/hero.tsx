@@ -2,6 +2,7 @@
 
 import { AwardBadge } from "@ryu/ui/components/award-badge";
 import { buttonVariants } from "@ryu/ui/components/button";
+import { ChromaticTextReveal } from "@ryu/ui/components/motion/chromatic-text-reveal";
 import PageHeader from "@ryu/ui/components/page-header";
 import { StaggerReveal } from "@ryu/ui/components/stagger-reveal";
 import { cn } from "@ryu/ui/lib/utils";
@@ -40,7 +41,38 @@ const SHOW_AWARD_BADGE = false;
  * a paragraph.
  */
 const HERO_TITLE =
-	"Secure and reliable AI agents automating critical business work 24/7";
+	"The document work that fills your team's week, done overnight.";
+
+/**
+ * The headline gets the same chromatic sweep every section header on this page
+ * already has (`SectionTitle`): the fixed text, then the final word painted by a
+ * moving clipped gradient.
+ *
+ * It is composed here rather than handing the whole string to `ChromaticTextReveal`
+ * because that component wraps its own `prefix` in `whitespace-nowrap` — fine for a
+ * three-word section header, but it would force this two-line headline onto one
+ * unbreakable line. So the prefix stays ordinary wrapping text inside the heading and
+ * only the last word goes through the sweep, with the component's own leading NBSP as
+ * the separator (hence no JSX space here — one would double it).
+ */
+const HERO_TITLE_LAST_SPACE = HERO_TITLE.lastIndexOf(" ");
+// Guarded the same way `SectionTitle` guards it: a one-word headline has no space,
+// and an unguarded `slice(0, -1)` would put all-but-the-last-CHARACTER in the prefix
+// and sweep a single letter. The headline above is edited often enough that this is
+// worth a ternary.
+const HERO_TITLE_PREFIX =
+	HERO_TITLE_LAST_SPACE === -1
+		? ""
+		: HERO_TITLE.slice(0, HERO_TITLE_LAST_SPACE);
+const HERO_TITLE_LAST_WORD =
+	HERO_TITLE_LAST_SPACE === -1
+		? HERO_TITLE
+		: HERO_TITLE.slice(HERO_TITLE_LAST_SPACE + 1);
+
+/** Lets the surrounding `StaggerReveal` finish lifting the headline into place
+ *  before the sweep runs, so the two motions read as one after the other instead of
+ *  blurring the same word twice at once. */
+const HERO_SWEEP_DELAY_S = 0.3;
 
 export default function Hero() {
 	// Owned here, not inside the stage, so the pills can sit above the wallpaper
@@ -101,7 +133,19 @@ export default function Hero() {
 							<PageHeader
 								className="max-w-2xl whitespace-pre-line"
 								stagger={false}
-								title={HERO_TITLE}
+								title={
+									<>
+										{HERO_TITLE_PREFIX}
+										<ChromaticTextReveal
+											delay={HERO_SWEEP_DELAY_S}
+											loop={false}
+											once
+											prefix=""
+											startOnView
+											words={[HERO_TITLE_LAST_WORD]}
+										/>
+									</>
+								}
 								titleClassName={landingHeadlineClass}
 							/>
 

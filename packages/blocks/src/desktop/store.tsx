@@ -23,6 +23,7 @@ import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
+import { EdgeScroller } from "@ryu/ui/components/edge-scroller.tsx";
 import {
 	Empty,
 	EmptyDescription,
@@ -35,17 +36,7 @@ import { Input } from "@ryu/ui/components/input.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import {
-	type CSSProperties,
-	Fragment,
-	type ReactNode,
-	type RefObject,
-	useCallback,
-	useEffect,
-	useLayoutEffect,
-	useRef,
-	useState,
-} from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 export interface StoreSectionTab {
 	/**
@@ -98,91 +89,6 @@ const noop = () => {
 	// Default no-op handler for the presentational layer.
 };
 
-/** How much of each overflowing edge dissolves into the background. */
-const EDGE_FADE = "2rem";
-
-/**
- * Edge fade for a HORIZONTAL scroller: the clipped side dissolves instead of
- * being cut off mid-pill, and only while that side actually has more to show.
- *
- * Measured in JS rather than with a `@utility` + scroll-driven animation because
- * this block is consumed by more than one app (the desktop shell and the e2e
- * harness/storyboard each build their own stylesheet). A utility defined in one
- * app's CSS silently no-ops in every other consumer — `scroll-fade-x`
- * (packages/ui/src/components/attachment.tsx) is exactly that: referenced once,
- * defined in no stylesheet, dead. Owning the mask here cannot rot that way.
- *
- * Unlike the label fade in `overflow-tooltip.tsx` there is no inline-box trap to
- * dodge: the element measured here is the scroll container itself and it is a
- * flex box, so `scrollWidth`/`clientWidth` are real numbers, not the 0/0 an
- * inline non-replaced box reports.
- */
-function useScrollFadeX(): {
-	ref: RefObject<HTMLDivElement | null>;
-	/** Which edges are faded — mirrored onto `data-fade` so the state is
-	 *  inspectable (and assertable) without parsing a serialized gradient. */
-	state: "both" | "end" | "none" | "start";
-	style: CSSProperties | undefined;
-} {
-	const ref = useRef<HTMLDivElement>(null);
-	const [edges, setEdges] = useState({ end: false, start: false });
-
-	const measure = useCallback(() => {
-		const el = ref.current;
-		if (!el) {
-			return;
-		}
-		const max = el.scrollWidth - el.clientWidth;
-		// 1px slack: fractional layout widths otherwise leave a permanent
-		// sub-pixel "there is more" on a strip that fits exactly.
-		setEdges({
-			end: max - el.scrollLeft > 1,
-			start: el.scrollLeft > 1,
-		});
-	}, []);
-
-	// Layout effect so the first paint already carries the correct mask; a
-	// passive effect flashes an unfaded strip for a frame on a long list.
-	useLayoutEffect(() => {
-		const el = ref.current;
-		if (!el) {
-			return;
-		}
-		measure();
-		el.addEventListener("scroll", measure, { passive: true });
-		const observer = new ResizeObserver(measure);
-		// The container gives the AVAILABLE width; its content row gives the
-		// CONTENT width. A tab list that grows (an app registers a section) resizes
-		// only the second, so both have to be watched.
-		observer.observe(el);
-		for (const child of Array.from(el.children)) {
-			observer.observe(child);
-		}
-		return () => {
-			el.removeEventListener("scroll", measure);
-			observer.disconnect();
-		};
-	}, [measure]);
-
-	if (!(edges.start || edges.end)) {
-		return { ref, state: "none", style: undefined };
-	}
-	const gradient = `linear-gradient(to right, ${
-		edges.start ? `transparent 0, #000 ${EDGE_FADE}` : "#000 0"
-	}, ${edges.end ? `#000 calc(100% - ${EDGE_FADE}), transparent 100%` : "#000 100%"})`;
-	let state: "both" | "end" | "start" = "start";
-	if (edges.start && edges.end) {
-		state = "both";
-	} else if (edges.end) {
-		state = "end";
-	}
-	return {
-		ref,
-		state,
-		style: { maskImage: gradient, WebkitMaskImage: gradient },
-	};
-}
-
 /**
  * The section tabs for a multi-section shell (the Store, the Library), rendered
  * INLINE at the top of the page as an ordinary element.
@@ -209,11 +115,14 @@ function useScrollFadeX(): {
  * `pills`, not `pills-lg`: this is an open-ended, horizontally scrolling section
  * nav under a page title, not the primary control of the surface, and a
  * 56px-tall pill × a dozen sections reads as a toolbar, not a nav. The list is
- * forced `flex-nowrap` inside its own `overflow-x-auto` box because the variant
+ * forced `flex-nowrap` inside the shared {@link EdgeScroller} because the variant
  * ships `flex-wrap` — wrapping would turn a long strip back into the multi-row
- * blob the inline design replaced. Both scrolled edges fade
- * ({@link useScrollFadeX}), so a clipped pill reads as "there is more" instead
- * of a truncation.
+ * blob the inline design replaced. The scroller fades each overflowing edge and
+ * reveals a bare chevron over it on hover, so a clipped pill reads as "there is
+ * more" and can be paged without a scrollbar under the row. It used to carry its
+ * own copy of that logic plus a `scrollbar-none` class that is defined in no
+ * stylesheet in this repo, so the strip shipped with BOTH bars visible (an
+ * `overflow-x-auto` with no explicit `overflow-y` resolves to `auto` as well).
  *
  * A thin divider is drawn wherever `group` changes, so clusters still read as
  * clusters without a second component.
@@ -229,19 +138,16 @@ export function StoreSectionTabs({
 	onSelect?: (value: string) => void;
 	sections: StoreSectionTab[];
 }) {
-	const fade = useScrollFadeX();
 	return (
 		<Tabs
 			className={cn("w-full min-w-0", className)}
 			onValueChange={(value) => onSelect(String(value))}
 			value={active}
 		>
-			<div
-				className="scrollbar-none w-full min-w-0 overflow-x-auto"
-				data-fade={fade.state}
+			<EdgeScroller
+				className="w-full"
+				contentClassName="w-full"
 				data-slot="store-section-tabs-scroller"
-				ref={fade.ref}
-				style={fade.style}
 			>
 				<TabsList aria-label="Sections" className="flex-nowrap" variant="pills">
 					{sections.map((s, i) => {
@@ -263,57 +169,55 @@ export function StoreSectionTabs({
 						);
 					})}
 				</TabsList>
-			</div>
+			</EdgeScroller>
 		</Tabs>
 	);
 }
 
 /**
- * The Store's GLOBAL search: one bare input pinned to the bottom of the page.
+ * The Store's / Library's GLOBAL search: one large muted pill, in the page flow,
+ * ABOVE the section tabs.
  *
- * Deliberately chrome-free — no border, ring, shadow or card — so it reads as a
- * line you type on rather than a widget bolted over the content. It is
- * `absolute`, not `fixed`: these pages render inside split panes, so a
- * viewport-fixed bar would escape its pane, slide under the shell's fixed
- * sidebar, and paint twice when two panes both show the Store. The caller mounts
- * it in a `relative` page root and pads its scrolling column by this bar's
- * height.
+ * It used to float at the bottom of the page (`StoreBottomSearch`), pinned
+ * `absolute` over a padded content column. Two things were wrong with that. The
+ * control that searches EVERYTHING sat below the tabs that scope a search to one
+ * realm, so the page read bottom-up; and it forced every section in the shell to
+ * reserve height for it whether or not it was scrolled to. Above the tabs it
+ * reads in the order it works — search everything, or pick a realm — and the
+ * shell's title row, which said nothing the tab strip did not already say, is
+ * gone with it.
  *
- * The strip behind the input is opaque `bg-background` (the retired floating bar
- * was translucent `bg-muted/70`): a bare input over content scrolling underneath
- * is unreadable, and an opaque strip is the least chrome that still keeps the
- * text legible.
+ * `size="lg"` is the default because this is the primary control of the surface;
+ * the compact expanding {@link StoreSearchButton} still exists for per-section
+ * toolbars, which are scoped searches sitting beside a list.
  *
- * It carries NO `z-index` on purpose. Being positioned is already enough to paint
- * over the page's in-flow content, and the one thing that shares this corner is
- * the shell's split-pane badge (`Layout.tsx` → `PaneBadge`, `absolute bottom-2
- * left-2 z-10`) — the pill naming the pane plus its actions. Neither the pane box
- * nor the page root opens a stacking context (both are positioned with
- * `z-index: auto`), so a `z-30` here outranked that badge and an opaque strip
- * simply erased it in split view. Below `z-10` the badge wins explicitly, the way
- * it already floats over the chat composer, and its pointer-proximity fade keeps
- * the input underneath reachable. Do not "restore" a z-index to fix a stacking
- * bug elsewhere: nothing in the padded content column paints into this strip.
+ * The row's trailing slot (`trailing`) holds the section's own filter/source
+ * controls, so the search and the things that narrow it stay on one line.
  */
-export function StoreBottomSearch({
+export function StoreGlobalSearch({
 	value,
 	onChange,
 	placeholder = "Search…",
 	className,
+	trailing,
+	size = "lg",
 }: {
 	className?: string;
 	onChange: (value: string) => void;
 	placeholder?: string;
+	size?: "default" | "lg";
+	/** Filter / source controls rendered beside the field, outside its pill. */
+	trailing?: ReactNode;
 	value: string;
 }) {
 	return (
-		<div
-			className={cn(
-				"absolute inset-x-0 bottom-0 bg-background px-4 pb-3",
-				className
-			)}
-		>
-			<div className="mx-auto flex w-full max-w-4xl items-center gap-2">
+		<div className={cn("flex w-full min-w-0 items-center gap-2", className)}>
+			<div
+				className={cn(
+					"flex min-w-0 flex-1 items-center gap-2 rounded-full bg-muted px-4",
+					size === "lg" ? "h-11" : "h-9"
+				)}
+			>
 				<HugeiconsIcon
 					aria-hidden
 					className="size-4 shrink-0 text-muted-foreground"
@@ -325,8 +229,8 @@ export function StoreBottomSearch({
 					// WebKit clear glyph suppressed — the row already has an explicit
 					// Clear button, and two clear affordances in one field is chrome the
 					// bare-input brief exists to avoid.
-					className="h-9 w-full min-w-0 border-none bg-transparent text-sm outline-none placeholder:text-muted-foreground focus:outline-none focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
-					data-slot="store-bottom-search"
+					className="h-full w-full min-w-0 border-none bg-transparent text-sm outline-none placeholder:text-muted-foreground focus:outline-none focus-visible:outline-none [&::-webkit-search-cancel-button]:appearance-none"
+					data-slot="store-global-search"
 					onChange={(e) => onChange(e.target.value)}
 					onKeyDown={(e) => {
 						if (e.key === "Escape" && value.length > 0) {
@@ -349,6 +253,7 @@ export function StoreBottomSearch({
 					</Button>
 				) : null}
 			</div>
+			{trailing}
 		</div>
 	);
 }

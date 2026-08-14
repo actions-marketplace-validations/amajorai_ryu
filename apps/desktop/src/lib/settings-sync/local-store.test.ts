@@ -3,7 +3,47 @@
 // reporting a write it made itself (an applied remote value bounces straight
 // back up, and two machines ping-pong forever).
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+
+// Register happy-dom FIRST, on the same guard every other DOM test in this
+// package uses. Without it this file's `window` stub was the only `window` in
+// the process when it ran first, and its teardown then DELETED the global —
+// leaving every later file that calls `window.dispatchEvent` with nothing.
+// Registering means the stubs below replace real globals and the teardown puts
+// real globals back, which is the invariant the whole package depends on.
+if (!GlobalRegistrator.isRegistered) {
+	GlobalRegistrator.register();
+}
+
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
+
+/**
+ * `bun test` runs this package, and its vitest shim has no `vi.stubGlobal` — the
+ * import threw before a single case ran. Installed directly on `globalThis`
+ * instead; there is nothing to restore afterwards because both globals are
+ * absent under bun and this file owns them for its whole lifetime, which is the
+ * install-once contract the comment below depends on.
+ */
+const originalGlobals = new Map<string, PropertyDescriptor | undefined>();
+
+const stubGlobal = (name: string, value: unknown): void => {
+	if (!originalGlobals.has(name)) {
+		originalGlobals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+	}
+	Object.defineProperty(globalThis, name, {
+		configurable: true,
+		writable: true,
+		value,
+	});
+};
 import {
 	applyRemote,
 	installSettingsObserver,
@@ -21,24 +61,37 @@ import {
  * over one real Storage.
  */
 const store = new Map<string, string>();
-vi.stubGlobal("localStorage", {
-	getItem: (key: string) => store.get(key) ?? null,
-	setItem: (key: string, value: string) => {
-		store.set(key, value);
-	},
-	removeItem: (key: string) => {
-		store.delete(key);
-	},
-	clear: () => store.clear(),
-	key: (index: number) => [...store.keys()][index] ?? null,
-	get length() {
-		return store.size;
-	},
-});
-// `window` for the `storage` listener the observer registers.
-vi.stubGlobal("window", { addEventListener: vi.fn() });
 
-installSettingsObserver();
+// INSIDE `beforeAll`, not at module scope. `bun test` imports EVERY file in the
+// package before it runs a single test, so a module-level stub is applied at
+// import time and owns the global for the whole run — an `afterAll` here cannot
+// undo it in time, because other files' tests have already executed against it.
+// A `window` carrying only `addEventListener` reached every later file that way,
+// and each one died on `window.dispatchEvent`. Installed and torn down around
+// THIS file's tests instead, which is the only scope that is actually ours.
+beforeAll(() => {
+	stubGlobal("localStorage", {
+		getItem: (key: string) => store.get(key) ?? null,
+		setItem: (key: string, value: string) => {
+			store.set(key, value);
+		},
+		removeItem: (key: string) => {
+			store.delete(key);
+		},
+		clear: () => store.clear(),
+		key: (index: number) => [...store.keys()][index] ?? null,
+		get length() {
+			return store.size;
+		},
+	});
+	// `window` for the `storage` listener the observer registers.
+	stubGlobal("window", {
+		addEventListener: mock(() => {
+			/* the observer only needs the listener to exist */
+		}),
+	});
+	installSettingsObserver();
+});
 
 beforeEach(() => {
 	store.clear();
@@ -116,4 +169,22 @@ describe("timestamps", () => {
 		localStorage.setItem(SYNCED_KEY, "true");
 		expect(localTimestamp(SYNCED_KEY)).toBeGreaterThanOrEqual(before);
 	});
+});
+
+// PUT THE GLOBALS BACK when this file is done. `bun test` runs the whole package
+// in ONE process, and the `window` installed above is a two-property stand-in —
+// it has `addEventListener` and nothing else. Left in place it becomes the
+// `window` every later file sees, so the first one to call `window.dispatchEvent`
+// dies on a global this file owns. That failure only ever appears in the full
+// run, never when the victim is run alone, which is what makes it expensive to
+// track down.
+afterAll(() => {
+	for (const [name, descriptor] of originalGlobals) {
+		if (descriptor) {
+			Object.defineProperty(globalThis, name, descriptor);
+		} else {
+			delete (globalThis as Record<string, unknown>)[name];
+		}
+	}
+	originalGlobals.clear();
 });

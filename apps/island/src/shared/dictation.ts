@@ -17,7 +17,7 @@ import {
 	EMPTY_AGENT_SELECTION,
 	parseAgentSelectionWithLegacyAgent,
 } from "./agent-selection.ts";
-import type { VoiceEngine } from "./voice.ts";
+import { VOICE_ENGINE_VALUES, type VoiceEngine } from "./voice.ts";
 
 export type { AgentSelection } from "./agent-selection.ts";
 export {
@@ -154,9 +154,17 @@ export const DEFAULT_DICTATION_PREFS: DictationPrefs = {
 	shortcut: DEFAULT_DICTATION_SHORTCUT,
 };
 
-/** Coerce an unknown value to a known engine, defaulting to parakeet. */
+/**
+ * Coerce an unknown value to a known engine, defaulting to parakeet.
+ *
+ * Checked against the full list rather than one `=== "whisper"`: the old form
+ * mapped EVERY other value onto parakeet, so a `gateway` pick written by the
+ * desktop was silently rewritten to parakeet the next time the island saved.
+ */
 function coerceEngine(value: unknown): VoiceEngine {
-	return value === "whisper" ? "whisper" : "parakeet";
+	return VOICE_ENGINE_VALUES.includes(value as VoiceEngine)
+		? (value as VoiceEngine)
+		: "parakeet";
 }
 
 /** Coerce an unknown value to a known activation mode, defaulting to push-to-talk. */

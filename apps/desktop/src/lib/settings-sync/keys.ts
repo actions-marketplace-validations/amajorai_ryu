@@ -178,7 +178,15 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 	},
 	{
 		key: "ryu:sidebar-group-chats-by-date",
-		label: "Group chats by date",
+		label: "Group lists by date",
+		group: "layout",
+	},
+	// Portable: it is a layout preference, not a pointer at anything machine-local.
+	// The picker's SELECTION is not synced for the opposite reason — it is a folder
+	// path or a space id, which name things that exist on one node.
+	{
+		key: "ryu:sidebar-grouped-nav",
+		label: "Projects & Spaces as pickers",
 		group: "layout",
 	},
 	{

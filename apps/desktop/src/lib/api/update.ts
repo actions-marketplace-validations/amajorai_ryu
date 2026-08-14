@@ -206,6 +206,54 @@ export function applyNodeUpdate(
 	});
 }
 
+// --- Deferred install ("tonight" instead of "now") -------------------------
+
+/** Matches Core's `update::schedule::PendingUpdate`. */
+export interface PendingUpdate {
+	asset: ReleaseAsset;
+	/** UTC instant the node will install at. */
+	scheduled_for: string;
+	/** The zone the quiet hour was computed in — the NODE's, not the viewer's. */
+	time_zone: string;
+	/** The version the user was shown when they deferred. */
+	version: string;
+}
+
+/**
+ * Install this update at the node's next quiet hour instead of now.
+ *
+ * The asset is PINNED here rather than re-resolved when the window arrives, so
+ * what installs at 03:00 is the version the user actually saw and agreed to.
+ *
+ * Scheduled ON THE NODE, in the NODE's zone. An update restarts the machine, so
+ * the machine that restarts is the one whose night matters — a viewer in another
+ * timezone deferring to "tonight" means the node's tonight, not theirs.
+ */
+export function scheduleNodeUpdate(
+	target: ApiTarget,
+	asset: ReleaseAsset,
+	version: string
+): Promise<PendingUpdate> {
+	return request<PendingUpdate>(target, "/api/update/schedule", {
+		method: "POST",
+		body: { asset, version },
+	});
+}
+
+/** The node's pending deferred update, if any, plus the node's own zone. */
+export function getNodeUpdateSchedule(
+	target: ApiTarget
+): Promise<{ pending: PendingUpdate | null; timeZone: string }> {
+	return request(target, "/api/update/schedule");
+}
+
+/** Cancel a deferred update. Idempotent. */
+export function cancelNodeUpdateSchedule(
+	target: ApiTarget
+): Promise<{ ok: boolean }> {
+	return request(target, "/api/update/schedule", { method: "DELETE" });
+}
+
 // --- Auto-update toggle (shared cross-surface via Core preferences) ---------
 // Key matches Core's `update::AUTO_UPDATE_PREF_KEY`. Stored as `{ "enabled": bool }`.
 

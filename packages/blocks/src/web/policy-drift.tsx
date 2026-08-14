@@ -26,7 +26,7 @@ const DRIFT = [
 	},
 	{
 		title: "People are already working off stale rules",
-		body: "Not an AI problem. Staff find out the rule changed when something goes wrong.",
+		body: "Your staff usually find out a rule changed only when something goes wrong.",
 	},
 	{
 		title: "Nothing adds up over time",

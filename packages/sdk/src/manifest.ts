@@ -578,6 +578,43 @@ export const SurfaceSchema = z.enum([
 
 export type Surface = z.infer<typeof SurfaceSchema>;
 
+// ── engines (host version floors) ────────────────────────────────────────────
+
+/**
+ * The `engines` block: a semver **requirement** per host surface, mirroring
+ * VS-Code's `engines.vscode`. Mirrors Core's `EnginesReq`.
+ *
+ * `ryu` is the Core floor, named that way for backwards compatibility — every
+ * manifest written before per-surface floors existed spells it `ryu`, and Core's
+ * `EnginesReq::floor_for` maps the `core` surface onto it. The remaining keys are
+ * optional floors for the surfaces a plugin actually touches.
+ *
+ * Values are NOT validated as semver ranges here: Core is the authority and
+ * rejects an unparseable requirement at manifest load with a precise message.
+ * Duplicating a range parser in the SDK would only create a second, drifting
+ * opinion about what `">=1.2, <2"` means.
+ */
+export const EnginesReqSchema = z.object({
+	/** Floor for the terminal (`cli`) surface. */
+	cli: z.string().optional(),
+	/** Floor for the Tauri desktop app. */
+	desktop: z.string().optional(),
+	/** Floor for the browser extension. */
+	extension: z.string().optional(),
+	/** Floor for the Ryu Gateway. */
+	gateway: z.string().optional(),
+	/** Floor for the dynamic-island companion. */
+	island: z.string().optional(),
+	/** Floor for the mobile app. */
+	mobile: z.string().optional(),
+	/** Floor for the running **Core** (e.g. `">=0.3.0"`). Required. */
+	ryu: z.string().min(1, "engines.ryu is required when engines is present"),
+	/** Floor for the Next.js web app. */
+	web: z.string().optional(),
+});
+
+export type EnginesReq = z.infer<typeof EnginesReqSchema>;
+
 // ── PluginManifest ───────────────────────────────────────────────────────────
 
 /**
@@ -668,6 +705,23 @@ export const PluginManifestSchema = z.object({
 	 * an unsupported-target plugin stays installable and inspectable.
 	 */
 	targets: z.array(SurfaceSchema).default([]),
+
+	/**
+	 * Host version floors — the semver requirement each surface must satisfy for
+	 * this plugin to install. Mirrors Core's `EnginesReq`
+	 * (`crates/core/kernel-contracts/src/manifest.rs`).
+	 *
+	 * `ryu` is the **Core** floor and the only required key (it is the legacy
+	 * spelling; every manifest in the wild carries just that one). The rest are
+	 * optional per-surface floors.
+	 *
+	 * REGRESSION THIS FIXES: `engines` was absent from this schema entirely, and
+	 * zod strips unlisted keys — so `ryu pack` silently dropped the whole block
+	 * from every bundle it produced. A plugin could declare a Core floor, publish,
+	 * and ship a bundle that declared none. Any new host floor MUST be added here
+	 * as well as in the Rust contract, or it does not survive packing.
+	 */
+	engines: EnginesReqSchema.optional(),
 
 	/**
 	 * Optional per-item AFFILIATE terms: the commission paid to a referrer when a

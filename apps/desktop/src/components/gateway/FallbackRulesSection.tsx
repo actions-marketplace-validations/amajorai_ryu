@@ -490,7 +490,7 @@ export function FallbackRulesSection({
 
 	return (
 		<SettingsSection
-			caption="Checked before every turn, against cached balances — the first rule that matches wins, so order these from most specific to most general."
+			caption="Checked before every turn, against cached balances. The first rule that matches wins, so order these from most specific to most general."
 			headerAction={
 				<Button
 					disabled={!canConfigure || save.isPending}
@@ -513,8 +513,8 @@ export function FallbackRulesSection({
 				<SettingsCard>
 					<p className="text-muted-foreground text-sm">
 						No rules yet. Add one to drop to a cheaper model when your Ryu
-						credit, a provider key's balance, or a subscription window runs low
-						— instead of finding out when a turn fails.
+						credit, a provider key's balance, or a subscription window runs low,
+						instead of finding out when a turn fails.
 					</p>
 				</SettingsCard>
 			) : null}

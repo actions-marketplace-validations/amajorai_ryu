@@ -243,6 +243,109 @@ pub fn gateway_bearer() -> anyhow::Result<String> {
     Ok("ryu-local".to_owned())
 }
 
+/// Env var carrying the admin credential to the spawned gateway. Sets the
+/// gateway's `auth.master_key` WITHOUT flipping `require_auth` — see the block
+/// that reads it in `apps/gateway/src/config.rs`.
+const ENV_GATEWAY_ADMIN_KEY: &str = "GATEWAY_ADMIN_KEY";
+
+/// The file the minted gateway admin key is persisted to, so the key survives a
+/// Core restart and a gateway respawn.
+fn gateway_admin_key_path() -> std::path::PathBuf {
+    crate::paths::ryu_dir().join("gateway-admin.key")
+}
+
+/// The admin credential Core presents on the gateway's ADMIN surface
+/// (`/v1/config`, audit, budget/spend).
+///
+/// Why this exists at all: the gateway grants its admin surface to loopback
+/// callers only while loopback is trustworthy, and `admin_loopback_allowed`
+/// revokes that trust as soon as the MESH is on — a userspace mesh peer arrives
+/// as `127.0.0.1`, so keeping loopback trust would fail OPEN to the tailnet. The
+/// gate is right; the casualty was Core, which had no credential to fall back on.
+/// Every gateway settings tab (budgets, safety filters, cost tiers, account keys)
+/// answered `/api/gateway/config failed: 401` the moment the user enabled the
+/// mesh, and no bearer Core could invent would pass: `require_local_admin` only
+/// bypasses for a bearer equal to the real master key, so the shared
+/// `"ryu-local"` literal was never going to work.
+///
+/// NOT `gateway_bearer`, deliberately. That one is also handed to the plugin
+/// sandbox (`sandbox_host.rs`), and routing the admin key through it would give
+/// every sandboxed plugin the gateway's admin surface. This accessor is Core-only.
+///
+/// Precedence mirrors `node_token`: an operator's own key wins, then the key this
+/// machine minted earlier, then a fresh mint. Returns `None` only when no key
+/// could be established AND none could be persisted (an unwritable home) — which
+/// is not fatal, it just leaves the admin surface on its previous loopback-trust
+/// behaviour rather than refusing to boot.
+pub fn gateway_admin_key() -> Option<String> {
+    static ADMIN_KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ADMIN_KEY
+        .get_or_init(|| {
+            // 0. On a remote data plane Core talks to a hosted fleet it did not
+            //    spawn, so a key minted on this machine means nothing there — the
+            //    fleet credential is the provisioned gateway token. Minting and
+            //    presenting a local key instead would 401 exactly as before, with a
+            //    more confusing reason.
+            if remote_data_plane() {
+                return gateway_token();
+            }
+
+            // 1. Operator-provisioned. A real master key outranks a minted admin
+            //    key, and the gateway applies the same precedence on its side.
+            for var in [ENV_GATEWAY_ADMIN_KEY, "GATEWAY_MASTER_KEY"] {
+                if let Ok(key) = std::env::var(var) {
+                    let trimmed = key.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_owned());
+                    }
+                }
+            }
+
+            let path = gateway_admin_key_path();
+
+            // 2. Minted earlier on this machine.
+            if let Ok(existing) = std::fs::read_to_string(&path) {
+                let trimmed = existing.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+
+            // 3. Mint one. Same shape as the node auth token: a random opaque
+            //    secret, never derived from anything guessable.
+            let key = format!("gwadm_{}", uuid::Uuid::new_v4().simple());
+            match write_admin_key_file(&path, &key) {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "gateway: minted admin key");
+                    Some(key)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "gateway: could not persist admin key ({e}); admin surface stays on loopback trust"
+                    );
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Write the admin key `0600` (owner-only). A world-readable admin credential
+/// beside the data dir would be worse than the loopback trust it replaces.
+fn write_admin_key_file(path: &std::path::Path, key: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, key)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Route outbound message `text` through the Gateway firewall before it leaves
 /// the box (egress DLP). The shared governance seam for every outbound channel
 /// send — the workflow `ChannelSend` node and the agent-callable `channel__send`
@@ -513,9 +616,9 @@ pub fn register_sidecar_manager(manager: std::sync::Arc<crate::sidecar::SidecarM
 /// "should I start it" answer can never disagree with the gateway's "where does
 /// this route" answer.
 ///
-/// **A blank/absent `firewall.inspector.model` SELECTS the tier, and blank
-/// `classifier_model` does not.** The asymmetry is not a guess; it is the two
-/// fields' declared serde behaviour in `apps/gateway/src/config.rs`:
+/// **A blank/absent model SELECTS the tier — for the inspector AND for smart
+/// routing.** Both are the fields' declared serde behaviour in
+/// `apps/gateway/src/config.rs`:
 /// * `InspectorConfig::model` carries `#[serde(default = "default_inspector_model",
 ///   deserialize_with = "de_inspector_model")]`, and `de_inspector_model` maps
 ///   `raw.trim().is_empty()` → `classify_model_id()`. An absent `model` inside a
@@ -524,10 +627,25 @@ pub fn register_sidecar_manager(manager: std::sync::Arc<crate::sidecar::SidecarM
 ///   Default for InspectorConfig`, which also fills `model: default_inspector_model()`
 ///   "so `..InspectorConfig::default()` can never reintroduce the empty-model trap".
 ///   So blank, absent-field and absent-object all resolve to the classify id.
-/// * `SmartRoutingConfig::classifier_model` is a plain `#[serde(default)]` `String`
-///   whose doc says "Empty ⇒ smart routing is inert (fail-open)". Blank there means
-///   *nothing runs*, so treating it as a classify selection would spawn a
-///   300-400 MB server for a feature that will not make a single call.
+/// * `SmartRoutingConfig::classifier_model` now carries the SAME pair
+///   (`default = "default_classifier_model"`, `deserialize_with =
+///   "de_classifier_model"`), so blank and absent resolve to `classify_model_id()`
+///   there too.
+///
+/// **This arm used to be the asymmetric one, and that asymmetry was load-bearing
+/// until the field changed under it.** `classifier_model` was a plain
+/// `#[serde(default)] String` documented as "Empty ⇒ smart routing is inert
+/// (fail-open)", so declining to arm on a blank was right: starting a 300-400 MB
+/// server for a feature that would not make a single call is pure waste. Once the
+/// gateway began resolving the blank, keeping the non-resolving test here turned a
+/// *silently inert* feature into a *silently failing* one — Core declines to start
+/// the tier, the gateway resolves the blank to the classify id, dials the `classify`
+/// provider, and gets connection refused. That is the identical shape as the
+/// inspector's own blank-model bug two units earlier, reintroduced through the other
+/// field. The rule to carry forward: **whenever a gateway field gains a resolving
+/// deserializer, the arm that reads it off the raw patch must gain the same
+/// resolution in the same change, or the two processes disagree about what "blank"
+/// means and the disagreement is invisible.**
 ///
 /// **Why blank had to be handled here, in Core.** `de_inspector_model` runs in the
 /// **gateway process**. Core inspects the patch strictly UPSTREAM of it:
@@ -631,6 +749,23 @@ pub(crate) fn patch_selects_classify_tier(patch: &serde_json::Value, classifier_
             Some(s) => s.trim().is_empty() || names_tier(Some(v)),
         },
     };
+    // Will the gateway's RESOLVED `routing.smart_routing.classifier_model` be the
+    // classify tier? Same three cases as the inspector above, and for the same
+    // reason: `de_classifier_model` maps blank → `classify_model_id()`, and the
+    // `default = "default_classifier_model"` half covers an absent key.
+    //
+    // Reached only under an arm that already proved `smart_routing.enabled == true`
+    // in THIS patch, so "absent ⇒ classify id" is never applied to a push that
+    // leaves the live routing section alone — the same bound that keeps arm 1 from
+    // spawning on every unrelated save.
+    let classifier_model_resolves_to_tier =
+        || match patch.pointer("/routing/smart_routing/classifier_model") {
+            None => true,
+            Some(v) => match v.as_str() {
+                None => false,
+                Some(s) => s.trim().is_empty() || names_tier(Some(v)),
+            },
+        };
     // Absent flag ⇒ NOT enabled. Every real writer sends the whole section, so a
     // missing flag means "this patch does not turn the consumer on"; treating it as
     // enabled would restore the spawn-on-any-push bug.
@@ -649,10 +784,10 @@ pub(crate) fn patch_selects_classify_tier(patch: &serde_json::Value, classifier_
     // Arm 1: the inspector, gated on its own flag (a present `inspector.enabled ==
     // true` proves the `firewall` key exists).
     (enabled("/firewall/inspector/enabled") && inspector_model_resolves_to_tier())
-        // Arm 2: smart routing. `names_tier`, NOT the resolving variant — blank
-        // `classifier_model` means the feature is inert.
-        || (enabled("/routing/smart_routing/enabled")
-            && names_tier(patch.pointer("/routing/smart_routing/classifier_model")))
+        // Arm 2: smart routing, gated on its own flag. The RESOLVING variant, like
+        // arm 1 — `classifier_model` gained `de_classifier_model`, so a blank one no
+        // longer means "inert", it means "the classify tier". See the doc above.
+        || (enabled("/routing/smart_routing/enabled") && classifier_model_resolves_to_tier())
         // Arm 3: LLM-judge bindings borrow the inspector's model regardless of
         // `inspector.enabled` (a non-empty `firewall.evaluators` array proves the
         // `firewall` key exists). Over-fires on non-judge kinds — see the doc.
@@ -1030,6 +1165,14 @@ pub(crate) async fn fetch_config(client: &reqwest::Client) -> anyhow::Result<ser
 /// `local` provider at the active engine. Empty when nothing is selected.
 fn gateway_spawn_env() -> Vec<(String, String)> {
     let mut env = Vec::new();
+    // The admin credential for THIS gateway. Sets `auth.master_key` on the child
+    // without turning on `require_auth`, so the admin surface starts demanding a
+    // key while every ordinary call Core and its sidecars make (chat, media,
+    // titles, widgets, …) keeps working unauthenticated exactly as before. See
+    // `gateway_admin_key` for why loopback trust alone stopped being enough.
+    if let Some(key) = gateway_admin_key() {
+        env.push((ENV_GATEWAY_ADMIN_KEY.to_owned(), key));
+    }
     if let Some(url) = local_engine_gateway_url() {
         tracing::info!(local_llm_url = %url, "gateway: registering active local engine as provider");
         env.push((ENV_LOCAL_LLM_URL.to_owned(), url));
@@ -2936,11 +3079,10 @@ mod tests {
         ));
     }
 
-    /// The blank/absent `firewall.inspector.model` contract, and the ASYMMETRY with
-    /// smart routing's `classifier_model`. Both halves are pinned here because both
-    /// are only true by virtue of a serde attribute in another crate
-    /// (`apps/gateway/src/config.rs`) that runs in another PROCESS, downstream of
-    /// this predicate:
+    /// The blank/absent-model contract for BOTH fields that can name the classify
+    /// tier. Pinned here because neither is true by anything in this crate: both hold
+    /// only by virtue of a serde attribute in `apps/gateway/src/config.rs` that runs
+    /// in another PROCESS, downstream of this predicate.
     ///
     /// * `InspectorConfig::model` → `deserialize_with = de_inspector_model`, which
     ///   maps a blank to `classify_model_id()`, plus a field default and a manual
@@ -2948,12 +3090,21 @@ mod tests {
     ///   classify tier" — so declining here (what the code did before) is what left
     ///   the guardrail silently dead for a user who followed the dialog's own advice
     ///   to leave the box empty.
-    /// * `SmartRoutingConfig::classifier_model` → a plain `#[serde(default)]`
-    ///   `String` documented "Empty ⇒ smart routing is inert (fail-open)". Blank
-    ///   there means nothing will call the tier, so arming would spend 300-400 MB on
-    ///   a feature that makes zero calls.
+    /// * `SmartRoutingConfig::classifier_model` → the SAME pair as of the P1-2 fix
+    ///   (`default = "default_classifier_model"`, `deserialize_with =
+    ///   "de_classifier_model"`). It used to be a plain `#[serde(default)] String`
+    ///   documented "Empty ⇒ smart routing is inert", and this test used to assert
+    ///   the OPPOSITE for it.
+    ///
+    /// **The assertion flipped, and that is the point of the rename.** While the
+    /// field resolved blanks and this arm did not, Core declined to start the tier
+    /// and the gateway dialled it anyway — connection refused, fail open, nothing
+    /// warned. Identical in shape to the inspector bug above, reintroduced through
+    /// the other field. A green test asserting the old rationale is what would have
+    /// hidden it, so the rationale is pinned to the CURRENT serde attributes and
+    /// fails loudly if either field stops resolving.
     #[test]
-    fn blank_inspector_model_selects_but_blank_classifier_model_does_not() {
+    fn a_blank_model_on_either_field_selects_the_classify_tier() {
         let id = crate::registry::DEFAULT_LOCAL_CLASSIFIER_MODEL_ID;
 
         for blank in ["", "   "] {
@@ -2973,18 +3124,36 @@ mod tests {
                 "a blank inspector model ({blank:?}) resolves to the classify id in the \
                  gateway, so Core must start the tier"
             );
-            // …and the mirror: smart routing's blank is inert, never a selection.
+            // …and now the same rule, not the mirror of it: `de_classifier_model`
+            // resolves this blank to the classify id too, so declining here would
+            // leave the gateway dialling a tier Core never started.
             assert!(
-                !patch_selects_classify_tier(
+                patch_selects_classify_tier(
                     &serde_json::json!({ "routing": {
                         "smart_routing": { "enabled": true, "classifier_model": blank },
                     } }),
                     id
                 ),
-                "a blank classifier_model makes smart routing inert ({blank:?}) — starting \
-                 the tier would burn 300-400 MB for a feature that never calls it"
+                "a blank classifier_model ({blank:?}) resolves to the classify id in the \
+                 gateway, so Core must start the tier"
             );
         }
+
+        // An ABSENT `classifier_model` inside a PRESENT, ENABLED `smart_routing` hits
+        // `#[serde(default = "default_classifier_model")]` — the same resolved id.
+        assert!(patch_selects_classify_tier(
+            &serde_json::json!({ "routing": { "smart_routing": { "enabled": true } } }),
+            id
+        ));
+        // The feature gate still holds: smart routing that this patch does not switch
+        // ON never arms, however its model reads. This is what keeps the widening from
+        // reopening the spawn-on-every-routing-push regression.
+        assert!(!patch_selects_classify_tier(
+            &serde_json::json!({ "routing": {
+                "smart_routing": { "enabled": false, "classifier_model": "" },
+            } }),
+            id
+        ));
 
         // An ABSENT `model` inside a PRESENT `inspector` hits
         // `#[serde(default = "default_inspector_model")]` — same resolved id.
@@ -3133,9 +3302,9 @@ mod tests {
                 "{model:?} must not select the classify tier"
             );
         }
-        // A BLANK model is deliberately NOT in the loop above: it means opposite
-        // things per field, and the asymmetry is pinned by
-        // `blank_inspector_model_selects_but_blank_classifier_model_does_not`.
+        // A BLANK model is deliberately NOT in the loop above: it is a SELECTION on
+        // both fields rather than a non-match, so it belongs to
+        // `a_blank_model_on_either_field_selects_the_classify_tier`, not here.
         // Patches that carry neither key at all (the common case: a firewall
         // pattern-pack toggle) never fire.
         assert!(!patch_selects_classify_tier(

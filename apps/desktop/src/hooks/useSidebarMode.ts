@@ -7,19 +7,51 @@ import { useCallback, useSyncExternalStore } from "react";
  *   group (Agents, Workflows, Chats, …), all visible at once.
  * - "tabbed": the section labels become a row of buttons at the top; clicking a
  *   button reveals just that one section's list below, like browser tabs.
+ * - "agent": AGENT MODE — the same tab strip as "tabbed", narrowed to exactly two
+ *   tabs (Sessions ⇄ Agents), landing on Agents, with the messaging-style agent
+ *   rows forced on. The posture Grok's bot mode and Hermes' Bot Mode ship: the
+ *   roster of named agents is the primary surface and a chat list is the other
+ *   half of one toggle, rather than one section among fifteen.
+ *
+ * - `plugin:<pluginId>:<modeId>`: an app-registered mode from a manifest's
+ *   `contributes.sidebar_modes`.
+ *
+ * "agent" is deliberately a MODE and not a third section: it is a preset over the
+ * machinery "tabbed" already owns (`tabbedKeys`, `activeTabbedKey`, the section
+ * renderer's `forceExpanded` path), so nothing downstream needs a new branch.
+ *
+ * The descriptors behind all four live in `layout/sidebar-modes.ts` — including
+ * the built-ins, which are ordinary entries there rather than branches in the
+ * renderer, so a contributed mode can do anything Agent mode does. This module
+ * only owns the stored KEY.
  */
-export type SidebarMode = "sections" | "tabbed";
+export type SidebarMode = "sections" | "tabbed" | "agent" | `plugin:${string}`;
 
 export const SIDEBAR_MODE_KEY = "ryu:sidebar-mode";
 export const DEFAULT_SIDEBAR_MODE: SidebarMode = "sections";
 
 const listeners = new Set<() => void>();
 
+/**
+ * The stored key, NOT a validated mode.
+ *
+ * Deliberately permissive: a contributed mode's validity depends on the
+ * contributions feed, which this module cannot see and which has not answered on
+ * first paint. Rejecting an unknown key here would silently un-choose a mode every
+ * cold start. `resolveSidebarMode` does the validating, at the render site that
+ * has the feed.
+ */
 function read(): SidebarMode {
 	try {
-		return localStorage.getItem(SIDEBAR_MODE_KEY) === "tabbed"
-			? "tabbed"
-			: "sections";
+		const stored = localStorage.getItem(SIDEBAR_MODE_KEY);
+		if (
+			stored === "tabbed" ||
+			stored === "agent" ||
+			(stored?.startsWith("plugin:") ?? false)
+		) {
+			return stored as SidebarMode;
+		}
+		return "sections";
 	} catch {
 		return DEFAULT_SIDEBAR_MODE;
 	}

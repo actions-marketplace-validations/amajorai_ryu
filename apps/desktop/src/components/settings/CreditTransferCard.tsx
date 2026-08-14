@@ -1,3 +1,4 @@
+import { CREDIT_POOLS, isCreditPoolId } from "@ryu/auth/lib/credit-pools";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Card,
@@ -89,6 +90,42 @@ function formatExpiry(iso: string | null): string | null {
 		day: "numeric",
 		year: "numeric",
 	})}`;
+}
+
+/**
+ * Word boundaries inside a pool id — see `poolDisplayName`. Module scope
+ * because a literal rebuilt per call is both wasteful and a lint error.
+ */
+const POOL_ID_WORD_SEPARATOR = /[-_]+/;
+
+/**
+ * A grant's user-facing pool name.
+ *
+ * `GET /api/credits/transferable` sends the DURABLE pool id — "cloudflare",
+ * "bedrock" — because that is what the grant document stores and what a debit
+ * is matched against. It is not a name to show anyone. `@ryu/auth/lib/credit-pools`
+ * exists to enforce exactly that ("USERS NEVER SEE A PROVIDER"): a pool's
+ * `label` names a TIER ("Ryu Fast"), never the vendor supplying it. This card
+ * printed the id straight through, which made it the one surface in the app
+ * that leaked a vendor name — the sibling grants list on the Credits page has
+ * always shown the label.
+ *
+ * The fallback is NOT for a pool that lacks a name — every pool in
+ * `CREDIT_POOLS` has a `label`. It is for an id this BUILD has never heard of,
+ * since the control plane can serve a pool that postdates the bundle. In that
+ * case a title-cased id is the least-bad option available: inventing a tier
+ * name would lie about money the user owns, and a raw slug reads as a bug on
+ * top of leaking the vendor.
+ */
+function poolDisplayName(pool: string): string {
+	if (isCreditPoolId(pool)) {
+		return CREDIT_POOLS[pool].label;
+	}
+	return pool
+		.split(POOL_ID_WORD_SEPARATOR)
+		.filter((word) => word.length > 0)
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+		.join(" ");
 }
 
 export function CreditTransferCard() {
@@ -295,7 +332,7 @@ export function CreditTransferCard() {
 											{formatUsd(grant.remainingMicroUsd)}
 										</span>
 										<span className="block text-muted-foreground text-xs">
-											{grant.pool}
+											{poolDisplayName(grant.pool)}
 											{expiry ? ` · ${expiry}` : ""}
 										</span>
 									</span>

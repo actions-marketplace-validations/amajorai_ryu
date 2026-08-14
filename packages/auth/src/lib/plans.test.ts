@@ -48,25 +48,31 @@ function requireBinding(
 	return binding;
 }
 
-describe("depositFee (max of 10% or $1.00 floor)", () => {
+describe("depositFee (max of the plan rate or the $2.40 floor)", () => {
 	it("charges the floor on a zero/negative amount", () => {
 		expect(depositFee(0)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 		expect(depositFee(-100)).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 	});
 
-	it("charges the 10% percentage when it exceeds the floor", () => {
-		// $100 top-up: 10% = $10.00 (> $1.00 floor) → $10.00.
-		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(10));
+	it("charges the 15% percentage when it exceeds the floor", () => {
+		// $100 top-up: 15% = $15.00 (> $1.50 floor) → $15.00.
+		expect(depositFee(usdToMicro(100))).toBe(usdToMicro(15));
 	});
 
-	it("meets the floor exactly at the $10 break-even", () => {
-		// $10 top-up: 10% = $1.00 = the floor.
-		expect(depositFee(usdToMicro(10))).toBe(usdToMicro(1));
+	it("meets the floor exactly at the $16 crossover", () => {
+		// $16 top-up: 15% = $2.40 = the floor. The crossover moved with the floor
+		// ($1.50 met 15% at $10); it is derived, not chosen — see
+		// DEPOSIT_FEE_FIXED_MICRO_USD for why the floor had to rise.
+		expect(depositFee(usdToMicro(16))).toBe(usdToMicro(2.4));
 	});
 
-	it("the $1.00 floor dominates below the break-even (nudges bigger top-ups)", () => {
-		// $5 pack: 10% = $0.50, but the floor is $1.00 (20% effective).
-		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(1));
+	it("the $2.40 floor dominates below the crossover (nudges bigger top-ups)", () => {
+		// $5 pack: 15% = $0.75, but the floor is $2.40 (48% effective). The floor
+		// is not a nudge alone — Polar's fixed $0.40 makes a small top-up
+		// unprofitable on the percentage by itself, and the floor also has to stay
+		// profitable far enough up to meet the LOWEST plan rate (12%), which does
+		// not break even until ~$19.80.
+		expect(depositFee(usdToMicro(5))).toBe(usdToMicro(2.4));
 		expect(depositFee(usdToMicro(1))).toBe(DEPOSIT_FEE_FIXED_MICRO_USD);
 	});
 });
@@ -130,7 +136,7 @@ describe("resolveEntitlement — subscriptions", () => {
 		expect(e.plan).toBe("pro");
 		expect(e.desktopAccess).toBe(true);
 		expect(e.managedInference).toBe(true);
-		expect(e.monthlyCreditPoolMicroUsd).toBe(usdToMicro(20));
+		expect(e.monthlyCreditPoolMicroUsd).toBe(usdToMicro(15));
 		expect(e.seats).toBe(1);
 	});
 
@@ -145,7 +151,7 @@ describe("resolveEntitlement — subscriptions", () => {
 			defaultsOnly
 		);
 		expect(e.plan).toBe("max");
-		expect(e.monthlyCreditPoolMicroUsd).toBe(usdToMicro(150));
+		expect(e.monthlyCreditPoolMicroUsd).toBe(usdToMicro(30));
 	});
 
 	it("ignores an inactive (canceled) subscription", () => {

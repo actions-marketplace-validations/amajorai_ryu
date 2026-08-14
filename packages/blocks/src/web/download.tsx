@@ -414,7 +414,7 @@ export default function DownloadBlock({
 						Download
 					</span>
 					<h1 className="text-balance font-medium text-4xl text-foreground leading-[1.1] tracking-tight md:text-6xl">
-						Powerful agents, as easy as installing an app.
+						Agents, as easy as installing an app.
 					</h1>
 					<p className="mx-auto max-w-xl text-balance text-muted-foreground md:text-lg">
 						Run local models on your own machine, no terminal or API keys

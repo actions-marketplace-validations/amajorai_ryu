@@ -4,6 +4,7 @@ import { getToolStatus } from "../utils/format-tool.ts";
 import { GenericTool } from "./generic-tool.tsx";
 import { toolRegistry } from "./tool-registry.ts";
 import { ToolRowBase } from "./tool-row-base.tsx";
+import { ToolTimingProvider } from "./tool-timing.tsx";
 
 export interface ToolGroupProps {
 	chatStatus?: string;
@@ -312,14 +313,19 @@ export const ToolGroup = memo(function ToolGroup({
 						const { isPending: nestedIsPending, isError: nestedIsError } =
 							getToolStatus(derivedPart, chatStatus);
 						return (
-							<GenericTool
-								icon={nestedMeta.icon}
-								isError={nestedIsError}
-								isPending={nestedIsPending}
-								key={idx}
-								subtitle={nestedMeta.subtitle?.(derivedPart)}
-								title={nestedMeta.title(derivedPart)}
-							/>
+							// Each nested row re-provides its OWN timing. These render
+							// beneath whatever `ToolTimingProvider` wraps the group, so
+							// without this every step would display the PARENT's duration
+							// — a wrong number, which is worse than no number.
+							<ToolTimingProvider key={idx} part={derivedPart}>
+								<GenericTool
+									icon={nestedMeta.icon}
+									isError={nestedIsError}
+									isPending={nestedIsPending}
+									subtitle={nestedMeta.subtitle?.(derivedPart)}
+									title={nestedMeta.title(derivedPart)}
+								/>
+							</ToolTimingProvider>
 						);
 					})}
 				</div>

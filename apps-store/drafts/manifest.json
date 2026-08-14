@@ -15,6 +15,7 @@
     "concurrency"
   ],
   "icon": "lucide:file-pen-line",
+  "iconDither": { "from": 40, "to": "transparent", "direction": "down" },
   "surfaces": {
     "gateway": { "support": "none" },
     "core": { "support": "full" },

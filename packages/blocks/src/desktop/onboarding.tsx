@@ -768,35 +768,49 @@ function ConnectStep({
 			}}
 		>
 			<StaggerReveal startDelay={ONBOARDING_CONTENT_DELAY_MS}>
+				{/* Both fields carry their name in the placeholder, the way the sign-in
+				    form does — the labels stay in the tree but visually hidden, because a
+				    placeholder is not an accessible name and vanishes as soon as the user
+				    types. The example address and the "optional" qualifier move into the
+				    hint below each field, which is where they still read once the
+				    placeholder is gone. */}
 				<div className="flex flex-col gap-2">
-					<Label htmlFor="onboarding-node-url">Node address</Label>
+					<Label className="sr-only" htmlFor="onboarding-node-url">
+						Node address
+					</Label>
 					<Input
 						autoComplete="off"
 						autoFocus
 						id="onboarding-node-url"
 						onChange={(e) => setUrl(e.target.value)}
-						placeholder="http://192.168.1.20:7980"
+						placeholder="Node address"
+						size="lg"
 						spellCheck={false}
 						value={url}
 					/>
 					<p className="text-muted-foreground text-xs">
-						The address of the machine running Ryu Core, including the port.
+						The address of the machine running Ryu Core, including the port —
+						for example http://192.168.1.20:7980.
 					</p>
 				</div>
 
 				<div className="flex flex-col gap-2">
-					<Label htmlFor="onboarding-node-token">Access token (optional)</Label>
+					<Label className="sr-only" htmlFor="onboarding-node-token">
+						Access token
+					</Label>
 					<Input
 						autoComplete="off"
 						id="onboarding-node-token"
 						onChange={(e) => setToken(e.target.value)}
-						placeholder="Leave empty if the node has no token"
+						placeholder="Access token"
+						size="lg"
 						spellCheck={false}
 						type="password"
 						value={token}
 					/>
 					<p className="text-muted-foreground text-xs">
-						Whoever runs the node can read it from their Ryu settings.
+						Optional — leave empty if the node has no token. Whoever runs the
+						node can read it from their Ryu settings.
 					</p>
 				</div>
 

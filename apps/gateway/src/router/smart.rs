@@ -153,9 +153,15 @@ impl SmartRouter {
         embed_provider: Option<&OpenAiProviderConfig>,
     ) -> Option<String> {
         let user_msg = last_user_message(messages)?;
-        let Some(openai) = embed_provider else {
-            warn!("smart routing: embedding strategy but no embedder configured; keeping requested model");
-            return None;
+        // No `[providers.openai]` is not "no embedder": Core runs an embed sidecar on
+        // loopback speaking the same OpenAI-compatible `/embeddings` shape, and it
+        // serves exactly the model `DEFAULT_EMBED_MODEL` names. Before this, the
+        // strategy warned and kept the requested model on every local-only node — so
+        // the one routing mode that needs no cloud account was the one that could not
+        // run without one. The local endpoint takes no key.
+        let (embed_base_url, embed_api_key) = match embed_provider {
+            Some(openai) => (openai.base_url.clone(), openai.api_key.clone()),
+            None => (crate::config::local_embed_base_url(), String::new()),
         };
         let model = if self.config.embedding_model.trim().is_empty() {
             DEFAULT_EMBED_MODEL
@@ -169,7 +175,7 @@ impl SmartRouter {
             .get_or_init(|| async {
                 let mut out = Vec::with_capacity(self.config.rules.len());
                 for rule in &self.config.rules {
-                    match embed_text(&rule.description, http, &openai.base_url, &openai.api_key, model).await {
+                    match embed_text(&rule.description, http, &embed_base_url, &embed_api_key, model).await {
                         Ok(v) => out.push(Some(v)),
                         Err(e) => {
                             warn!(rule = %rule.description, error = %e, "smart routing: failed to embed rule description; rule disabled");
@@ -184,8 +190,8 @@ impl SmartRouter {
         let query_emb = match embed_text(
             truncate(&user_msg, MAX_CLASSIFIER_INPUT_CHARS),
             http,
-            &openai.base_url,
-            &openai.api_key,
+            &embed_base_url,
+            &embed_api_key,
             model,
         )
         .await

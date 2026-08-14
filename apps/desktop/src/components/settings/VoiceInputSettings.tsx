@@ -23,6 +23,7 @@ import { request, toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_VOICE_PREFS,
 	getVoiceInputPrefs,
+	isVoiceEngine,
 	setVoiceInputPrefs,
 	VOICE_ENGINES,
 	type VoiceEngine,
@@ -101,13 +102,24 @@ export function VoiceInputSettings() {
 	};
 
 	const selectedEngine = VOICE_ENGINES.find((e) => e.engine === prefs.engine);
-	const engineSidecar = statuses.find(
-		(s) => s.name === selectedEngine?.sidecar
-	);
-	const engineRunning = engineSidecar?.running ?? false;
+	// A cloud engine has no sidecar, so there is nothing to install or run and
+	// nothing to report as stopped. Guarded rather than left to `find`: matching
+	// `s.name === undefined` would be a nonsense lookup that happens to return
+	// undefined today.
+	const engineSidecar = selectedEngine?.sidecar
+		? statuses.find((s) => s.name === selectedEngine.sidecar)
+		: undefined;
+	const engineRunning = selectedEngine?.sidecar
+		? engineSidecar?.running === true
+		: true;
 
-	const isEngine = (value: string): value is VoiceEngine =>
-		value === "whisper" || value === "parakeet";
+	// Derived from the engine list, not hand-written: a hardcoded pair silently
+	// rejected any engine added to `VOICE_ENGINES` — which is how the cloud slot
+	// stayed unreachable while Core had supported it all along.
+	// Base UI's Select hands back `string | null`, so the guard takes `unknown`
+	// and does the narrowing itself rather than the call site pre-asserting it.
+	const isEngine = (value: unknown): value is VoiceEngine =>
+		isVoiceEngine(value);
 
 	return (
 		<SettingsSection
@@ -147,7 +159,7 @@ export function VoiceInputSettings() {
 					description={
 						engineRunning
 							? "Running."
-							: "Not running — install + start it from Services first."
+							: "Not running. Install and start it from Services first."
 					}
 					title={
 						<span className="flex items-center gap-2">

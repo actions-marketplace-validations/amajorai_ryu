@@ -155,7 +155,12 @@ export default function SpaceDocEditorPage({
 		return () => {
 			cancelled = true;
 		};
-	}, [getDocument, spaceId, documentId, updateTabsIconWhere]);
+		// `reloadNonce` is load-bearing: the "Try again" button on the load-failed
+		// screen only bumps it. Without it here the effect never re-runs, so
+		// `loadFailed` stays true and the retry can never clear the error screen.
+		// Mirror of the same restore in SpaceDatabaseEditorPage — the two must
+		// move together.
+	}, [getDocument, spaceId, documentId, updateTabsIconWhere, reloadNonce]);
 
 	// Offer this page as context to the global "Ask Ryu" assistant.
 	useAssistantPageContext(

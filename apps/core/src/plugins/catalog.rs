@@ -39,7 +39,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::plugin_manifest::{PluginManifest, Requires, Surface};
+use crate::plugin_manifest::{
+    CompatibilityVerdict, EnginesReq, PluginManifest, Requires, Surface,
+};
 use crate::plugins::graph::{resolve_enable_order, DependencyError};
 
 /// Hard cap on how many plugins one catalog install may pull in (target +
@@ -89,6 +91,33 @@ pub struct CatalogEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<Surface>,
 
+    /// The host version floors this plugin declares, mirrored from the manifest's
+    /// `engines`. Absent = no floors.
+    ///
+    /// Carried on the ENTRY, not just the detail payload: a browse surface has to
+    /// be able to grey a card and say "needs Core 0.2.0" without fetching a detail
+    /// document per card. It was previously projected only into the version-detail
+    /// payload, where it served as a scorecard badge and nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engines: Option<EnginesReq>,
+
+    /// This node's verdict on [`engines`](CatalogEntry::engines) — whether the
+    /// plugin can be installed here, and which floors are unmet.
+    ///
+    /// Computed by whoever SERVES the entry, because only they know the running
+    /// versions; a static registry feed leaves it absent. A client that knows its
+    /// own surface version (the desktop knows its Tauri build) re-evaluates
+    /// locally from `engines` and may turn an advisory `unknown` into a refusal —
+    /// see `HostVersions::evaluate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<CompatibilityVerdict>,
+
+    /// True when this entry is INSTALLED but held back by an unmet floor — the
+    /// incompatible lane. Distinct from `compatibility.compatible == false` on a
+    /// not-yet-installed entry, which is merely "you could not install this".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installed_but_incompatible: bool,
+
     // ── Presentation, projected from the manifest ─────────────────────────────
     //
     // A listing's NAME and ICON are declared by its manifest, never invented by
@@ -121,6 +150,10 @@ pub struct CatalogEntry {
     /// CSS background for the icon square.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_background: Option<String>,
+
+    /// Inset + letterbox for the icon square — see `PluginManifest::icon_padding`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_padding: Option<String>,
 
     /// Brand accent colour, hex.
     #[serde(default, skip_serializing_if = "Option::is_none")]

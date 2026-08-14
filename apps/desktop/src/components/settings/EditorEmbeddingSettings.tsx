@@ -305,7 +305,7 @@ function EmbeddingCard({ target }: { target: ApiTarget }) {
 				baseUrlInput.trim() || undefined,
 				Number.isFinite(dims) ? dims : undefined
 			);
-			toast.success("Embedding model changed — reindexing in the background");
+			toast.success("Embedding model changed; reindexing in the background");
 			await refresh();
 		} catch (e) {
 			toast.error(

@@ -39,6 +39,7 @@ import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { safeHttpUrl } from "@ryu/marketplace/catalog/safe-url";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import { ContextMenuItem } from "@ryu/ui/components/context-menu.tsx";
 import {
 	Empty,
 	EmptyDescription,
@@ -151,6 +152,25 @@ export default function IntegrationsCatalogSection({
 	);
 }
 
+/** The one row a brand card's right-click menu can hold: the brand's own site,
+ *  the same link its detail header offers. `undefined` — and so no menu at all —
+ *  when the directory entry carries no domain. Rendered as a real anchor so it
+ *  opens the way every other external link in this file does. */
+function brandSiteMenu(domain: string | null | undefined) {
+	const href = domain ? safeHttpUrl(`https://${domain}`) : null;
+	if (!href) {
+		return undefined;
+	}
+	return (
+		<ContextMenuItem
+			render={<a href={href} rel="noopener noreferrer" target="_blank" />}
+		>
+			<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
+			Open website
+		</ContextMenuItem>
+	);
+}
+
 function IntegrationList({
 	integrations,
 	loading,
@@ -212,6 +232,10 @@ function IntegrationList({
 				{integrations.map((it) => (
 					<StoreCatalogCard
 						action={null}
+						// A brand has no install lifecycle — it is a directory entry — so
+						// the one verb worth a menu is the one the detail panel already
+						// offers: its own site. A brand with no domain gets no menu.
+						contextMenu={brandSiteMenu(it.domain)}
 						description={
 							it.categories.length > 0
 								? it.categories.slice(0, 2).join(" · ")

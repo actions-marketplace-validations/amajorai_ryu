@@ -12,6 +12,19 @@
 // Apps (plugins) realm
 // ---------------------------------------------------------------------------
 
+/**
+ * The `?source=` value that browses every marketplace at once — the store's
+ * default view. Mirrors Core's `PLUGIN_ALL_SOURCES_ID`.
+ *
+ * It is a VIEW, not a registered source: it never appears in the `sources` list
+ * the server returns, it cannot be the node's active-source preference, and Core
+ * resolves it to a list of real sources at both the browse and detail seams. It
+ * lives in this module — the wire contract both hosts already import — rather than
+ * beside the component that renders it, so the desktop and web hooks can default to
+ * it without pulling the section's component tree into their bundle.
+ */
+export const ALL_PLUGIN_SOURCES_ID = "all";
+
 /** The host surfaces a plugin can declare support for.
  *
  *  Mirrors the `Surface` enum in `crates/core/kernel-contracts/src/manifest.rs`
@@ -34,6 +47,219 @@ export type Surface =
 	| "web"
 	| "cli"
 	| "unknown";
+
+// ── Host version floors (`engines`) ──────────────────────────────────────────
+
+/** The `engines` block: a semver requirement per host surface. Mirrors Core's
+ *  `EnginesReq`.
+ *
+ *  `ryu` is the CORE floor under its legacy name — every manifest in the wild
+ *  spells it that way, and Core's `Surface::engines_key()` maps `core` onto it.
+ *  When naming the offending key in UI copy, use `engines_key`-equivalent wording
+ *  (`ryu` for core), never the bare surface token, or the message points at a key
+ *  that does not exist in any manifest. */
+export interface HostFloors {
+	cli?: string | null;
+	desktop?: string | null;
+	extension?: string | null;
+	gateway?: string | null;
+	island?: string | null;
+	mobile?: string | null;
+	/** The CORE floor. */
+	ryu?: string | null;
+	web?: string | null;
+}
+
+/** One unsatisfied floor. Tagged on `code`, mirroring Core's `UnmetRequirement`.
+ *
+ *  `unknown` is ADVISORY and must never block a verb: it means the evaluator did
+ *  not know that surface's version, not that the surface is too old. */
+export type UnmetRequirement =
+	| { code: "too_old"; surface: Surface; required: string; present: string }
+	| { code: "unknown"; surface: Surface; required: string }
+	| {
+			code: "invalid_requirement";
+			surface: Surface;
+			required: string;
+			reason: string;
+	  };
+
+/** The result of checking {@link HostFloors} against the running hosts. */
+export interface CompatibilityVerdict {
+	/** True when nothing BLOCKING is unmet. Advisory `unknown` entries do not
+	 *  clear this — a plugin whose only problem is an unobservable surface stays
+	 *  installable. */
+	compatible: boolean;
+	/** Every unsatisfied floor, blocking and advisory alike. */
+	unmet?: UnmetRequirement[];
+}
+
+/** The surface a floor key names, for display. `ryu` is Core. */
+const FLOOR_KEY_TO_SURFACE: Record<keyof HostFloors, Surface> = {
+	cli: "cli",
+	desktop: "desktop",
+	extension: "extension",
+	gateway: "gateway",
+	island: "island",
+	mobile: "mobile",
+	ryu: "core",
+	web: "web",
+};
+
+/** Strip a leading `v` and any prerelease/build suffix, returning `[major, minor,
+ *  patch]`, or `null` if it does not look like semver.
+ *
+ *  The suffix is DROPPED on purpose, matching Core: semver says a prerelease does
+ *  not satisfy a plain `>=` range, so comparing `0.1.12-nightly.3` verbatim
+ *  against `>=0.1.0` would mark every plugin incompatible on every nightly. */
+function releaseTriple(version: string): [number, number, number] | null {
+	const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+	if (!match) {
+		return null;
+	}
+	return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Compare two release triples: negative if `a < b`, 0 if equal, positive if `a > b`. */
+function compareTriples(
+	a: [number, number, number],
+	b: [number, number, number]
+): number {
+	for (let i = 0; i < 3; i++) {
+		if (a[i] !== b[i]) {
+			return a[i] - b[i];
+		}
+	}
+	return 0;
+}
+
+/** Does `present` satisfy the semver requirement `required`?
+ *
+ *  Deliberately a SUBSET of semver's range grammar — the comparator forms Core's
+ *  `VersionReq` actually sees in practice (`>=x`, `>x`, `<x`, `<=x`, `=x`, a bare
+ *  version meaning `>=`, and comma-separated conjunctions). Returns `null` for
+ *  anything it cannot parse, and every caller treats `null` as "cannot decide,
+ *  do not claim incompatible" — the client is a DISPLAY refinement, and Core
+ *  remains the authority that actually refuses the install. */
+function satisfies(present: string, required: string): boolean | null {
+	const have = releaseTriple(present);
+	if (!have) {
+		return null;
+	}
+	for (const rawPart of required.split(",")) {
+		const part = rawPart.trim();
+		if (part === "" || part === "*") {
+			continue;
+		}
+		// Minor and patch are BOTH optional: a bound is routinely written `<2`, and
+		// requiring `x.y` made that unparseable, so `">=1.2, <2"` silently degraded
+		// to "cannot decide" and let a 2.0.0 host look compatible. An omitted
+		// component is zero, matching semver's own reading of a partial version.
+		const m = /^(>=|<=|>|<|=)?\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?\s*$/.exec(
+			part
+		);
+		if (!m) {
+			return null;
+		}
+		const op = m[1] ?? ">=";
+		const want: [number, number, number] = [
+			Number(m[2]),
+			Number(m[3] ?? 0),
+			Number(m[4] ?? 0),
+		];
+		const cmp = compareTriples(have, want);
+		const ok =
+			(op === ">=" && cmp >= 0) ||
+			(op === ">" && cmp > 0) ||
+			(op === "<=" && cmp <= 0) ||
+			(op === "<" && cmp < 0) ||
+			(op === "=" && cmp === 0);
+		if (!ok) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/** Re-evaluate {@link HostFloors} with the versions THIS client knows.
+ *
+ *  Why a client-side pass exists at all: Core observes only its own version and
+ *  the Gateway's, so it reports a desktop/island/mobile floor as advisory
+ *  `unknown`. The desktop DOES know its own version (Tauri's `getVersion()`), so
+ *  overlaying it turns that advisory into a real refusal — the whole point of
+ *  declaring a per-surface floor.
+ *
+ *  Strictly a refinement: a floor this function cannot parse, or a surface it has
+ *  no version for, is left exactly as Core reported it. It never marks something
+ *  compatible that Core called incompatible.
+ *
+ *  @param floors    the listing's declared `engines`
+ *  @param known     surface → running version, for surfaces this client knows
+ *  @param serverVerdict Core's verdict, used as the base so server-only knowledge
+ *                       (the observed Gateway version) is not lost. */
+export function evaluateCompatibility(
+	floors: HostFloors | null | undefined,
+	known: Partial<Record<Surface, string>>,
+	serverVerdict?: CompatibilityVerdict | null
+): CompatibilityVerdict {
+	if (!floors) {
+		return serverVerdict ?? { compatible: true, unmet: [] };
+	}
+
+	const unmet: UnmetRequirement[] = [];
+	for (const [key, surface] of Object.entries(FLOOR_KEY_TO_SURFACE) as [
+		keyof HostFloors,
+		Surface,
+	][]) {
+		const required = floors[key];
+		if (!required) {
+			continue;
+		}
+		// Prefer what this client knows; fall back to what the server already said
+		// about the same surface so an observed Gateway version survives.
+		const present = known[surface];
+		if (present === undefined) {
+			const fromServer = serverVerdict?.unmet?.find(
+				(u) => u.surface === surface
+			);
+			unmet.push(fromServer ?? { code: "unknown", required, surface });
+			continue;
+		}
+		const ok = satisfies(present, required);
+		if (ok === false) {
+			unmet.push({ code: "too_old", present, required, surface });
+		} else if (ok === null) {
+			// Undecidable locally — defer to the server rather than invent a verdict.
+			const fromServer = serverVerdict?.unmet?.find(
+				(u) => u.surface === surface
+			);
+			if (fromServer) {
+				unmet.push(fromServer);
+			}
+		}
+	}
+
+	return {
+		compatible: !unmet.some(
+			(u) => u.code === "too_old" || u.code === "invalid_requirement"
+		),
+		unmet,
+	};
+}
+
+/** The entries that actually prevent an install (advisory `unknown` excluded).
+ *
+ *  Shared so no caller has to re-derive which codes block — getting that wrong in
+ *  one place is how an advisory turns into a spurious refusal. The user-facing
+ *  sentence lives in `surface-labels.ts` (`describeIncompatibility`), which owns
+ *  the surface display names. */
+export function blockingUnmet(
+	verdict: CompatibilityVerdict | null | undefined
+): UnmetRequirement[] {
+	return (verdict?.unmet ?? []).filter(
+		(u) => u.code === "too_old" || u.code === "invalid_requirement"
+	);
+}
 
 /** Presentational banner descriptor for an app's hero region — the listing's OWN
  *  background, as opposed to the wash the hero derives from its `icon_dither` when
@@ -264,10 +490,35 @@ export interface CatalogEntry {
 	accent_color?: string | null;
 	banner?: CatalogBanner | null;
 	built_in?: boolean;
+	/** Which MARKETPLACE this row was browsed from, and how to name it in a
+	 *  heading. Stamped by Core only in the all-marketplaces view (`?source=all`),
+	 *  where the page is a concatenation of every source and the rows would
+	 *  otherwise be indistinguishable.
+	 *
+	 *  Distinct from {@link source}, which is per-entry provenance (`"built-in"`, a
+	 *  repo host, …) and does not name a browsable catalog. Absent whenever a single
+	 *  source is selected — there is nothing to disambiguate then. */
+	catalog_source_id?: string;
+	catalog_source_name?: string;
 	category?: string | null;
+	/** The serving node's verdict on {@link engines}. Absent when the source is a
+	 *  static feed that does not know what is running.
+	 *
+	 *  A client that knows its own surface version should NOT trust this blindly —
+	 *  Core cannot observe desktop/island/mobile/extension/web, so it reports those
+	 *  floors as advisory `unknown`. Re-evaluate with `evaluateCompatibility` and
+	 *  the local version overlaid; that turns an advisory into a real refusal. */
+	compatibility?: CompatibilityVerdict | null;
 	description: string;
 	descriptor_only?: boolean;
 	developer?: string | null;
+	/** Host version floors this listing declares (the manifest's `engines`), one
+	 *  semver requirement per surface. `ryu` is the CORE floor — the legacy
+	 *  spelling, kept because every manifest in the wild uses it.
+	 *
+	 *  Absent = declares no floors. Present on the CARD, not just the detail, so a
+	 *  grid can grey a tile without a detail fetch per tile. */
+	engines?: HostFloors | null;
 	/** Icon-primitive glyph id (Iconify `prefix:name`, bare Hugeicons name, or URL),
 	 *  masked with the current text colour. Distinct from `icon_url` (a raster logo);
 	 *  wins over it on the card when both are present. */
@@ -276,8 +527,18 @@ export interface CatalogEntry {
 	/** Dithered-gradient background for the icon square, in place of a flat
 	 *  `icon_background`. Validated at render; an invalid spec falls back. */
 	icon_dither?: CardDither | null;
+	/** Inset + letterbox for the icon square (manifest `iconPadding`): one of
+	 *  `none` | `sm` | `md` | `lg`. A raw string on the wire so an unknown value
+	 *  cannot fail a parse; validated at render (`normalizeIconPadding`). */
+	icon_padding?: string | null;
 	icon_url?: string | null;
 	id: string;
+	/** True when this listing is INSTALLED but held back by an unmet floor.
+	 *
+	 *  Distinct from `compatibility.compatible === false` on a listing that is not
+	 *  installed, which only means "you could not install this". This one means the
+	 *  plugin is on disk and deliberately not running. */
+	installed_but_incompatible?: boolean;
 	integration_kind?: string | null;
 	integration_url?: string | null;
 	kinds: string[];

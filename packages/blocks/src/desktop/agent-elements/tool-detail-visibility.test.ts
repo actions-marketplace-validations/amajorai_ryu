@@ -154,6 +154,15 @@ describe("hasVisibleContentAtNoDetail", () => {
 				{ type: "data-image-generation", data: { status: "generating" } },
 			])
 		).toBe(true);
+		// The video twin. Asserted alongside its image counterpart rather than in a
+		// case of its own, because the failure this catches is someone adding one
+		// media surface and not the other: an in-flight generation that is invisible
+		// with tool detail hidden, and that also makes its message read as empty.
+		expect(
+			hasVisibleContentAtNoDetail([
+				{ type: "data-video-generation", data: { status: "generating" } },
+			])
+		).toBe(true);
 		expect(
 			hasVisibleContentAtNoDetail([
 				{ type: "file", mediaType: "audio/wav", url: "blob:x" },

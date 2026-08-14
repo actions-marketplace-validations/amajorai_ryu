@@ -24,6 +24,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@ryu/ui/components/tabs";
+import { cn } from "@ryu/ui/lib/utils";
 import {
 	ArrowLeft,
 	Bot,
@@ -39,6 +40,7 @@ import {
 	Minus,
 	Monitor,
 	Plus,
+	Scale,
 	Server,
 	Shield,
 	Star,
@@ -103,16 +105,96 @@ const noop = () => {
  * it here in the same commit.
  * -------------------------------------------------------------------------- */
 export const PRO_MONTHLY_USD = 39;
-export const MAX_MONTHLY_USD = 200;
-/** Teams is priced AT Pro per seat, deliberately — see `plans.ts`. */
-export const TEAMS_MONTHLY_PER_SEAT_USD = PRO_MONTHLY_USD;
+/**
+ * Max is $99, charm-priced under $100 on purpose. It was $200 with a $150 credit
+ * pool, which made it a credit pack priced ABOVE what the same credits cost as a
+ * top-up — see `plans.ts` for the arithmetic. It now differentiates on the
+ * machine, the mail limits and the deposit rate.
+ */
+export const MAX_MONTHLY_USD = 99;
+/**
+ * Teams is $49/seat — ABOVE Pro, not equal to it. A team seat buys governance,
+ * not more inference, which is the market convention (a Cursor Teams seat is
+ * double Pro's price for identical included usage). Pricing it at Pro made Teams
+ * invisible: same price, smaller pool, and forced on any multi-member org.
+ */
+export const TEAMS_MONTHLY_PER_SEAT_USD = 49;
 /**
  * Seat minimums, mirroring `PLANS.<plan>.seatModel.minSeats`. Same duplication
  * bargain as the prices above: presentational surfaces read these, and the one
  * page that has the catalog on hand may override them via props.
  */
 export const TEAMS_MIN_SEATS = 2;
+/**
+ * Max is SINGLE-SEAT. The constant stays at 1 (and the card shows no seat
+ * stepper) because Max used to be seat-scalable, which put two multi-seat
+ * business plans side by side differing only in credit volume. Multi-seat is
+ * Teams' job.
+ */
 export const MAX_MIN_SEATS = 1;
+
+/* -------------------------------------------------------------------------- *
+ * Included AI usage, in whole USD per month (per SEAT for Teams).
+ *
+ * Mirrors `PLANS.<plan>.monthlyCreditPoolMicroUsd`, and exists as constants
+ * rather than literals because these numbers appear in three places — the plan
+ * card bullets, the savings-calculator footnote, and the comparison copy — and
+ * the footnote used to DERIVE its figure from a "50% of price" rule. When the
+ * pools were pinned per plan that rule stopped being true, and the page quietly
+ * advertised $19.50 of included usage on a plan granting $15.
+ * -------------------------------------------------------------------------- */
+export const PRO_INCLUDED_USD = 15;
+export const MAX_INCLUDED_USD = 30;
+export const TEAMS_INCLUDED_PER_SEAT_USD = 15;
+
+/**
+ * Teams volume discount, mirrored from `@ryu/auth/lib/seat-tiers` for the same
+ * reason the prices above are mirrored: `@ryu/blocks` is presentational and must
+ * not depend on the control-plane package. Polar enforces the real ladder via
+ * native seat tiers; this only renders it.
+ */
+export const TEAMS_VOLUME_TIERS: readonly {
+	minSeats: number;
+	percent: number;
+}[] = [
+	{ minSeats: 10, percent: 5 },
+	{ minSeats: 25, percent: 10 },
+	{ minSeats: 50, percent: 15 },
+];
+
+/**
+ * The per-seat price at `seats`, volume discount applied.
+ *
+ * THIS MUST EXIST, and its absence was a bug: the card rendered the volume
+ * ladder as a NOTE while `PriceBlock` still multiplied the LIST seat price by
+ * the seat count. At 25 seats the page quoted $1,225/mo against the $1,102.50
+ * Polar actually charges — the page overstating by $122.50/mo, which is the same
+ * class of page-vs-checkout disagreement as Teams advertising $39 while billing
+ * $49. A discount nobody sees until the invoice is worse than no discount.
+ *
+ * Rounded to whole cents to match `seatPriceUsd` in `@ryu/auth/lib/seat-tiers`,
+ * which is what the provisioning script writes into Polar's native seat tiers.
+ */
+export function teamsSeatPriceUsd(listUsd: number, seats: number): number {
+	let percent = 0;
+	for (const tier of TEAMS_VOLUME_TIERS) {
+		if (seats >= tier.minSeats) {
+			percent = tier.percent;
+		}
+	}
+	return Math.round(listUsd * (1 - percent / 100) * 100) / 100;
+}
+
+/** The volume discount in force at `seats`, as a percentage (0 when none). */
+export function teamsVolumePercent(seats: number): number {
+	let percent = 0;
+	for (const tier of TEAMS_VOLUME_TIERS) {
+		if (seats >= tier.minSeats) {
+			percent = tier.percent;
+		}
+	}
+	return percent;
+}
 
 /** Annual billing gives two months free (pay for 10 of 12 months). */
 const FREE_MONTHS_ON_ANNUAL = 2;
@@ -125,7 +207,7 @@ const PAID_MONTHS_ON_ANNUAL = MONTHS_PER_YEAR - FREE_MONTHS_ON_ANNUAL;
  * this is the per-month *equivalent* of the annual price (two months free, i.e.
  * billed for 10 of 12 months); on monthly it is the list price. Anchoring on the
  * smaller monthly number is the standard SaaS psychology play. With monthly
- * $39/$200 this lands the annual totals on $390/$2000 (Pro/Max), matching the
+ * $39/$99 this lands the annual totals on $390/$990 (Pro/Max), matching the
  * Polar yearly prices.
  */
 export function effectiveMonthlyPrice(
@@ -159,7 +241,7 @@ const usd = new Intl.NumberFormat("en-US", {
  * multiplied total for the chosen seat count is spelled out underneath so the
  * buyer still sees what they will actually pay. `perSeat` only controls the
  * "/seat" suffix (Teams is advertised per seat; Max is advertised at a flat
- * $200/mo even though it is seat-scalable), and is independent of `seats`.
+ * $99/mo), and is independent of `seats`.
  */
 function PriceBlock({
 	monthly,
@@ -190,16 +272,32 @@ function PriceBlock({
 				/>
 				<span className="ml-1 text-muted-foreground">{`${seat}/mo`}</span>
 			</div>
+			{/* The seat total and the annual total spin like the headline rather
+			    than snapping. They move for the SAME reasons it does — the yearly
+			    toggle and the seat stepper — so a static number beside a spinning
+			    one reads as the static one having failed to update. */}
 			{showSeatTotal ? (
-				<p className="mb-1 font-medium text-sm">
-					{usd.format(seatTotal)}/mo for {seats} seats
+				<p className="mb-1 flex items-baseline font-medium text-sm">
+					<NumberTicker prefix="$" value={seatTotal} />
+					<span className="ml-1">/mo for {seats} seats</span>
 				</p>
 			) : null}
-			<p className="mb-6 text-muted-foreground text-xs">
-				{isYearly
-					? `Billed ${usd.format(showSeatTotal ? seatAnnualTotal : annualTotal)}${showSeatTotal ? "" : seat}/year · 2 months free`
-					: `Billed monthly${perSeat ? " · per seat" : ""} · cancel anytime`}
-			</p>
+			{isYearly ? (
+				<p className="mb-6 flex items-baseline text-muted-foreground text-xs">
+					<span className="mr-1">Billed</span>
+					<NumberTicker
+						prefix="$"
+						value={showSeatTotal ? seatAnnualTotal : annualTotal}
+					/>
+					<span className="ml-1">
+						{showSeatTotal ? "" : seat}/year · 2 months free
+					</span>
+				</p>
+			) : (
+				<p className="mb-6 text-muted-foreground text-xs">
+					{`Billed monthly${perSeat ? " · per seat" : ""} · cancel anytime`}
+				</p>
+			)}
 		</>
 	);
 }
@@ -214,7 +312,26 @@ function PriceBlock({
  * `onSeatsChange`, so surfaces that show the cards read-only (the desktop
  * paywall, storyboard) are unaffected.
  */
-const MAX_SEAT_SELECTOR = 500;
+/**
+ * Where self-serve stops and sales starts.
+ *
+ * 100 because that is the same line `docs/enterprise-pricing-framework.md` draws:
+ * above it a buyer almost always needs something self-serve cannot do anyway —
+ * SSO, invoicing and a PO, a security review, custom terms — so letting the
+ * slider run to 500 sold a purchase that procurement would have blocked at
+ * checkout. It was 500, which disagreed with the framework and quoted six-figure
+ * annual commitments through a card form with no contract behind them.
+ *
+ * The cap is a ROUTING decision, not a limit on how many seats we will sell: the
+ * copy beside it points at Enterprise, which is where 100+ is priced properly
+ * (and more cheaply per seat than this ladder bottoms out at).
+ *
+ * MIRRORS `SELF_SERVE_MAX_SEATS` in `@ryu/auth/lib/seat-tiers`, which is where
+ * it is ENFORCED — both `/checkout/teams` and `validateSeatChange` refuse above
+ * it. This constant only stops the slider; a cap that lived only here would be a
+ * suggestion, since both routes read a seat count straight off the request body.
+ */
+const MAX_SEAT_SELECTOR = 100;
 
 function SeatSelector({
 	seats,
@@ -229,6 +346,10 @@ function SeatSelector({
 }) {
 	const clamp = (next: number) =>
 		Math.min(MAX_SEAT_SELECTOR, Math.max(minSeats, Math.floor(next)));
+	// The seat count SPINS like every other figure on the card, but the field
+	// must stay typeable — a 250-seat buyer is not pressing "+" 248 times. So the
+	// ticker is what you see, and clicking it swaps in the real input.
+	const [editing, setEditing] = useState(false);
 
 	return (
 		<div className="mb-6">
@@ -238,46 +359,72 @@ function SeatSelector({
 			>
 				Seats
 			</label>
-			<div className="flex items-center gap-2">
-				<Button
-					aria-label="Remove a seat"
-					className="size-8 shrink-0"
-					disabled={seats <= minSeats}
-					onClick={() => onSeatsChange(clamp(seats - 1))}
-					size="icon"
-					type="button"
-					variant="outline"
-				>
-					<Minus className="size-4" />
-				</Button>
-				<Input
-					className="h-8 w-16 text-center tabular-nums"
-					id={inputId}
-					inputMode="numeric"
-					max={MAX_SEAT_SELECTOR}
-					min={minSeats}
-					onChange={(event) => {
-						const next = Number.parseInt(event.target.value, 10);
-						if (Number.isFinite(next)) {
-							onSeatsChange(clamp(next));
-						}
-					}}
-					type="number"
-					value={seats}
-				/>
-				<Button
-					aria-label="Add a seat"
-					className="size-8 shrink-0"
-					disabled={seats >= MAX_SEAT_SELECTOR}
-					onClick={() => onSeatsChange(clamp(seats + 1))}
-					size="icon"
-					type="button"
-					variant="outline"
-				>
-					<Plus className="size-4" />
-				</Button>
-				<span className="ml-1 text-muted-foreground text-xs">
-					{minSeats > 1 ? `minimum ${minSeats}` : "1 seat = 1 person"}
+			<div className="flex items-center gap-3">
+				{/* ONE control, not three. The stepper buttons live INSIDE the field's
+				    border and share its height, so it reads as a single seat picker
+				    rather than a text box that happens to have buttons parked beside
+				    it. `lg` sizing because this is the only interactive control on the
+				    card and it competes with a 4xl price. */}
+				<div className="inline-flex h-11 items-center rounded-lg border bg-background shadow-xs focus-within:ring-[3px] focus-within:ring-ring/50">
+					<button
+						aria-label="Remove a seat"
+						className="flex h-full w-10 shrink-0 items-center justify-center rounded-l-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+						disabled={seats <= minSeats}
+						onClick={() => onSeatsChange(clamp(seats - 1))}
+						type="button"
+					>
+						<Minus className="size-4" />
+					</button>
+					<Input
+						// Borderless and transparent: the WRAPPER owns the border now, so
+						// the input keeping its own would draw a box inside a box. The
+						// appearance triple removes the native spinners, which would
+						// otherwise duplicate the buttons either side of them.
+						className={cn(
+							"h-full w-14 border-0 bg-transparent px-0 text-center font-medium text-base tabular-nums shadow-none focus-visible:ring-0",
+							"[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
+							editing ? "" : "sr-only"
+						)}
+						id={inputId}
+						inputMode="numeric"
+						max={MAX_SEAT_SELECTOR}
+						min={minSeats}
+						onBlur={() => setEditing(false)}
+						onChange={(event) => {
+							const next = Number.parseInt(event.target.value, 10);
+							if (Number.isFinite(next)) {
+								onSeatsChange(clamp(next));
+							}
+						}}
+						type="number"
+						value={seats}
+					/>
+					{editing ? null : (
+						<button
+							aria-label={`${seats} seats — click to type a different number`}
+							className="flex h-full w-14 items-center justify-center font-medium text-base tabular-nums"
+							onClick={() => setEditing(true)}
+							type="button"
+						>
+							<NumberTicker value={seats} />
+						</button>
+					)}
+					<button
+						aria-label="Add a seat"
+						className="flex h-full w-10 shrink-0 items-center justify-center rounded-r-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+						disabled={seats >= MAX_SEAT_SELECTOR}
+						onClick={() => onSeatsChange(clamp(seats + 1))}
+						type="button"
+					>
+						<Plus className="size-4" />
+					</button>
+				</div>
+				<span className="text-muted-foreground text-xs">
+					{seats >= MAX_SEAT_SELECTOR
+						? "Need more? Talk to sales"
+						: minSeats > 1
+							? `minimum ${minSeats}`
+							: "1 seat = 1 person"}
 				</span>
 			</div>
 		</div>
@@ -298,10 +445,97 @@ export const PRICING_AUDIENCE_PLANS = {
 	individual: ["lifetime", "pro"],
 } as const;
 
+/** Where the customer runs Ryu — the outermost pricing choice. */
+export type PricingDeployment = "platform" | "self-hosted";
+
+/**
+ * THE DEPLOYMENT SWITCH — platform vs self-hosted.
+ *
+ * DELIBERATELY NOT A THIRD PILL ROW. The page already carries two `TabsList`
+ * pill switches (audience, then billing), and adding a third identical row makes
+ * three controls that LOOK like peers while being nested: deployment decides
+ * whether billing is even a concept, audience narrows the shelf inside it, and
+ * billing only restyles what is already visible. Three equal pill rows stacked
+ * on top of each other flatten that hierarchy into a wall of tabs, and the
+ * reader has to try them to learn which one matters.
+ *
+ * So this one is rendered as a segmented CARD control — bigger, captioned, its
+ * own surface — and the two pill rows below it are hidden entirely on the
+ * self-hosted side (there is no seat billing to toggle and no audience split).
+ * The result is at most two visible controls at any time, in a visual order that
+ * matches the logical one, rather than four.
+ */
+export function PricingDeploymentToggle({
+	deployment = "platform",
+	onDeploymentChange = noop,
+}: {
+	deployment?: PricingDeployment;
+	onDeploymentChange?: (deployment: PricingDeployment) => void;
+}) {
+	const OPTIONS: {
+		caption: string;
+		icon: typeof Cloud;
+		label: string;
+		value: PricingDeployment;
+	}[] = [
+		{
+			caption: "We run it. Credits included, no keys to hold.",
+			icon: Cloud,
+			label: "Ryu Platform",
+			value: "platform",
+		},
+		{
+			caption: "You run it. Open source, on your own infrastructure.",
+			icon: Server,
+			label: "Self-hosted",
+			value: "self-hosted",
+		},
+	];
+	return (
+		<div className="mx-auto mb-8 grid max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
+			{OPTIONS.map((option) => {
+				const active = deployment === option.value;
+				const Icon = option.icon;
+				return (
+					<button
+						aria-pressed={active}
+						className={cn(
+							"rounded-2xl border p-4 text-left transition-colors",
+							active
+								? "border-primary bg-primary/5"
+								: "border-border bg-card hover:bg-accent/40"
+						)}
+						key={option.value}
+						onClick={() => onDeploymentChange(option.value)}
+						type="button"
+					>
+						<span className="flex items-center gap-2 font-semibold text-sm">
+							<Icon
+								className={cn(
+									"size-4",
+									active ? "text-primary" : "text-muted-foreground"
+								)}
+							/>
+							{option.label}
+						</span>
+						<span className="mt-1 block text-muted-foreground text-xs">
+							{option.caption}
+						</span>
+					</button>
+				);
+			})}
+		</div>
+	);
+}
+
 /**
  * The individual / business audience switch. Sits ABOVE the monthly/yearly
  * toggle: it changes WHICH plans exist, where the billing toggle only changes
  * how the visible ones are billed, so the wider choice is the outer one.
+ *
+ * Both this and the billing toggle live INSIDE the platform branch — see
+ * {@link PricingDeploymentToggle} for why they are hidden rather than disabled
+ * on the self-hosted side.
  */
 export function PricingAudienceToggle({
 	audience = "individual",
@@ -680,7 +914,7 @@ export function ProPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>$20/month of AI usage included</span>
+						<span>{`$${PRO_INCLUDED_USD}/month of AI usage included`}</span>
 					</li>
 					<li className="flex items-center">
 						<Zap className="mr-2 size-4" />
@@ -729,9 +963,16 @@ export function ProPlanCard({
 }
 
 /**
- * Max plan card — 24/7 managed agents, with the optional Cloud panel. Max is
- * seat-scalable from ONE seat (unlike Teams' minimum of two), so the seat
- * stepper is optional here and a solo buyer never sees a seat total.
+ * Max plan card — the individual power tier, with the optional Cloud panel.
+ *
+ * NO SEAT STEPPER: Max is single-seat now. It was seat-scalable, and that is
+ * precisely what made the ladder unreadable — a buyer comparing two multi-seat
+ * plans had to do arithmetic to discover the cheaper one was also the better
+ * one. Teams owns multi-seat.
+ *
+ * The bullets lead with what a TOP-UP CANNOT BUY (machine, mail, deposit rate),
+ * because the credit line alone no longer justifies the jump and pretending
+ * otherwise is how the old $200 tier became unsellable.
  */
 export function MaxPlanCard({
 	isYearly = false,
@@ -739,14 +980,14 @@ export function MaxPlanCard({
 	onCheckout = noop,
 	currentPlan = null,
 	cloudTiers = [],
-	seats = 1,
-	minSeats = 1,
-	onSeatsChange,
 }: SeatPlanCardProps) {
 	const isCurrent = currentPlan === "max";
 	const isLoading =
 		loadingPlan === "max-monthly" || loadingPlan === "max-yearly";
-	const effectiveSeats = Math.max(seats, minSeats);
+	// `seats` / `minSeats` / `onSeatsChange` are accepted and IGNORED rather than
+	// removed from the prop type: the page still passes them, and dropping them
+	// from the signature would break the call site for a card that simply has no
+	// seat dimension any more. They are inert here on purpose.
 	return (
 		<PricingCardBorder variant="max">
 			<CardHeader>
@@ -757,35 +998,31 @@ export function MaxPlanCard({
 				<CardDescription>We run AI for you, around the clock.</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<PriceBlock
-					isYearly={isYearly}
-					monthly={MAX_MONTHLY_USD}
-					seats={effectiveSeats}
-				/>
-				{onSeatsChange ? (
-					<SeatSelector
-						inputId="ryu-seats-max"
-						minSeats={minSeats}
-						onSeatsChange={onSeatsChange}
-						seats={effectiveSeats}
-					/>
-				) : null}
+				<PriceBlock isYearly={isYearly} monthly={MAX_MONTHLY_USD} />
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<ArrowLeft className="mr-2 size-4" />
 						<span>Everything in Pro, plus:</span>
 					</li>
 					<li className="flex items-center">
+						<Server className="mr-2 size-4" />
+						<span>
+							<strong>Double the cloud node</strong> — 4 vCPU · 8 GB · 80 GB
+						</span>
+					</li>
+					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>$150/month of AI usage included</span>
+						<span>
+							<strong>Cheaper top-ups</strong> — 12% deposit fee, not 13%
+						</span>
 					</li>
 					<li className="flex items-center">
 						<Bot className="mr-2 size-4" />
 						<span>AI agents that keep working 24/7</span>
 					</li>
 					<li className="flex items-center">
-						<Server className="mr-2 size-4" />
-						<span>Free managed cloud node (2 vCPU · 4 GB)</span>
+						<Coins className="mr-2 size-4" />
+						<span>{`$${MAX_INCLUDED_USD}/month of AI usage included`}</span>
 					</li>
 					<li className="flex items-center">
 						<Mail className="mr-2 size-4" />
@@ -816,8 +1053,59 @@ export function MaxPlanCard({
 }
 
 /**
- * Teams plan card — per-seat org plan, with the optional Cloud panel. Teams is
- * priced AT Pro per seat, so the card leads with that rather than a premium.
+ * Shown once a volume tier is actually EARNED: the list price struck through,
+ * and the percentage named.
+ *
+ * Separate from {@link VolumeDiscountNote}, which advertises the ladder to
+ * someone who has not reached it yet. Both matter, and for opposite reasons —
+ * one is a reason to add seats, the other is confirmation you got what you were
+ * promised. A discount applied silently is indistinguishable from no discount.
+ */
+function VolumeDiscountApplied({ seats }: { seats: number }) {
+	const percent = teamsVolumePercent(seats);
+	if (percent === 0) {
+		return null;
+	}
+	return (
+		<p className="mb-4 font-medium text-primary text-sm">
+			<span className="text-muted-foreground line-through">
+				${TEAMS_MONTHLY_PER_SEAT_USD}
+			</span>{" "}
+			{percent}% volume discount applied at {seats} seats
+		</p>
+	);
+}
+
+/**
+ * The volume ladder, rendered as a plain line of breakpoints.
+ *
+ * It is on the card rather than in a footnote because it is the answer to the
+ * objection the old pricing had none for: a growing company paid strictly more
+ * per head as it grew, with no relief and no reason to consolidate. Showing the
+ * next breakpoint to a buyer sitting at 8 seats is the point.
+ */
+function VolumeDiscountNote() {
+	return (
+		<p className="mt-4 text-muted-foreground text-xs">
+			Volume pricing:{" "}
+			{TEAMS_VOLUME_TIERS.map((tier, i) => (
+				<span key={tier.minSeats}>
+					{i > 0 ? " · " : ""}
+					<strong>{tier.percent}% off</strong> from {tier.minSeats} seats
+				</span>
+			))}
+		</p>
+	);
+}
+
+/**
+ * Teams plan card — per-seat org plan, with the optional Cloud panel.
+ *
+ * The card leads with the GOVERNANCE premium, not a price match. Teams used to
+ * be priced at Pro and led with "at the same price per person", which read as
+ * "nothing changes" — and the entitlements agreed, since the per-seat pool was
+ * actually smaller than Pro's. A team seat costs more because it buys shared
+ * billing, roles, more mail and a node per 10 seats.
  */
 export function TeamsPlanCard({
 	isYearly = false,
@@ -843,12 +1131,18 @@ export function TeamsPlanCard({
 				<CardDescription>We run AI for your whole team.</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
+				{/* The DISCOUNTED per-seat price, not the list — Polar bills the
+				    volume tier, so quoting list here would overstate the bill. */}
 				<PriceBlock
 					isYearly={isYearly}
-					monthly={TEAMS_MONTHLY_PER_SEAT_USD}
+					monthly={teamsSeatPriceUsd(
+						TEAMS_MONTHLY_PER_SEAT_USD,
+						effectiveSeats
+					)}
 					perSeat
 					seats={effectiveSeats}
 				/>
+				<VolumeDiscountApplied seats={effectiveSeats} />
 				{onSeatsChange ? (
 					<SeatSelector
 						inputId="ryu-seats-teams"
@@ -860,15 +1154,15 @@ export function TeamsPlanCard({
 				<ul className="space-y-3">
 					<li className="flex items-center">
 						<ArrowLeft className="mr-2 size-4" />
-						<span>Everything in Pro, at the same price per person:</span>
-					</li>
-					<li className="flex items-center">
-						<Coins className="mr-2 size-4" />
-						<span>Shared AI usage across your team</span>
+						<span>Everything in Pro, for the whole org:</span>
 					</li>
 					<li className="flex items-center">
 						<Users className="mr-2 size-4" />
 						<span>One bill, one shared wallet</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4" />
+						<span>{`$${TEAMS_INCLUDED_PER_SEAT_USD}/seat/month of AI usage, pooled`}</span>
 					</li>
 					<li className="flex items-center">
 						<Shield className="mr-2 size-4" />
@@ -882,12 +1176,22 @@ export function TeamsPlanCard({
 						<Mail className="mr-2 size-4" />
 						<span>Unlimited Agent Inboxes · 20 GB storage</span>
 					</li>
-					{/* Same free base node as Pro and Max — see the note on the Pro card. */}
+					{/* Teams is the ONE plan whose compute grows with the org — by SIZE
+					    first, then count (`TEAMS_NODE_TIERS` in @ryu/auth/lib/base-node).
+					    Ten small boxes for a hundred people would be ten small boxes. */}
 					<li className="flex items-center">
 						<Server className="mr-2 size-4" />
-						<span>Free managed cloud node (2 vCPU · 4 GB)</span>
+						<span>
+							<strong>A free cloud node that grows with your team</strong> — up
+							to 4 vCPU · 8 GB
+						</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4" />
+						<span>12% deposit fee on top-ups</span>
 					</li>
 				</ul>
+				<VolumeDiscountNote />
 				<CloudUpgradePanel
 					loadingPlan={loadingPlan}
 					onCheckout={onCheckout}
@@ -914,61 +1218,237 @@ export function TeamsPlanCard({
 }
 
 /**
- * Enterprise plan — the "contact sales" tier, rendered as a FULL-WIDTH horizontal
- * band BELOW the self-serve plans (spanning all columns), not a fifth column.
- * No self-serve checkout: the CTA links to the sales/contact page. Uses the
- * `enterprise` PlanBadge + gradient border (both already supported).
+ * Enterprise plan — the "contact sales" tier, now a CARD beside Teams rather
+ * than a full-width band below it.
  *
- * Its `max-w-4xl` MUST track the plan grid's: a wider band overhangs the cards
- * above it on both sides, which reads as a misaligned page rather than a band.
+ * It was a band because the business shelf used to hold Teams AND Max, so a
+ * third card would not fit. Max moved to the individual shelf when it became
+ * single-seat, which left Teams alone on a two-column grid with a hole in it —
+ * and a band under a lone card reads as a footnote rather than as a tier.
+ *
+ * As a card it also does its OTHER job properly: an unpriced option beside a
+ * priced one is the anchor that makes the priced one look definite. "Custom"
+ * carries no number to compare against, so it can only raise the reference
+ * point.
+ *
+ * No self-serve checkout — the CTA goes to sales.
  */
 export function EnterprisePlanCard() {
 	return (
-		<div className="mx-auto mb-12 max-w-4xl">
-			<PricingCardBorder variant="enterprise">
-				<div className="flex flex-col gap-6 p-6 md:flex-row md:items-center md:justify-between md:gap-10">
-					<div className="md:max-w-xs">
-						<div className="flex items-center gap-2">
-							<span className="font-semibold text-xl">Enterprise</span>
-							<PlanBadge label="Enterprise" plan="enterprise" size="md" />
-						</div>
-						<p className="mt-1 text-muted-foreground text-sm">
-							We run AI across your whole organization.
-						</p>
-						<div className="mt-3 font-semibold text-3xl">Custom</div>
-						<p className="text-muted-foreground text-xs">
-							Tailored to your org · annual contract
-						</p>
-					</div>
-					<ul className="grid flex-1 grid-cols-2 gap-x-8 gap-y-3">
-						<li className="flex items-center">
-							<ArrowLeft className="mr-2 size-4" />
-							<span>Everything in Teams</span>
-						</li>
-						<li className="flex items-center">
-							<Key className="mr-2 size-4" />
-							<span>SSO &amp; SCIM</span>
-						</li>
-						<li className="flex items-center">
-							<Shield className="mr-2 size-4" />
-							<span>Audit logs &amp; SLAs</span>
-						</li>
-						<li className="flex items-center">
-							<Users className="mr-2 size-4" />
-							<span>Dedicated support</span>
-						</li>
-					</ul>
-					<a
-						className={buttonVariants({
-							variant: "outline",
-							className: "shrink-0 md:w-48",
-						})}
-						href="/contact"
-					>
-						Contact sales
-					</a>
-				</div>
-			</PricingCardBorder>
+		<PricingCardBorder variant="enterprise">
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2 text-xl">
+					Enterprise
+					<PlanBadge label="Enterprise" plan="enterprise" size="md" />
+				</CardTitle>
+				<CardDescription>
+					We run AI across your whole organization.
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex-1">
+				{/* No NumberTicker here on purpose: "Custom" is not a number, and the
+				    absence of one is the point of the tier. */}
+				<div className="mb-1 font-semibold text-4xl">Custom</div>
+				<p className="mb-6 text-muted-foreground text-xs">
+					Tailored to your org · annual contract
+				</p>
+				<ul className="space-y-3">
+					<li className="flex items-center">
+						<ArrowLeft className="mr-2 size-4" />
+						<span>Everything in Teams, plus:</span>
+					</li>
+					<li className="flex items-center">
+						<Key className="mr-2 size-4" />
+						<span>SSO &amp; SCIM provisioning</span>
+					</li>
+					<li className="flex items-center">
+						<Shield className="mr-2 size-4" />
+						<span>Audit logs, custom SLA &amp; DPA</span>
+					</li>
+					<li className="flex items-center">
+						<Server className="mr-2 size-4" />
+						<span>Dedicated or self-hosted deployment</span>
+					</li>
+					<li className="flex items-center">
+						<Cloud className="mr-2 size-4" />
+						<span>Choose your data region</span>
+					</li>
+					<li className="flex items-center">
+						<Users className="mr-2 size-4" />
+						<span>Named contact &amp; onboarding</span>
+					</li>
+					<li className="flex items-center">
+						<Wrench className="mr-2 size-4" />
+						<span>Invoicing, PO &amp; custom terms</span>
+					</li>
+				</ul>
+			</CardContent>
+			<CardFooter>
+				<a
+					className={buttonVariants({
+						variant: "outline",
+						className: "w-full",
+					})}
+					href="/contact"
+				>
+					Contact sales
+				</a>
+			</CardFooter>
+		</PricingCardBorder>
+	);
+}
+
+/**
+ * THE LICENCE COPY ON THESE TWO CARDS IS LOAD-BEARING — do not simplify it to
+ * "open source" or to a single licence name.
+ *
+ * Ryu is open-CORE, not uniformly permissive, and the split is exactly what the
+ * paid tier sells relief from (`docs/open-core.md` is the source of truth):
+ *
+ *  - `apps/core` and the SDK/CLI are **Apache-2.0** — permissive, no obligations.
+ *  - `apps/gateway` and `crates/gateway/*` are **AGPL-3.0** — and the gateway is
+ *    the piece a company actually deploys for routing, firewall, PII/DLP,
+ *    budgets and audit. AGPL's network clause means an org that MODIFIES the
+ *    gateway and offers it over a network owes those modifications back.
+ *  - The desktop, web and identity surfaces are proprietary and are not part of
+ *    a self-hosted deployment at all.
+ *
+ * That AGPL boundary is the commercial-licence lever, and it is a stronger offer
+ * than "we'll support you": the paid tier sells an actual alternative licence to
+ * an actual obligation. Writing "Apache 2.0 licensed" across the whole product
+ * (which is what a competitor with a uniformly-permissive core can truthfully
+ * say) would be FALSE here, and a wrong licence claim on a public pricing page is
+ * the most expensive error this file can carry.
+ *
+ * No price is quoted for the licensed tier. There is no per-annum figure to
+ * quote — `docs/enterprise-pricing-framework.md` prices contracts case by case.
+ */
+export function SelfHostedOssCard() {
+	return (
+		<PricingCardBorder variant="desktop-license">
+			<CardHeader>
+				<CardTitle className="text-xl">Open source</CardTitle>
+				<CardDescription>
+					Run the whole engine on your own machines.
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex-1">
+				<div className="mb-1 font-semibold text-4xl">$0</div>
+				<p className="mb-6 text-muted-foreground text-xs">
+					Free forever · self-supported
+				</p>
+				<ul className="space-y-3">
+					<li className="flex items-center">
+						<Scale className="mr-2 size-4 shrink-0" />
+						<span>Apache-2.0 core · AGPL-3.0 gateway</span>
+					</li>
+					<li className="flex items-center">
+						<Bot className="mr-2 size-4 shrink-0" />
+						<span>Agents, workflows, memory &amp; tools</span>
+					</li>
+					<li className="flex items-center">
+						<Shield className="mr-2 size-4 shrink-0" />
+						<span>Gateway routing, firewall &amp; budgets</span>
+					</li>
+					<li className="flex items-center">
+						<Key className="mr-2 size-4 shrink-0" />
+						<span>Your own provider keys</span>
+					</li>
+					<li className="flex items-center">
+						<Server className="mr-2 size-4 shrink-0" />
+						<span>Zero egress — nothing leaves your network</span>
+					</li>
+					<li className="flex items-center">
+						<Users className="mr-2 size-4 shrink-0" />
+						<span>Community support</span>
+					</li>
+				</ul>
+			</CardContent>
+			<CardFooter>
+				<a
+					className={buttonVariants({
+						variant: "outline",
+						className: "w-full",
+					})}
+					href="https://docs.ryuhq.com/docs/start-here/getting-started/self-host"
+				>
+					Read the self-hosting guide
+				</a>
+			</CardFooter>
+		</PricingCardBorder>
+	);
+}
+
+/** The commercial licence: AGPL relief, plus the controls an enterprise needs. */
+export function SelfHostedLicensedCard() {
+	return (
+		<PricingCardBorder variant="enterprise">
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2 text-xl">
+					Licensed
+					<PlanBadge label="Enterprise" plan="enterprise" size="md" />
+				</CardTitle>
+				<CardDescription>
+					A commercial licence, on your infrastructure.
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="flex-1">
+				<div className="mb-1 font-semibold text-4xl">Custom</div>
+				<p className="mb-6 text-muted-foreground text-xs">
+					Flat annual fee · no per-seat or per-token metering
+				</p>
+				<ul className="space-y-3">
+					<li className="flex items-center">
+						<ArrowLeft className="mr-2 size-4 shrink-0" />
+						<span>Everything in open source, plus:</span>
+					</li>
+					<li className="flex items-center">
+						<Scale className="mr-2 size-4 shrink-0" />
+						<span>Commercial licence — no AGPL obligations</span>
+					</li>
+					<li className="flex items-center">
+						<Key className="mr-2 size-4 shrink-0" />
+						<span>SSO &amp; SCIM provisioning</span>
+					</li>
+					<li className="flex items-center">
+						<Shield className="mr-2 size-4 shrink-0" />
+						<span>Audit logs, custom SLA &amp; DPA</span>
+					</li>
+					<li className="flex items-center">
+						<Cpu className="mr-2 size-4 shrink-0" />
+						<span>Air-gapped &amp; offline deployment</span>
+					</li>
+					<li className="flex items-center">
+						<Wrench className="mr-2 size-4 shrink-0" />
+						<span>Named support engineer &amp; onboarding</span>
+					</li>
+					<li className="flex items-center">
+						<Coins className="mr-2 size-4 shrink-0" />
+						<span>Invoicing, PO &amp; custom terms</span>
+					</li>
+				</ul>
+			</CardContent>
+			<CardFooter>
+				<a className={buttonVariants({ className: "w-full" })} href="/contact">
+					Talk to us
+				</a>
+			</CardFooter>
+		</PricingCardBorder>
+	);
+}
+
+/**
+ * The self-hosted shelf: two cards, free OSS and the commercial licence.
+ *
+ * Two columns for two cards, matching the platform shelf's rule that column
+ * count tracks card count — a wider grid holding two cards reads as a page that
+ * failed to load.
+ */
+export function SelfHostedPlanGrid() {
+	return (
+		<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
+			<SelfHostedOssCard />
+			<SelfHostedLicensedCard />
 		</div>
 	);
 }
@@ -1022,7 +1502,15 @@ export function PricingPlanGrid({
 }) {
 	if (audience === "individual") {
 		return (
-			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
+			// THREE cards, Lifetime -> Pro -> Max, ascending. Max moved here from the
+			// business shelf when it became single-seat: it is an individual power
+			// tier, and sitting it beside Teams was the visual half of the same
+			// mistake the catalog made — two plans presented as alternatives when one
+			// is bought per person and the other per org.
+			//
+			// Three is also the shape that reads best: the centre card carries the
+			// eye, the third sets the high anchor, and a fourth would flatten both.
+			<div className="mx-auto mb-12 grid max-w-6xl grid-cols-1 gap-8 md:grid-cols-3">
 				<LifetimePlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
@@ -1035,22 +1523,6 @@ export function PricingPlanGrid({
 					loadingPlan={loadingPlan}
 					onCheckout={onCheckout}
 				/>
-			</div>
-		);
-	}
-
-	return (
-		<>
-			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
-				<TeamsPlanCard
-					currentPlan={currentPlan}
-					isYearly={isYearly}
-					loadingPlan={loadingPlan}
-					minSeats={teamsMinSeats}
-					onCheckout={onCheckout}
-					onSeatsChange={onSeatsChange}
-					seats={seats ?? teamsMinSeats}
-				/>
 				<MaxPlanCard
 					currentPlan={currentPlan}
 					isYearly={isYearly}
@@ -1061,11 +1533,26 @@ export function PricingPlanGrid({
 					seats={maxSeats ?? maxMinSeats}
 				/>
 			</div>
-			{/* Enterprise lives ONLY on the business shelf. It is a full-width band
-			    rendered after the grid rather than a fifth card, so it must move with
-			    the branch — left outside, it would advertise "contact sales" under a
-			    two-card individual shelf. */}
-			<EnterprisePlanCard />
+		);
+	}
+
+	return (
+		<>
+			{/* TWO cards: the self-serve org plan and the one you have to call about.
+			    Enterprise lives ONLY on this shelf — on the individual shelf it would
+			    advertise "contact sales" to someone buying one seat. */}
+			<div className="mx-auto mb-12 grid max-w-4xl grid-cols-1 gap-8 md:grid-cols-2">
+				<TeamsPlanCard
+					currentPlan={currentPlan}
+					isYearly={isYearly}
+					loadingPlan={loadingPlan}
+					minSeats={teamsMinSeats}
+					onCheckout={onCheckout}
+					onSeatsChange={onSeatsChange}
+					seats={seats ?? teamsMinSeats}
+				/>
+				<EnterprisePlanCard />
+			</div>
 		</>
 	);
 }

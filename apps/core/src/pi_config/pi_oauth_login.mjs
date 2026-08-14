@@ -99,11 +99,64 @@ const notify = (event) => {
 	}
 };
 
+/**
+ * Hard ceiling on how long the bridge may linger after its terminal frame.
+ *
+ * Core reads this pipe in a tight loop, so a flush costs milliseconds — the
+ * 200 KB `done` frame measured 36 ms end to end. Two seconds is therefore far
+ * more headroom than a flush needs, while keeping the OAuth callback port held
+ * for no longer than Core already waits for the bridge's exit status
+ * (`EXIT_STATUS_WAIT` in oauth_login.rs).
+ */
+const EXIT_GRACE_MS = 2000;
+
+/**
+ * Exit, giving stdout a chance to go out first.
+ *
+ * `process.exit()` DISCARDS anything still queued on a piped stdout, and every
+ * terminal frame this bridge writes is the one frame that matters: drop the
+ * `done` line and Core sees only EOF, which it can report as nothing better
+ * than "the login flow exited before completing" — for a login that in fact
+ * succeeded. The `done` frame is also the biggest thing written here (it
+ * carries the whole credential), so it is the one most likely to still be in
+ * the pipe when the process leaves.
+ *
+ * What this does NOT do is wait for a `drain` event. That was the previous
+ * shape and it was dead code for most partially-buffered writes: Node arms
+ * `drain` only when a `write()` returned `false`, i.e. only once the buffer
+ * reached the high-water mark, which for a piped stdout is 65536. Measured
+ * here — four 30001-byte writes to a pipe with a slow reader — the last write
+ * still returned `true` with `writableLength = 30001`, the buffer emptied, and
+ * `drain` never fired. So the "NOT optional" exit silently degraded to whatever
+ * the event loop did next.
+ *
+ * The exit really is not optional: these flows bind fixed callback ports (53692
+ * for Claude, 1455 for ChatGPT), and pi-ai closes its callback server with
+ * `server.close()`, which does not destroy live keep-alive sockets — so the
+ * loop can stay alive holding the port. Hence: set the code, let the loop wind
+ * down on its own when nothing holds it, and arm an UNREF'd timer as the
+ * ceiling. Unref'd is the point — it never keeps the process alive itself, it
+ * only fires when something else already has.
+ *
+ * The old fast path (`writableLength === 0` -> exit at once) is gone with it.
+ * On macOS a piped stdout is written asynchronously and `writableLength` drops
+ * to 0 the moment libuv takes the chunk, NOT when the reader has it, so that
+ * test never proved what it was asked to prove. Dropping it trades an instant
+ * exit for at most {@link EXIT_GRACE_MS}, and only when something is holding
+ * the loop open; a truncated `done` frame costs the user a successful login
+ * reported as a failure, which is the worse of the two by a wide margin.
+ */
+const exitWhenFlushed = (code) => {
+	rl.close();
+	process.exitCode = code;
+	setTimeout(() => process.exit(code), EXIT_GRACE_MS).unref();
+};
+
 async function main() {
 	const providerId = process.argv[2];
 	if (!providerId) {
 		emit({ type: "error", message: "no provider id given" });
-		process.exit(2);
+		return 2;
 	}
 	const provider = builtinProviders().find(
 		(entry) => entry.id === providerId && entry.auth?.oauth !== undefined
@@ -113,19 +166,16 @@ async function main() {
 			type: "error",
 			message: `provider "${providerId}" has no OAuth login in this pi-ai build`,
 		});
-		process.exit(2);
+		return 2;
 	}
 	const credential = await provider.auth.oauth.login({ prompt, notify });
 	emit({ type: "done", credential });
+	return 0;
 }
 
 main()
-	.then(() => {
-		rl.close();
-		process.exit(0);
-	})
+	.then((code) => exitWhenFlushed(code))
 	.catch((error) => {
 		emit({ type: "error", message: error?.message ?? String(error) });
-		rl.close();
-		process.exit(1);
+		exitWhenFlushed(1);
 	});

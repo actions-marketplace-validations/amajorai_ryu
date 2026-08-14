@@ -455,6 +455,88 @@ describe("AppBuilder", () => {
 // silently delete a plugin's dependencies BEFORE the manifest is signed. So every
 // case below asserts the field SURVIVES the parse, not merely that it parses.
 
+describe("engines (host version floors)", () => {
+	/** The regression: `engines` was absent from `PluginManifestSchema`, and zod
+	 *  strips unlisted keys — so `ryu pack` dropped the block from every bundle. A
+	 *  plugin could declare a Core floor, publish, and ship a bundle declaring none. */
+	it("does not strip `engines` — the whole block survives the parse", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			engines: {
+				cli: ">=0.1.0",
+				desktop: ">=0.2.0",
+				extension: ">=0.1.0",
+				gateway: ">=0.1.5",
+				island: ">=0.1.0",
+				mobile: ">=1.0.0",
+				ryu: ">=0.1.0",
+				web: ">=0.1.0",
+			},
+			id: "com.example.floors",
+			name: "Floors",
+			runnables: [],
+			version: "1.0.0",
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.engines).toEqual({
+			cli: ">=0.1.0",
+			desktop: ">=0.2.0",
+			extension: ">=0.1.0",
+			gateway: ">=0.1.5",
+			island: ">=0.1.0",
+			mobile: ">=1.0.0",
+			ryu: ">=0.1.0",
+			web: ">=0.1.0",
+		});
+	});
+
+	it("keeps a legacy `{ ryu }`-only block intact and adds no sibling keys", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			engines: { ryu: ">=0.1.0" },
+			id: "com.example.legacy-engines",
+			name: "Legacy",
+			runnables: [],
+			version: "1.0.0",
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.engines).toEqual({ ryu: ">=0.1.0" });
+	});
+
+	it("leaves `engines` undefined when the manifest declares none", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			id: "com.example.no-engines",
+			name: "None",
+			runnables: [],
+			version: "1.0.0",
+		});
+
+		expect(parsed.success).toBe(true);
+		if (!parsed.success) {
+			return;
+		}
+		expect(parsed.data.engines).toBeUndefined();
+	});
+
+	it("rejects an `engines` block with no Core floor", () => {
+		const parsed = PluginManifestSchema.safeParse({
+			engines: { desktop: ">=0.2.0" },
+			id: "com.example.bad-engines",
+			name: "Bad",
+			runnables: [],
+			version: "1.0.0",
+		});
+
+		expect(parsed.success).toBe(false);
+	});
+});
+
 describe("requires / targets", () => {
 	it("keeps a manifest with NEITHER requires nor targets valid (all 37 shipped plugins)", () => {
 		const parsed = PluginManifestSchema.safeParse({

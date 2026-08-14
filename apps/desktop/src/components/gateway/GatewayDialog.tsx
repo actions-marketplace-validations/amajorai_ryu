@@ -192,6 +192,9 @@ import {
 	fetchOrgs,
 	hasOrgAuth,
 } from "@/src/lib/api/org.ts";
+// A different module from `org.ts` above: `orgs.ts` owns the SESSION's active
+// org, which `org.ts` (the org list + RBAC routes) has no accessor for.
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 import {
 	type AgentSelection,
 	DEFAULT_AGENT_SELECTION_PREF_KEY,
@@ -225,16 +228,22 @@ import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
  * A local / offline / no-org node therefore keeps its config editable; Core is
  * the real enforcement point, this only reflects it in the UI. Shares the
  * `workspace-orgs` / `workspace-my-permissions` query keys with WorkspaceSection
- * so both surfaces read one deduplicated fetch.
+ * so both surfaces read one deduplicated fetch — and resolves the org the same
+ * way it does, off the session's active org rather than the first membership,
+ * so a workspace switch cannot leave the previous org's permissions applied
+ * here (fail-open means that failure is silent).
  */
 function useGatewayConfigurable(): boolean {
 	const authed = hasOrgAuth();
+	const activeOrgId = useActiveOrgId();
 	const orgsQuery = useQuery({
 		enabled: authed,
 		queryKey: ["workspace-orgs"],
 		queryFn: fetchOrgs,
 	});
-	const orgId = orgsQuery.data?.[0]?.id ?? null;
+	const orgs = orgsQuery.data ?? [];
+	const orgId =
+		orgs.find((org) => org.id === activeOrgId)?.id ?? orgs[0]?.id ?? null;
 	const permissionsQuery = useQuery({
 		enabled: authed && Boolean(orgId),
 		queryKey: ["workspace-my-permissions", orgId],
@@ -503,8 +512,8 @@ function GatewayKeysCard({
 				) : null}
 				{reachable ? null : (
 					<p className="px-3 text-muted-foreground text-sm">
-						Gateway unreachable — key list unavailable. Start the gateway and
-						refresh.
+						Gateway unreachable, so the key list is unavailable. Start the
+						gateway and refresh.
 					</p>
 				)}
 			</div>
@@ -758,7 +767,7 @@ function ByokCard({
 
 	return (
 		<SettingsSection
-			caption="Add your own API keys for OpenAI, Anthropic, OpenRouter, or Gemini. Keys are stored in the OS credential store and pushed to the local gateway; they are never sent to any Ryu server. Keys are encrypted at rest and never written to plaintext files. The masked badge reflects whether a key is set; the actual value is not displayed after saving."
+			caption="Add your own API keys for OpenAI, Anthropic, OpenRouter, or Gemini. Keys are stored in the OS credential store, encrypted at rest, and pushed to the local gateway; they are never sent to a Ryu server or written to a plaintext file. The masked badge reflects whether a key is set; the actual value is not displayed after saving."
 			title="Provider keys (BYOK)"
 		>
 			<SettingsGroup>
@@ -1752,7 +1761,7 @@ function modalityProviderLabel(id: string): string {
 const MODALITY_COPY: Record<Modality, { label: string; note: string }> = {
 	chat: {
 		label: "Chat",
-		note: "Rarely reached: ordinary chat is routed by the model map above, not by this row. The router only consults the chat entry for an agent that carries a per-agent chat MODEL slot and no provider slot — with a provider slot set, that slot wins outright.",
+		note: "Rarely reached. Ordinary chat is routed by the model map above, not by this row. The router only consults the chat entry for an agent that carries a per-agent chat MODEL slot and no provider slot; with a provider slot set, that slot wins outright.",
 	},
 	image: {
 		label: "Image generation",
@@ -1768,7 +1777,7 @@ const MODALITY_COPY: Record<Modality, { label: string; note: string }> = {
 	},
 	video: {
 		label: "Video generation",
-		note: "Used by POST /v1/videos/generations — job-based, so the client polls for the result.",
+		note: "Used by POST /v1/videos/generations. It is job-based, so the client polls for the result.",
 	},
 };
 
@@ -1936,9 +1945,9 @@ function ModalityRowDescription({
 		// wrong for exactly the requests most likely to hit this row.
 		return (
 			<span className="text-muted-foreground">
-				Falls back to the default provider — strictly, to ordinary model
-				routing, which lands on {modalityProviderLabel(defaultProvider)} when no
-				model mapping or built-in prefix rule matches the requested model.
+				Falls back to the default provider; strictly, to ordinary model routing,
+				which lands on {modalityProviderLabel(defaultProvider)} when no model
+				mapping or built-in prefix rule matches the requested model.
 			</span>
 		);
 	}
@@ -1998,7 +2007,7 @@ function ModalityRoutingRows({
 		return (
 			<p className="text-sm text-warning">
 				This gateway does not report its modality map, so it cannot be edited
-				here — and it cannot be preserved either: saving anything in this card
+				here, and it cannot be preserved either: saving anything in this card
 				replaces the whole routing section, so a{" "}
 				<span className="font-mono">[routing.modality_map]</span> written by
 				hand in <span className="font-mono">gateway.toml</span> is dropped.
@@ -2379,24 +2388,36 @@ function SmartRoutingCard({
 	const isDisabled =
 		!reachable || draft === null || !canConfigure || served === false;
 
-	// Smart routing's two inert-but-enabled states, both of which the gateway
-	// treats as a no-op WITHOUT saying so (`SmartRoutingConfig::is_active` returns
-	// false, and the request silently keeps its originally requested model):
+	// Smart routing's one remaining enabled-but-broken state, plus the blank the
+	// gateway now fills in for us.
 	//
-	//  - the LLM strategy with a blank classifier model — `is_active` requires a
-	//    non-empty one, so the whole feature is off despite the switch reading on.
-	//    (Unlike the guardrail inspector, the gateway does NOT substitute a
-	//    default here, so this really is a blank.)
+	//  - a blank classifier model is NO LONGER inert. `classifier_model` carries
+	//    `deserialize_with = "de_classifier_model"`, which resolves a blank to the
+	//    classify tier's id as the config comes off the wire — the same treatment
+	//    `inspector.model` has always had. It used to be genuinely inert
+	//    (`is_active` required a non-empty id), and this card's copy still said so
+	//    for a while after the field changed; saying "it never runs" about a
+	//    feature that now runs is the more expensive kind of wrong, because the
+	//    user acts on it. It is an informational default now, not a warning.
 	//  - a classifier model served only by the local classify tier on a node that
 	//    cannot serve it — either no such tier at all, or (the reachable case) the
 	//    tier's weights were never downloaded so its sidecar can never start. The
-	//    classification call errors, and smart routing fails open by design.
+	//    classification call errors, and smart routing fails open by design. THIS
+	//    is the one that stayed a warning, and resolving the blank made it strictly
+	//    more important: a cleared box now lands on the local tier by default, so
+	//    the unreachable case is easier to hit than it was.
 	const classifierModel = draft?.classifier_model.trim() ?? "";
 	const smartLlm =
 		draft?.enabled === true && (draft.strategy ?? "llm") === "llm";
-	const classifierMissing = smartLlm && classifierModel === "";
+	// What the GATEWAY will actually use. `de_classifier_model` resolves a blank
+	// `classifier_model` to the classify tier's id as it comes off the wire, so a
+	// cleared box is not "off" — it is "the local classifier". Both the note and
+	// the reachability probe below have to reason about the RESOLVED id, or a
+	// cleared box silently skips the one warning that still matters.
+	const classifierDefaulted = smartLlm && classifierModel === "";
+	const resolvedClassifier = classifierModel || CLASSIFY_MODEL_ID;
 	const classifierUnserved =
-		smartLlm && classifyTierCannotServeModel(classifyTier, classifierModel);
+		smartLlm && classifyTierCannotServeModel(classifyTier, resolvedClassifier);
 	const classifierUnservedReason =
 		classifyTier === "absent" || classifyTier === "unweighted"
 			? CLASSIFY_TIER_COPY[classifyTier].reason
@@ -2404,7 +2425,7 @@ function SmartRoutingCard({
 
 	return (
 		<SettingsSection
-			caption="Custom routing instructions — a cheap classifier model reads each message and sends it to the model you picked for that kind of request. For example, route coding questions to Claude and casual chat to a local model. Changes take effect after the gateway restarts. The classifier runs once per conversation; if it errors, times out, or matches no rule, the request keeps its originally requested model."
+			caption="Custom routing instructions. A cheap classifier model reads each message and sends it to the model you picked for that kind of request. For example, route coding questions to Claude and casual chat to a local model. Changes take effect after the gateway restarts. The classifier runs once per conversation; if it errors, times out, or matches no rule, the request keeps its originally requested model."
 			headerAction={
 				<Button
 					disabled={isDisabled || saving}
@@ -2424,14 +2445,14 @@ function SmartRoutingCard({
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
-						Gateway unreachable — start the gateway and refresh to configure
+						Gateway unreachable. Start the gateway and refresh to configure
 						smart routing.
 					</p>
 				)}
 				{served === false ? (
 					<p className="text-sm text-warning">
 						This gateway does not report its smart-routing config, so it cannot
-						be edited here — and it cannot be preserved either: saving anything
+						be edited here, and it cannot be preserved either: saving anything
 						in this card replaces the whole routing section, so a{" "}
 						<span className="font-mono">[routing.smart_routing]</span> written
 						by hand in <span className="font-mono">gateway.toml</span> would be
@@ -2501,17 +2522,17 @@ function SmartRoutingCard({
 							A cheap, fast model used only to sort requests. Any routable model
 							id works (including local models or openrouter/ slugs).
 						</p>
-						{classifierMissing ? (
-							<p className="text-destructive text-xs">
-								Smart routing is on but no classifier model is picked, so it
-								never runs — every request keeps the model it asked for. Pick
-								one to turn it on for real.
+						{classifierDefaulted ? (
+							<p className="text-muted-foreground text-xs">
+								No classifier model is picked, so smart routing uses this node's
+								local classifier ({CLASSIFY_MODEL_ID}). Enter a model id to
+								route with something else.
 							</p>
 						) : null}
 						{classifierUnserved ? (
 							<p className="text-destructive text-xs">
 								Smart routing is on with the local classify tier as its
-								classifier, but {classifierUnservedReason} — so the
+								classifier, but {classifierUnservedReason}, so the
 								classification call will fail and every request will quietly
 								keep the model it asked for. Pick a model this node can reach.
 							</p>
@@ -2834,17 +2855,17 @@ function RoutingCard({
 		<SettingsSection
 			caption={
 				<>
-					Ryu's user-level model routing — runs before any upstream provider
-					routing. Pick which provider handles requests by default, map specific
-					models to providers, and order the fallback chain for when a provider
-					is unavailable.{" "}
+					Ryu's user-level model routing, which runs before any upstream
+					provider routing. Pick which provider handles requests by default, map
+					specific models to providers, and order the fallback chain for when a
+					provider is unavailable.{" "}
 					<span className="font-medium text-foreground">
 						Two-layer guardrail model:
 					</span>{" "}
 					Ryu evaluates firewall rules, PII/DLP, and per-agent budgets here, at
 					the gateway, before the request leaves to any upstream provider. When
 					you route to OpenRouter, OpenRouter's own auto-routing and guardrails
-					run as an additional layer on top — they do not replace Ryu's
+					run as an additional layer on top; they do not replace Ryu's
 					user-level controls. Use{" "}
 					<span className="font-mono">openrouter/auto</span> to let OpenRouter
 					pick the best available model; any{" "}
@@ -2881,7 +2902,7 @@ function RoutingCard({
 				) : null}
 				{reachable ? null : (
 					<p className="text-muted-foreground text-sm">
-						Gateway unreachable — controls are disabled. Start the gateway and
+						Gateway unreachable, so controls are disabled. Start the gateway and
 						refresh to configure routing.
 					</p>
 				)}
@@ -3243,7 +3264,7 @@ function LiveSpendCard({ target }: { target: ApiTarget }) {
 			) : null}
 			{!loading && spend && !spend.reachable ? (
 				<p className="px-3.5 text-muted-foreground text-sm">
-					Gateway unreachable — live spend appears once it is running.
+					Gateway unreachable. Live spend appears once it is running.
 				</p>
 			) : null}
 			{!loading && spend?.reachable && !anySpend ? (
@@ -3844,8 +3865,8 @@ function CommandApprovalCard({ target }: { target: ApiTarget }) {
 		if (ok) {
 			setStatus(
 				next
-					? "Enabled — restart the node to apply."
-					: "Disabled — restart the node to apply."
+					? "Enabled. Restart the node to apply."
+					: "Disabled. Restart the node to apply."
 			);
 		} else {
 			setEnabled(!next);
@@ -3855,7 +3876,7 @@ function CommandApprovalCard({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Pre-scan every agent's native tool calls (Claude/Codex Bash, Write, Edit, and the rest) through the command-approval scanner before they run — closing the gap where an agent's own file/shell tools bypassed the gateway. On by default and fail-closed: it defers to the firewall and allow/deny rules above, and it is the only governance on headless runs (their permission prompts auto-approve). Restart the node to apply."
+			caption="Pre-scan every agent's native tool calls (Claude/Codex Bash, Write, Edit, and the rest) through the command-approval scanner before they run, closing the gap where an agent's own file/shell tools bypassed the gateway. On by default and fail-closed: it defers to the firewall and allow/deny rules above, and it is the only governance on headless runs (their permission prompts auto-approve). Restart the node to apply."
 			title="Command approval"
 		>
 			<div className="flex flex-col gap-3">
@@ -4688,14 +4709,14 @@ function InspectorCard({ ctx, target }: { ctx: ScopeCtx; target: ApiTarget }) {
 							    local classifier running. */}
 							<p className="text-muted-foreground text-xs">
 								Any routable model id. Leave empty for this node's local
-								classifier (Gemma 3 270M) — saving writes that id explicitly,
+								classifier (Gemma 3 270M). Saving writes that id explicitly,
 								because a blank value would leave the local classifier stopped.
 							</p>
 							{unservedModel ? (
 								<p className="text-destructive text-xs">
 									The inspector is on and pointed at the local classifier, but{" "}
 									{unservedReason}. The inspection call will fail, and the
-									inspector fails open — so it will allow every turn while still
+									inspector fails open, so it will allow every turn while still
 									reporting as enabled. Pick a model this node can reach.
 								</p>
 							) : null}
@@ -4962,7 +4983,7 @@ function EvaluatorsCard({ target, ctx }: { target: ApiTarget; ctx: ScopeCtx }) {
 
 	return (
 		<SettingsSection
-			caption="Enable typed evaluators as inline guardrails at this scope. Each runs on the request/response path with a Block / Warn / Sanitize action. Offline-only evaluators (quality, conversation, trajectory, voice) are not shown here — they live on the agent Evals surface. A ‘not yet enforced’ evaluator is catalogued but not wired to execution yet."
+			caption="Enable typed evaluators as inline guardrails at this scope. Each runs on the request/response path with a Block / Warn / Sanitize action. Offline-only evaluators (quality, conversation, trajectory, voice) are not shown here; they live on the agent Evals surface. A ‘not yet enforced’ evaluator is catalogued but not wired to execution yet."
 			title="Evaluators"
 		>
 			<div className="px-3">
@@ -5191,8 +5212,8 @@ function GuardrailsSection({
 				<div className="flex flex-col gap-3">
 					{reachable ? null : (
 						<p className="px-3 text-muted-foreground text-sm">
-							Gateway unreachable — controls are disabled. Start the gateway and
-							refresh to configure guardrails.
+							Gateway unreachable, so controls are disabled. Start the gateway
+							and refresh to configure guardrails.
 						</p>
 					)}
 					{reachable && configError ? (
@@ -5455,7 +5476,7 @@ function AuditPanel({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Gateway request log — provider, model, token usage, latency, and eval score. API keys are always redacted. Newest first."
+			caption="Gateway request log: provider, model, token usage, latency, and eval score. API keys are always redacted. Newest first."
 			headerAction={
 				<div className="flex items-center gap-3">
 					<div className="flex items-center gap-2">
@@ -5811,7 +5832,7 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Anything on this node that needs an agent or a model, but has none configured of its own, uses this: plugin settings left blank, chat auto-rename, side questions, the advisor, context compaction, and follow-up suggestions. A setting that names its own target always wins over this one. Leave it unset to keep each feature's built-in fallback — which for chat titles and suggestions is the on-device local model, so setting a cloud default here does route those through the Gateway."
+			caption="Anything on this node that needs an agent or a model, but has none configured of its own, uses this: plugin settings left blank, chat auto-rename, side questions, the advisor, context compaction, and follow-up suggestions. A setting that names its own target always wins over this one. Leave it unset to keep each feature's built-in fallback. For chat titles and suggestions that fallback is the on-device local model, so setting a cloud default here does route those through the Gateway."
 			title="Default agent & model"
 		>
 			<SettingsCard className="space-y-4">
@@ -5834,8 +5855,8 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 					)}
 					<p className="text-muted-foreground text-xs">
 						Pick an agent to run the work, or a provider and model to answer it
-						directly. Features that make a plain model call can't run an agent —
-						if you pick one, they use the model it is configured with, and fall
+						directly. Features that make a plain model call can't run an agent.
+						If you pick one, they use the model it is configured with, and fall
 						back to their own default when it has none.
 					</p>
 				</div>

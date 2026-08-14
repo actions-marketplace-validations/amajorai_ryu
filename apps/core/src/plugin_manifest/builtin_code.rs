@@ -402,6 +402,11 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     ),
     (
         "@ryu/output-styles",
+        "output-styles/no-ai-slop.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/no-ai-slop.md"),
+    ),
+    (
+        "@ryu/output-styles",
         "output-styles/plain-text.md",
         include_str!("../../../../plugins-store/output-styles/output-styles/plain-text.md"),
     ),

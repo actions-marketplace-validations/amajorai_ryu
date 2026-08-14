@@ -3,6 +3,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { CopilotPlugin } from "@platejs/ai/react";
 import { serializeMd, stripMarkdown } from "@platejs/markdown";
+import { EDITOR_AI_UNCONFIGURED_ERROR } from "@ryu/ui/components/editor/use-chat.ts";
 import { GhostText } from "@ryu/ui/components/editor/ui/ghost-text.tsx";
 import { getEditorAiConfig } from "@ryu/ui/lib/editor-ai.ts";
 import { generateText } from "ai";
@@ -46,9 +47,7 @@ const copilotFetch = (async (_input, init) => {
 	const aiCfg = getEditorAiConfig();
 
 	if (!(aiCfg.enabled && aiCfg.baseUrl && aiCfg.model)) {
-		throw new Error(
-			"Editor AI is not configured. Turn it on in Settings → Editor and pick a model."
-		);
+		throw new Error(EDITOR_AI_UNCONFIGURED_ERROR);
 	}
 
 	const raw = typeof init?.body === "string" ? init.body : "{}";

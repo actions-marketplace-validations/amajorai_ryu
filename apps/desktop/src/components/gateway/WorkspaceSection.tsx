@@ -62,6 +62,9 @@ import {
 	setMemberRoles,
 	updateRole,
 } from "@/src/lib/api/org.ts";
+// A different module from `org.ts` above: `orgs.ts` owns the SESSION's active
+// org, which `org.ts` (the org list + RBAC routes) has no accessor for.
+import { useActiveOrgId } from "@/src/lib/api/orgs.ts";
 
 /** Where members are invited / roles changed (Better Auth owns those mutations). */
 const ORGANIZATIONS_URL = `${FRONTEND_URL.replace(/\/$/, "")}/organizations`;
@@ -542,8 +545,21 @@ export function WorkspaceSection() {
 	});
 
 	const orgs = orgsQuery.data ?? [];
-	const primaryOrg = orgs[0] ?? null;
-	const orgId = primaryOrg?.id ?? null;
+	const activeOrgId = useActiveOrgId();
+	// The org this SESSION is scoped to, not the first membership. `orgs[0]` was
+	// the server's own fallback for a session with no active org (the earliest
+	// membership), which is exactly why it looked right until someone switched
+	// workspace: from then on this section showed the previous org's roster and
+	// role matrix while every other org-scoped surface had moved on. The fallback
+	// is kept, but only as the fallback it always was.
+	const activeOrg =
+		orgs.find((org) => org.id === activeOrgId) ?? orgs[0] ?? null;
+	const orgId = activeOrg?.id ?? null;
+	// Everything except the one shown above. Computed here so the section's own
+	// visibility test is the list it renders: `orgs.length > 1` was equivalent
+	// only while the org above was always `orgs[0]`, and would otherwise be able
+	// to open an empty group.
+	const otherOrgs = orgs.filter((org) => org.id !== orgId);
 
 	const membersQuery = useQuery({
 		enabled: authed && Boolean(orgId),
@@ -600,8 +616,8 @@ export function WorkspaceSection() {
 				<SettingsGroup>
 					<SettingsItem
 						description={
-							primaryOrg
-								? `You are ${primaryOrg.role ?? "a member"} of this workspace.`
+							activeOrg
+								? `You are ${activeOrg.role ?? "a member"} of this workspace.`
 								: "You are not in an organization yet. Create one to share this node with a team."
 						}
 						title={
@@ -610,15 +626,15 @@ export function WorkspaceSection() {
 									className="size-4 text-muted-foreground"
 									icon={UserGroupIcon}
 								/>
-								{primaryOrg?.name ?? "Personal"}
-								{primaryOrg ? <RoleBadge role={primaryOrg.role} /> : null}
+								{activeOrg?.name ?? "Personal"}
+								{activeOrg ? <RoleBadge role={activeOrg.role} /> : null}
 							</span>
 						}
 					/>
-					{primaryOrg ? (
+					{activeOrg ? (
 						<SettingsItem
 							actions={
-								<CopyableId label="organization ID" value={primaryOrg.id} />
+								<CopyableId label="organization ID" value={activeOrg.id} />
 							}
 							description="Identifies this workspace across surfaces and in support requests."
 							title="Organization ID"
@@ -634,7 +650,7 @@ export function WorkspaceSection() {
 				</SettingsGroup>
 			</SettingsSection>
 
-			{primaryOrg && orgId ? (
+			{activeOrg && orgId ? (
 				<SettingsSection
 					caption="Everyone in this workspace. Owners and admins manage members and billing; assign custom roles for finer-grained permissions."
 					title="Members"
@@ -692,7 +708,7 @@ export function WorkspaceSection() {
 				</SettingsSection>
 			) : null}
 
-			{primaryOrg && orgId ? (
+			{activeOrg && orgId ? (
 				rolesQuery.isLoading ? (
 					<SettingsSection title="Roles">
 						<div className="flex h-16 items-center justify-center">
@@ -704,13 +720,13 @@ export function WorkspaceSection() {
 				)
 			) : null}
 
-			{orgs.length > 1 ? (
+			{otherOrgs.length > 0 ? (
 				<SettingsSection
 					caption="Other organizations you belong to."
 					title="Your organizations"
 				>
 					<SettingsGroup>
-						{orgs.slice(1).map((org) => (
+						{otherOrgs.map((org) => (
 							<SettingsItem
 								actions={<CopyableId label="organization ID" value={org.id} />}
 								description={`You are ${org.role ?? "a member"}.`}

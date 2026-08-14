@@ -1301,6 +1301,154 @@ pub const APPROVALS_UI_HTML: &str = include_str!("fixtures/approvals.ui.html");
 /// - Any manifest that fails JSON parsing is skipped with a warning.
 pub struct PluginManifestLoader;
 
+/// A manifest that parsed and validated cleanly but whose declared **host floors**
+/// (`engines`) this node does not satisfy.
+///
+/// ## Why the manifest is private
+///
+/// An incompatible plugin has to be VISIBLE (the marketplace must show it, greyed,
+/// saying what it needs) without being LIVE. Those pull in opposite directions: the
+/// moment an incompatible manifest reaches the runtime manifest list, every
+/// consumer that iterates it picks the plugin up — hook dispatch, `app_contrib`,
+/// `may_emit_event`, the contributions endpoint, sidecar spawn, `http.public_mount`,
+/// `AppGate` registration. Auditing all of them to skip one flag is exactly the kind
+/// of "one site missed it" bug this codebase already learned about with legacy id
+/// canonicalization.
+///
+/// So the manifest is not exposed as a field. [`PluginManifestLoader::load`] still
+/// returns `Vec<PluginManifest>` containing ONLY compatible manifests — every
+/// existing runtime caller is unchanged and cannot see an incompatible plugin even
+/// in principle. The catalog projection is the one consumer that wants it, and it
+/// asks by name via [`IncompatibleManifest::for_catalog`].
+#[derive(Debug, Clone)]
+pub struct IncompatibleManifest {
+    /// PRIVATE by design — see the type doc. Reach it via
+    /// [`IncompatibleManifest::for_catalog`], which names its one legitimate use.
+    manifest: PluginManifest,
+    /// Which floors are unsatisfied, and what is actually running.
+    verdict: CompatibilityVerdict,
+    /// Where this manifest came from (`<built-in>` or a path), for diagnostics.
+    source: String,
+}
+
+impl IncompatibleManifest {
+    /// The plugin id.
+    pub fn id(&self) -> &str {
+        &self.manifest.id
+    }
+
+    /// Why it is incompatible.
+    pub fn verdict(&self) -> &CompatibilityVerdict {
+        &self.verdict
+    }
+
+    /// Where it was loaded from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The manifest, **for building a marketplace card only**.
+    ///
+    /// Named for its one legitimate caller so that any other use is obvious in
+    /// review. Do NOT register hooks, routes, sidecars, contributions or public
+    /// mounts from this — the plugin is not installable on this node, and anything
+    /// it registers is a capability the user cannot see or govern.
+    pub fn for_catalog(&self) -> &PluginManifest {
+        &self.manifest
+    }
+}
+
+/// The outcome of a load pass: the manifests that may run, and the ones that may
+/// only be shown.
+#[derive(Debug, Clone, Default)]
+pub struct LoadedManifests {
+    /// Manifests that passed every gate. This is what the runtime uses.
+    pub compatible: Vec<PluginManifest>,
+    /// Manifests held back by an unsatisfied host floor. Catalog-only.
+    pub incompatible: Vec<IncompatibleManifest>,
+}
+
+/// Why a manifest did not make it into the runtime set.
+///
+/// Split so the loader can tell "this file is broken, drop it" (the historical
+/// behaviour, still a warning) apart from "this plugin is fine but needs a newer
+/// host", which is a first-class, user-facing state rather than a log line.
+#[derive(Debug, Clone)]
+pub enum ManifestRejection {
+    /// Malformed, unparseable, duplicate, or otherwise invalid. Dropped entirely.
+    Invalid(String),
+    /// Well-formed, but this node does not meet its declared host floors.
+    Incompatible(Box<IncompatibleManifest>),
+}
+
+/// Every pre-existing gate in `parse_and_validate` reports a `String`, and all of
+/// them mean the same thing: this manifest is not usable. Converting here keeps
+/// those call sites (and their `?`) untouched, so the only gate that had to learn
+/// the new outcome is the host-floor one.
+impl From<String> for ManifestRejection {
+    fn from(msg: String) -> Self {
+        ManifestRejection::Invalid(msg)
+    }
+}
+
+impl std::fmt::Display for ManifestRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestRejection::Invalid(msg) => f.write_str(msg),
+            ManifestRejection::Incompatible(inc) => {
+                let unmet: Vec<String> = inc
+                    .verdict
+                    .unmet
+                    .iter()
+                    .filter(|u| u.is_blocking())
+                    .map(|u| match u {
+                        UnmetRequirement::TooOld {
+                            surface,
+                            required,
+                            present,
+                        } => format!("{} requires {required} but this node has {present}", surface.engines_key()),
+                        UnmetRequirement::InvalidRequirement {
+                            surface, required, ..
+                        } => format!("{} has an invalid requirement '{required}'", surface.engines_key()),
+                        UnmetRequirement::Unknown { surface, required } => {
+                            format!("{} requires {required} (version unknown)", surface.engines_key())
+                        }
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "app '{}' is not compatible with this node: {} (source: {})",
+                    inc.manifest.id,
+                    unmet.join("; "),
+                    inc.source
+                )
+            }
+        }
+    }
+}
+
+/// The host versions this node can actually vouch for.
+///
+/// Core knows its own version, and the Gateway's when it has been observed via
+/// `/health`. Everything else — desktop, island, mobile, extension, web, and a
+/// separately-installed CLI — is a distinct install that never reports in, so it is
+/// deliberately absent rather than guessed. Absent means UNKNOWN, which
+/// [`HostVersions::evaluate`] treats as advisory: see
+/// [`UnmetRequirement::Unknown`].
+///
+/// Guessing here would be the dangerous choice. Core, Gateway, CLI and desktop do
+/// ship from one release train, so stamping Core's version onto all four would
+/// usually be right — and silently wrong exactly when it matters, for the stale
+/// binary left behind by a partial update, which is the case a floor exists to
+/// catch.
+pub fn node_host_versions() -> HostVersions {
+    let mut hosts = HostVersions::default().with(Surface::Core, core_version().to_string());
+    if let Some(gw) = crate::sidecar::gateway::observed_gateway_version() {
+        hosts = hosts.with(Surface::Gateway, gw);
+    }
+    hosts
+}
+
 impl PluginManifestLoader {
     /// Resolve the plugins scan directory.
     ///
@@ -1328,14 +1476,36 @@ impl PluginManifestLoader {
 
     /// Load all manifests: built-ins first, then user-installed. Returns only
     /// the manifests that pass semver and duplicate-id validation.
+    ///
+    /// **Compatible manifests only.** A plugin whose host floors this node does not
+    /// meet is not in this list — which is precisely how the runtime is kept from
+    /// ever activating one. Callers that need to SHOW those (the catalog) use
+    /// [`Self::load_all`] and read the [`LoadedManifests::incompatible`] lane.
     pub fn load() -> Vec<PluginManifest> {
+        Self::load_all().compatible
+    }
+
+    /// [`Self::load`] plus the manifests held back by an unsatisfied host floor.
+    ///
+    /// Only the catalog projection should call this. Everything that RUNS a plugin
+    /// wants `load()`, whose type makes the incompatible lane unreachable.
+    pub fn load_all() -> LoadedManifests {
         let mut manifests: Vec<PluginManifest> = Vec::new();
+        let mut incompatible: Vec<IncompatibleManifest> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
 
         // 1. Built-in manifests (compiled in).
         for &raw in BUILTIN_MANIFESTS {
             match Self::parse_and_validate(raw, "<built-in>", None, &mut seen_ids) {
                 Ok(m) => manifests.push(m),
+                Err(ManifestRejection::Incompatible(inc)) => {
+                    tracing::info!(
+                        plugin = %inc.id(),
+                        "built-in held back: {}",
+                        ManifestRejection::Incompatible(inc.clone())
+                    );
+                    incompatible.push(*inc);
+                }
                 Err(e) => tracing::warn!("built-in manifest skipped: {e}"),
             }
         }
@@ -1382,6 +1552,14 @@ impl PluginManifestLoader {
                                 &mut seen_ids,
                             ) {
                                 Ok(m) => manifests.push(m),
+                                Err(ManifestRejection::Incompatible(inc)) => {
+                                    tracing::info!(
+                                        plugin = %inc.id(),
+                                        "installed plugin held back: {}",
+                                        ManifestRejection::Incompatible(inc.clone())
+                                    );
+                                    incompatible.push(*inc);
+                                }
                                 Err(e) => {
                                     tracing::warn!(
                                         "plugin manifest at {} skipped: {e}",
@@ -1410,7 +1588,10 @@ impl PluginManifestLoader {
             }
         }
 
-        manifests
+        LoadedManifests {
+            compatible: manifests,
+            incompatible,
+        }
     }
 
     /// Parse ONLY the compiled-in built-in manifests, ignoring `~/.ryu/plugins`.
@@ -1465,7 +1646,7 @@ impl PluginManifestLoader {
         source: &str,
         code_base: Option<&Path>,
         seen_ids: &mut HashSet<String>,
-    ) -> Result<PluginManifest, String> {
+    ) -> Result<PluginManifest, ManifestRejection> {
         let mut manifest: PluginManifest =
             serde_json::from_str(raw).map_err(|e| format!("JSON parse error: {e}"))?;
 
@@ -1511,32 +1692,57 @@ impl PluginManifestLoader {
             return Err(format!(
                 "app '{}' has invalid semver version '{}' (source: {source})",
                 manifest.id, manifest.version
-            ));
+            ).into());
         }
 
         if !seen_ids.insert(manifest.id.clone()) {
             return Err(format!(
                 "duplicate app id '{}' (source: {source}); first occurrence wins",
                 manifest.id
-            ));
+            ).into());
         }
 
-        // Version-pin gate: if the manifest declares `engines.ryu`, it must parse
-        // as a semver requirement AND the running Core version must satisfy it.
-        // Reject otherwise so an incompatible plugin never loads.
+        // Host-floor gate: every requirement in `engines` must parse as semver, and
+        // every floor for a surface whose version this node KNOWS must be satisfied.
+        //
+        // The two failures are deliberately different outcomes:
+        //
+        //   * an UNPARSEABLE requirement is a broken manifest — a hard `Invalid`,
+        //     dropped exactly as before. There is nothing to show a user, and a
+        //     requirement nobody can evaluate must never be treated as satisfied.
+        //   * an UNSATISFIED floor is a well-formed plugin that this node is too old
+        //     to run. That used to be a hard reject too, which made the plugin
+        //     VANISH: no card, no explanation, no way for a user to learn that
+        //     updating would bring it back. It now goes to the incompatible lane —
+        //     shown in the marketplace with what it needs, refused at install.
+        //
+        // Only floors for OBSERVABLE surfaces can block; see `node_host_versions`.
         if let Some(engines) = &manifest.engines {
-            let req = semver::VersionReq::parse(&engines.ryu).map_err(|e| {
-                format!(
-                    "app '{}' has invalid engines.ryu requirement '{}': {e} (source: {source})",
-                    manifest.id, engines.ryu
-                )
-            })?;
-            let core = core_version();
-            if !req.matches(&core) {
-                return Err(format!(
-                    "app '{}' requires Ryu engine '{}' but this Core is '{core}' (source: {source})",
-                    manifest.id, engines.ryu
-                ));
+            let verdict = node_host_versions().evaluate(Some(engines));
+            if let Some(bad) = verdict.unmet.iter().find_map(|u| match u {
+                UnmetRequirement::InvalidRequirement {
+                    surface,
+                    required,
+                    reason,
+                } => Some((surface, required, reason)),
+                _ => None,
+            }) {
+                let (surface, required, reason) = bad;
+                return Err(ManifestRejection::Invalid(format!(
+                    "app '{}' has an invalid engines.{} requirement '{required}': {reason} \
+                     (source: {source})",
+                    manifest.id,
+                    surface.engines_key(),
+                )));
+            }
+            if !verdict.compatible {
+                return Err(ManifestRejection::Incompatible(Box::new(
+                    IncompatibleManifest {
+                        manifest,
+                        verdict,
+                        source: source.to_owned(),
+                    },
+                )));
             }
         }
 
@@ -1560,13 +1766,13 @@ impl PluginManifestLoader {
                     return Err(format!(
                         "app '{}' cannot depend on itself (source: {source})",
                         manifest.id
-                    ));
+                    ).into());
                 }
                 if !seen_deps.insert(dep.id.as_str()) {
                     return Err(format!(
                         "app '{}' declares duplicate dependency '{}' (source: {source})",
                         manifest.id, dep.id
-                    ));
+                    ).into());
                 }
                 if let Some(min) = &dep.min_version {
                     parse_min_version(min).map_err(|e| {
@@ -1597,7 +1803,7 @@ impl PluginManifestLoader {
                     return Err(format!(
                         "app '{}' declares duplicate sidecar name '{}' (source: {source})",
                         manifest.id, spec.name
-                    ));
+                    ).into());
                 }
             }
         }
@@ -1610,13 +1816,13 @@ impl PluginManifestLoader {
                 return Err(format!(
                     "app '{}' companion label must not be empty (source: {source})",
                     manifest.id
-                ));
+                ).into());
             }
             if crate::plugin_manifest::schema::label_impersonates_system_chrome(&companion.label) {
                 return Err(format!(
                     "app '{}' companion label '{}' must not impersonate system chrome (must not contain 'ryu' or 'system') (source: {source})",
                     manifest.id, companion.label
-                ));
+                ).into());
             }
         }
 
@@ -1630,7 +1836,7 @@ impl PluginManifestLoader {
                     return Err(format!(
                         "app '{}' contributes unknown runnable id '{referenced}' (no matching entry in 'runnables') (source: {source})",
                         manifest.id
-                    ));
+                    ).into());
                 }
             }
         }
@@ -2582,8 +2788,12 @@ mod tests {
 
     // ── PluginManifestLoader tests ───────────────────────────────────────────────
 
+    /// Flattens the typed rejection to its rendered message so the existing
+    /// `err.contains("…")` assertions keep reading the same way. Tests that need to
+    /// distinguish `Invalid` from `Incompatible` call `parse_and_validate` directly.
     fn loader_parse(raw: &str) -> Result<PluginManifest, String> {
         PluginManifestLoader::parse_and_validate(raw, "<test>", None, &mut HashSet::new())
+            .map_err(|e| e.to_string())
     }
 
     // ── companion label anti-impersonation ───────────────────────────────────
@@ -2921,8 +3131,9 @@ mod tests {
         let mut seen = HashSet::new();
         PluginManifestLoader::parse_and_validate(json, "<t1>", None, &mut seen)
             .expect("first occurrence should succeed");
-        let err =
-            PluginManifestLoader::parse_and_validate(json, "<t2>", None, &mut seen).unwrap_err();
+        let err = PluginManifestLoader::parse_and_validate(json, "<t2>", None, &mut seen)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("duplicate app id"), "unexpected error: {err}");
     }
 
@@ -3223,8 +3434,12 @@ mod tests {
         assert_eq!(m.engines.as_ref().unwrap().ryu, ">=0.0.1");
     }
 
+    /// An unsatisfiable floor used to be a hard reject, which made the plugin
+    /// VANISH — no card, no explanation, no way to learn that updating would bring
+    /// it back. It is now a typed `Incompatible`, which the catalog can render and
+    /// the runtime still never sees.
     #[test]
-    fn engines_unsatisfied_is_rejected() {
+    fn engines_unsatisfied_is_held_back_not_dropped() {
         // An impossibly-high requirement no real Core version satisfies.
         let json = r#"{
             "id": "com.example.engbad",
@@ -3233,15 +3448,35 @@ mod tests {
             "runnables": [],
             "engines": { "ryu": ">=9999.0.0" }
         }"#;
-        let err = loader_parse(json).unwrap_err();
-        assert!(
-            err.contains("requires Ryu engine"),
-            "expected version-pin rejection, got: {err}"
-        );
+        let err = PluginManifestLoader::parse_and_validate(
+            json,
+            "<test>",
+            None,
+            &mut HashSet::new(),
+        )
+        .unwrap_err();
+
+        let ManifestRejection::Incompatible(inc) = err else {
+            panic!("an unsatisfied floor must be Incompatible, not Invalid: {err}");
+        };
+        assert_eq!(inc.id(), "com.example.engbad");
+        assert!(!inc.verdict().compatible);
+        assert!(matches!(
+            inc.verdict().unmet.as_slice(),
+            [UnmetRequirement::TooOld {
+                surface: Surface::Core,
+                ..
+            }]
+        ));
+        // The card still has everything it needs to render.
+        assert_eq!(inc.for_catalog().name, "Eng Bad");
     }
 
+    /// An UNPARSEABLE requirement stays a hard drop: there is nothing coherent to
+    /// show a user, and a requirement nobody can evaluate must never be treated as
+    /// satisfied.
     #[test]
-    fn engines_invalid_requirement_is_rejected() {
+    fn engines_invalid_requirement_is_still_dropped() {
         let json = r#"{
             "id": "com.example.engsyntax",
             "name": "Eng Syntax",
@@ -3249,10 +3484,68 @@ mod tests {
             "runnables": [],
             "engines": { "ryu": "not-a-req" }
         }"#;
-        let err = loader_parse(json).unwrap_err();
+        let err = PluginManifestLoader::parse_and_validate(
+            json,
+            "<test>",
+            None,
+            &mut HashSet::new(),
+        )
+        .unwrap_err();
+
         assert!(
-            err.contains("invalid engines.ryu"),
+            matches!(err, ManifestRejection::Invalid(_)),
+            "an unparseable requirement must be Invalid, not Incompatible"
+        );
+        // Named by the key an author actually wrote (`ryu`), never `engines.core`.
+        assert!(
+            err.to_string().contains("invalid engines.ryu"),
             "expected invalid-requirement rejection, got: {err}"
+        );
+    }
+
+    /// THE CONTAINMENT PROPERTY. An incompatible manifest must be visible to the
+    /// catalog and invisible to the runtime — and the type system, not an audit of
+    /// every consumer, is what guarantees the second half: `load()` returns
+    /// `Vec<PluginManifest>` and the incompatible lane is a different type that
+    /// only `load_all()` hands out.
+    #[test]
+    fn an_incompatible_manifest_never_reaches_the_runtime_manifest_list() {
+        let json = r#"{
+            "id": "com.example.contained",
+            "name": "Contained",
+            "version": "1.0.0",
+            "runnables": [],
+            "engines": { "ryu": ">=9999.0.0" },
+            "contributes": {
+                "turn_hooks": [
+                    { "id": "h1", "on": "pre_user_turn", "code": "return ctx;" }
+                ]
+            }
+        }"#;
+        let mut seen = HashSet::new();
+        let rejected =
+            PluginManifestLoader::parse_and_validate(json, "<test>", None, &mut seen).unwrap_err();
+
+        let ManifestRejection::Incompatible(inc) = rejected else {
+            panic!("expected the incompatible lane");
+        };
+
+        // It DOES declare a turn hook...
+        assert_eq!(
+            inc.for_catalog()
+                .contributes
+                .as_ref()
+                .map(|c| c.turn_hooks.len()),
+            Some(1),
+            "the fixture must actually contribute something, or this proves nothing"
+        );
+
+        // ...and it is NOT in the list every runtime consumer iterates. `load()`
+        // cannot return it: its type has no incompatible lane at all.
+        let runtime: Vec<PluginManifest> = PluginManifestLoader::load();
+        assert!(
+            !runtime.iter().any(|m| m.id == "com.example.contained"),
+            "an incompatible plugin must never enter the runtime manifest list"
         );
     }
 
@@ -3478,6 +3771,7 @@ mod tests {
     fn parse(raw: &str) -> Result<PluginManifest, String> {
         let mut seen = HashSet::new();
         PluginManifestLoader::parse_and_validate(raw, "<test>", None, &mut seen)
+            .map_err(|e| e.to_string())
     }
 
     const NO_DEPS: &str = r#"{

@@ -11,8 +11,14 @@ import {
 	applyNodeUpdate,
 	checkForUpdate,
 	getAutoUpdateEnabled,
+	scheduleNodeUpdate,
 	type UpdateCheck,
 } from "@/src/lib/api/update.ts";
+import {
+	clearPendingAppUpdate,
+	dueAppUpdate,
+	getPendingAppUpdate,
+} from "@/src/lib/app-update-schedule.ts";
 import { getAppVersion, verdictAppliesToApp } from "@/src/lib/app-version.ts";
 import {
 	getReleaseChannel,
@@ -59,6 +65,15 @@ export function AutoUpdater() {
 		const run = async () => {
 			const node = getNode();
 			const target = toTarget(node);
+			// A deferred install the user already agreed to comes FIRST, before any
+			// check. This is the primary execution path for a desktop deferral, not
+			// a fallback: the app is normally asleep or quit at 03:00, so "the next
+			// launch after the window" is when the promise is actually kept. See
+			// `lib/app-update-schedule.ts` for why that is the only promise this
+			// surface may make.
+			if (await installDeferredUpdate(node)) {
+				return;
+			}
 			// ALWAYS clamped, regardless of which node answers. This verdict has
 			// exactly one consumer — `installUpdate`, which drives THIS APP'S OWN
 			// bundle — so the window that governs it is this user's, not the queried
@@ -88,6 +103,22 @@ export function AutoUpdater() {
 			// so the app's own version is what the release has to beat.
 			if (!(await verdictAppliesToApp(verdict))) {
 				return;
+			}
+
+			// An install this user already BOOKED for tonight must not be started
+			// now, and must not be nagged about again — they made the decision once.
+			// Anything still pending here is not yet due, since a due record was
+			// installed and cleared above.
+			const booked = await getPendingAppUpdate();
+			if (booked) {
+				if (booked.version === verdict.latest) {
+					return;
+				}
+				// A newer release superseded the booked one. Leaving the stale record
+				// would install an older build at the window — which the native
+				// updater refuses anyway, so the deferral would silently do nothing
+				// forever. Drop it and treat the new release as a fresh decision.
+				await clearPendingAppUpdate();
 			}
 
 			// The shared cross-surface `auto-updates` preference is the ONLY source of
@@ -124,7 +155,103 @@ export function AutoUpdater() {
 		run().catch(() => undefined);
 	}, [getNode]);
 
+	// OPPORTUNISTIC, not the mechanism. If the app happens to be open and the
+	// machine awake when the window arrives, install then — that is the one case
+	// where a desktop deferral can behave like the node's. It is a supplement to
+	// the launch check above, never a replacement: a lid-shut laptop runs no
+	// timers, and `dueAppUpdate` compares WALL CLOCK precisely so that a machine
+	// which slept through the hour still reports the record as due.
+	useEffect(() => {
+		const timer = setInterval(
+			() => {
+				installDeferredUpdate(getNode()).catch(() => undefined);
+			},
+			10 * 60 * 1000
+		);
+		return () => clearInterval(timer);
+	}, [getNode]);
+
 	return null;
+}
+
+/**
+ * Install a deferred update whose window has passed. Returns whether one was
+ * taken over, so the caller can skip its own check.
+ *
+ * THE RECORD IS CLEARED BEFORE THE INSTALL, NEVER AFTER — installing replaces
+ * this bundle and relaunches, so no line after `installUpdate` is guaranteed to
+ * run. A record that survived its own install would come due again on the next
+ * launch and reinstall forever. Clearing first costs a genuine failure one
+ * missed window instead of a restart loop, which is the same trade Core's
+ * scheduler makes.
+ *
+ * `pinned` is what keeps the promise honest: the stored verdict is the one the
+ * user was shown, and re-checking now would resolve the static feed to whatever
+ * is newest at THIS moment — a different build, with different release notes,
+ * on a machine they deliberately chose not to touch during the day.
+ */
+async function installDeferredUpdate(node: {
+	url: string;
+}): Promise<boolean> {
+	const due = await dueAppUpdate();
+	if (!due) {
+		return false;
+	}
+	// The booking may already have been satisfied — by the toast's "Update now",
+	// by an auto-install, or by the user installing a build by hand. Nothing else
+	// clears the record, so without this the stale one replays forever: the
+	// native updater refuses a version that is not newer, we fall back to a
+	// "v0.1.5 available" toast shown to someone already on v0.1.5, and the real
+	// check for that launch is skipped behind it.
+	if (!(await verdictAppliesToApp(due.verdict))) {
+		await clearPendingAppUpdate();
+		return false;
+	}
+	// Clearing FIRST, and refusing to install when it fails. Installing replaces
+	// this bundle and relaunches, so no line after `installUpdate` is guaranteed
+	// to run — a record that survived its own install comes due again next launch
+	// and reinstalls forever. If the record cannot be removed at all (a locked or
+	// read-only file), the honest move is to leave the normal check to run rather
+	// than start a loop nothing can break out of.
+	if (!(await clearPendingAppUpdate())) {
+		return false;
+	}
+	await installUpdate(due.verdict, { node, pinned: true });
+	return true;
+}
+
+/**
+ * Whether this release can honestly be booked for the quiet hour.
+ *
+ * A deferral only means anything if the build that lands later is the one the
+ * user agreed to now, and that requires all three:
+ *
+ *   * a LOCAL node answered. The verdict is replayed hours later without a
+ *     re-check, so a remote node's `tag` would let it choose which signed Ryu
+ *     build lands on this machine — the exposure `canPinInstall` exists to
+ *     deny. The live "Update now" path is not exposed the same way: it resolves
+ *     the static feed, which always yields genuine-latest whatever a node says.
+ *   * a `tag`. Without one there is nothing to pin to, and the install would
+ *     fall through to the static feed and deliver whatever is newest at 03:00.
+ *   * a FIXED channel. `nightly` / `canary` are rolling pointers, so pinning to
+ *     one installs whatever it holds at the window — the unpinned behaviour
+ *     with extra steps.
+ *
+ * Exported so the surface can hide the offer rather than fail at the window.
+ * Not offering a promise you cannot keep is the whole point of this feature.
+ */
+export function canDeferAppUpdate(
+	verdict: UpdateCheck,
+	node: { url: string } | undefined
+): boolean {
+	const channel = getReleaseChannel();
+	return (
+		node !== undefined &&
+		isLocalNode(node) &&
+		(verdict.tag ?? "") !== "" &&
+		channel !== "nightly" &&
+		channel !== "canary"
+	);
 }
 
 /**
@@ -252,6 +379,42 @@ function offerManualDownload(verdict: UpdateCheck, downloadsUrl: string): void {
  * Returns a message when it did remote work, `null` when the native updater took
  * over (it owns its own progress toasts and relaunch).
  */
+/**
+ * Defer a REMOTE node's update to that node's next quiet hour.
+ *
+ * Only meaningful for a node the desktop does not own. A local node's update
+ * ships inside this app bundle and is installed by the native updater, which
+ * has its own restart flow — there is nothing on the node to defer.
+ *
+ * Returns a human sentence naming the time AND the zone. "03:00" alone is the
+ * ambiguity deferring exists to remove: the node's zone is usually not the
+ * viewer's, and a user in Singapore scheduling a Frankfurt node means
+ * Frankfurt's night.
+ */
+export async function scheduleReleaseUpdate(
+	target: ApiTarget,
+	node: { url: string },
+	verdict: UpdateCheck
+): Promise<string> {
+	if (isLocalNode(node)) {
+		throw new Error(
+			"This node updates with the app itself, so there is nothing to schedule."
+		);
+	}
+	if (!verdict.asset) {
+		throw new Error(
+			`No install asset published for v${verdict.latest} on this node's platform.`
+		);
+	}
+	const pending = await scheduleNodeUpdate(
+		target,
+		verdict.asset,
+		verdict.latest
+	);
+	const when = new Date(pending.scheduled_for).toLocaleString();
+	return `v${pending.version} will install at ${when} (${pending.time_zone}).`;
+}
+
 export async function applyReleaseUpdate(
 	target: ApiTarget,
 	node: { url: string },
@@ -374,7 +537,25 @@ function canPinInstall(
 // action) can trigger the same single app-wide install from Core's verdict.
 export async function installUpdate(
 	verdict: UpdateCheck,
-	options?: { node?: { url: string } }
+	options?: {
+		node?: { url: string };
+		/**
+		 * Install exactly the release `verdict.tag` names, rather than whatever the
+		 * static feed resolves to now.
+		 *
+		 * Set ONLY by the deferred-install path, where the verdict was pinned when
+		 * the user agreed to it and re-resolving would hand over a build they never
+		 * saw.
+		 *
+		 * It does not widen who may install what. The entitlement check below runs
+		 * first and unchanged; a clamped verdict still routes through
+		 * `canPinInstall`, the updates-window guard, which is left alone; and the
+		 * pinned branch carries `canDeferAppUpdate`, which re-imposes the same
+		 * `isLocalNode` requirement `canPinInstall` makes — so a remote node still
+		 * cannot choose which signed build lands here.
+		 */
+		pinned?: boolean;
+	}
 ) {
 	// Cheap sanity check against a verdict that was not clamped when it should
 	// have been — a stale cached response, or a hand-crafted one. It CANNOT cover
@@ -421,6 +602,42 @@ export async function installUpdate(
 		} else {
 			offerManualDownload(verdict, downloadsUrl);
 		}
+		return;
+	}
+
+	// A deferred install on a fixed channel resolves to the tag it was booked
+	// against. The JS updater below can only read the static feed baked into
+	// tauri.conf.json, which always points at the ABSOLUTE latest — so using it
+	// here would install whatever shipped between the user agreeing and the
+	// window arriving, which is precisely the thing pinning exists to stop.
+	//
+	// A rolling pointer (`nightly` / `canary`) is excluded because it does not
+	// identify a build: pinning to it would install whatever the pointer holds
+	// now, which is the unpinned behaviour with extra steps. Those channels fall
+	// through to the channel path below, unchanged.
+	if (options?.pinned) {
+		// FAILS CLOSED, like the restricted branch above and for a sharper reason.
+		// A deferred verdict is replayed hours later with no re-check, so if the
+		// preconditions in `canDeferAppUpdate` do not hold we must NOT fall through
+		// to the JS updater: that reads the static feed, which always resolves to
+		// absolute-latest, and would quietly install a build the user never saw —
+		// the exact substitution pinning exists to prevent.
+		//
+		// The `isLocalNode` half is a trust boundary, not tidiness. `canPinInstall`
+		// documents it: a hostile or compromised node choosing among legitimately
+		// signed releases is not stopped by signature verification. The surface
+		// already refuses to OFFER a deferral in these cases, so reaching here
+		// means the record predates that check or the active node changed.
+		if (!canDeferAppUpdate(verdict, options.node)) {
+			offerManualDownload(verdict, downloadsUrl);
+			return;
+		}
+		await installPinnedUpdate(
+			verdict,
+			verdict.tag ?? "",
+			channel,
+			downloadsUrl
+		);
 		return;
 	}
 

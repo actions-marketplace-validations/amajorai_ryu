@@ -480,7 +480,7 @@ function SurfaceBackgroundEditor({ surface }: { surface: BackgroundSurface }) {
 export function BackgroundCustomizationSettings() {
 	return (
 		<SettingsSection
-			caption="Layer a gradient or image over the sidebar and page. Off by default — the theme colors show through any transparency."
+			caption="Layer a gradient or image over the sidebar and page. Off by default, so the theme colors show through any transparency."
 			title="Backgrounds"
 		>
 			<SettingsCard className="grid grid-cols-1 gap-6 md:grid-cols-2">

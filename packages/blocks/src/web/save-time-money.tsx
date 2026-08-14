@@ -27,8 +27,8 @@ const COLUMNS: Column[] = [
 		points: [
 			"Set up around your document types and your rules",
 			"Your reviewers stay in the loop where it counts",
-			"Ready in days, not a six month project",
-			"We build the first workflow with you, not for you to figure out",
+			"The overnight queue already drafted when your team arrives",
+			"We build the first workflow sitting with the people who do it",
 		],
 	},
 	{

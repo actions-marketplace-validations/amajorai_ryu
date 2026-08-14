@@ -28,6 +28,7 @@ import StoreCatalogLayout, {
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
 	StoreItemOverflowMenu,
+	storeItemContextMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
@@ -39,6 +40,7 @@ import {
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Badge } from "@ryu/ui/components/badge";
+import { Button } from "@ryu/ui/components/button";
 import {
 	Empty,
 	EmptyDescription,
@@ -49,6 +51,7 @@ import {
 import { Label } from "@ryu/ui/components/label";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/radio-group";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { StatusBadge, type StatusKind } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { type ComponentProps, useMemo, useState } from "react";
 import { useDebouncedValue } from "@/src/hooks/use-debounced-value.ts";
@@ -106,7 +109,16 @@ interface EngineListItem {
 	installState: EngineInstallState | null;
 	kind: EngineListKind;
 	name: string;
-	statusLabel: string | null;
+	/** The row's live STATE, as the shared status glyph plus the word it shows on
+	 *  hover. It used to be a bare `string | null` rendered as a grey text badge;
+	 *  three words ("Active", "Running", "Default") repeated down a two-column
+	 *  grid is most of what made the section look noisy, and none of them said
+	 *  anything the glyph cannot.
+	 *
+	 *  `label` overrides the kind's default word, which is what lets an image or
+	 *  speech engine say "Running" while wearing the same green check a text
+	 *  engine's "Active" does — they are the same state under two vocabularies. */
+	status: { kind: StatusKind; label?: string } | null;
 	/** Current toggle position: active (text) / running (image, speech) /
 	 *  default (sandbox). */
 	toggled: boolean;
@@ -162,6 +174,37 @@ function hasEngineUpdate(engine: { updateAvailable: boolean }): boolean {
 	return engine.updateAvailable;
 }
 
+/** Where to get each sandbox runtime, for the row that cannot install it.
+ *
+ *  Ryu deliberately never installs Docker: `crates/core/sandbox/src/docker.rs`
+ *  carries a LOCKED DECISION (issue #191) to stay detection-only, enforced by a
+ *  committed `detect_does_not_install_docker` test. That is not squeamishness —
+ *  on macOS the cask still ends in a EULA modal and a privileged-helper prompt,
+ *  on Linux the package needs root and `docker` group membership is
+ *  root-equivalent, and on Windows it needs admin plus WSL2 plus a reboot. An
+ *  "install" that ends with the user typing an admin password is a slower version
+ *  of telling them to install it.
+ *
+ *  What was NOT defensible is what the row said about it. A non-interactive
+ *  "Not detected" chip and a sentence reading "install its CLI on the node" named
+ *  nothing, linked nowhere, and offered no action — so the honest answer ("Ryu
+ *  will not install this one, here is where to get it") was indistinguishable
+ *  from a broken feature. */
+const SANDBOX_INSTALL_DOCS: Record<string, { href: string; what: string }> = {
+	docker: {
+		href: "https://docs.docker.com/get-started/get-docker/",
+		what: "Docker Desktop or Colima",
+	},
+	microsandbox: {
+		href: "https://github.com/microsandbox/microsandbox",
+		what: "the microsandbox CLI",
+	},
+	opensandbox: {
+		href: "https://github.com/agentsea/opensandbox",
+		what: "the opensandbox CLI",
+	},
+};
+
 function sandboxDescription(backend: SandboxBackendEntry): string {
 	if (!backend.supported) {
 		return unsupportedReason(
@@ -176,7 +219,10 @@ function sandboxDescription(backend: SandboxBackendEntry): string {
 	if (backend.name === "wasmtime") {
 		return "Built-in WASM sandbox (compile with the sandbox-wasmtime feature).";
 	}
-	return "Not detected — install its CLI on the node to use it.";
+	const docs = SANDBOX_INSTALL_DOCS[backend.name];
+	return docs
+		? `Not detected. Ryu does not install this one — it needs elevated privileges on every platform — so install ${docs.what} yourself and it is picked up automatically.`
+		: "Not detected — install its CLI on the node to use it.";
 }
 
 function useRowStates() {
@@ -235,6 +281,56 @@ const TOGGLE_LABELS: Record<
  * already in (the resident text engine, the default sandbox — neither can be
  * switched off, only swapped away from by picking another row).
  */
+/**
+ * The right-click rows for an engine card — the same branches
+ * {@link EngineCardAction} takes, restated for the context-menu primitive.
+ *
+ * `undefined` (no menu at all) for the two rows that genuinely have no verb: an
+ * engine this platform cannot run, and a sandbox runtime Ryu only DETECTS. Both
+ * already say so in their status badge, and a menu whose single row is greyed
+ * out teaches nothing the badge did not.
+ */
+function engineCardContextMenu({
+	item,
+	onInstall,
+	onOpenSettings,
+	onToggle,
+	onUninstall,
+}: {
+	item: EngineListItem;
+	onInstall: (item: EngineListItem) => void;
+	onOpenSettings?: (() => void) | null;
+	onToggle: (item: EngineListItem, next: boolean) => void;
+	onUninstall: (item: EngineListItem) => void;
+}) {
+	if (!item.available) {
+		return undefined;
+	}
+	const labels = TOGGLE_LABELS[item.kind];
+	if (!item.installed) {
+		if (item.installState === null) {
+			return undefined;
+		}
+		return storeItemContextMenu({
+			installed: false,
+			onInstall: () => onInstall(item),
+			onOpenSettings: onOpenSettings ?? undefined,
+		});
+	}
+	const canToggleOn = !item.toggled;
+	const canToggleOff = item.toggled && Boolean(labels.disable);
+	return storeItemContextMenu({
+		disableLabel: labels.disable,
+		enabled: item.toggled,
+		enableLabel: labels.enable,
+		installed: true,
+		onDisable: canToggleOff ? () => onToggle(item, false) : undefined,
+		onEnable: canToggleOn ? () => onToggle(item, true) : undefined,
+		onOpenSettings: onOpenSettings ?? undefined,
+		onUninstall: item.canUninstall ? () => onUninstall(item) : undefined,
+	});
+}
+
 function EngineCardAction({
 	item,
 	busy,
@@ -259,7 +355,12 @@ function EngineCardAction({
 	const labels = TOGGLE_LABELS[item.kind];
 
 	if (!item.available) {
-		return <Badge variant="secondary">Unavailable</Badge>;
+		return (
+			// The row shape carries `available` but not the platform list the reason
+			// text is built from (only the text-engine detail has it), so the card
+			// says the generic thing and the detail hero says which platforms.
+			<StatusBadge kind="unavailable" label="Not supported on this platform" />
+		);
 	}
 
 	if (!item.installed) {
@@ -267,7 +368,34 @@ function EngineCardAction({
 		// the node or it isn't — so it gets a status, not an Install button that
 		// could not do anything.
 		if (item.installState === null) {
-			return <Badge variant="secondary">Not detected</Badge>;
+			// Not a bare chip: this row can never gain an Install button (Ryu is
+			// detection-only for sandbox runtimes), so a dead badge is the ONLY thing
+			// the user would ever see here. The glyph carries the reason on hover and
+			// the link is the action the row is actually able to offer.
+			const docs = SANDBOX_INSTALL_DOCS[item.name];
+			return (
+				<div className="flex items-center gap-1">
+					<StatusBadge
+						kind="unavailable"
+						label={
+							docs
+								? `Not detected. Ryu does not install ${item.displayName} — it needs elevated privileges on every platform. Install ${docs.what} and it is picked up automatically.`
+								: "Not detected on this node"
+						}
+					/>
+					{docs ? (
+						<Button
+							render={
+								<a href={docs.href} rel="noopener noreferrer" target="_blank" />
+							}
+							size="sm"
+							variant="ghost"
+						>
+							How to install
+						</Button>
+					) : null}
+				</div>
+			);
 		}
 		return (
 			<StoreItemAction
@@ -374,8 +502,11 @@ function EngineList({
 							<StoreCatalogCard
 								action={
 									<div className="flex items-center gap-2">
-										{item.statusLabel ? (
-											<Badge variant="secondary">{item.statusLabel}</Badge>
+										{item.status ? (
+											<StatusBadge
+												kind={item.status.kind}
+												label={item.status.label}
+											/>
 										) : null}
 										<EngineCardAction
 											busy={rowState(item.name).pending !== null}
@@ -387,7 +518,18 @@ function EngineList({
 										/>
 									</div>
 								}
+								contextMenu={engineCardContextMenu({
+									item,
+									onInstall,
+									onOpenSettings: settingsOpener(item.id),
+									onToggle,
+									onUninstall,
+								})}
 								description={item.description}
+								// An engine that cannot run on this platform is dimmed, never
+								// hidden — the platform answer is exactly what the user came to
+								// find. Its status glyph carries the reason.
+								dimmed={!item.available}
 								icon={<HugeiconsIcon className="size-5" icon={CpuIcon} />}
 								key={item.id}
 								name={item.displayName}
@@ -658,12 +800,25 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						badges={[
-							engine.active ? "Active" : null,
-							unsupported ? "Unsupported here" : null,
-						].filter((b): b is string => Boolean(b))}
 						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
 						name={engine.displayName}
+						statusIcons={
+							<>
+								{engine.active ? (
+									<StatusBadge kind="active" tone="hero" />
+								) : null}
+								{unsupported ? (
+									<StatusBadge
+										kind="unavailable"
+										label={
+											unsupportedReason(engine.platforms) ??
+											"Not supported on this platform"
+										}
+										tone="hero"
+									/>
+								) : null}
+							</>
+						}
 						tagline={engine.description}
 					/>
 				}
@@ -781,11 +936,13 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						badges={[engine.running ? "Running" : null].filter(
-							(b): b is string => Boolean(b)
-						)}
 						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
 						name={engine.displayName}
+						statusIcons={
+							engine.running ? (
+								<StatusBadge kind="active" label="Running" tone="hero" />
+							) : null
+						}
 						tagline={engine.description}
 					/>
 				}
@@ -873,12 +1030,22 @@ function EngineDetailPanel({
 				}
 				hero={
 					<ListingHero
-						badges={[
-							backend.isDefault ? "Default" : null,
-							backend.supported ? null : "Unsupported here",
-						].filter((b): b is string => Boolean(b))}
 						icon={<HugeiconsIcon className="size-8" icon={CpuIcon} />}
 						name={backend.displayName}
+						statusIcons={
+							<>
+								{backend.isDefault ? (
+									<StatusBadge kind="default" tone="hero" />
+								) : null}
+								{backend.supported ? null : (
+									<StatusBadge
+										kind="unavailable"
+										label="Not supported on this platform"
+										tone="hero"
+									/>
+								)}
+							</>
+						}
 						tagline={sandboxDescription(backend)}
 					/>
 				}
@@ -989,7 +1156,7 @@ export default function EnginesCatalogSection() {
 				name: e.name,
 				displayName: e.displayName,
 				description: e.description,
-				statusLabel: e.active ? "Active" : null,
+				status: e.active ? ({ kind: "active" } as const) : null,
 				installState: e.installState,
 				installed: e.installState === "installed",
 				available: e.supported,
@@ -1008,7 +1175,9 @@ export default function EnginesCatalogSection() {
 			name: e.name,
 			displayName: e.displayName,
 			description: e.description,
-			statusLabel: e.running ? "Running" : null,
+			status: e.running
+				? ({ kind: "active", label: "Running" } as const)
+				: null,
 			installState: e.installState,
 			installed: e.installState === "installed",
 			available: true,
@@ -1036,7 +1205,7 @@ export default function EnginesCatalogSection() {
 				name: b.name,
 				displayName: b.displayName,
 				description: sandboxDescription(b),
-				statusLabel: b.isDefault ? "Default" : null,
+				status: b.isDefault ? ({ kind: "default" } as const) : null,
 				// Ryu never installs a sandbox backend — its runtime is detected on the
 				// node — so the row carries no install lifecycle at all.
 				installState: null,

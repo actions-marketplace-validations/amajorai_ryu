@@ -11,6 +11,7 @@ mod secrets;
 mod shadow_auth;
 mod startup;
 mod tray;
+mod update_schedule;
 mod win_process;
 // M7 companion spike — compiled only when companion-spike feature is active.
 mod companion_spike;
@@ -1671,6 +1672,10 @@ pub fn run() {
             deep_clean_node,
             midnight_wipe::get_midnight_wipe,
             midnight_wipe::set_midnight_wipe,
+            update_schedule::get_pending_app_update,
+            update_schedule::set_pending_app_update,
+            update_schedule::clear_pending_app_update,
+            update_schedule::due_app_update,
             migrate_data_folder,
             import_data_folder,
             open_external,

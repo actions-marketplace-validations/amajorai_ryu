@@ -1,20 +1,17 @@
 import {
 	Activity01Icon,
 	Add01Icon,
-	AiBrain01Icon,
 	ArrowLeft01Icon,
 	ArrowRight01Icon,
 	ArrowShrink02Icon,
 	ArrowShrinkIcon,
 	ArrowTurnBackwardIcon,
 	AudioWave01Icon,
-	BookOpen01Icon,
 	BubbleChatIcon,
 	Calendar04Icon,
 	Cancel01Icon,
 	CheckmarkBadge02Icon,
 	Copy01Icon,
-	CpuIcon,
 	Delete02Icon,
 	DeliverySecure01Icon,
 	Download01Icon,
@@ -27,26 +24,22 @@ import {
 	LinkSquare02Icon,
 	Message01Icon,
 	Mortarboard01Icon,
-	Package01Icon,
 	PackageIcon,
 	PencilEdit01Icon,
 	PieChartIcon,
 	PinIcon,
 	PinOffIcon,
 	Pulse01Icon,
-	PuzzleIcon,
 	RowDeleteIcon,
 	ServerStack01Icon,
 	Settings01Icon,
 	SidebarLeftIcon,
 	SidebarRightIcon,
 	SidebarTopIcon,
-	Square01Icon,
 	Tag01Icon,
 	Target01Icon,
 	UnfoldMoreIcon,
 	WorkflowCircle06Icon,
-	Wrench01Icon,
 	ZzzIcon,
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
@@ -65,6 +58,7 @@ import {
 	ContextMenuSubTrigger,
 	ContextMenuTrigger,
 } from "@ryu/ui/components/context-menu";
+import { EdgeScrollChevrons } from "@ryu/ui/components/edge-scroller.tsx";
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { GlyphDisplay } from "@ryu/ui/components/glyph-display.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
@@ -92,6 +86,7 @@ import { openTabWindow } from "@/lib/tauri-bridge.ts";
 import { isDockableRoutePath } from "@/src/components/panels/dock-panels.ts";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import type {
+	ShellRoute,
 	Split,
 	SplitOrientation,
 	Tab,
@@ -100,6 +95,7 @@ import type {
 } from "@/src/contexts/TabsContext.tsx";
 import {
 	findSplit,
+	shellRoute,
 	TAB_GROUP_COLORS,
 	useTabsContext,
 } from "@/src/contexts/TabsContext.tsx";
@@ -215,11 +211,29 @@ const COLOR_LABELS: Record<TabGroupColor, string> = {
 	orange: "Orange",
 };
 
-// Single source of truth for tab icons, keyed by the same paths as PATH_TITLES
-// in TabsContext. Keep both maps in sync so a new route always gets its own
-// icon instead of silently falling back to the chat icon. Each glyph mirrors
-// the matching sidebar entry (AppSidebar's SECTION_ICONS + the NavTabButton
-// chrome) so a page's tab and its sidebar row read as the same thing.
+// Tab icons for the routes that are their own page — the glyph half of
+// `PATH_TITLES` in TabsContext. The two multi-section shells (the Library and
+// the Customize store) do NOT take their glyph from here: every route in a
+// shell is one page, so `pathIcon` answers all of them from `SHELL_ICONS` below
+// before this map is consulted. A per-section key added back would be dead for
+// that route and would re-state the mistake it encodes — the shell's one name
+// under a section's icon, the "keeps the sidebar entry's icon" half of the bug
+// this seam closes.
+//
+// Some keys below are bare routes that are THEMSELVES shell routes. They are
+// unreachable for their own path (the family branch answers first) and stay
+// only for their DETAIL subpaths — separate pages that reach a glyph through
+// `pathIcon`'s leading-segment fallback, so deleting the alias would silently
+// drop every one of them to the chat icon. Exactly six such subpath families
+// exist (`/agents/:id/edit`, `/channels/:id`, `/identities/profile/:id`,
+// `/skills/:id/edit`, `/spaces/:id` + its doc/db/wb/app variants,
+// `/workflows/:id`), so exactly six aliases are kept. The rest — `/apps`,
+// `/engines`, `/extensions`, `/fleet`, `/models`, `/tools` — have no subpath
+// route in `builtins.ts` and were deleted rather than left as rows nothing can
+// read; re-add one only together with the route that reaches it.
+// Each glyph mirrors the matching sidebar entry (AppSidebar's SECTION_ICONS +
+// the NavTabButton chrome) so a page's tab and its sidebar row read as the same
+// thing.
 const PATH_ICONS: Record<string, IconSvgElement> = {
 	// No Home/dashboard entry: that page's path is declared by `@ryu/dashboards`
 	// (`contributes.sidebar_buttons[].target`), and its tab icon comes from the same
@@ -227,42 +241,19 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	// consults before this map. A path key here would go stale the moment the app
 	// moved itself.
 	"/chat": Message01Icon,
+	// Bare `/agents` is a Library route now (TabsContext's `LIBRARY_ALIAS_PATHS`),
+	// so this row is read only for the agent routes UNDER it: the explicit
+	// agent-edit branch in `pathIcon`, plus any other `/agents/*` deep link that
+	// lands on the leading-segment fallback.
 	"/agents": Target01Icon,
 	"/channels": BubbleChatIcon,
-	"/engines": CpuIcon,
 	"/identities": Key01Icon,
 	"/identities/new": Key01Icon,
-	// Every `/store/*` section and `/marketplace` are ONE page — the Customize
-	// shell — and `PATH_TITLES` already titles them all "Customize". They must
-	// therefore carry the sidebar's own Customize glyph (the `store` NavTabButton's
-	// `PackageIcon`), or the same page shows up as three different things: three of
-	// these keys were simply missing and fell back to the chat icon, and
-	// `/marketplace` disagreed with the button by rendering a storefront.
-	"/store": PackageIcon,
-	"/store/agents": PackageIcon,
-	"/store/apps": PackageIcon,
-	"/store/plugins": PackageIcon,
-	"/store/workflows": PackageIcon,
-	"/marketplace": PackageIcon,
-	"/models": Package01Icon,
 	"/skills": Mortarboard01Icon,
 	"/spaces": DeliverySecure01Icon,
 	"/meetings": AudioWave01Icon,
-	"/tools": Wrench01Icon,
 	"/workflows": WorkflowCircle06Icon,
 	"/workflows/build": WorkflowCircle06Icon,
-	"/library": LibraryIcon,
-	// The Library's section routes take their section's own glyph (LibraryPage's
-	// `SECTIONS`), not the Library book — a Library tab pinned to Agents should
-	// read as Agents.
-	"/library/agent": Target01Icon,
-	"/library/chat": BookOpen01Icon,
-	"/library/channel": BubbleChatIcon,
-	"/library/identity": Key01Icon,
-	"/library/memory": AiBrain01Icon,
-	"/library/space": DeliverySecure01Icon,
-	"/library/tools": Wrench01Icon,
-	"/library/workflow": WorkflowCircle06Icon,
 	"/quests": CheckmarkBadge02Icon,
 	"/timeline": Activity01Icon,
 	"/review": PieChartIcon,
@@ -272,9 +263,16 @@ const PATH_ICONS: Record<string, IconSvgElement> = {
 	"/approvals": InboxIcon,
 	"/downloads": Download01Icon,
 	"/settings": Settings01Icon,
-	"/extensions": PuzzleIcon,
-	"/apps": Square01Icon,
-	"/fleet": ServerStack01Icon,
+};
+
+/** One glyph per multi-section shell, the exact counterpart of the one title
+    `shellRoute` hands back. The Library book is the sidebar's own Library
+    chrome; `PackageIcon` is the `store` NavTabButton's Customize glyph. Keyed
+    off the SHELL, never the section, because a tab that names the page must not
+    change its icon when the user switches section inside it. */
+const SHELL_ICONS: Record<ShellRoute["family"], IconSvgElement> = {
+	library: LibraryIcon,
+	store: PackageIcon,
 };
 
 const AGENT_EDIT_PATH_RE = /^\/agents\/.+\/edit$/;
@@ -284,6 +282,16 @@ function pathIcon(path: string): IconSvgElement {
 	// Agent edit paths (/agents/:id/edit) share the agents icon.
 	if (AGENT_EDIT_PATH_RE.test(base)) {
 		return PATH_ICONS["/agents"];
+	}
+	// A shell route takes its family's glyph, before any per-path lookup: every
+	// section of the Library / the Customize store is the same page under the
+	// same name, so it must also be the same icon. Keying the glyph on the
+	// section instead is what let one tab read "Library" under a wrench, and —
+	// since the tab now switches its own path as the user moves through the
+	// family — made a single tab's glyph mutate while its name stood still.
+	const shell = shellRoute(base);
+	if (shell) {
+		return SHELL_ICONS[shell.family];
 	}
 	// Exact route wins; otherwise fall back to the leading path segment so
 	// detail subpaths (e.g. /spaces/:id, /workflows/:id) keep their page icon
@@ -296,18 +304,24 @@ function pathIcon(path: string): IconSvgElement {
 	return (root ? PATH_ICONS[`/${root}`] : undefined) ?? Message01Icon;
 }
 
-// The agents tab uses the static Ryu ghost logo instead of a HugeIcons glyph;
+// The agent editor uses the static Ryu ghost logo instead of a HugeIcons glyph;
 // every other tab keeps its path icon. Unloaded tabs always show Zzz regardless.
+//
+// Bare `/agents` is NOT one of them any more: it mounts the same LibraryPage
+// section as `/library/agent`, so it is a Library route (TabsContext's
+// `LIBRARY_ALIAS_PATHS`) and one tab now carries the whole family. Painting the
+// ghost on it would make that single tab flicker logo↔book as the user switched
+// section, under a name ("Library") that never changed.
 function isAgentsTab(path: string): boolean {
-	const base = path.split("?")[0];
-	return base === "/agents" || AGENT_EDIT_PATH_RE.test(base);
+	return AGENT_EDIT_PATH_RE.test(path.split("?")[0]);
 }
 
 // Renders a tab's leading glyph: spinner while busy; an entity GlyphValue when
 // set (chat / space / page / agent / meeting / plugin — same as the sidebar);
 // else an app-registered Iconify/Hugeicons id from the tab-icon registry
-// (manifest contributions + `shell.registerTabIcon`); else the static Ryu logo
-// for agents tabs; else the path's Hugeicons icon (or Zzz when unloaded).
+// (manifest contributions + `shell.registerTabIcon`), UNLESS the tab sits on a
+// shell route; else the static Ryu logo for the agent editor; else the path's
+// Hugeicons icon (or Zzz when unloaded).
 export function TabGlyph({
 	path,
 	icon,
@@ -329,7 +343,15 @@ export function TabGlyph({
 		() => resolveTabIcon(path) ?? "",
 		() => ""
 	);
-	const registeredIcon = resolveTabIcon(path);
+	// A registered rule may NOT repaint a shell route: `resolveTabIcon` matches by
+	// path PREFIX, and Core's own `builtin:spaces` rule (`pathPrefix: "/spaces"`)
+	// therefore covers bare `/spaces` — a Library alias. Without this guard the
+	// one Library tab would still swap its glyph book↔vault as the user moved
+	// between the Spaces section and any other, under a name that never changes:
+	// the section-keyed icon this seam removes, re-entering through the registry.
+	// Only the exact shell routes are exempt; the DETAIL pages underneath
+	// (`/spaces/:id`, a companion's own path) are separate pages and keep theirs.
+	const registeredIcon = shellRoute(path) ? undefined : resolveTabIcon(path);
 
 	if (busy && !unloaded) {
 		return <Spinner aria-label="In progress" className={className} />;
@@ -1478,7 +1500,10 @@ export function TitleBar() {
 			inline: "nearest",
 			behavior: "smooth",
 		});
-	}, []);
+		// `activeTabId` is load-bearing — it is the "newly-activated" half. Without
+		// it this runs once at mount and a newly activated tab is never scrolled
+		// into view.
+	}, [activeTabId]);
 
 	// Translate vertical wheel into horizontal scroll for the tab strip, since
 	// its scrollbar is hidden to keep the tabs aligned with the rest of the
@@ -1564,9 +1589,17 @@ export function TitleBar() {
 				// top in inset mode. Floating mode has no SidebarInset margin, so add
 				// the same 8px top offset to keep the tab row aligned with the sidebar
 				// node selector and the fixed nav cluster (see Layout).
+				//
+				// That offset is PADDING, not a `top`, and the difference is the whole
+				// point: `data-tauri-drag-region` lives on this element, so anything
+				// above its box is not draggable. With `top-2` the topmost 8px band of
+				// the window — the strip the blur layer reaches up into — was dead
+				// space: it looked like titlebar and dragged nothing. `h-14 pt-2`
+				// centres the row at exactly the same 32px from the window top while
+				// keeping the band inside the drag region.
 				className={cn(
-					"absolute left-0 z-10 flex h-12 w-full items-center px-2",
-					floatingChromeOffset ? "top-2" : "top-0"
+					"absolute top-0 left-0 z-10 flex w-full items-center px-2",
+					floatingChromeOffset ? "h-14 pt-2" : "h-12"
 				)}
 				data-tauri-drag-region
 				onMouseEnter={effectiveAutoHide ? showTitleBarPeek : undefined}
@@ -1591,17 +1624,15 @@ export function TitleBar() {
 				    it gets a plain solid background instead (no pointless blur over the
 				    reserved gap). Both sit behind the z-10 controls.
 
-				    The wrapper is pushed down by `top-2` in floating mode to align the
-				    tab row, but the background layer must NOT move with it — it has to
-				    keep starting at the true window top or an unblurred gap shows above
-				    it. So in floating mode we cancel the wrapper's 8px offset (pull the
-				    layer back up by 8px) and grow its height by the same 8px, keeping the
-				    blur anchored at the window top with its fade ending where it did. */}
+				    The wrapper now starts at the true window top in BOTH modes (floating
+				    mode pads instead of offsetting, so the drag region covers the top
+				    band), so neither layer needs to be pulled back up any more — they
+				    only grow by the same 8px in floating mode so the fade still ends
+				    where it did. */}
 				{isChatActive ? (
 					<ProgressiveBlur
 						backgroundColor="var(--background)"
 						blurAmount="12px"
-						className={floatingChromeOffset ? "-top-2!" : ""}
 						height={floatingChromeOffset ? "80px" : "72px"}
 						position="top"
 					/>
@@ -1609,8 +1640,8 @@ export function TitleBar() {
 					<div
 						aria-hidden
 						className={cn(
-							"pointer-events-none absolute left-0 w-full bg-background",
-							floatingChromeOffset ? "-top-2 h-14" : "top-0 h-12"
+							"pointer-events-none absolute top-0 left-0 w-full bg-background",
+							floatingChromeOffset ? "h-14" : "h-12"
 						)}
 					/>
 				)}
@@ -1707,8 +1738,12 @@ export function TitleBar() {
 								    cure). items-start so the inner box isn't stretched, so its
 								    align-items:center then centers the tabs in the unpadded 32px
 								    content box, leaving the padding band (and its scrollbar) below.
-								    Overflow is also reached via the wheel handler + scrollIntoView. */}
-									<div className="flex h-8 min-w-0 flex-1 items-start overflow-hidden">
+								    Overflow is also reached via the wheel handler + scrollIntoView,
+								    and by the hover-revealed edge chevrons (`EdgeScrollChevrons`) —
+								    the same affordance the Store/Library section strips wear, which
+								    is why the group is named `edge-scroller` here too. */}
+									<div className="group/edge-scroller relative flex h-8 min-w-0 flex-1 items-start overflow-hidden">
+										<EdgeScrollChevrons scrollRef={scrollRef} />
 										<div
 											className="group/tabstrip flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden pb-8 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 											data-tauri-drag-region={false}

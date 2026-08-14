@@ -122,7 +122,7 @@ function CheckRow({ check }: { check: ScorecardCheck }) {
 	return (
 		<li
 			className={cn(
-				"flex items-start gap-2.5 rounded-md border px-3 py-2",
+				"flex items-start gap-2.5 rounded-md bg-muted px-3 py-2",
 				check.status === "unknown" && "opacity-60"
 			)}
 		>
@@ -149,7 +149,7 @@ export function ScorecardPanel({ scorecard }: { scorecard: Scorecard }) {
 	const unknownCount = scorecard.checks.length - scorecard.evaluated;
 	return (
 		<div className="flex flex-col gap-6">
-			<section className="flex items-start gap-4 rounded-lg border p-4">
+			<section className="flex items-start gap-4 rounded-lg bg-muted p-4">
 				<div className="flex flex-col items-center gap-0.5">
 					<span
 						className={cn(

@@ -39,7 +39,7 @@ const KEY_SOURCE_COPY: Record<
 	env: {
 		label: "Environment variable",
 		caption:
-			"The key is injected by whoever starts this node and is never written to disk by Ryu. Keep a safe backup of it — without it, encrypted data cannot be read again.",
+			"The key is injected by whoever starts this node and is never written to disk by Ryu. Keep a safe backup of it; without it, encrypted data cannot be read again.",
 		strong: true,
 	},
 	keychain: {
@@ -250,7 +250,7 @@ export function EncryptionSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Encrypted data is only as recoverable as its key. If the key is lost — a wiped keychain, a re-imaged machine, a missing environment variable — the encrypted chats and memories on this node cannot be recovered by anyone, including us."
+				caption="Encrypted data is only as recoverable as its key. If the key is lost (a wiped keychain, a re-imaged machine, a missing environment variable), the encrypted chats and memories on this node cannot be recovered by anyone, including us."
 				title="Data folder"
 			>
 				<SettingsGroup>

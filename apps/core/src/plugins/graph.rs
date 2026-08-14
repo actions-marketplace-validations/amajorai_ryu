@@ -102,6 +102,26 @@ pub enum DependencyError {
         plugin: String,
         dependents: Vec<String>,
     },
+
+    /// An UPDATE was refused because it would break an installed **dependent**.
+    ///
+    /// The forward gate ([`DependencyError::VersionMismatch`]) asks "are this
+    /// plugin's own dependencies new enough?". This is the reverse question, which
+    /// only an update can raise: `dependency` is being moved to `incoming`, and
+    /// `plugin` — already installed — declares a `min_version` that the incoming
+    /// version does not satisfy. Distinct from `VersionMismatch` because the
+    /// offending version is NOT installed yet: reporting it as "installed" would be
+    /// a lie, and the UI wants to say "updating X to 2.0.0 would break Y".
+    DependentVersionMismatch {
+        /// The installed dependent that would be left broken.
+        plugin: String,
+        /// The plugin being updated.
+        dependency: String,
+        /// The requirement `plugin` declares, as written.
+        required: String,
+        /// The version `dependency` would be moved to.
+        incoming: String,
+    },
 }
 
 impl DependencyError {
@@ -115,6 +135,7 @@ impl DependencyError {
             DependencyError::InvalidVersionReq { .. } => "invalid_version_req",
             DependencyError::Cycle { .. } => "cycle",
             DependencyError::BlockedByDependents { .. } => "blocked_by_dependents",
+            DependencyError::DependentVersionMismatch { .. } => "dependent_version_mismatch",
         }
     }
 }
@@ -169,6 +190,16 @@ impl std::fmt::Display for DependencyError {
                 f,
                 "cannot disable '{plugin}': still required by {}",
                 dependents.join(", ")
+            ),
+            DependencyError::DependentVersionMismatch {
+                plugin,
+                dependency,
+                required,
+                incoming,
+            } => write!(
+                f,
+                "updating '{dependency}' to {incoming} would break '{plugin}', which requires \
+                 '{required}'"
             ),
         }
     }
@@ -322,6 +353,79 @@ pub fn dependents_of(id: &str, manifests: &[PluginManifest]) -> Vec<String> {
     // everything before it.
     order.pop();
     order
+}
+
+/// Validate that every installed **dependent** of `updated` still accepts it at
+/// its NEW version.
+///
+/// The forward gate in [`resolve_enable_order`] answers "are this plugin's own
+/// dependencies new enough?" — which an update already runs via
+/// [`crate::plugins::lifecycle::plan_update_dep_closure`]. It structurally cannot
+/// answer the reverse question, because the reverse edges live on OTHER manifests:
+/// moving `@ryu/spaces` from 1.2.0 to 2.0.0 while an installed `@ryu/meetings`
+/// declares `">=1.2, <2"` satisfies every forward edge and still leaves a broken
+/// dependent enabled. That is the exact hole this closes.
+///
+/// Checks DIRECT dependents only, deliberately: a transitive dependent's own edge
+/// is against its direct dependency, whose version this update does not change. It
+/// is therefore already satisfied and re-checking it would report a failure that
+/// does not exist.
+///
+/// Pass the currently-**installed** manifests (the pre-update set; `updated`'s own
+/// stale entry is ignored, so it is safe to pass the set that still contains it).
+/// Returns the FIRST offending dependent — matching the fail-fast contract every
+/// other resolver in this module follows.
+///
+/// An unparseable `min_version` or an unparseable incoming version is reported as
+/// [`DependencyError::InvalidVersionReq`] rather than silently passing: an update
+/// gate that cannot decide must refuse, not wave the change through.
+pub fn validate_dependents_of_update(
+    updated: &PluginManifest,
+    installed: &[PluginManifest],
+) -> Result<(), DependencyError> {
+    let incoming = semver::Version::parse(&updated.version).map_err(|e| {
+        DependencyError::InvalidVersionReq {
+            plugin: updated.id.clone(),
+            dependency: updated.id.clone(),
+            requirement: updated.version.clone(),
+            reason: format!(
+                "incoming version '{}' is not valid semver: {e}",
+                updated.version
+            ),
+        }
+    })?;
+
+    for dependent in installed {
+        // The stale record for the plugin being updated is not its own dependent.
+        if dependent.id == updated.id {
+            continue;
+        }
+        for dep in dependent.dependencies() {
+            if dep.id != updated.id {
+                continue;
+            }
+            let Some(min) = &dep.min_version else {
+                // No floor declared — any version is acceptable.
+                continue;
+            };
+            let req =
+                parse_min_version(min).map_err(|e| DependencyError::InvalidVersionReq {
+                    plugin: dependent.id.clone(),
+                    dependency: updated.id.clone(),
+                    requirement: min.clone(),
+                    reason: e,
+                })?;
+            if !req.matches(&incoming) {
+                return Err(DependencyError::DependentVersionMismatch {
+                    plugin: dependent.id.clone(),
+                    dependency: updated.id.clone(),
+                    required: min.clone(),
+                    incoming: updated.version.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The order in which to disable `id` **and everything that depends on it**:
@@ -583,6 +687,114 @@ mod tests {
                 plugin: "a".to_owned()
             }
         );
+    }
+
+    // ── validate_dependents_of_update ──────────────────────────────────────────
+
+    /// The regression this exists for: every FORWARD edge is satisfied by a major
+    /// bump of a shared dependency, so `plan_update_dep_closure` waves it through,
+    /// and an installed dependent that pinned `<2` is left broken and enabled.
+    #[test]
+    fn a_major_bump_that_breaks_an_installed_dependent_is_refused() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2, <2"))]),
+        ];
+        let updated = m("@ryu/spaces", "2.0.0", &[]);
+
+        let err = validate_dependents_of_update(&updated, &installed)
+            .expect_err("a dependent pinned <2 must block the 2.0.0 update");
+        assert_eq!(err.code(), "dependent_version_mismatch");
+        assert_eq!(
+            err,
+            DependencyError::DependentVersionMismatch {
+                plugin: "@ryu/meetings".to_owned(),
+                dependency: "@ryu/spaces".to_owned(),
+                required: ">=1.2, <2".to_owned(),
+                incoming: "2.0.0".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_update_the_dependents_still_accept_is_allowed() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2, <2"))]),
+        ];
+        let updated = m("@ryu/spaces", "1.9.3", &[]);
+        assert!(validate_dependents_of_update(&updated, &installed).is_ok());
+    }
+
+    /// A bare `min_version` is a MINIMUM (`"1.2.0"` == `">=1.2.0"`), so a major
+    /// bump satisfies it. Guards against "fix" it to caret semantics, which would
+    /// make every major bump of every shared dependency un-updatable.
+    #[test]
+    fn a_bare_min_version_does_not_cap_the_major() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some("1.2.0"))]),
+        ];
+        let updated = m("@ryu/spaces", "2.0.0", &[]);
+        assert!(validate_dependents_of_update(&updated, &installed).is_ok());
+    }
+
+    #[test]
+    fn a_dependent_with_no_declared_floor_never_blocks() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/canvas", "1.0.0", &[("@ryu/spaces", None)]),
+        ];
+        let updated = m("@ryu/spaces", "9.9.9", &[]);
+        assert!(validate_dependents_of_update(&updated, &installed).is_ok());
+    }
+
+    /// The pre-update set still contains the target's OWN stale record. It must not
+    /// be mistaken for a dependent of itself.
+    #[test]
+    fn the_targets_own_stale_record_is_not_its_dependent() {
+        let installed = vec![m("@ryu/spaces", "1.2.0", &[("@ryu/storage", Some("1.0.0"))])];
+        let updated = m("@ryu/spaces", "2.0.0", &[("@ryu/storage", Some("1.0.0"))]);
+        assert!(validate_dependents_of_update(&updated, &installed).is_ok());
+    }
+
+    /// A gate that cannot decide must refuse, not wave the update through.
+    #[test]
+    fn an_unparseable_dependent_floor_refuses_rather_than_passes() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some("not-a-req"))]),
+        ];
+        let updated = m("@ryu/spaces", "2.0.0", &[]);
+        let err = validate_dependents_of_update(&updated, &installed)
+            .expect_err("an undecidable floor must refuse");
+        assert_eq!(err.code(), "invalid_version_req");
+    }
+
+    #[test]
+    fn an_unparseable_incoming_version_refuses_rather_than_passes() {
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2"))]),
+        ];
+        let updated = m("@ryu/spaces", "not-semver", &[]);
+        let err = validate_dependents_of_update(&updated, &installed)
+            .expect_err("an unparseable incoming version must refuse");
+        assert_eq!(err.code(), "invalid_version_req");
+    }
+
+    /// A transitive dependent's edge is against its DIRECT dependency, whose
+    /// version this update does not change — so it must not be reported.
+    #[test]
+    fn a_transitive_dependent_is_not_reported() {
+        // top -> meetings (>=1.0) -> spaces (>=1.2)
+        let installed = vec![
+            m("@ryu/spaces", "1.2.0", &[]),
+            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2"))]),
+            m("@ryu/top", "1.0.0", &[("@ryu/meetings", Some(">=1.0"))]),
+        ];
+        let updated = m("@ryu/spaces", "1.5.0", &[]);
+        assert!(validate_dependents_of_update(&updated, &installed).is_ok());
     }
 
     // ── dependents_of / resolve_disable_order ──────────────────────────────────

@@ -10,8 +10,8 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
-	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
+	storeItemContextMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import {
 	ListingAsideCard,
@@ -22,6 +22,7 @@ import {
 	type ListingStat,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import { useInstalledOnly } from "@ryu/marketplace/catalog/installed-filter";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar";
@@ -40,7 +41,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import InfiniteSentinel from "@/src/components/store/InfiniteSentinel.tsx";
 import { useMcpCatalog } from "@/src/hooks/useMcpCatalog.ts";
 import {
@@ -65,9 +66,13 @@ import { useInstallProgress } from "@/src/store/useDownloadsStore.ts";
  */
 export default function McpCatalogSection({
 	initialQuery = "",
+	initialSelectedId,
 }: {
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
+	/** Open this item's preview on arrival — the id of a card clicked on the
+	 *  Store's Home shelves. */
+	initialSelectedId?: string;
 } = {}) {
 	// An MCP server that ships inside a plugin (the plugin declares `mcp_servers`)
 	// is configured through that plugin's settings; a plain registry server has no
@@ -94,6 +99,29 @@ export default function McpCatalogSection({
 		selectSource,
 		selectingSource,
 	} = useMcpCatalog(initialQuery);
+
+	// The Store shell's "installed only" switch (the retired "Added" tab,
+	// inverted). Applied to the rendered list because the MCP registry feed has no
+	// server-side installed filter to push it into.
+	const installedOnly = useInstalledOnly();
+	const visibleServers = useMemo(
+		() => (installedOnly ? servers.filter((s) => s.installed) : servers),
+		[servers, installedOnly]
+	);
+
+	// A Home shelf card opens this section with its item already selected. One
+	// shot, latched: the prop is a arrival instruction, not a controlled value, so
+	// re-running it would fight the user's own next click (and `select` changes
+	// identity on every refetch, which would make a plain dep array do exactly
+	// that).
+	const preselected = useRef(false);
+	useEffect(() => {
+		if (!initialSelectedId || preselected.current) {
+			return;
+		}
+		preselected.current = true;
+		select(initialSelectedId);
+	}, [initialSelectedId, select]);
 
 	// Per-card install without a per-id hook: the hook's install() acts on the
 	// SELECTED server, so a card's Install selects its row and defers the call
@@ -163,7 +191,7 @@ export default function McpCatalogSection({
 					onInstall={cardInstall}
 					onSelect={select}
 					selectedId={selectedId}
-					servers={servers}
+					servers={visibleServers}
 					settingsOpener={settingsOpener}
 				/>
 			}
@@ -297,15 +325,14 @@ function McpServerList({
 								onOpenSettings={settingsOpener(s.id)}
 							/>
 						}
-						contextMenu={
-							s.installed ? undefined : (
-								<StoreItemContextMenuContent
-									canReport={false}
-									onInstall={() => onInstall(s.id)}
-									onReport={() => undefined}
-								/>
-							)
-						}
+						// An installed MCP server has no enable/uninstall concept (see
+						// `McpCardAction`), so its menu holds Settings when the listing
+						// declares any and renders nothing at all when it does not.
+						contextMenu={storeItemContextMenu({
+							installed: s.installed,
+							onInstall: () => onInstall(s.id),
+							onOpenSettings: settingsOpener(s.id) ?? undefined,
+						})}
 						description={s.description}
 						icon={<HugeiconsIcon className="size-5" icon={ServerStack01Icon} />}
 						key={s.id}

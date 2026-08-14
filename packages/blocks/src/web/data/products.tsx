@@ -563,7 +563,7 @@ export const products: Product[] = [
 			eyebrow: "Our business",
 			title: "Premade agents, built around you.",
 			subtitle:
-				"Most people think our business is the platform. It isn't, the platform is what lets us build and ship customized agents for businesses, fast.",
+				"We sell customized agents, and the platform is what lets us build and ship them fast.",
 			items: [
 				{
 					title: "We scope it",
@@ -971,7 +971,7 @@ export const products: Product[] = [
 			},
 		],
 		cta: {
-			title: "Level up your agents.",
+			title: "Give your agents a new skill.",
 			subtitle:
 				"Install skills inside Ryu, or ship SKILL.md files that teach external agents how to drive your node.",
 			primaryCta: { label: "Browse Skills", href: "/products/marketplace" },
@@ -985,7 +985,7 @@ export const products: Product[] = [
 		name: "MCP",
 		navLabel: "MCP",
 		category: "Build",
-		tagline: "250+ tools wired in. Give your agents superpowers.",
+		tagline: "250+ tools wired in. GitHub, Slack, Postgres, browser, and more.",
 		Icon: Plug,
 		hero: {
 			eyebrow: "MCP · Model Context Protocol",
@@ -1152,7 +1152,7 @@ export const products: Product[] = [
 			{
 				title: "Superpowers",
 				description:
-					"Read, write, and act across apps, not just chat about them.",
+					"Read, write, and act across the apps your work already runs on.",
 				icon: Zap,
 			},
 			{
@@ -1163,9 +1163,9 @@ export const products: Product[] = [
 		],
 		bento: {
 			eyebrow: "Powered by Composio",
-			title: "Real actions, not just answers.",
+			title: "Your agents act in your real accounts.",
 			subtitle:
-				"Tools are being built for agents, not just for people. Connections give your agents authenticated access to act in the real world.",
+				"Connections give an agent authenticated access to the SaaS your work already runs on, so it can send the email and open the PR itself.",
 			items: [
 				{
 					title: "Composio catalog",
@@ -1464,7 +1464,7 @@ export const products: Product[] = [
 			eyebrow: "The primary surface",
 			title: "Everything, one window.",
 			subtitle:
-				"The app is the product: making agents as easy as installing software is the hard problem, and it's treated as the product, not an afterthought.",
+				"Making agents as easy as installing software is the hard problem, so the app gets the same engineering as the runtime under it.",
 			items: [
 				{
 					title: "Chat & council",
@@ -1549,7 +1549,7 @@ export const products: Product[] = [
 			eyebrow: "Ryu Island · context companion",
 			title: "The background agent that helps.",
 			subtitle:
-				"A dynamic-island overlay that watches your context and proactively suggests the next move, behind a per-capability consent gate. The world's first background agent that actually helps.",
+				"A dynamic-island overlay that reads your screen context on-device and offers the next step as a chip, behind a per-capability consent gate.",
 			primaryCta: EARLY_ACCESS,
 			secondaryCta: DOWNLOAD,
 			visual: <IslandVisual />,
@@ -2201,9 +2201,9 @@ export const products: Product[] = [
 			},
 		],
 		cta: {
-			title: "Break your agents before they do.",
+			title: "Break your agents before an attacker does.",
 			subtitle:
-				"Book a red-team engagement and find the holes before an attacker does.",
+				"Book a red-team engagement and get a prioritized report of what we got through.",
 			primaryCta: BOOK_DEMO,
 			secondaryCta: EARLY_ACCESS,
 			note: "Adversarial testing · OWASP-mapped · Feeds the firewall",

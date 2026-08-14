@@ -25,6 +25,10 @@ import { CollapsibleText } from "./collapsible-text.tsx";
 import { ImageLightbox } from "./image-lightbox.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
 import {
+	type MessageReactionBucket,
+	MessageReactions,
+} from "./message-reactions.tsx";
+import {
 	messageSelectableProps,
 	QuoteBlock,
 	splitLeadingQuote,
@@ -74,6 +78,21 @@ export interface UserMessageProps {
 	message: UIMessage;
 	onEditCancel?: () => void;
 	onEditSubmit?: (text: string) => void;
+	/**
+	 * Toggle the caller's own `emoji` on this message. Its presence is what turns
+	 * the reaction affordance on — a surface that does not pass it renders no
+	 * picker, which is how the island and the storyboard opt out for free.
+	 */
+	onToggleReaction?: (emoji: string) => void;
+	/**
+	 * True once Core has assigned this message its real id. The picker stays
+	 * hidden until then: a client-generated id 404s BY DESIGN (Core ships no
+	 * retarget fallback), so offering the affordance early would guarantee a
+	 * failed write on every freshly-sent message.
+	 */
+	reactable?: boolean;
+	/** This message's reaction buckets, in Core's first-reaction order. */
+	reactions?: readonly MessageReactionBucket[];
 }
 
 type MessagePart = UIMessage["parts"][number];
@@ -317,6 +336,9 @@ export const UserMessage = memo(function UserMessage({
 	groupPosition = "single",
 	onEditSubmit,
 	onEditCancel,
+	onToggleReaction,
+	reactable = false,
+	reactions,
 }: UserMessageProps) {
 	const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 	const textParts = message.parts?.filter(isTextPart) ?? [];
@@ -381,6 +403,17 @@ export const UserMessage = memo(function UserMessage({
 		</TooltipProvider>
 	) : null;
 
+	// Rendered only when the surface wired a toggle: without one there is nothing
+	// a click could do, so a picker would be a dead control.
+	const ReactionsNode = onToggleReaction ? (
+		<MessageReactions
+			align={isOwnMessage ? "end" : "start"}
+			buckets={reactions ?? []}
+			canReact={reactable}
+			onToggle={onToggleReaction}
+		/>
+	) : null;
+
 	const MessageBubble = (
 		<>
 			{images.length > 0 && (
@@ -434,17 +467,25 @@ export const UserMessage = memo(function UserMessage({
 				// its hover toolbar agree on one left edge — so the bubble itself is
 				// uncapped.
 				//
-				// `bg-muted` is not set here: it comes from the `muted` variant's
-				// `*:data-[slot=bubble-content]:bg-muted` selector, which is why
+				// The fill is not set here: it comes from the variant's
+				// `*:data-[slot=bubble-content]:bg-*` selector, which is why
 				// `data-slot` must stay the primitive's own and the e2e hook is a
 				// `data-testid` instead.
+				//
+				// `default` = the theme's primary. The agent side took over the neutral
+				// `muted` fill this bubble used to carry, so the user's own turn is the
+				// one thing in the transcript painted in the brand colour — which is
+				// what makes it findable when scrolling back through a long thread.
+				// `text-foreground` is dropped for the same reason: the variant pairs
+				// `bg-primary` with `text-primary-foreground`, and forcing the plain
+				// foreground on top of it would leave dark text on a saturated fill.
 				<Bubble
 					align={isOwnMessage ? "end" : "start"}
 					className="max-w-full"
-					variant="muted"
+					variant="default"
 				>
 					<BubbleContent
-						className="rounded-2xl px-3.5 py-1.5 text-foreground text-sm leading-5 transition-colors"
+						className="rounded-2xl px-3.5 py-1.5 text-sm leading-5 transition-colors"
 						data-testid="user-message-bubble"
 					>
 						{quote && <QuoteBlock text={quote} />}
@@ -453,12 +494,18 @@ export const UserMessage = memo(function UserMessage({
 								collapsedMaxHeightClass="max-h-[120px]"
 								contentClassName="wrap-break-word whitespace-pre-wrap leading-5"
 								contentKey={body}
-								fadeToClass="to-muted"
+								fadeToClass="to-primary"
 							>
 								<p {...messageSelectableProps}>{body}</p>
 							</CollapsibleText>
 						)}
 					</BubbleContent>
+					{/* Inside `Bubble`, which is the `relative` box the absolutely
+					    positioned chip row anchors to. Hung off the bubble's OUTER
+					    edge (start for a remote sender, end for one's own) so it
+					    overlaps the bubble corner the way every messaging client
+					    places it. */}
+					{ReactionsNode}
 				</Bubble>
 			)}
 		</>

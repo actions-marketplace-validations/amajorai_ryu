@@ -9,11 +9,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import {
-	StoreBottomSearch,
 	StoreComingSoon,
+	StoreGlobalSearch,
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
+import { InstalledOnlyProvider } from "@ryu/marketplace/catalog/installed-filter";
 import { REALM_ICONS } from "@ryu/marketplace/catalog/realm-icons";
 import { Button } from "@ryu/ui/components/button";
 import { Logo } from "@ryu/ui/components/logo";
@@ -22,6 +23,12 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "@ryu/ui/components/popover";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "@ryu/ui/components/tooltip";
+import { cn } from "@ryu/ui/lib/utils";
 import {
 	type ReactNode,
 	useCallback,
@@ -36,7 +43,6 @@ import AppsCatalogSection from "@/src/components/store/AppsCatalogSection.tsx";
 import ContributedStoreSection from "@/src/components/store/ContributedStoreSection.tsx";
 import { DesktopCatalogHost } from "@/src/components/store/catalog-host.tsx";
 import EnginesCatalogSection from "@/src/components/store/EnginesCatalogSection.tsx";
-import InstalledSection from "@/src/components/store/InstalledSection.tsx";
 import IntegrationsCatalogSection from "@/src/components/store/IntegrationsCatalogSection.tsx";
 import McpCatalogSection from "@/src/components/store/McpCatalogSection.tsx";
 import ModelsCatalogSection from "@/src/components/store/ModelsCatalogSection.tsx";
@@ -55,6 +61,7 @@ import {
 	storeTabSectionValue,
 	useContributedStoreTabs,
 } from "@/src/hooks/useContributedStoreTabs.ts";
+import { useStorePrefetch } from "@/src/hooks/useStorePrefetch.ts";
 import {
 	type StoreSearchRealm,
 	useStoreSearch,
@@ -74,7 +81,6 @@ type BuiltinStoreSection =
 	| "mcp"
 	| "agents"
 	| "engines"
-	| "installed"
 	| "account";
 
 /** An active section value: a {@link BuiltinStoreSection}, or a contributed tab's
@@ -155,21 +161,16 @@ const SECTIONS: {
 	// found nothing never learned the community feed had it. They now render as a
 	// trailing, separately-headed shelf inside Apps and Plugins, carrying the same
 	// "not reviewed by Ryu" notice they carried here (see `CommunityShelf`).
-	// Manage — what you already have installed, and the nodes running it.
 	//
-	// Tools is deliberately NOT here: the MCP servers registered on this node and
-	// the tools they expose now live in the Library (`/tools`), because the Store is
-	// where you FIND things to add and that surface manages what is already
-	// installed. Browse the MCP catalog under "MCP" above.
+	// "Added" is NOT a tab either, for the same reason and by the same fix: it was a
+	// thirteenth pill that was not a category, and reaching an installed model
+	// through it meant leaving the Models tab and every affordance that makes Models
+	// usable. It is the chrome's "Installed only" switch now
+	// ({@link InstalledOnlyProvider}), which narrows whichever section you are
+	// already on. Tools is deliberately not here either: the MCP servers registered
+	// on this node live in the Library (`/tools`); browse the catalog under "MCP".
 	//
-	// Cross-node health + per-node sidecar controls live in the node selector
-	// (shell); this section covers everything installed on the active node.
-	{
-		value: "installed",
-		label: "Added",
-		icon: Download01Icon,
-		group: "manage",
-	},
+	// Cross-node health + per-node sidecar controls live in the node selector.
 	// Account — Marketplace money layer: licenses, selling, connections.
 	{ value: "account", label: "Account", icon: Wallet01Icon, group: "account" },
 ];
@@ -178,78 +179,6 @@ const BUILTIN_SECTION_VALUES = SECTIONS.map((s) => s.value);
 
 function isBuiltinSection(value: string): value is BuiltinStoreSection {
 	return (BUILTIN_SECTION_VALUES as string[]).includes(value);
-}
-
-/** Per-section two-line header (title + one-line description), shown above the
- *  active section's content pane. The typography mirrors the onboarding card
- *  headers (`onboarding.tsx` FeatureStep): a foreground `font-semibold text-lg`
- *  title over a muted `text-sm` subtext, so the whole app reads as one system. */
-const SECTION_HEADERS: Record<
-	BuiltinStoreSection,
-	{ title: string; subtitle: string }
-> = {
-	home: {
-		title: "Home",
-		subtitle: "Featured picks and fresh arrivals from across the marketplace.",
-	},
-	integrations: {
-		title: "Integrations",
-		subtitle:
-			"Find the service you use, then everything that connects to it in one place.",
-	},
-	apps: {
-		title: "Apps",
-		subtitle: "Plugins that ship a companion interface you open inside Ryu.",
-	},
-	plugins: {
-		title: "Plugins",
-		subtitle: "Tools, agents, channels, and integrations that extend Ryu.",
-	},
-	models: {
-		title: "Models",
-		subtitle: "Download and manage local models to run inference on-device.",
-	},
-	skills: {
-		title: "Skills",
-		subtitle: "Reusable instructions your agents load on demand for a task.",
-	},
-	mcp: {
-		title: "MCP",
-		subtitle:
-			"Connect Model Context Protocol servers to give agents new tools.",
-	},
-	agents: {
-		title: "Agents",
-		subtitle: "Prebuilt agents you can add and start using in one click.",
-	},
-	engines: {
-		title: "Engines",
-		subtitle:
-			"Local inference runtimes for text, image, speech, and embeddings.",
-	},
-	installed: {
-		title: "Added",
-		subtitle: "Everything added to the active node, gathered in one place.",
-	},
-	account: {
-		title: "Account",
-		subtitle: "Licenses, connections, and the marketplace money layer.",
-	},
-};
-
-/** The header copy for a section: the shell's own table for a built-in, the
- *  contribution's own `title`/`subtitle` for an app-registered tab. */
-function sectionHeader(
-	section: StoreSection,
-	contributed: PluginStoreTab | null
-): { subtitle: string; title: string } {
-	if (isBuiltinSection(section)) {
-		return SECTION_HEADERS[section];
-	}
-	return {
-		title: contributed?.title ?? "Store",
-		subtitle: contributed?.subtitle ?? "",
-	};
 }
 
 /**
@@ -272,8 +201,13 @@ function sectionHeader(
 export default function StorePage({
 	initialSection = "home",
 	initialQuery,
+	initialInstalledOnly = false,
 }: {
 	initialSection?: string;
+	/** Open with the "Installed only" switch already on. Set by the legacy
+	 *  `/apps`, `/extensions` and `/fleet` routes, which used to open the retired
+	 *  "Added" section — the switch is where that view lives now. */
+	initialInstalledOnly?: boolean;
 	/** Seed the active section's search (deep-links carry it, e.g. the
 	 *  integrations.sh → MCP-catalog hand-off pre-filters by server name). */
 	initialQuery?: string;
@@ -283,6 +217,9 @@ export default function StorePage({
 	// rather than once at mount — a deep link to `/store/workflows` must land on the
 	// Workflows tab even though the contribution has not loaded on first render.
 	const contributedTabs = useContributedStoreTabs();
+	// Warm every tab's opening view in the background, so switching tabs reads
+	// from cache instead of spinning once per tab per session.
+	useStorePrefetch();
 	const [section, setSection] = useState<StoreSection>(() =>
 		isBuiltinSection(initialSection) ? initialSection : "home"
 	);
@@ -346,12 +283,32 @@ export default function StorePage({
 		string | undefined
 	>(initialQuery);
 
+	// …and when a HOME shelf card opens a realm, the clicked item's id rides along
+	// instead, so the section opens with that item's preview rather than with its
+	// title typed into the search box. Two separate slots on purpose: a store-wide
+	// search result carries a query and no id, a Home card carries an id and no
+	// query, and collapsing them would make one of the two lie.
+	const [sectionInitialSelectedId, setSectionInitialSelectedId] = useState<
+		string | undefined
+	>(undefined);
+
 	// The active section publishes its filter panel here; the chrome's toolbar row
 	// renders it as a popover button beside the search.
 	const [toolbar, setToolbar] = useState<StoreToolbarConfig | null>(null);
 
-	const openRealm = (realm: StoreSearchRealm, query: string) => {
+	// "Installed only" — the retired "Added" tab as a switch over whichever
+	// section is open. Shell state rather than per-section state, so it survives
+	// switching tabs: that is the whole point (browse Models installed, then
+	// Plugins installed, without re-arming it each time).
+	const [installedOnly, setInstalledOnly] = useState(initialInstalledOnly);
+
+	const openRealm = (
+		realm: StoreSearchRealm,
+		query: string,
+		itemId?: string
+	) => {
 		setSectionInitialQuery(query.trim() || undefined);
+		setSectionInitialSelectedId(itemId || undefined);
 		setSearchQuery("");
 		setSection(realm);
 	};
@@ -365,6 +322,9 @@ export default function StorePage({
 			);
 			if (resolved) {
 				setSectionInitialQuery(undefined);
+				// A manual tab pick must drop a stale preselect too, or the section
+				// re-opens the last Home card's preview when the user comes back to it.
+				setSectionInitialSelectedId(undefined);
 				setSearchQuery("");
 				setPendingSection(null);
 				setSection(resolved);
@@ -382,86 +342,118 @@ export default function StorePage({
 	// rich filters up here; every other (carded) section renders its own filter
 	// button beside its list, so only Models fills this slot.
 	const sectionFilters = section === "models" ? toolbar : null;
+	// …and because Models is full-bleed, the chrome above it must be too. A
+	// centered `max-w-4xl` search + tab strip sitting over an edge-to-edge
+	// master-detail pane is the one place the shell visibly stopped being one
+	// page.
+	const fullBleed = section === "models";
 
 	return (
 		<DesktopMarketplaceHost>
 			<DesktopCatalogHost>
 				<StoreToolbarProvider value={setToolbar}>
-					<div className="relative flex h-full flex-col overflow-hidden pt-12">
-						{/* Page chrome, inline: the section title, the active section's
-						    filters, then the section tabs. Aligned to the same centered
-						    column the card grids use, so the title, the tabs and the first
-						    card share a left edge. The store-wide search is NOT here — it
-						    is the bare bottom input below; only per-section controls
-						    (filters, source) sit in this row, and the tab strip itself
-						    carries tabs and nothing else. */}
-						<div className="mx-auto w-full max-w-4xl shrink-0 px-4 pt-4">
-							<div className="flex items-center justify-between gap-3">
-								<p className="font-semibold text-lg">
-									{sectionHeader(section, activeContributedTab).title}
-								</p>
-								<div className="flex items-center gap-1">
-									{sectionFilters?.panel ? (
-										<Popover>
-											<PopoverTrigger
-												render={
-													<Button className="gap-1.5" size="sm" variant="ghost">
-														<HugeiconsIcon
-															className="size-3.5"
-															icon={
-																sectionFilters.panelIcon ??
-																SlidersHorizontalIcon
-															}
-														/>
-														{sectionFilters.panelLabel ?? "Filters"}
-													</Button>
-												}
-											/>
-											<PopoverContent
-												align="end"
-												className="w-[min(30rem,90vw)] p-0"
-											>
-												{sectionFilters.panel}
-											</PopoverContent>
-										</Popover>
-									) : null}
-								</div>
+					<InstalledOnlyProvider value={installedOnly}>
+						<div className="relative flex h-full flex-col overflow-hidden pt-12">
+							{/* Page chrome, inline and in the order it works: the global
+							    search (with the active section's filters and the
+							    installed-only switch beside it), then the section tabs.
+							    Aligned to the same column the section below uses — centered
+							    for the carded sections, edge-to-edge for the full-bleed
+							    Models pane.
+
+							    There is no section TITLE any more. It restated the pill that
+							    was already active directly beneath it, and it pushed the one
+							    control that searches everything to the bottom of the page,
+							    below the tabs that scope a search to one realm. */}
+							<div
+								className={cn(
+									"mx-auto w-full shrink-0 px-4 pt-4",
+									fullBleed ? "max-w-none" : "max-w-4xl"
+								)}
+							>
+								<StoreGlobalSearch
+									onChange={setSearchQuery}
+									placeholder="Search the whole marketplace…"
+									trailing={
+										<>
+											{sectionFilters?.panel ? (
+												<Popover>
+													<PopoverTrigger
+														render={
+															<Button className="gap-1.5" variant="ghost">
+																<HugeiconsIcon
+																	className="size-4"
+																	icon={
+																		sectionFilters.panelIcon ??
+																		SlidersHorizontalIcon
+																	}
+																/>
+																{sectionFilters.panelLabel ?? "Filters"}
+															</Button>
+														}
+													/>
+													<PopoverContent
+														align="end"
+														className="w-[min(30rem,90vw)] p-0"
+													>
+														{sectionFilters.panel}
+													</PopoverContent>
+												</Popover>
+											) : null}
+											<Tooltip>
+												<TooltipTrigger
+													render={
+														<Button
+															aria-pressed={installedOnly}
+															className="gap-1.5"
+															onClick={() => setInstalledOnly((on) => !on)}
+															variant={installedOnly ? "secondary" : "ghost"}
+														>
+															<HugeiconsIcon
+																className="size-4"
+																icon={Download01Icon}
+															/>
+															Installed
+														</Button>
+													}
+												/>
+												<TooltipContent>
+													{installedOnly
+														? "Showing only what you have installed"
+														: "Show only what you have installed"}
+												</TooltipContent>
+											</Tooltip>
+										</>
+									}
+									value={searchQuery}
+								/>
+								<StoreSectionTabs
+									active={section}
+									className="pt-2 pb-1"
+									onSelect={selectSection}
+									sections={navSections}
+								/>
 							</div>
-							<StoreSectionTabs
-								active={section}
-								className="pt-2 pb-1"
-								onSelect={selectSection}
-								sections={navSections}
-							/>
+							<div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+								{searching ? (
+									<StoreSearchResults
+										groups={search.groups}
+										isEmpty={search.isEmpty}
+										loading={search.loading || searchPending}
+										onOpenRealm={(realm) => openRealm(realm, searchQuery)}
+									/>
+								) : (
+									<StoreContent
+										contributedTab={activeContributedTab}
+										initialQuery={sectionInitialQuery}
+										initialSelectedId={sectionInitialSelectedId}
+										onOpenRealm={openRealm}
+										section={section}
+									/>
+								)}
+							</div>
 						</div>
-						{/* `pb-14` = the bottom search bar's height. The bar is positioned
-						    out of flow, so without this the last card row sits under it and
-						    cannot be reached: every section scrolls INSIDE this box (they
-						    are `h-full`/`flex-1 overflow-auto`), so padding it once shortens
-						    all of them instead of hunting each section. */}
-						<div className="min-h-0 min-w-0 flex-1 overflow-hidden pb-14">
-							{searching ? (
-								<StoreSearchResults
-									groups={search.groups}
-									isEmpty={search.isEmpty}
-									loading={search.loading || searchPending}
-									onOpenRealm={(realm) => openRealm(realm, searchQuery)}
-								/>
-							) : (
-								<StoreContent
-									contributedTab={activeContributedTab}
-									initialQuery={sectionInitialQuery}
-									onOpenRealm={openRealm}
-									section={section}
-								/>
-							)}
-						</div>
-						<StoreBottomSearch
-							onChange={setSearchQuery}
-							placeholder="Search the whole marketplace…"
-							value={searchQuery}
-						/>
-					</div>
+					</InstalledOnlyProvider>
 				</StoreToolbarProvider>
 			</DesktopCatalogHost>
 		</DesktopMarketplaceHost>
@@ -471,6 +463,7 @@ export default function StorePage({
 function StoreContent({
 	section,
 	initialQuery,
+	initialSelectedId,
 	onOpenRealm,
 	contributedTab,
 }: {
@@ -479,7 +472,15 @@ function StoreContent({
 	section: StoreSection;
 	/** Seed query carried over from the store-wide search (searchable realms only). */
 	initialQuery?: string;
-	onOpenRealm: (realm: StoreSearchRealm, query: string) => void;
+	/** Open this item's preview on arrival — a Home shelf card's id. Forwarded only
+	 *  to the six sections that own a per-item preview; Integrations, Engines,
+	 *  Account and app-registered tabs have no such concept. */
+	initialSelectedId?: string;
+	onOpenRealm: (
+		realm: StoreSearchRealm,
+		query: string,
+		itemId?: string
+	) => void;
 }) {
 	if (section === "home") {
 		return <StoreHome onOpenRealm={onOpenRealm} />;
@@ -493,28 +494,57 @@ function StoreContent({
 		);
 	}
 	if (section === "apps") {
-		return <AppsCatalogSection initialQuery={initialQuery} variant="apps" />;
+		return (
+			<AppsCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+				variant="apps"
+			/>
+		);
 	}
 	if (section === "plugins") {
-		return <AppsCatalogSection initialQuery={initialQuery} variant="plugins" />;
+		return (
+			<AppsCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+				variant="plugins"
+			/>
+		);
 	}
 	if (section === "models") {
-		return <ModelsCatalogSection initialQuery={initialQuery} />;
+		return (
+			<ModelsCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+			/>
+		);
 	}
 	if (section === "skills") {
-		return <SkillsCatalogSection initialQuery={initialQuery} />;
+		return (
+			<SkillsCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+			/>
+		);
 	}
 	if (section === "mcp") {
-		return <McpCatalogSection initialQuery={initialQuery} />;
+		return (
+			<McpCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+			/>
+		);
 	}
 	if (section === "agents") {
-		return <AgentsCatalogSection initialQuery={initialQuery} />;
+		return (
+			<AgentsCatalogSection
+				initialQuery={initialQuery}
+				initialSelectedId={initialSelectedId}
+			/>
+		);
 	}
 	if (section === "engines") {
 		return <EnginesCatalogSection />;
-	}
-	if (section === "installed") {
-		return <InstalledSection />;
 	}
 	if (section === "account") {
 		return <AccountSection />;

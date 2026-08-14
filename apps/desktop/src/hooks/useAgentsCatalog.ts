@@ -32,6 +32,15 @@ export interface UseAgentsCatalogResult {
 	uninstall: (id: string) => Promise<void>;
 }
 
+/** Query descriptor shared with the Store's warm-up path (`useStorePrefetch`), so
+ *  a prefetch lands under the key this hook reads. */
+export function agentCatalogQuery(target: ApiTarget) {
+	return {
+		queryKey: ["agents", "catalog", target.url],
+		queryFn: () => fetchAgentCatalog(target),
+	};
+}
+
 export function useAgentsCatalog(): UseAgentsCatalogResult {
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -41,10 +50,7 @@ export function useAgentsCatalog(): UseAgentsCatalogResult {
 	const { url, token } = target;
 	const qc = useQueryClient();
 
-	const catalogQuery = useQuery({
-		queryKey: ["agents", "catalog", url],
-		queryFn: () => fetchAgentCatalog({ url, token }),
-	});
+	const catalogQuery = useQuery(agentCatalogQuery(target));
 
 	// Install/uninstall changes two things: the catalog's `added` flag (this
 	// query) and the node's agent roster (`GET /api/agents`, read by the

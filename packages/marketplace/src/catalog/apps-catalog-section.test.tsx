@@ -192,8 +192,72 @@ describe("CatalogHost seam — Apps section", () => {
 		const html = renderToStaticMarkup(
 			<StoreItemAction installed locked onOpenSettings={() => undefined} />
 		);
-		expect(html).toContain("Built in");
+		// The word now lives on the status glyph's `aria-label`, not as visible
+		// text. That is the ONLY place it can be asserted from here — and the only
+		// place a screen reader can reach it — because `TooltipContent` is portaled
+		// and `renderToStaticMarkup` never emits a portal.
+		expect(html).toContain('aria-label="Built in"');
 		expect(html).toContain("More actions");
+	});
+
+	// ── host-floor (engines) incompatibility ──────────────────────────────────
+	//
+	// The listing must still RENDER — it used to vanish from the catalog entirely,
+	// leaving no way to discover that updating would bring it back — while the
+	// install verb is withheld, because Core refuses the install anyway.
+
+	test("an incompatible listing shows Unavailable instead of Add", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				incompatible="Requires Ryu >=0.2.0 (you have 0.1.12)"
+				installed={false}
+				onInstall={() => undefined}
+			/>
+		);
+		expect(html).toContain("Unavailable");
+		expect(html).not.toContain(">Add<");
+	});
+
+	test("the reason travels with the control so the user learns what to update", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				incompatible="Requires Ryu >=0.2.0 (you have 0.1.12)"
+				installed={false}
+			/>
+		);
+		// Asserted on `aria-label`, not `title`: a hover-only tooltip is unreachable
+		// by keyboard and invisible on touch, so the accessible name is the one that
+		// proves the reason actually reaches a user.
+		expect(html).toContain('aria-label="Requires Ryu &gt;=0.2.0 (you have 0.1.12)"');
+	});
+
+	/** An installed-but-held-back plugin must stay removable — it is on disk, it is
+	 *  not running, and Remove is the only verb that still makes sense. */
+	test("an installed incompatible plugin keeps a manage menu", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				enabled={false}
+				incompatible="Requires Ryu >=0.2.0 (you have 0.1.12)"
+				installed
+				onUninstall={() => undefined}
+			/>
+		);
+		expect(html).toContain("Unavailable");
+		expect(html).toContain("Manage");
+	});
+
+	/** A compatible listing must be completely unaffected — `incompatible` is the
+	 *  only thing that suppresses Add, and an advisory-only verdict yields null. */
+	test("a compatible listing is untouched", () => {
+		const html = renderToStaticMarkup(
+			<StoreItemAction
+				incompatible={null}
+				installed={false}
+				onInstall={() => undefined}
+			/>
+		);
+		expect(html).toContain("Add");
+		expect(html).not.toContain("Unavailable");
 	});
 
 	test("StoreItemOverflowMenu renders nothing when it would be empty", () => {

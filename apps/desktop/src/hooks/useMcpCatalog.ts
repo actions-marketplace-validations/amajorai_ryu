@@ -66,6 +66,47 @@ export interface UseMcpCatalogResult {
 const SEARCH_DEBOUNCE_MS = 300;
 const PAGE_LIMIT = 40;
 
+// Query descriptors shared with the Store's warm-up path (`useStorePrefetch`), so
+// a prefetch always lands under the key this hook reads. See the same block in
+// `useSkillsCatalog.ts`.
+
+export function mcpSourcesQuery(target: ApiTarget) {
+	return {
+		queryKey: ["mcp", "sources", target.url],
+		queryFn: () => fetchMcpSources(target),
+	};
+}
+
+export function mcpServersQuery(target: ApiTarget) {
+	return {
+		queryKey: ["mcp", "servers", target.url],
+		queryFn: () => fetchMcpServers(target),
+	};
+}
+
+export function mcpListQuery(
+	target: ApiTarget,
+	params: { query: string; source: string }
+) {
+	return {
+		queryKey: [
+			"mcp",
+			"list",
+			target.url,
+			{ q: params.query, source: params.source },
+		],
+		queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+			searchMcpCatalog(target, {
+				query: params.query,
+				limit: PAGE_LIMIT,
+				cursor: pageParam,
+			}),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last: { nextCursor?: string | null }) =>
+			last.nextCursor ?? undefined,
+	};
+}
+
 export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -81,10 +122,7 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 
 	// Catalog sources: list + active selection live in Core. Selecting a source
 	// switches Core's active endpoint, so every list/detail must refetch.
-	const sourcesQuery = useQuery({
-		queryKey: ["mcp", "sources", url],
-		queryFn: () => fetchMcpSources({ url, token }),
-	});
+	const sourcesQuery = useQuery(mcpSourcesQuery(target));
 	const activeSource = sourcesQuery.data?.active ?? "";
 
 	const selectSourceMutation = useMutation({
@@ -108,24 +146,14 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 
 	// Registered MCP servers — the authoritative installed-state signal. A card
 	// is installed iff its id is among these names. Re-fetched after install.
-	const serversQuery = useQuery({
-		queryKey: ["mcp", "servers", url],
-		queryFn: () => fetchMcpServers({ url, token }),
-	});
+	const serversQuery = useQuery(mcpServersQuery(target));
 	const installedNames = useMemo(
 		() => new Set((serversQuery.data ?? []).map((s) => s.name)),
 		[serversQuery.data]
 	);
 
 	const listQuery = useInfiniteQuery({
-		queryKey: ["mcp", "list", url, { q: debouncedQuery, source: activeSource }],
-		queryFn: ({ pageParam }) =>
-			searchMcpCatalog(
-				{ url, token },
-				{ query: debouncedQuery, limit: PAGE_LIMIT, cursor: pageParam }
-			),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.nextCursor ?? undefined,
+		...mcpListQuery(target, { query: debouncedQuery, source: activeSource }),
 		placeholderData: keepPreviousData,
 	});
 
@@ -165,7 +193,9 @@ export function useMcpCatalog(initialQuery = ""): UseMcpCatalogResult {
 		},
 	});
 
-	const select = useCallback((id: string) => setSelectedId(id), []);
+	// `select("")` is how the layout closes the preview — normalise it to null so
+	// the detail query stays disabled instead of fetching an empty id.
+	const select = useCallback((id: string) => setSelectedId(id || null), []);
 
 	const install = useCallback(async () => {
 		if (!selectedId) {

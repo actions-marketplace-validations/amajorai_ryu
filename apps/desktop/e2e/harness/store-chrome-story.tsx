@@ -1,13 +1,13 @@
 // Standalone browser story for the REAL Store/Library page chrome:
-// `StoreSectionTabs` (the pill section strip with its scrolled-edge fade) and
-// `StoreBottomSearch` (the bare, bottom-pinned global search field), both
+// `StoreSectionTabs` (the pill section strip, scrolled through the shared
+// `EdgeScroller`) and `StoreGlobalSearch` (the large muted search pill), both
 // exported from `packages/blocks/src/desktop/store.tsx`.
 //
 // Both are prop-driven presentational components, so they mount without Core,
 // Tauri or seed data. The third panel mirrors StorePage's structural shell —
-// `relative` page root, a padded scrolling column, the bar positioned out of
-// flow — because that arrangement is what makes the last row reachable, and a
-// component rendered on its own cannot show it.
+// search over tabs over a scrolling column — because the ORDER is the claim: the
+// control that searches everything sits above the tabs that scope a search to one
+// realm, not below them.
 
 import {
 	AppleIcon,
@@ -22,7 +22,7 @@ import {
 	Wallet01Icon,
 } from "@hugeicons/core-free-icons";
 import {
-	StoreBottomSearch,
+	StoreGlobalSearch,
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store";
@@ -56,19 +56,14 @@ const MANY: StoreSectionTab[] = [
 const FEW: StoreSectionTab[] = MANY.slice(0, 2);
 
 /**
- * StorePage's shell in miniature, mirroring the three things that make the
- * bottom bar behave: a `relative` page root, a scrolling column padded by the
- * bar's height, and the bar positioned out of flow at the bottom.
+ * StorePage's shell in miniature: the global search over the section tabs over a
+ * scrolling content column, all in the page flow.
  *
- * The last child is a stand-in for the shell's split-pane badge (`Layout.tsx` →
- * `PaneBadge`): same box (`absolute bottom-2 left-2 z-10`), and rendered AFTER
- * the page the way Layout renders it after `<RouteOutlet>`. It is what the
- * bottom bar shares this corner with, and a `z-30` on the bar erased it.
- *
- * The real badge wrapper also carries `pointer-events-none` (so content behind
- * stays clickable); the stand-in drops it because hit-testing is how the test
- * reads PAINT order — `elementFromPoint` skips a `pointer-events: none` box, and
- * the question here is which of the two is on top, not which is clickable.
+ * Nothing is positioned out of flow any more. The search used to be an
+ * `absolute` bar pinned to the bottom, which is why this story also carried a
+ * stand-in for the shell's split-pane badge (the one thing that shared that
+ * corner, and that a z-index on the bar erased). With the field in the flow at
+ * the top, neither the overlap nor the padding dance it needed exists.
  */
 function PageShell({ testid, width }: { testid: string; width: number }) {
 	const [query, setQuery] = useState("");
@@ -79,7 +74,19 @@ function PageShell({ testid, width }: { testid: string; width: number }) {
 			style={{ height: 320, width }}
 		>
 			<div className="relative flex h-full flex-col overflow-hidden">
-				<div className="min-h-0 flex-1 overflow-hidden pb-14">
+				<div className="shrink-0 px-4 pt-4">
+					<StoreGlobalSearch
+						onChange={setQuery}
+						placeholder="Search the whole marketplace…"
+						value={query}
+					/>
+					<StoreSectionTabs
+						active="home"
+						className="pt-2 pb-1"
+						sections={MANY}
+					/>
+				</div>
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<div
 						className="h-full overflow-auto p-4"
 						data-testid={`${testid}-scroller`}
@@ -94,19 +101,6 @@ function PageShell({ testid, width }: { testid: string; width: number }) {
 							</div>
 						))}
 					</div>
-				</div>
-				<StoreBottomSearch
-					onChange={setQuery}
-					placeholder="Search the whole marketplace…"
-					value={query}
-				/>
-			</div>
-			<div
-				className="absolute bottom-2 left-2 z-10 flex h-8 items-center gap-1.5"
-				data-testid={`${testid}-badge`}
-			>
-				<div className="flex h-6 items-center rounded-full bg-primary px-2.5 font-medium text-primary-foreground text-xs">
-					Store
 				</div>
 			</div>
 		</section>

@@ -133,12 +133,15 @@ export function TimeGridView({
 	);
 
 	// Scroll to business hours on mount and whenever the day range changes.
-	const _rangeKey = days.map((d) => eventDayKey(d)).join("|");
+	// `rangeKey` is load-bearing — it is the whole "whenever the day range
+	// changes" half. It is a joined string rather than `days` because `days` is a
+	// fresh array each render, which would re-scroll on every render.
+	const rangeKey = days.map((d) => eventDayKey(d)).join("|");
 	useEffect(() => {
 		if (scrollRef.current) {
 			scrollRef.current.scrollTop = SCROLL_TO_HOUR * HOUR_HEIGHT;
 		}
-	}, []);
+	}, [rangeKey]);
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col">

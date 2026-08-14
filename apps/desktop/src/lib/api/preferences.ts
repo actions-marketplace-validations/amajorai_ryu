@@ -819,7 +819,14 @@ export function setAaStatsMode(
 export const VOICE_PREF_KEY = "voice-input";
 
 /** Transcription engine: the `?engine=` value Core's transcribe route accepts. */
-export type VoiceEngine = "whisper" | "parakeet";
+/**
+ * `gateway` is the CLOUD slot: Core routes it to the gateway's STT modality
+ * (`crates/core/stt` — "the swappable cloud STT slot"), so the provider and
+ * model are whatever the node's modality map says, not a local sidecar. It has
+ * existed in Core for some time and was simply unreachable from the UI, because
+ * this union and `VOICE_ENGINES` below listed only the two local engines.
+ */
+export type VoiceEngine = "whisper" | "parakeet" | "gateway";
 
 /**
  * Activation behavior of the push-to-talk shortcut. `"toggle"` = press once to
@@ -852,7 +859,8 @@ export const VOICE_ENGINES: {
 	engine: VoiceEngine;
 	label: string;
 	model: string;
-	sidecar: string;
+	/** The sidecar to check install/run status against, or null for a cloud engine. */
+	sidecar: string | null;
 }[] = [
 	{
 		engine: "parakeet",
@@ -866,7 +874,31 @@ export const VOICE_ENGINES: {
 		model: "ggml-base.en",
 		sidecar: "whispercpp",
 	},
+	{
+		engine: "gateway",
+		label: "Cloud (via gateway)",
+		// The gateway picks the model from its STT modality mapping; Core sends no
+		// model name of its own, so there is nothing to pin here.
+		model: "",
+		// No sidecar: nothing is installed or run locally for this engine, which
+		// is why `sidecar` is optional and the install/run row is hidden for it.
+		sidecar: null,
+	},
 ];
+
+/**
+ * Narrow a stored value to a known engine.
+ *
+ * Derived from `VOICE_ENGINES` rather than hand-written, which is the whole
+ * point: the previous `=== "whisper" ? "whisper" : "parakeet"` silently mapped
+ * EVERY unrecognised value onto parakeet, so adding an engine to the list left
+ * it unselectable and, worse, quietly rewrote a saved pick for it.
+ */
+export function isVoiceEngine(value: unknown): value is VoiceEngine {
+	return (
+		typeof value === "string" && VOICE_ENGINES.some((e) => e.engine === value)
+	);
+}
 
 /** Default voice-input settings (mirrors the island's `DEFAULT_VOICE_PREFS`). */
 export const DEFAULT_VOICE_PREFS: VoiceInputPrefs = {
@@ -887,7 +919,7 @@ export async function getVoiceInputPrefs(
 	}
 	try {
 		const parsed = JSON.parse(raw) as Partial<VoiceInputPrefs>;
-		const engine = parsed.engine === "whisper" ? "whisper" : "parakeet";
+		const engine = isVoiceEngine(parsed.engine) ? parsed.engine : "parakeet";
 		return {
 			enabled: parsed.enabled !== false,
 			engine,

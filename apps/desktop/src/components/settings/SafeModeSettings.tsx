@@ -61,7 +61,7 @@ function statusLine(state: SafeModeState): string {
 	if (state.enabled) {
 		return state.source === "env"
 			? `Active, forced on by the RYU_SAFE_MODE environment variable. Holding back ${scope}.`
-			: `Active. Holding back ${scope}. Your apps are untouched — turning this off restores them exactly.`;
+			: `Active. Holding back ${scope}. Your apps are untouched; turning this off restores them exactly.`;
 	}
 	return `Off. Turning it on would start the node without ${scope}.`;
 }
@@ -134,7 +134,7 @@ export function SafeModeSettings() {
 
 	return (
 		<SettingsSection
-			caption="Starts the node with apps, plugins, skills, your MCP servers and the scheduler switched off, so you can tell whether one of them is what's slow. Chat, agents and settings keep working. Nothing is uninstalled or reconfigured — this only changes what loads."
+			caption="Starts the node with apps, plugins, skills, your MCP servers and the scheduler switched off, so you can tell whether one of them is what's slow. Chat, agents and settings keep working. Nothing is uninstalled or reconfigured; this only changes what loads."
 			title="Troubleshooting"
 		>
 			<SettingsGroup>
@@ -149,7 +149,7 @@ export function SafeModeSettings() {
 					}
 					description={
 						state
-							? `${statusLine(state)} Applies on restart — the node restarts when you flip this.`
+							? `${statusLine(state)} Applies on restart; the node restarts when you flip this.`
 							: `The node isn't answering, so this reads the on-disk flag instead: Safe Mode is ${enabled ? "armed" : "off"} for its next boot.`
 					}
 					title="Safe Mode"

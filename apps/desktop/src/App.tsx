@@ -45,6 +45,7 @@ import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
 import { useBuildProfile } from "./lib/build-profile.ts";
+import { isOnboardingActive } from "./lib/onboarding-active.ts";
 import { useReleaseChannel } from "./lib/release-channel.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
@@ -293,6 +294,12 @@ function MainApp() {
 				received?: number;
 				total?: number | null;
 			}>(event, ({ payload }) => {
+				// Onboarding reports these same two installs inline, on a screen whose
+				// whole job is showing them. Toasting there stacked a second, redundant
+				// report over the first — so while the wizard is up, it owns the news.
+				if (isOnboardingActive()) {
+					return;
+				}
 				if (payload.phase === "downloading") {
 					// One long-lived progress toast, updated in place as bytes land: the
 					// installer streams the body and reports on the way, and a
@@ -680,6 +687,7 @@ function MainApp() {
 							})}
 							avatarUrl={session?.user?.image ?? null}
 							userName={session?.user?.name ?? null}
+							userNameLoading={isPending}
 						/>
 					</PageWrapper>
 				) : showApp ? (

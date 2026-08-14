@@ -10,11 +10,20 @@
 // keyboard, the selected wash, the right-click menu, and somewhere to hang an
 // install button or a favourite star.
 //
-// The badge is mounted `still`. It keeps every bit of its look — the metal ring,
-// the depth, the seeded backdrop, both faces — and keeps answering the pointer
-// with a tilt, but it does not turn or float on its own. A screen of twenty
-// revolving cards is unusable, and with no idle turn a stray drag would leave a
-// card permanently skewed (see `PassCardShell`'s `still`).
+// The badge is mounted `still` and UNRINGED. It keeps the depth, the seeded
+// backdrop, the milled edge and both faces, and keeps answering the pointer with
+// a tilt, but it does not turn or float on its own and it wears no animated
+// metal ring. A screen of twenty revolving cards is unusable, and with no idle
+// turn a stray drag would leave a card permanently skewed (see
+// `PassCardShell`'s `still`); twenty shimmering rings are the same fault in the
+// other axis — the effect that reads as a finish on one hero card reads as
+// noise repeated across a grid, and each one costs a live `metal-fx` WebGL
+// instance. The ring stays on wherever a single badge is the subject.
+//
+// There is no hover wash behind the card either. The card is already a physical
+// object that lifts, tilts and catches light under the pointer; a rectangle of
+// `bg-accent` fading in around it reads as a second, flat card appearing behind
+// the real one. `selected` still paints — that is state, not hover feedback.
 
 import {
 	ContextMenu,
@@ -78,7 +87,7 @@ export function AgentBadgeCard({
 		<div
 			className={cn(
 				"flex flex-col gap-2 rounded-2xl p-2 outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/30",
-				selected ? "bg-accent" : "hover:bg-accent/50",
+				selected && "bg-accent",
 				className
 			)}
 			onClick={onOpen}
@@ -99,6 +108,7 @@ export function AgentBadgeCard({
 				logo={logo}
 				metalTheme={resolvedTheme === "light" ? "light" : "dark"}
 				name={name}
+				ringed={false}
 				role={role ?? undefined}
 				still
 			/>

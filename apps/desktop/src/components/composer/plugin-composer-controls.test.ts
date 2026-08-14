@@ -12,9 +12,12 @@
 import { describe, expect, test } from "bun:test";
 import type { PluginComposerControl } from "@/src/lib/api/plugins.ts";
 import {
+	COMPOSER_PLUGIN_SECTION_PREFIX,
 	composerControlPlacement,
+	composerPluginSectionKey,
 	composerSelectOptions,
 	composerSelectValue,
+	isComposerPluginSectionKey,
 	isKnownComposerControl,
 	type KnownComposerControl,
 	partitionComposerControls,
@@ -195,5 +198,41 @@ describe("select values", () => {
 			flag: "mode",
 		}) as KnownComposerControl;
 		expect(composerSelectValue(empty, {})).toBeUndefined();
+	});
+});
+
+// The composer trigger summarises the sections it opens, but NOT the contributed
+// ones — an app's mode picker and the output style stay in the popover instead of
+// spending a permanent segment on a bar that is already narrow at compact density.
+// The section key is the whole discriminator, so it is asserted from both ends:
+// the builder and the predicate must agree, or the filter silently stops matching
+// and every contributed picker reappears on the trigger.
+describe("contributed settings-menu section keys", () => {
+	test("the key a contributed select becomes is recognised as a plugin section", () => {
+		const key = composerPluginSectionKey({ id: "mode", plugin: "@ryu/news" });
+		expect(key.startsWith(COMPOSER_PLUGIN_SECTION_PREFIX)).toBe(true);
+		expect(isComposerPluginSectionKey(key)).toBe(true);
+	});
+
+	test("the key is unique per plugin AND per control", () => {
+		const a = composerPluginSectionKey({ id: "mode", plugin: "@ryu/news" });
+		const b = composerPluginSectionKey({ id: "mode", plugin: "@ryu/tuition" });
+		const c = composerPluginSectionKey({ id: "depth", plugin: "@ryu/news" });
+		expect(new Set([a, b, c]).size).toBe(3);
+	});
+
+	test("the shell's own section keys are NOT treated as plugin sections", () => {
+		// These are the sections that legitimately earn a trigger segment; if the
+		// predicate ever matched one, the trigger would lose the agent/model/approval
+		// summary it exists for.
+		for (const key of [
+			"agent",
+			"model",
+			"approval",
+			"thinking",
+			"output-style",
+		]) {
+			expect(isComposerPluginSectionKey(key)).toBe(false);
+		}
 	});
 });

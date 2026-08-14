@@ -17,7 +17,7 @@
 // matching the Inbox tray so the two footer popovers read as one.
 
 import { Download01Icon } from "@hugeicons/core-free-icons";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
 	TrayBadge,
@@ -33,15 +33,14 @@ import {
 } from "@/src/components/shell/TrayPopover.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
+import { useDownloadBulkActions } from "@/src/hooks/useDownloadBulkActions.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
-import { clearDownload, isInFlight } from "@/src/lib/api/downloads.ts";
+import { isInFlight } from "@/src/lib/api/downloads.ts";
 import {
 	selectAggregate,
 	selectOrderedTasks,
 	useDownloadsStore,
 } from "@/src/store/useDownloadsStore.ts";
-import { useNodeStore } from "@/src/store/useNodeStore.ts";
 import { AvailableUpdates } from "./AvailableUpdates.tsx";
 import { DownloadRow, formatBytes } from "./DownloadRow.tsx";
 
@@ -63,19 +62,15 @@ export function DownloadCenter() {
 	// feed the badge too, so the count shows even when nothing is actively
 	// downloading — matching the "Updates" section in the panel body.
 	const { updates } = useAvailableUpdates();
-	const getNode = useNodeStore((s) => s.getActiveNode);
 	const [friendly] = useFriendlyMode();
 	const { openTab } = useTabsContext();
 	const [open, setOpen] = useState(false);
 
-	const clearFinished = useCallback(() => {
-		const target = toTarget(getNode());
-		for (const task of tasks) {
-			if (task.state === "completed" || task.state === "cancelled") {
-				clearDownload(target, task.id).catch(() => undefined);
-			}
-		}
-	}, [getNode, tasks]);
+	const {
+		clearFinished,
+		clearUnfinished,
+		pending: clearing,
+	} = useDownloadBulkActions(tasks);
 
 	// Active keeps everything still moving (or paused/failed and therefore
 	// actionable) at the top; finished sinks below it.
@@ -140,10 +135,29 @@ export function DownloadCenter() {
 		>
 			<TrayHeader
 				actions={
-					finished.length > 0 ? (
-						<TrayTextButton onClick={clearFinished}>
-							Clear finished
-						</TrayTextButton>
+					finished.length > 0 || active.length > 0 ? (
+						<>
+							{active.length > 0 ? (
+								<TrayTextButton
+									disabled={clearing}
+									onClick={() => {
+										clearUnfinished().catch(() => undefined);
+									}}
+								>
+									Clear unfinished
+								</TrayTextButton>
+							) : null}
+							{finished.length > 0 ? (
+								<TrayTextButton
+									disabled={clearing}
+									onClick={() => {
+										clearFinished().catch(() => undefined);
+									}}
+								>
+									Clear finished
+								</TrayTextButton>
+							) : null}
+						</>
 					) : undefined
 				}
 				count={aggregate.inFlight}

@@ -183,6 +183,19 @@ export const clearDownload = (target: ApiTarget, id: string) =>
 	});
 
 /**
+ * Empty the durable finished-downloads log.
+ *
+ * `clearDownload` drops a row from the live registry only; Core has already
+ * written a copy of every finished download to `downloads-history.json`, and
+ * that copy is what the downloads page's History section lists. Clearing one
+ * without the other is why "Clear finished" could look like it did nothing.
+ */
+export const clearDownloadHistory = (target: ApiTarget) =>
+	request<{ cleared: number; ok: boolean }>(target, "/api/downloads/history", {
+		method: "DELETE",
+	});
+
+/**
  * Subscribe to download-center events and invoke `onEvent` for each. The first
  * event is always a `snapshot` (Core sends it on connect), so a late or
  * reconnecting client self-heals. Resolves when `signal` aborts. Shares the

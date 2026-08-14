@@ -689,6 +689,44 @@ mod tests {
         assert_eq!(t.route("@cf/qwen/qwen1.5-14b-chat-awq").0, "cloudflare");
     }
 
+    /// The exact model ids Core puts in front of users for the pool-backed
+    /// managed providers still route to the pool those rows claim.
+    ///
+    /// The list is a literal COPY of `suggested_models` on the `managed-cloudflare`
+    /// and `managed-bedrock` rows in `apps/core/src/pi_config/mod.rs`. Core is a
+    /// separate crate that cannot import this table, and the failure mode of a
+    /// disagreement is silent and financial: an id whose prefix this table stops
+    /// claiming falls through to `default_provider` — the retail pool — while the
+    /// picker still calls it "Ryu Fast" and the user's Fast grant goes untouched.
+    ///
+    /// So the duplication is the point. If a row here has to change to keep this
+    /// test green, the corresponding Core row is wrong and must change with it.
+    #[test]
+    fn the_model_ids_core_offers_for_each_pool_still_route_to_that_pool() {
+        let t = bare("openai");
+        for (model, pool) in [
+            // managed-cloudflare → "Ryu Fast"
+            ("@cf/meta/llama-3.1-8b-instruct", "cloudflare"),
+            ("@cf/mistral/mistral-7b-instruct-v0.2", "cloudflare"),
+            ("@cf/qwen/qwen1.5-14b-chat-awq", "cloudflare"),
+            // managed-bedrock → "Ryu Frontier"
+            ("anthropic.claude-3-5-sonnet-20241022-v2:0", "bedrock"),
+            ("amazon.nova-pro-v1:0", "bedrock"),
+            ("meta.llama3-1-70b-instruct-v1:0", "bedrock"),
+        ] {
+            let (routed, sent) = t.route(model);
+            assert_eq!(
+                routed, pool,
+                "Core offers `{model}` as {pool} supply, but this table routes it \
+                 to `{routed}` — that turn would debit the wrong pool"
+            );
+            // And the id reaches the provider verbatim: step 3 has no rewrite slot,
+            // so a prefix that is not part of a genuine upstream id routes cleanly
+            // and then 404s.
+            assert_eq!(sent, model);
+        }
+    }
+
     #[test]
     fn bedrock_vendor_ids_route_to_the_bedrock_pool() {
         let t = bare("openai");

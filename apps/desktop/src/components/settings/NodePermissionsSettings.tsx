@@ -113,7 +113,7 @@ export function NodePermissionsSettings() {
 				<h3 className="font-medium text-sm">Permissions</h3>
 				<p className="text-muted-foreground text-xs">
 					By default everyone's access follows their role. Here you can make
-					exceptions for a single space — giving one team access, or taking it
+					exceptions for a single space: giving one team access, or taking it
 					away from someone who would otherwise have it.
 				</p>
 			</div>
@@ -122,7 +122,7 @@ export function NodePermissionsSettings() {
 				<h4 className="font-medium text-xs">With custom permissions</h4>
 				{resources.length === 0 ? (
 					<p className="rounded-md border border-dashed px-3 py-6 text-center text-muted-foreground text-xs">
-						Nothing customised yet — everyone follows their role everywhere.
+						Nothing customised yet. Everyone follows their role everywhere.
 					</p>
 				) : (
 					<ul className="flex flex-col gap-2">

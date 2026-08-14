@@ -32,6 +32,7 @@
     "predev": "node scripts/free-ports.mjs",
     "polar:provision": "bun run scripts/polar/provision-products.ts",
     "polar:provision-extras": "bun run scripts/polar/provision-extras.ts",
+    "polar:provision-voucher": "bun run scripts/polar/provision-voucher.ts",
     "registry:generate": "node tools/generate-registry.mjs",
     "registry:check": "node tools/generate-registry.mjs --check",
     "test:tools": "node --test tools/generate-registry.test.mjs tools/generate-marketplace.test.mjs tools/toolsmith/harness.test.mjs tools/toolsmith/purity.test.mjs tools/toolsmith/manifest.test.mjs scripts/release/next-version.test.mjs scripts/release/channel-brand.test.mjs scripts/release/artifact-name.test.mjs scripts/wipe.test.mjs",

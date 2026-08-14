@@ -23,6 +23,7 @@ import {
 	parseMcpToolType,
 	toolRegistry,
 } from "./tool-registry.ts";
+import { ToolTimingProvider } from "./tool-timing.tsx";
 
 export interface ToolRendererProps {
 	chatStatus?: string;
@@ -108,7 +109,20 @@ function extractStackTrace(part: any): string | null {
 	return null;
 }
 
-export const ToolRenderer = memo(function ToolRenderer({
+export const ToolRenderer = memo(function ToolRenderer(
+	props: ToolRendererProps
+) {
+	// Every row below reads its timing from context rather than a prop: a dozen
+	// tool components sit between here and `ToolRowBase`, and none of them would
+	// otherwise use the value they had to forward.
+	return (
+		<ToolTimingProvider part={props.part}>
+			<ToolRendererInner {...props} />
+		</ToolTimingProvider>
+	);
+});
+
+const ToolRendererInner = memo(function ToolRendererInner({
 	part,
 	nestedTools,
 	chatStatus,

@@ -112,9 +112,15 @@ export interface ViewItem {
 	/** Trailing metadata (e.g. a timestamp or count). */
 	accessory?: string;
 	actions?: ViewAction[];
+	/** An image URL (`http(s)` or `data:`) drawn as the row's subject — see
+	 *  {@link ViewSourceMap.avatar}. */
+	avatar?: string;
 	badges?: ViewBadge[];
 	/** Longer text shown in the detail pane (desktop) / expanded row (island). */
 	detail?: string;
+	/** A glyph id resolved by the host's Icon primitive — see
+	 *  {@link ViewSourceMap.icon}. */
+	icon?: string;
 	id: string;
 	subtitle?: string;
 	title: string;
@@ -243,10 +249,36 @@ export interface ViewSourceFilter {
 export type ViewTextTransform = "basename" | "humanize";
 
 /** Maps each {@link ViewItem} field to the response-row key it reads. Defaults:
- *  `id` → `"id"`, `title` → `"title"`; the rest are omitted unless mapped. */
+ *  `id` → `"id"`, `title` → `"title"`, `icon` → `"icon"`; the rest are omitted
+ *  unless mapped. */
 export interface ViewSourceMap {
 	accessory?: string;
+	/**
+	 * Row key holding a PICTURE for the row — an `http(s)` or `data:` image URL.
+	 *
+	 * Separate from {@link ViewSourceMap.icon} because they are different render
+	 * decisions, not two spellings of one: a glyph is chrome that sits at the row's
+	 * text size, while an avatar is the row's subject and makes the row taller and
+	 * avatar-led (the shape a roster of named agents/people/bots wants — see
+	 * {@link SidebarSectionSpec.rowStyle}). A row that resolves an avatar uses it; a
+	 * row that resolves neither falls back to the section's own glyph, so a feed
+	 * where only some rows have a picture stays a single coherent list.
+	 *
+	 * This is the field whose absence used to mean a contributed section could not
+	 * draw the avatar-led row the shell's own Agents section draws — the one thing
+	 * that made "an app owns its sidebar section" less than true.
+	 */
+	avatar?: string;
 	detail?: string;
+	/**
+	 * Row key holding a per-row glyph id, resolved by the shell's Icon primitive.
+	 *
+	 * Defaults to `"icon"`, which is not a style choice: the sidebar renderer read
+	 * `row.icon` off the raw row before this field existed, so any other default
+	 * would silently drop the glyph from every section already shipping. Declare it
+	 * when the feed's own name for the glyph is something else (`glyph`, `symbol`).
+	 */
+	icon?: string;
 	id?: string;
 	subtitle?: string;
 	/** Transform applied to the mapped `subtitle` value. */
@@ -291,6 +323,24 @@ export interface SidebarSectionSpec {
 		targetFrom?: string;
 	};
 	/**
+	 * Response-row key holding each row's timestamp, so the section can honour the
+	 * user's "Group lists by date" preference (Today / Yesterday / Last week / …)
+	 * exactly like the shell's own lists do. Epoch milliseconds or an ISO string.
+	 *
+	 * OPTIONAL, and absent does not mean opted out: the renderer probes the common
+	 * stamp names Core already serves (`updatedAt`, `created_at`, `lastMessageAt`, …)
+	 * so a section written before this field existed still groups. Declare it when
+	 * the feed's own name for time is not one of those, or when the row carries
+	 * several stamps and only one is the right axis to group by (a run's
+	 * `startedAt` rather than the record's `updatedAt`). A declared key is taken at
+	 * its word — the renderer will not fall back to a different one behind your
+	 * back — and a row that resolves no stamp lands in an explicit "Undated" bucket
+	 * rather than being back-dated into "Older".
+	 *
+	 * Ignored entirely while the preference is off, which is the default.
+	 */
+	dateKey?: string;
+	/**
 	 * What the section shows when its source returns no rows. Absent = the whole
 	 * section is hidden, which is right for a passive list (an app with no
 	 * documents should not leave a phantom header) but wrong for a section whose
@@ -328,6 +378,25 @@ export interface SidebarSectionSpec {
 	};
 	/** Route template opened when a row is clicked. */
 	itemTarget?: string;
+	/**
+	 * How each row draws — the same two shapes the shell's own Agents section
+	 * offers, so an app's roster can look like the shell's instead of approximating
+	 * it with a subtitle:
+	 *
+	 * - `"compact"` (default) — one line, leading glyph, taller only when the row
+	 *   resolved a `subtitle`. What every section shipped before this field.
+	 * - `"messaging"` — a WhatsApp/Telegram-shaped row: a two-line-tall round
+	 *   avatar on the left ({@link ViewSourceMap.avatar}), title and `accessory`
+	 *   (a stamp) on the first line, `subtitle` (a last-message preview) below.
+	 *
+	 * Declared per SECTION, not per sidebar mode, because it is a property of this
+	 * feed: a roster of named bots wants avatars whether the user is in Agent mode
+	 * or reading the section stacked among fifteen others. A `"messaging"` section
+	 * whose rows resolve no avatar still draws the two-line row, falling back to
+	 * the section glyph — that is a feed missing a picture, not a reason to
+	 * silently change layout row by row.
+	 */
+	rowStyle?: "compact" | "messaging";
 	/** Live rows for the section (same primitive `list-detail` uses). */
 	source?: ViewSource;
 }
@@ -790,6 +859,10 @@ export function sourceItemsFromResponse(
 				),
 				detail: rowText(row, map.detail),
 				accessory: rowText(row, map.accessory),
+				// `icon` defaults to the "icon" key the sidebar renderer read off the
+				// raw row before this was mappable — see ViewSourceMap.icon.
+				avatar: rowText(row, map.avatar),
+				icon: rowText(row, map.icon ?? "icon"),
 			},
 		});
 		if (limit !== undefined && out.length >= limit) {

@@ -303,7 +303,7 @@ function ModelSpendCard() {
 
 	return (
 		<SettingsSection
-			caption="Your account's usage rollup: lifetime spend (in USD) and the most-used models by request count. Per-model dollar attribution is not yet broken out — only the aggregate cost and per-model request share are available."
+			caption="Your account's usage rollup: lifetime spend (in USD) and the most-used models by request count. Per-model dollar attribution is not yet broken out; only the aggregate cost and per-model request share are available."
 			title="Spend by model"
 		>
 			{renderBody()}
@@ -436,7 +436,7 @@ function ProviderTierEditor({
 				) : null}
 				{reachable ? null : (
 					<p className="px-3.5 text-muted-foreground text-sm">
-						Gateway unreachable — start the gateway and refresh to configure
+						Gateway unreachable. Start the gateway and refresh to configure
 						provider tiers.
 					</p>
 				)}
@@ -542,7 +542,7 @@ function AccountKeysDisplay({
 				) : null}
 				{reachable ? null : (
 					<p className="px-3.5 text-muted-foreground text-sm">
-						Gateway unreachable — start the gateway and refresh to view account
+						Gateway unreachable. Start the gateway and refresh to view account
 						keys.
 					</p>
 				)}
@@ -595,7 +595,7 @@ function AccountKeysDisplay({
 function ProviderCreditsCard() {
 	return (
 		<SettingsSection
-			caption="Prepaid balance left on the API keys stored on this node. Only OpenAI-compatible vendors that publish a balance to an inference key can be shown — OpenAI and Anthropic expose theirs only to a browser session or a separate admin key, so they cannot appear here."
+			caption="Prepaid balance left on the API keys stored on this node. Only OpenAI-compatible vendors that publish a balance to an inference key can be shown. OpenAI and Anthropic expose theirs only to a browser session or a separate admin key, so they cannot appear here."
 			title="API credit balance"
 		>
 			<SettingsGroup>

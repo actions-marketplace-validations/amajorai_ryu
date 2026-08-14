@@ -46,6 +46,7 @@ const EMPTY: PluginContributions = {
 	hook_events: [],
 	views: [],
 	sidebar_sections: [],
+	sidebar_modes: [],
 	sidebar_buttons: [],
 	themes: [],
 	dock_panels: [],

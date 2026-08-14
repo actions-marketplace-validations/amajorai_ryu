@@ -9,6 +9,7 @@ import {
 	CardTitle,
 } from "@ryu/ui/components/card";
 import { Checkbox } from "@ryu/ui/components/checkbox";
+import { Input } from "@ryu/ui/components/input";
 import { NumberTicker } from "@ryu/ui/components/number-ticker";
 import PageHeader from "@ryu/ui/components/page-header.tsx";
 import { Slider } from "@ryu/ui/components/slider";
@@ -16,6 +17,7 @@ import { useMemo, useState } from "react";
 import {
 	annualTotalPrice,
 	effectiveMonthlyPrice,
+	TEAMS_INCLUDED_PER_SEAT_USD,
 	TEAMS_MIN_SEATS,
 	TEAMS_MONTHLY_PER_SEAT_USD,
 } from "./pricing.tsx";
@@ -188,6 +190,185 @@ const REPLACEABLE_TOOLS: readonly ReplaceableTool[] = [
 	},
 ];
 
+/**
+ * A cost an agent platform displaces that is NOT a software subscription.
+ *
+ * THE TOOL LIST ALONE UNDERSELLS THE PRODUCT, and by a wide margin. Ticking
+ * every subscription above tops out at a few hundred dollars a month, because
+ * that is what SOFTWARE costs — while the work those agents actually do is
+ * priced in salaries, retainers and hours. A buyer comparing us against Notion
+ * and Zapier is answering "which tools do we replace"; the question that
+ * persuades is "what would you pay to get this done without us", and its answer
+ * is an order of magnitude larger.
+ *
+ * These rows are EDITABLE, unlike the tool list, and that difference is
+ * deliberate. A vendor's list price is a fact we can look up and be held to; an
+ * SDR's loaded cost is the buyer's own number, varies by market by a factor of
+ * three, and would read as a made-up claim if we asserted it. So we seed a
+ * defensible default and let them correct it — the figure they typed is the one
+ * they believe, which is the only figure that moves a decision.
+ */
+interface DisplacedCost {
+	readonly category: string;
+	/** Seeded monthly USD — a starting point, not a claim. */
+	readonly defaultMonthlyUsd: number;
+	/** Ticked on first render. Off by default: these are large numbers, and a
+	 * calculator that opens by asserting a $6,000/mo saving reads as a sales
+	 * trick rather than an estimate. The buyer opts in to each one. */
+	readonly defaultOn: boolean;
+	/** Where the default comes from, so the number is arguable rather than magic. */
+	readonly hint: string;
+	readonly id: string;
+	readonly name: string;
+	/** What Ryu does instead — one short clause. */
+	readonly replacedBy: string;
+}
+
+/**
+ * Seeded at deliberately CONSERVATIVE figures (2026 US mid-market), because the
+ * calculator's credibility is worth more than its headline. Each is a monthly
+ * cost the buyer edits to their own reality.
+ */
+const DISPLACED_COSTS: readonly DisplacedCost[] = [
+	{
+		id: "hire-sdr",
+		name: "An SDR or outbound rep",
+		category: "People you'd hire",
+		defaultMonthlyUsd: 5000,
+		defaultOn: false,
+		hint: "Fully loaded monthly cost, salary plus overhead",
+		replacedBy: "Agents that research, draft and follow up",
+	},
+	{
+		id: "hire-support",
+		name: "A support agent",
+		category: "People you'd hire",
+		defaultMonthlyUsd: 4000,
+		defaultOn: false,
+		hint: "One full-time support seat, fully loaded",
+		replacedBy: "Agent Inboxes that triage and answer",
+	},
+	{
+		id: "hire-analyst",
+		name: "A junior analyst or researcher",
+		category: "People you'd hire",
+		defaultMonthlyUsd: 5500,
+		defaultOn: false,
+		hint: "Fully loaded monthly cost",
+		replacedBy: "Research runs on a schedule, not a request",
+	},
+	{
+		id: "hire-ops",
+		name: "An ops or admin coordinator",
+		category: "People you'd hire",
+		defaultMonthlyUsd: 4500,
+		defaultOn: false,
+		hint: "Fully loaded monthly cost",
+		replacedBy: "Workflows that run the recurring work",
+	},
+	{
+		id: "ops-hours",
+		name: "Ops and admin time you already spend",
+		category: "Time you'd get back",
+		defaultMonthlyUsd: 1600,
+		defaultOn: false,
+		hint: "About 10 hours a week at $40/hour, loaded",
+		replacedBy: "The same work, unattended",
+	},
+	{
+		id: "support-tickets",
+		name: "Tickets handled by hand",
+		category: "Time you'd get back",
+		defaultMonthlyUsd: 1000,
+		defaultOn: false,
+		hint: "About 200 tickets a month at $5 each",
+		replacedBy: "First-pass drafts on every ticket",
+	},
+	{
+		id: "agency-content",
+		name: "Content or research retainer",
+		category: "Agencies and contractors",
+		defaultMonthlyUsd: 3000,
+		defaultOn: false,
+		hint: "A typical small monthly retainer",
+		replacedBy: "Drafts your team edits instead of commissions",
+	},
+	{
+		id: "agency-leadgen",
+		name: "Lead-gen or list-building retainer",
+		category: "Agencies and contractors",
+		defaultMonthlyUsd: 2000,
+		defaultOn: false,
+		hint: "A typical small monthly retainer",
+		replacedBy: "Agents that build and enrich the list",
+	},
+	{
+		id: "cac-tooling",
+		name: "Outbound and sales tooling",
+		category: "Going to market",
+		defaultMonthlyUsd: 800,
+		defaultOn: false,
+		hint: "Sequencer, dialler and deliverability stack",
+		replacedBy: "Channels and workflows on your own node",
+	},
+	{
+		id: "data-enrichment",
+		name: "Data and enrichment subscriptions",
+		category: "Going to market",
+		defaultMonthlyUsd: 1200,
+		defaultOn: false,
+		hint: "Apollo, Clay, ZoomInfo and similar",
+		replacedBy: "Web research and enrichment as a tool call",
+	},
+	{
+		id: "own-api-keys",
+		name: "API keys you'd buy directly",
+		category: "Keys you'd otherwise hold",
+		defaultMonthlyUsd: 400,
+		defaultOn: false,
+		hint: "What you'd put on your own OpenAI, Anthropic and search accounts",
+		// The keyless pass-through story: the models are billed at cost, so this
+		// line is not "cheaper keys" — it is the same spend, minus the accounts,
+		// the cards, the rate limits and the per-vendor minimums.
+		replacedBy: "Same models at cost, without holding a single key",
+	},
+];
+
+/** Both groups share one row shape for totalling; only the UI differs. */
+const DISPLACED_CATEGORIES: readonly {
+	name: string;
+	items: readonly DisplacedCost[];
+}[] = DISPLACED_COSTS.reduce<{ name: string; items: DisplacedCost[] }[]>(
+	(groups, cost) => {
+		const existing = groups.find((group) => group.name === cost.category);
+		if (existing) {
+			existing.items.push(cost);
+			return groups;
+		}
+		groups.push({ name: cost.category, items: [cost] });
+		return groups;
+	},
+	[]
+);
+
+const DEFAULT_DISPLACED_SELECTION = new Set(
+	DISPLACED_COSTS.filter((cost) => cost.defaultOn).map((cost) => cost.id)
+);
+
+/** Seeded amounts, keyed by id, before the buyer edits any of them. */
+const DEFAULT_DISPLACED_AMOUNTS: Readonly<Record<string, number>> =
+	Object.fromEntries(
+		DISPLACED_COSTS.map((cost) => [cost.id, cost.defaultMonthlyUsd])
+	);
+
+/**
+ * Upper bound on an edited amount. Not a UX nicety: the totals feed a
+ * percentage and a bar width, and a buyer who pastes a salary in cents (or
+ * leans on a key) would otherwise render a "you'd save 99.9%" headline that
+ * discredits the whole section.
+ */
+const MAX_DISPLACED_MONTHLY_USD = 1_000_000;
+
 /** The catalog grouped into the order the categories first appear. */
 const TOOL_CATEGORIES: readonly {
 	name: string;
@@ -228,11 +409,13 @@ const SEAT_SLIDER_MAX = 50;
 /** Where the slider starts when this section owns its own seat state. */
 const DEFAULT_LOCAL_SEATS = 5;
 /**
- * The fraction of a per-seat price granted back as included AI usage — the 50%
- * default in `includedCreditPoolMicroUsd`. Mirrored here only to phrase the
- * footnote; nothing is billed from it.
+ * Included AI usage is now a PINNED per-plan amount, not a fraction of price.
+ *
+ * This footnote used to compute "50% of the seat price", which was true when
+ * every pool derived from one rule and became a lie the moment they were pinned
+ * — the page advertised $19.50/mo of included usage on a plan granting $15. The
+ * caller passes the real figure; the default is Pro's.
  */
-const INCLUDED_CREDIT_FRACTION = 0.5;
 
 /**
  * The comparison bar: two stacked tracks, the wider one being whatever costs
@@ -324,6 +507,67 @@ function ToolRow({
 	);
 }
 
+/** One tickable displaced-cost row, with the amount editable in place. */
+function DisplacedCostRow({
+	cost,
+	amount,
+	selected,
+	onToggle,
+	onAmountChange,
+}: {
+	amount: number;
+	cost: DisplacedCost;
+	onAmountChange: (id: string, next: number) => void;
+	onToggle: (id: string, next: boolean) => void;
+	selected: boolean;
+}) {
+	const inputId = `ryu-displaced-${cost.id}`;
+	const amountId = `ryu-displaced-amount-${cost.id}`;
+	return (
+		<div className="flex items-start gap-3 rounded-xl px-3 py-2.5 transition-colors hover:bg-muted/50">
+			<Checkbox
+				checked={selected}
+				className="mt-0.5"
+				id={inputId}
+				onCheckedChange={(next) => onToggle(cost.id, next === true)}
+			/>
+			<label className="flex-1 cursor-pointer" htmlFor={inputId}>
+				<span className="block font-medium text-sm">{cost.name}</span>
+				<span className="block text-muted-foreground text-xs">
+					{cost.replacedBy}
+				</span>
+			</label>
+			<span className="shrink-0 text-right">
+				{/* The label is visually hidden rather than absent: the input is a bare
+				    number next to a name, which a screen reader would read as an
+				    unlabelled spinbutton. */}
+				<label className="sr-only" htmlFor={amountId}>
+					Monthly cost of {cost.name} in US dollars
+				</label>
+				<span className="flex items-center justify-end gap-1">
+					<span className="text-muted-foreground text-sm">$</span>
+					<Input
+						className="h-8 w-24 text-right text-sm tabular-nums"
+						id={amountId}
+						inputMode="numeric"
+						max={MAX_DISPLACED_MONTHLY_USD}
+						min={0}
+						onChange={(event) =>
+							onAmountChange(cost.id, Number(event.target.value))
+						}
+						type="number"
+						value={amount}
+					/>
+					<span className="text-muted-foreground text-xs">/mo</span>
+				</span>
+				<span className="mt-0.5 block text-muted-foreground text-xs">
+					{cost.hint}
+				</span>
+			</span>
+		</div>
+	);
+}
+
 /**
  * Total cost savings from replacing a stack of point tools with one Ryu plan.
  *
@@ -335,6 +579,7 @@ function ToolRow({
 export function PricingSavingsCalculator({
 	isYearly = false,
 	monthlyPerSeatUsd = TEAMS_MONTHLY_PER_SEAT_USD,
+	includedPerSeatUsd = TEAMS_INCLUDED_PER_SEAT_USD,
 	minSeats = TEAMS_MIN_SEATS,
 	planName = "Teams",
 	plansHref = "#plans",
@@ -342,6 +587,12 @@ export function PricingSavingsCalculator({
 	seats: controlledSeats,
 	onSeatsChange,
 }: {
+	/**
+	 * Included AI usage per seat per month, in whole USD. Passed rather than
+	 * derived: pools are pinned per plan, so no fraction of the price is correct
+	 * for all of them.
+	 */
+	includedPerSeatUsd?: number;
 	isYearly?: boolean;
 	/**
 	 * Seat floor of the plan being compared against. The slider MUST NOT go below
@@ -370,6 +621,12 @@ export function PricingSavingsCalculator({
 	const [selected, setSelected] = useState<Set<string>>(
 		() => new Set(DEFAULT_SELECTION)
 	);
+	const [displacedSelected, setDisplacedSelected] = useState<Set<string>>(
+		() => new Set(DEFAULT_DISPLACED_SELECTION)
+	);
+	const [displacedAmounts, setDisplacedAmounts] = useState<
+		Record<string, number>
+	>(() => ({ ...DEFAULT_DISPLACED_AMOUNTS }));
 
 	// A solo plan is priced at exactly one seat regardless of what the page (or a
 	// stale local value) is holding, so the totals can never quote a team price.
@@ -397,14 +654,47 @@ export function PricingSavingsCalculator({
 		});
 	};
 
+	const toggleDisplaced = (id: string, next: boolean) => {
+		setDisplacedSelected((prev) => {
+			const draft = new Set(prev);
+			if (next) {
+				draft.add(id);
+			} else {
+				draft.delete(id);
+			}
+			return draft;
+		});
+	};
+
+	const setDisplacedAmount = (id: string, next: number) => {
+		// Clamped, and NaN-guarded: an emptied field yields `Number("") === 0`,
+		// but a partially typed one can yield NaN, which would poison the total
+		// and render every downstream figure as "$NaN".
+		const safe = Number.isFinite(next)
+			? Math.min(Math.max(Math.round(next), 0), MAX_DISPLACED_MONTHLY_USD)
+			: 0;
+		setDisplacedAmounts((prev) => ({ ...prev, [id]: safe }));
+	};
+
 	const { stackAnnual, ryuAnnual, savings, savingsPct } = useMemo(() => {
-		const stackMonthly = REPLACEABLE_TOOLS.filter((tool) =>
+		const toolsMonthly = REPLACEABLE_TOOLS.filter((tool) =>
 			selected.has(tool.id)
 		).reduce(
 			(total, tool) =>
 				total + (tool.perSeat ? tool.monthlyUsd * seats : tool.monthlyUsd),
 			0
 		);
+		// Displaced costs are FLAT, never multiplied by seats. They are already
+		// whole-org figures — one SDR, one retainer — so scaling them by the seat
+		// count would multiply a salary by the size of the team paying it.
+		const displacedMonthly = DISPLACED_COSTS.filter((cost) =>
+			displacedSelected.has(cost.id)
+		).reduce(
+			(total, cost) =>
+				total + (displacedAmounts[cost.id] ?? cost.defaultMonthlyUsd),
+			0
+		);
+		const stackMonthly = toolsMonthly + displacedMonthly;
 		// Competitors are totalled at their MONTHLY list rate over a year; Ryu is
 		// totalled at whichever term the page's billing toggle is on, so the yearly
 		// toggle's two free months show up in the comparison.
@@ -420,9 +710,16 @@ export function PricingSavingsCalculator({
 			savings: saved,
 			savingsPct: stackYear > 0 ? Math.round((saved / stackYear) * 100) : 0,
 		};
-	}, [selected, seats, isYearly, monthlyPerSeatUsd]);
+	}, [
+		selected,
+		displacedSelected,
+		displacedAmounts,
+		seats,
+		isYearly,
+		monthlyPerSeatUsd,
+	]);
 
-	const nothingSelected = selected.size === 0;
+	const nothingSelected = selected.size === 0 && displacedSelected.size === 0;
 	const ryuMonthlyPerSeat = effectiveMonthlyPrice(monthlyPerSeatUsd, isYearly);
 
 	return (
@@ -433,38 +730,85 @@ export function PricingSavingsCalculator({
 			<PageHeader
 				as="h2"
 				className="mb-8 text-center"
-				subtitle="Tick the subscriptions Ryu would replace and we'll do the arithmetic. Prices are each vendor's public monthly list rate."
+				subtitle="Tick the subscriptions Ryu would replace, then add the work you'd otherwise pay people to do. Vendor prices are public monthly list rates; the rest are yours to edit."
 				title="What are you paying for today?"
 			/>
 
 			<div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_360px]">
-				<Card>
-					<CardHeader>
-						<CardTitle className="text-lg">Your current stack</CardTitle>
-						<CardDescription>
-							Per-seat tools scale with the seat count; flat-rate tools
-							don&apos;t.
-						</CardDescription>
-					</CardHeader>
-					<CardContent className="space-y-6">
-						{TOOL_CATEGORIES.map((category) => (
-							<div key={category.name}>
-								<p className="mb-1 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-									{category.name}
-								</p>
-								{category.tools.map((tool) => (
-									<ToolRow
-										key={tool.id}
-										onToggle={toggle}
-										seats={seats}
-										selected={selected.has(tool.id)}
-										tool={tool}
-									/>
-								))}
-							</div>
-						))}
-					</CardContent>
-				</Card>
+				{/* Both cost groups share the left column; the savings panel sticks
+				    in the right one. Wrapped rather than left to grid auto-placement,
+				    which would have put the second card BESIDE the first and pushed
+				    the sticky panel onto a second row. */}
+				<div className="space-y-8">
+					<Card>
+						<CardHeader>
+							<CardTitle className="text-lg">Your current stack</CardTitle>
+							<CardDescription>
+								Per-seat tools scale with the seat count; flat-rate tools
+								don&apos;t.
+							</CardDescription>
+						</CardHeader>
+						<CardContent className="space-y-6">
+							{TOOL_CATEGORIES.map((category) => (
+								<div key={category.name}>
+									<p className="mb-1 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+										{category.name}
+									</p>
+									{category.tools.map((tool) => (
+										<ToolRow
+											key={tool.id}
+											onToggle={toggle}
+											seats={seats}
+											selected={selected.has(tool.id)}
+											tool={tool}
+										/>
+									))}
+								</div>
+							))}
+						</CardContent>
+					</Card>
+
+					{/* The second group, and the one that carries the argument. The card
+					    above answers "which tools do we replace"; this one answers "what
+					    would you pay to get this done without us", which is where the
+					    number stops being a rounding error on a software budget. Kept as a
+					    separate card, and separately opt-in, so the tool comparison stays
+					    honest on its own — a buyer who trusts only the list prices can
+					    ignore this entirely and still get a defensible figure. */}
+					<Card>
+						<CardHeader>
+							<CardTitle className="text-lg">
+								What would you pay to get this done without us?
+							</CardTitle>
+							<CardDescription>
+								The work, not the software. These are your numbers — the
+								defaults are only a starting point, so edit them to what you
+								actually pay.
+							</CardDescription>
+						</CardHeader>
+						<CardContent className="space-y-6">
+							{DISPLACED_CATEGORIES.map((category) => (
+								<div key={category.name}>
+									<p className="mb-1 px-3 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+										{category.name}
+									</p>
+									{category.items.map((cost) => (
+										<DisplacedCostRow
+											amount={
+												displacedAmounts[cost.id] ?? cost.defaultMonthlyUsd
+											}
+											cost={cost}
+											key={cost.id}
+											onAmountChange={setDisplacedAmount}
+											onToggle={toggleDisplaced}
+											selected={displacedSelected.has(cost.id)}
+										/>
+									))}
+								</div>
+							))}
+						</CardContent>
+					</Card>
+				</div>
 
 				<div className="lg:sticky lg:top-24 lg:self-start">
 					<Card>
@@ -506,7 +850,8 @@ export function PricingSavingsCalculator({
 
 							{nothingSelected ? (
 								<p className="mt-6 text-muted-foreground text-sm">
-									Tick the tools you already pay for to see the difference.
+									Tick what you pay for today — tools, people, or both — to see
+									the difference.
 								</p>
 							) : (
 								<>
@@ -535,9 +880,7 @@ export function PricingSavingsCalculator({
 							</Button>
 							<p className="mt-3 text-muted-foreground text-xs">
 								Ryu {planName} also includes{" "}
-								{usdWithCents.format(
-									monthlyPerSeatUsd * INCLUDED_CREDIT_FRACTION
-								)}
+								{usdWithCents.format(includedPerSeatUsd)}
 								{seatControl ? "/seat" : ""}/mo of AI usage, so the model bills
 								the tools above charge you for are already in the number.
 							</p>

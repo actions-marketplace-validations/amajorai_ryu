@@ -1,0 +1,136 @@
+import { BubbleReactions } from "@ryu/ui/components/bubble";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@ryu/ui/components/popover";
+import { cn } from "@ryu/ui/lib/utils";
+
+export { isServerAssignedMessageId } from "./message-reaction-id.ts";
+
+import { IconMoodPlus } from "@tabler/icons-react";
+
+/**
+ * Emoji reactions on one chat message: the chip row, and the picker that adds
+ * to it.
+ *
+ * # The dark-mode halo
+ *
+ * `BubbleReactions` ships `ring-3 ring-card`, which exists to punch the chip row
+ * out of the bubble it overlaps. That reads as a clean notch only where `--card`
+ * equals the surface behind it. In this app's dark theme `--card` is a LIGHTER
+ * grey than `--background`, so the ring renders as a visible pale halo around
+ * every chip. The ring is overridden to the transcript's own background here
+ * rather than fixed in the primitive: other surfaces (the notes editor, the
+ * data grid) sit on `--card` and want the shipped value.
+ */
+
+/** One `(emoji, count)` bucket as the chip row renders it. */
+export interface MessageReactionBucket {
+	count: number;
+	emoji: string;
+	reactedByMe: boolean;
+}
+
+/**
+ * The quick set, in the order every messaging client shows it.
+ *
+ * Fixed rather than a full emoji-mart picker: reactions are a one-tap
+ * affordance, and mounting a searchable grid of 1800 glyphs on every message
+ * hover is both slower and more UI than the gesture deserves.
+ */
+export const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "😮", "😢"] as const;
+
+export interface MessageReactionsProps {
+	align?: "start" | "end";
+	buckets: readonly MessageReactionBucket[];
+	/** Hidden entirely when false — see `isServerAssignedMessageId`. */
+	canReact?: boolean;
+	className?: string;
+	onToggle: (emoji: string) => void;
+	side?: "top" | "bottom";
+}
+
+/**
+ * The chip row. Renders nothing at all when a message has no reactions and
+ * cannot take one, so an ordinary message carries no extra box.
+ */
+export function MessageReactions({
+	buckets,
+	className,
+	canReact = false,
+	onToggle,
+	side = "bottom",
+	align = "end",
+}: MessageReactionsProps) {
+	if (buckets.length === 0 && !canReact) {
+		return null;
+	}
+	return (
+		<BubbleReactions
+			align={align}
+			// See the halo note above: `ring-background` replaces the primitive's
+			// `ring-card`, which haloes wherever card ≠ background.
+			className={cn("ring-background", className)}
+			side={side}
+		>
+			{buckets.map((bucket) => (
+				<button
+					aria-label={`${bucket.emoji} ${bucket.count}`}
+					aria-pressed={bucket.reactedByMe}
+					className={cn(
+						"flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs leading-none transition-colors",
+						"hover:bg-foreground/8",
+						// The caller's own reactions are the only ones tinted, so a glance
+						// answers "did I already react" without counting.
+						bucket.reactedByMe
+							? "bg-primary/15 text-foreground"
+							: "text-muted-foreground"
+					)}
+					key={bucket.emoji}
+					onClick={() => onToggle(bucket.emoji)}
+					type="button"
+				>
+					<span className="text-sm leading-none">{bucket.emoji}</span>
+					<span className="tabular-nums">{bucket.count}</span>
+				</button>
+			))}
+			{canReact && <ReactionPicker onPick={onToggle} />}
+		</BubbleReactions>
+	);
+}
+
+function ReactionPicker({ onPick }: { onPick: (emoji: string) => void }) {
+	return (
+		<Popover>
+			{/* Base UI triggers take a `render` prop; nesting a button as a CHILD of
+			    the trigger renders a button inside a button and throws. */}
+			<PopoverTrigger
+				render={
+					<button
+						aria-label="Add reaction"
+						className="flex items-center rounded-full px-1 py-0.5 text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground"
+						type="button"
+					>
+						<IconMoodPlus className="size-3.5" />
+					</button>
+				}
+			/>
+			<PopoverContent className="w-auto p-1">
+				<div className="flex items-center gap-0.5">
+					{QUICK_REACTIONS.map((emoji) => (
+						<button
+							aria-label={emoji}
+							className="rounded-md p-1 text-base leading-none transition-colors hover:bg-foreground/8"
+							key={emoji}
+							onClick={() => onPick(emoji)}
+							type="button"
+						>
+							{emoji}
+						</button>
+					))}
+				</div>
+			</PopoverContent>
+		</Popover>
+	);
+}

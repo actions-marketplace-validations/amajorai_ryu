@@ -149,7 +149,7 @@ export function SettingsSyncTab() {
 								onCheckedChange={setSyncEnabled}
 							/>
 						}
-						description="Node and gateway configuration, API keys, workspace folders and device-specific picks are never included — see the list below for exactly what travels."
+						description="Node and gateway configuration, API keys, workspace folders and device-specific picks are never included. See the list below for exactly what travels."
 						title="Sync My Settings Across Machines"
 					/>
 					<SettingsItem

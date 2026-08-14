@@ -204,9 +204,12 @@ export function httpPrimitiveTransport(
 		return (parsed.text ?? "").trim();
 	};
 
-	// `/api/voice/speak` — Core streams raw `audio/wav` bytes back (not JSON, not a
-	// data: URL). Convert the response to a renderable data: URL, as the desktop
-	// host's rpc.ts does, so the shipped type contract ("returns a data: URL") holds.
+	// `/api/voice/speak` — Core streams raw audio bytes back (not JSON, not a
+	// data: URL). Usually `audio/wav`; the cloud engine (`engine: "gateway"`) can
+	// answer with whatever the routed provider produced, so the media type is read
+	// off the response rather than assumed. Convert to a renderable data: URL, as
+	// the desktop host's rpc.ts does, so the shipped type contract ("returns a
+	// data: URL") holds.
 	const speakDirect = async (body: unknown): Promise<string> => {
 		const res = await doFetch(`${base}/api/voice/speak`, {
 			method: "POST",

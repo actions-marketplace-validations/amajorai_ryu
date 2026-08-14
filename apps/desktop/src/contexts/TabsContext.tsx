@@ -230,6 +230,9 @@ interface TabsContextValue {
 	activateTab: (id: string) => void;
 	activeTabId: string;
 	addTabToGroup: (tabId: string, groupId: string) => void;
+	/** Join `tabId` to an existing split as a new pane at the end of its root
+	    run (drag a tab onto a split bracket, or the "Add … to split" menu). */
+	addTabToSplit: (splitId: string, tabId: string) => void;
 	/** Tile `tabIds` into a NEW split whose tree is the preset's shape (pane
 	    order = the preset's depth-first slot order). Extra ids are ignored;
 	    fewer ids than slots is a no-op. The one primitive that can create a
@@ -239,9 +242,6 @@ interface TabsContextValue {
 	    remembered route or an empty pane the user then fills. Fails as a whole
 	    (never half-applied) when the tab cap can't fit every pane. */
 	applySplitPresetToNewTabs: (root: PresetBranch) => void;
-	/** Join `tabId` to an existing split as a new pane at the end of its root
-	    run (drag a tab onto a split bracket, or the "Add … to split" menu). */
-	addTabToSplit: (splitId: string, tabId: string) => void;
 	/** Bind (or unbind, with `undefined`) the conversation a chat tab is showing.
 	    A tab opened as a blank "New chat" only learns its conversation id on the
 	    first send, so ChatPage writes it back here. Without the write-back the tab
@@ -406,36 +406,16 @@ export function useTabsContext(): TabsContextValue {
 	return ctx;
 }
 
+/** Single-page routes and their tab titles. The Library and the Customize store
+    are deliberately ABSENT: every one of their routes is the same multi-section
+    shell, so their titles come from {@link shellRoute} instead — see the comment
+    there. Do not re-add a per-section key here; it would be dead (shellRoute is
+    consulted first) and would drift. */
 const PATH_TITLES: Record<string, string> = {
 	[DASHBOARD_DEFAULT_PATH]: "Home",
 	"/chat": "New chat",
 	[PANE_CHOOSER_PATH]: "Empty pane",
-	"/agents": "Agents",
-	"/library": "Library",
-	// Library section tabs (Agents/Spaces/Workflows consolidated into the Library).
-	"/library/agent": "Agents",
-	"/library/space": "Spaces",
-	"/library/workflow": "Workflows",
-	"/library/chat": "Chats",
-	"/library/channel": "Channels",
-	"/library/identity": "Identities",
-	"/library/memory": "Memory",
-	"/library/tools": "Tools",
-	"/channels": "Channels",
-	"/identities": "Identities",
 	"/identities/new": "New identity",
-	"/engines": "Engines",
-	"/store": "Customize",
-	"/store/agents": "Customize",
-	"/store/apps": "Customize",
-	"/store/plugins": "Customize",
-	"/store/workflows": "Customize",
-	"/marketplace": "Customize",
-	"/models": "Models",
-	"/skills": "Skills",
-	"/spaces": "Spaces",
-	"/tools": "Tools",
-	"/workflows": "Workflows",
 	"/workflows/build": "Build a workflow",
 	"/calendar": "Calendar",
 	"/meetings": "Meetings",
@@ -447,10 +427,97 @@ const PATH_TITLES: Record<string, string> = {
 	"/inbox": "Inbox",
 	"/downloads": "Downloads",
 	"/settings": "Settings",
-	"/extensions": "Extensions",
-	"/apps": "Plugins",
-	"/fleet": "Installed",
 };
+
+/** The two multi-section shells in the app: LibraryPage and StorePage. */
+type ShellFamily = "library" | "store";
+
+export interface ShellRoute {
+	family: ShellFamily;
+	title: string;
+}
+
+/** The store shell's product name. It is the word the sidebar's own header
+    button carries (AppSidebar `CHROME_LABELS.store`), and TitleBar keys its
+    glyph off the same decision — change all three together or the one page
+    shows up as several different things. */
+const STORE_SHELL_TITLE = "Customize";
+const LIBRARY_SHELL_TITLE = "Library";
+
+/** Bare legacy routes that mount LibraryPage on a section (see
+    `contributions/builtins.ts`). Matched EXACTLY: `/channels/:id`,
+    `/identities/new`, `/identities/profile/:id`, `/agents/:id/edit` and
+    `/workflows/build` are genuinely different pages and must keep their own
+    titles.
+
+    `/agents` is one of them: `builtins.ts` mounts it as
+    `LibraryPage initialSection: "agent"` — byte-for-byte the page
+    `/library/agent` mounts — so keeping it out would leave one page with two
+    names and two tabs that never reuse each other, which is the defect this
+    whole seam exists to remove. Nothing in the app opens bare `/agents` any
+    more (the sidebar, the palette and EmptyTabsState all target
+    `/library/agent`); it survives as a deep link and in restored sessions.
+    TitleBar's Ryu-ghost painting used to be the argument for excluding it, but
+    that argues for a glyph, not a second name — `isAgentsTab` is now narrowed
+    to the agent EDIT route so a Library tab never flickers logo↔book as its
+    section changes. */
+const LIBRARY_ALIAS_PATHS = new Set([
+	"/agents",
+	"/channels",
+	"/identities",
+	"/spaces",
+	"/tools",
+	"/workflows",
+]);
+
+/** Bare legacy routes that mount StorePage on a section. Exact matches only —
+    `/skills/new` is the SKILL.md editor companion, not the store. */
+const STORE_ALIAS_PATHS = new Set([
+	"/apps",
+	"/engines",
+	"/extensions",
+	"/fleet",
+	"/models",
+	"/skills",
+]);
+
+/**
+ * The PAGE a route belongs to, for the two shells whose sections switch in
+ * place (the Library and the Customize store). Returns undefined for every
+ * other route.
+ *
+ * A section is not a page. `/tools`, `/library/agent` and `/library` are one
+ * LibraryPage; `/apps`, `/models`, `/marketplace` and `/store/plugins` are one
+ * StorePage. Previously each of those had its own row in `PATH_TITLES` naming
+ * the SECTION ("Tools", "Models"), and — worse — the caller's title won over
+ * the map (`opts?.title ?? defaultTitle(path)`), so a tab was named after
+ * whichever sidebar row happened to open it and then never renamed when the
+ * user switched section inside the page. Both halves are fixed by making these
+ * routes authoritative: {@link resolveTabTitle} consults this FIRST, so a
+ * caller-supplied label can no longer override a shell's own name. Entity
+ * routes (a chat, an agent, a space) match nothing here and keep their
+ * caller-supplied titles.
+ */
+export function shellRoute(path: string): ShellRoute | undefined {
+	const base = path.split("?")[0];
+	if (
+		base === "/library" ||
+		base.startsWith("/library/") ||
+		LIBRARY_ALIAS_PATHS.has(base)
+	) {
+		return { family: "library", title: LIBRARY_SHELL_TITLE };
+	}
+	if (
+		base === "/store" ||
+		base.startsWith("/store/") ||
+		base === "/marketplace" ||
+		base.startsWith("/marketplace/") ||
+		STORE_ALIAS_PATHS.has(base)
+	) {
+		return { family: "store", title: STORE_SHELL_TITLE };
+	}
+	return undefined;
+}
 
 function makeTabId(): string {
 	return `tab-${crypto.randomUUID()}`;
@@ -489,12 +556,52 @@ function defaultTitle(path: string): string {
 	if (IDENTITY_PROFILE_TITLE_RE.test(base)) {
 		return "Identities";
 	}
+	// After the entity regexes (so `/agents/:id/edit` stays "Edit agent") and
+	// before the per-path map, which no longer carries the shells' routes.
+	const shell = shellRoute(base);
+	if (shell) {
+		return shell.title;
+	}
 	const mapped = PATH_TITLES[base];
 	if (mapped) {
 		return mapped;
 	}
 	const segment = base.split("/").filter(Boolean).at(-1);
 	return segment ? humanizePathSegment(segment) : "Page";
+}
+
+/**
+ * The title a tab must carry for `path`, given whatever the caller asked for.
+ *
+ * The one seam every tab title flows through. A shell route WINS over
+ * `callerTitle`: sidebar rows, the command palette and the empty-tabs state all
+ * pass their own label ("Tools", "Plugins", "Customize"), and honouring it is
+ * what left tabs named after the row that opened them. Everything else keeps
+ * the caller's title — a chat, an agent or a space tab is named for its entity,
+ * which no path map can know.
+ */
+function resolveTabTitle(path: string, callerTitle?: string): string {
+	return shellRoute(path)?.title ?? callerTitle ?? defaultTitle(path);
+}
+
+/**
+ * The entity glyph a tab on `path` may carry — the icon half of
+ * {@link resolveTabTitle}, and the same rule: a shell OWNS its glyph, so a tab
+ * sitting on one carries none and TitleBar paints the family's icon from the
+ * path instead.
+ *
+ * Without this a stamped `icon` outlives the route it was stamped for: it wins
+ * over the path icon in `TabGlyph`, it is persisted across relaunches, and both
+ * the reuse branches here and `setTabRoute` carry it onto the next route. An
+ * agent tab (its avatar) navigated in place to `/library/space` would keep the
+ * avatar while reading "Library". Entity routes are untouched — a chat, a space
+ * or an agent tab is exactly where a caller-supplied glyph belongs.
+ */
+function resolveTabGlyph(
+	path: string,
+	callerIcon?: GlyphValue
+): GlyphValue | undefined {
+	return shellRoute(path) ? undefined : callerIcon;
 }
 
 // /chat tabs can have multiple instances; all other paths are singletons.
@@ -708,6 +815,84 @@ function migrateLegacyPath(path: string): string {
 	return path === LEGACY_DASHBOARD_PATH ? DASHBOARD_DEFAULT_PATH : path;
 }
 
+/**
+ * Collapse a restored session to ONE tab per shell family.
+ *
+ * `openTab` keeps a single Library / Customize tab, but nothing enforced that
+ * on the way IN. A session that was written with `/tools`, `/models`, `/apps`
+ * and `/skills` open revives as four tabs, three of them reading "Customize"
+ * and one "Library" — indistinguishable in the strip, which is the reported
+ * defect in a new shape — and the first member of each family then absorbs
+ * every later navigation into it, stranding the others.
+ *
+ * Two kinds of member are never dropped, only ever collapsed AROUND:
+ *
+ * - Split members, matching `openTab`'s `!t.splitId` exclusion: a tiled pane
+ *   holds its section deliberately.
+ * - PINNED members, all of them. A pin is explicit user state and this function
+ *   runs on data that cannot tell a deliberate second shell tab (middle-click /
+ *   "open in new tab", which `forceNew` still allows) from a stale session — the
+ *   persisted record is just a path — so it must not be the thing that deletes
+ *   one. An unpinned extra IS dropped on that same reasoning inverted: nothing
+ *   marks it as wanted, and leaving it produces the identically-named tabs this
+ *   collapse exists to remove. The cost is that a middle-clicked second
+ *   Customize tab does not survive a relaunch unless the user pins it.
+ *
+ * The survivor — the member that absorbs the family — is the first pinned one,
+ * else the active one, else the first. It inherits the ACTIVE member's path when
+ * that member is being dropped, so the user still lands on the section they
+ * left, and `activeId` follows the survivor in that case. Overwriting a pinned
+ * survivor's section is deliberate and matches `openTab`: pinning says "keep
+ * this tab", not "keep this section".
+ */
+function dedupeShellFamilies(
+	tabs: Tab[],
+	activeId: string
+): { activeId: string; tabs: Tab[] } {
+	const families = new Map<ShellFamily, Tab[]>();
+	for (const t of tabs) {
+		const family = t.splitId ? undefined : shellRoute(t.path)?.family;
+		if (!family) {
+			continue;
+		}
+		const members = families.get(family);
+		if (members) {
+			members.push(t);
+		} else {
+			families.set(family, [t]);
+		}
+	}
+	const dropped = new Set<string>();
+	let survivingActiveId = activeId;
+	for (const members of families.values()) {
+		if (members.length < 2) {
+			continue;
+		}
+		const active = members.find((t) => t.id === activeId);
+		const survivor = members.find((t) => t.pinned) ?? active ?? members[0];
+		// Only when the active member is one of the dropped ones: a pinned active
+		// member keeps its own section, because it is not going anywhere.
+		if (active && active !== survivor && !active.pinned) {
+			survivor.path = active.path;
+		}
+		for (const t of members) {
+			if (t !== survivor && !t.pinned) {
+				dropped.add(t.id);
+			}
+		}
+		if (dropped.has(survivingActiveId)) {
+			survivingActiveId = survivor.id;
+		}
+	}
+	if (dropped.size === 0) {
+		return { tabs, activeId };
+	}
+	return {
+		tabs: tabs.filter((t) => !dropped.has(t.id)),
+		activeId: survivingActiveId,
+	};
+}
+
 function restoreSession(): StartupState | null {
 	try {
 		const raw = localStorage.getItem(SESSION_TABS_KEY);
@@ -718,16 +903,29 @@ function restoreSession(): StartupState | null {
 		if (!Array.isArray(parsed.tabs) || parsed.tabs.length === 0) {
 			return null;
 		}
-		const mapped: Tab[] = parsed.tabs.map((t) => ({
-			id: makeTabId(),
-			path: migrateLegacyPath(t.path),
-			title: t.title,
-			conversationId: t.conversationId,
-			initialAgent: t.initialAgent,
-			initialProject: t.initialProject,
-			pinned: t.pinned,
-			icon: t.icon,
-		}));
+		// Titles and glyphs are persisted verbatim, so a session written by an
+		// earlier build still carries the SIDEBAR's label on its shell tabs
+		// ("Tools", "Plugins", "Customize") and whatever icon was stamped on them.
+		// Re-resolving through `resolveTabTitle` / `resolveTabGlyph` on the way in
+		// renames them once, at restore, rather than leaving the stale name to
+		// survive every relaunch — a shell route's title and glyph are derived,
+		// never user data, so there is nothing to preserve. Non-shell tabs keep
+		// both (a chat tab's thread name and avatar are NOT derivable from its
+		// path). Re-titling alone would leave several identically-named tabs in the
+		// strip, so `dedupeShellFamilies` below collapses them too.
+		const mapped: Tab[] = parsed.tabs.map((t) => {
+			const path = migrateLegacyPath(t.path);
+			return {
+				id: makeTabId(),
+				path,
+				title: resolveTabTitle(path, t.title),
+				conversationId: t.conversationId,
+				initialAgent: t.initialAgent,
+				initialProject: t.initialProject,
+				pinned: t.pinned,
+				icon: resolveTabGlyph(path, t.icon),
+			};
+		});
 		// Revive split layouts over the fresh ids, then stamp membership onto the
 		// member tabs (membership drives normalize + the strip brackets).
 		const splits: Split[] = [];
@@ -760,7 +958,15 @@ function restoreSession(): StartupState | null {
 		// Focus id is resolved before normalize reorders (pinned-lead), so it
 		// tracks the tab the user last viewed rather than a shifted position.
 		const activeId = mapped[idx].id;
-		return { tabs: normalize(mapped), activeId, splits: reconciled };
+		// One tab per shell family, the same invariant `openTab` holds. Runs after
+		// split revival so the dedupe can see (and spare) split members, and the
+		// splits themselves are untouched because no split member is ever dropped.
+		const collapsed = dedupeShellFamilies(mapped, activeId);
+		return {
+			tabs: normalize(collapsed.tabs),
+			activeId: collapsed.activeId,
+			splits: reconciled,
+		};
 	} catch {
 		return null;
 	}
@@ -811,7 +1017,7 @@ export function TabsProvider({
 					{
 						id,
 						path: initialTab.path.split("?")[0],
-						title: initialTab.title ?? defaultTitle(initialTab.path),
+						title: resolveTabTitle(initialTab.path, initialTab.title),
 						conversationId: initialTab.conversationId,
 					},
 				],
@@ -974,27 +1180,61 @@ export function TabsProvider({
 			const patchIcon = <T extends Tab>(tab: T): T =>
 				opts?.icon === undefined ? tab : { ...tab, icon: opts.icon };
 
-			// The unified Library is one tab that switches sections in place: any
-			// `/library` or `/library/<section>` navigation reuses an existing
-			// Library tab and swaps its section (bumping navToken to force a remount
-			// so LibraryPage re-reads `initialSection`) rather than stacking a second
-			// Library tab. Falls through to normal singleton creation when none is open.
-			const isLibraryPath = base === "/library" || base.startsWith("/library/");
-			if (isLibraryPath && !opts?.forceNew) {
-				const existing = current.find(
-					(t) => t.path === "/library" || t.path.startsWith("/library/")
-				);
+			// Each multi-section shell (the Library, the Customize store) is ONE tab
+			// that switches sections in place: any navigation into the family reuses
+			// the open tab and swaps its section (bumping navToken to force a remount
+			// so the page re-reads `initialSection`) rather than stacking a second
+			// one. Falls through to normal singleton creation when none is open.
+			// Family-wide, not `/library`-prefixed: now that every route in a family
+			// shares one title, per-path singletons would leave the user staring at
+			// several identically-named "Library" tabs — the same defect in a new
+			// shape. `forceNew` (middle-click, "open in new tab") still opts out.
+			//
+			// Two tiers, and the ORDER is load-bearing. An exact-path match wins, so
+			// this branch can never do less than the `isSingleton` guard below it
+			// used to: navigating to a route that is already open activates THAT tab
+			// (split members included, exactly as the singleton guard did) instead of
+			// rewriting some other family member onto the same path — which would
+			// leave two identically-pathed, identically-titled tabs, the second of
+			// them unreachable by navigation for the rest of the session. Only when
+			// no tab is on the route does the family fallback re-point one.
+			//
+			// The family tier skips split members (`!t.splitId`) — see `setTabRoute`'s
+			// note: a sidebar click must never rewrite a pane the user deliberately
+			// tiled. The old `/library`-only predicate had no such guard, but widening
+			// the family from 9 Library routes to ~20 across both shells would
+			// otherwise have made "click Plugins, lose the /models pane you were
+			// reading" a routine accident. A PINNED shell tab is still reused:
+			// pinning says "keep this tab", not "keep this section", and skipping it
+			// would spawn a second tab with the very same name.
+			const shell = shellRoute(base);
+			if (shell && !opts?.forceNew) {
+				const existing =
+					current.find((t) => t.path === base) ??
+					current.find(
+						(t) => !t.splitId && shellRoute(t.path)?.family === shell.family
+					);
 				if (existing) {
-					if (existing.path !== base || opts?.icon !== undefined) {
-						const reused: Tab = patchIcon({
+					// `existing.title !== shell.title` heals a tab whose stale label was
+					// written by an older build and is still open in THIS session (the
+					// restore-time migration only catches it across a relaunch);
+					// `existing.icon !== undefined` does the same for a stale glyph the
+					// tab carried in from an entity route (see `resolveTabGlyph`).
+					if (
+						existing.path !== base ||
+						existing.title !== shell.title ||
+						existing.icon !== undefined
+					) {
+						const reused: Tab = {
 							...existing,
 							path: base,
-							title: opts?.title ?? defaultTitle(path),
+							title: resolveTabTitle(path, opts?.title),
+							icon: resolveTabGlyph(base, opts?.icon ?? existing.icon),
 							navToken:
 								existing.path === base
 									? existing.navToken
 									: (existing.navToken ?? 0) + 1,
-						});
+						};
 						setTabs((prev) => {
 							const next = normalize(
 								prev.map((t) => (t.id === reused.id ? reused : t))
@@ -1067,10 +1307,13 @@ export function TabsProvider({
 				!activeTab.pinned &&
 				!activeTab.splitId
 			) {
-				const reused: Tab = patchIcon({
+				const reused: Tab = {
 					...activeTab,
 					path: base,
-					title: opts?.title ?? defaultTitle(path),
+					title: resolveTabTitle(path, opts?.title),
+					// The tab keeps the route's own glyph, not the one the previous
+					// route left on it (see `resolveTabGlyph`).
+					icon: resolveTabGlyph(base, opts?.icon ?? activeTab.icon),
 					conversationId: opts?.conversationId,
 					initialPrompt: opts?.initialPrompt,
 					initialSubmit: opts?.initialSubmit,
@@ -1082,7 +1325,7 @@ export function TabsProvider({
 					// (otherwise ChatPage keeps rendering the previous thread).
 					navToken: (activeTab.navToken ?? 0) + 1,
 					unloaded: false,
-				});
+				};
 				setTabs((prev) => {
 					const next = normalize(
 						prev.map((t) => (t.id === reused.id ? reused : t))
@@ -1104,10 +1347,11 @@ export function TabsProvider({
 				return activeTabIdRef.current;
 			}
 
-			const newTab: Tab = patchIcon({
+			const newTab: Tab = {
 				id: makeTabId(),
 				path: base,
-				title: opts?.title ?? defaultTitle(path),
+				title: resolveTabTitle(path, opts?.title),
+				icon: resolveTabGlyph(base, opts?.icon),
 				conversationId: opts?.conversationId,
 				initialPrompt: opts?.initialPrompt,
 				initialSubmit: opts?.initialSubmit,
@@ -1115,7 +1359,7 @@ export function TabsProvider({
 				initialAgent: opts?.initialAgent,
 				initialGhost: opts?.initialGhost,
 				initialProject: opts?.initialProject,
-			});
+			};
 			setTabs((prev) => {
 				const next = normalize([...prev, newTab]);
 				tabsRef.current = next;
@@ -1961,9 +2205,11 @@ export function TabsProvider({
 			const next: Tab = {
 				...target,
 				path: base,
-				title: opts?.title ?? defaultTitle(base),
+				title: resolveTabTitle(base, opts?.title),
 				conversationId: opts?.conversationId,
-				icon: opts?.icon ?? target.icon,
+				// A shell route owns its glyph, so the pane drops whatever the route
+				// it is leaving stamped on it (see `resolveTabGlyph`).
+				icon: resolveTabGlyph(base, opts?.icon ?? target.icon),
 				// One-shot seeds belong to the route being left behind.
 				initialPrompt: undefined,
 				initialSubmit: undefined,

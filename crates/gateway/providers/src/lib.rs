@@ -239,6 +239,108 @@ pub(crate) async fn check_response_status(
     )))
 }
 
+/// Check a completed **audio** response and normalize it to the JSON audio
+/// envelope Core consumes:
+///
+/// ```json
+/// { "object": "audio",
+///   "data": [{ "b64_json": "<base64>", "content_type": "audio/wav" }],
+///   "raw": null }
+/// ```
+///
+/// A sibling of [`check_response_status`] rather than a change to it: that
+/// function is shared by chat, image, STT and video and parses JSON
+/// unconditionally, which is exactly the bug here — `POST /v1/audio/speech`
+/// answers with raw `audio/*` bytes, so every real synthesis died as
+/// "`{provider}` response parse error". The 429 arm is kept byte-identical
+/// because the circuit breaker and the fallback chain key off the typed
+/// [`ProviderError::RateLimited`].
+///
+/// Providers that answer in JSON (an OpenAI-compatible relay returning
+/// `{"audio": "<b64>"}`, or an error body) are passed through verbatim — their
+/// JSON text is never base64'd as if it were audio.
+pub(crate) async fn audio_response_to_envelope(
+    resp: reqwest::Response,
+    provider: &str,
+    quota: Option<&ProviderQuotas>,
+) -> Result<Value, ProviderError> {
+    use base64::Engine as _;
+
+    let status = resp.status();
+    let rate_limit = parse_rate_limit(resp.headers());
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = rate_limit.as_ref().and_then(|r| r.retry_after);
+        let reset_at = rate_limit.as_ref().and_then(|r| r.reset_at);
+        if let Some(q) = quota {
+            q.record_rate_limited(provider, retry_after, reset_at);
+        }
+        // Drain the body best-effort for the log; it is not surfaced to the caller.
+        let _ = resp.text().await;
+        tracing::warn!(provider, status = %status, "provider rate limited (429)");
+        return Err(ProviderError::RateLimited {
+            provider: provider.to_string(),
+            retry_after,
+            reset_at,
+        });
+    }
+
+    // Capture the content type BEFORE the body is consumed.
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if !status.is_success() {
+        // Errors are JSON (or text) even on an audio endpoint. Lift
+        // `error.message` when it is there, else surface the raw body.
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+            .unwrap_or_else(|| body.trim().to_string());
+        tracing::warn!(provider, status = %status, error = %msg, "provider returned error");
+        return Err(ProviderError::Provider(format!(
+            "{provider} error {status}: {msg}"
+        )));
+    }
+
+    if let (Some(q), Some(info)) = (quota, rate_limit.as_ref()) {
+        q.record_success(provider, info);
+    }
+
+    if content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("application/json")
+    {
+        return resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Provider(format!("{provider} response parse error: {e}")));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| ProviderError::Provider(format!("{provider} audio read error: {e}")))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let ct = if content_type.is_empty() {
+        "audio/mpeg".to_string()
+    } else {
+        content_type
+    };
+    Ok(serde_json::json!({
+        "object": "audio",
+        "data": [{ "b64_json": b64, "content_type": ct }],
+        "raw": Value::Null,
+    }))
+}
+
 /// Retry a fallible `reqwest` send closure up to `max_retries` times on
 /// transient errors (5xx or connection failure), with exponential back-off
 /// (1 s, 2 s, 4 s, …).  4xx errors are not retried.
@@ -432,6 +534,29 @@ pub(crate) fn normalize_media_output(output: &Value) -> Value {
     serde_json::json!({ "data": data, "raw": output.clone() })
 }
 
+/// Attach a provider's own usage report to a normalized media response.
+///
+/// METERING NEEDS THE TRANSACTION, NOT AN AVERAGE. A flat per-call media rate
+/// charges a two-second image and a sixty-second video the same amount, so it is
+/// wrong by up to ~30x in both directions on the same configured number.
+/// Replicate reports `metrics.predict_time` — the billable compute seconds — and
+/// the normalizer used to discard it along with the rest of the prediction
+/// envelope, which is why the debit downstream had nothing to bill from.
+///
+/// Kept as a separate step rather than folded into `normalize_media_output` so
+/// providers that report nothing stay unchanged and simply omit the key; the
+/// debit path treats a missing `usage` as "fall back to the flat rate".
+pub(crate) fn with_media_usage(mut normalized: Value, usage: &Value) -> Value {
+    if let Some(seconds) = usage
+        .get("predict_time")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|s| *s > 0.0)
+    {
+        normalized["usage"] = serde_json::json!({ "compute_seconds": seconds });
+    }
+    normalized
+}
+
 /// Recursively collect renderable media URLs from an arbitrary output value,
 /// de-duplicating so repeated URLs (e.g. a result echoed in nested fields) are
 /// emitted once.
@@ -487,6 +612,10 @@ pub(crate) mod test_support {
         pub status: u16,
         pub headers: Vec<(String, String)>,
         pub body: String,
+        /// Raw body for replies that are not text (audio, images). When set it
+        /// is served verbatim and `body` is ignored — including the `{{BASE}}`
+        /// substitution, which would corrupt binary payloads.
+        pub body_bytes: Option<Vec<u8>>,
     }
 
     impl MockResponse {
@@ -496,6 +625,7 @@ pub(crate) mod test_support {
                 status: 200,
                 headers: vec![("content-type".into(), "application/json".into())],
                 body: body.into(),
+                body_bytes: None,
             }
         }
 
@@ -505,6 +635,18 @@ pub(crate) mod test_support {
                 status,
                 headers: vec![("content-type".into(), "application/json".into())],
                 body: body.into(),
+                body_bytes: None,
+            }
+        }
+
+        /// A `200 OK` reply carrying arbitrary (possibly non-UTF-8) bytes under
+        /// an explicit content type — how a real TTS endpoint answers.
+        pub fn ok_bytes(content_type: &str, body: Vec<u8>) -> Self {
+            Self {
+                status: 200,
+                headers: vec![("content-type".into(), content_type.into())],
+                body: String::new(),
+                body_bytes: Some(body),
             }
         }
 
@@ -585,13 +727,18 @@ pub(crate) mod test_support {
             }
         };
 
-        let body = reply.body.replace("{{BASE}}", &state.base_url);
         let mut builder = Response::builder()
             .status(StatusCode::from_u16(reply.status).unwrap_or(StatusCode::OK));
         for (k, v) in &reply.headers {
             builder = builder.header(k, v);
         }
-        builder.body(Body::from(body)).unwrap()
+        match reply.body_bytes {
+            Some(bytes) => builder.body(Body::from(bytes)).unwrap(),
+            None => {
+                let body = reply.body.replace("{{BASE}}", &state.base_url);
+                builder.body(Body::from(body)).unwrap()
+            }
+        }
     }
 
     impl MockServer {

@@ -475,32 +475,12 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 	// conversation store, so it isn't re-hydrated on reload. A backing engine that
 	// isn't available surfaces as an inline error on the same surface (graceful
 	// degradation).
-	const handleGenerateImage = useCallback(
-		async (prompt: string) => {
-			const userId = `img-user-${Date.now()}`;
-			const assistantId = `img-${Date.now()}`;
-			// Echo the prompt as a user bubble, and reserve the image frame in the
-			// same tick — the `data-image-generation` part MessageList renders through
-			// the ImageGeneration surface. Status goes straight from `generating` to
-			// `complete`/`error`: this path has no progress events to report.
-			setMessages((prev) => [
-				...prev,
-				{
-					id: userId,
-					role: "user",
-					parts: [{ type: "text", text: prompt }],
-				} as (typeof prev)[number],
-				{
-					id: assistantId,
-					role: "assistant",
-					parts: [
-						{
-							type: "data-image-generation",
-							data: { status: "generating", prompt },
-						},
-					],
-				} as unknown as (typeof prev)[number],
-			]);
+	//
+	// The generation itself runs against an assistant message that ALREADY
+	// exists, so a failed one can be re-run in place (see `handleRetryGeneration`)
+	// rather than echoing the prompt a second time — same split as ChatPage.
+	const runImageGeneration = useCallback(
+		async (assistantId: string, prompt: string) => {
 			const settle = (parts: unknown[]) => {
 				setMessages((prev) =>
 					prev.map((m) =>
@@ -508,6 +488,14 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					)
 				);
 			};
+			// Back to the in-flight frame first: on a retry the message still holds
+			// the failed part, and the frame must reserve its box again.
+			settle([
+				{
+					type: "data-image-generation",
+					data: { status: "generating", prompt },
+				},
+			]);
 			try {
 				const urls = await generateImage(chatTarget, prompt);
 				const [first, ...rest] = urls;
@@ -550,6 +538,51 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 			}
 		},
 		[chatTarget, setMessages]
+	);
+
+	const handleGenerateImage = useCallback(
+		async (prompt: string) => {
+			const userId = `img-user-${Date.now()}`;
+			const assistantId = `img-${Date.now()}`;
+			// Echo the prompt as a user bubble, and reserve the image frame in the
+			// same tick — the `data-image-generation` part MessageList renders through
+			// the ImageGeneration surface. Status goes straight from `generating` to
+			// `complete`/`error`: this path has no progress events to report.
+			setMessages((prev) => [
+				...prev,
+				{
+					id: userId,
+					role: "user",
+					parts: [{ type: "text", text: prompt }],
+				} as (typeof prev)[number],
+				{
+					id: assistantId,
+					role: "assistant",
+					parts: [
+						{
+							type: "data-image-generation",
+							data: { status: "generating", prompt },
+						},
+					],
+				} as unknown as (typeof prev)[number],
+			]);
+			await runImageGeneration(assistantId, prompt);
+		},
+		[runImageGeneration, setMessages]
+	);
+
+	// Retry a failed inline generation, in place on the same assistant message.
+	// This dock has no video composer action (`onGenerateVideo` is never passed),
+	// so only the image kind can reach here; a video part would have to come from
+	// somewhere that cannot produce one.
+	const handleRetryGeneration = useCallback(
+		(messageId: string, kind: "image" | "video", prompt: string) => {
+			if (kind !== "image") {
+				return;
+			}
+			void runImageGeneration(messageId, prompt);
+		},
+		[runImageGeneration]
 	);
 
 	// Multimodal (speak): synthesize an assistant reply via Core's `/api/voice/speak`
@@ -889,7 +922,8 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		<EmptyStateHeader
 			logo={genericLogo}
 			renderBody={genericComposer.renderBody}
-			sections={genericComposer.sections}
+			// A settings trigger, so it summarises what the composer's trigger does.
+			sections={genericComposer.triggerSections}
 		/>
 	);
 
@@ -1004,6 +1038,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 					error={error ?? undefined}
 					key={`${activeNode.url}-${activeConvId}`}
 					messages={messages}
+					onRetryGeneration={handleRetryGeneration}
 					onSend={handleSend}
 					onSpeak={handleSpeak}
 					onStop={stop}

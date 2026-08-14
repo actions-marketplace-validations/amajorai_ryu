@@ -104,6 +104,15 @@ impl Scheduler {
         // so an interval job resumes immediately (not fires a backlog) once the
         // user pays. Default-ON ⇒ headless / OSS Core / entitled desktop tick
         // normally. See [`crate::entitlement`].
+        // A DEFERRED UPDATE IS NOT AN AUTOMATION, so it runs BEFORE the
+        // entitlement gate below. That gate pauses autonomous work for an
+        // unentitled node so a paywalled user cannot keep spending managed
+        // inference in the background — but an update the user explicitly asked
+        // for is neither autonomous nor billable, and stranding it behind a
+        // lapsed subscription would leave that node unpatched indefinitely,
+        // including for security releases.
+        apply_due_update(now).await;
+
         if !crate::entitlement::is_active() {
             tracing::debug!("scheduler: node not entitled; skipping tick (automations paused)");
             return;
@@ -546,5 +555,42 @@ mod tests {
         // job is disabled (checked in `tick`, but verify parse + match here).
         let s = CronSchedule::parse("* * * * *").unwrap();
         assert!(s.matches(Utc::now()));
+    }
+}
+
+/// Install a deferred update once its quiet hour has arrived.
+///
+/// CLEARED BEFORE THE ATTEMPT, not after. The install replaces the running
+/// binary and the process restarts, so "clear on success" never executes —
+/// the record would survive, come due again on the next boot, and reinstall
+/// on every tick forever. Clearing first means a genuine failure costs the
+/// user one missed window (they are told an update is still available)
+/// rather than an unbootable restart loop.
+async fn apply_due_update(now: DateTime<Utc>) {
+    let Some(pending) = crate::update::schedule::due_at(now) else {
+        return;
+    };
+    if let Err(e) = crate::update::schedule::clear_pending() {
+        // Could not clear ⇒ do NOT install. A failure here is exactly the
+        // condition that would produce the reinstall loop above.
+        tracing::error!("deferred update: could not clear the record, skipping: {e}");
+        return;
+    }
+    tracing::info!(
+        "deferred update: installing {} (scheduled for {})",
+        pending.version,
+        pending.scheduled_for
+    );
+    match crate::update::apply::apply_update(
+        // A fresh registry rather than the server's: this runs unattended at
+        // 03:00, so there is no UI subscribed to progress, and threading the
+        // server's state into the scheduler for a once-a-release event would
+        // couple the two for no observable gain.
+        &ryu_downloads::DownloadCenter::new(reqwest::Client::new()),
+        &pending.asset,
+    )
+    .await {
+        Ok(_) => tracing::info!("deferred update: applied"),
+        Err(e) => tracing::error!("deferred update: apply failed: {e}"),
     }
 }

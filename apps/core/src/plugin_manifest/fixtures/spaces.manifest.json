@@ -14,6 +14,17 @@
   "requires": {
     "capabilities": [{ "capability": "rag" }]
   },
+  "contributes": {
+    "settings_tabs": [
+      {
+        "id": "spaces.editor",
+        "title": "Spaces",
+        "scope": "node",
+        "view": "spaces",
+        "fields": []
+      }
+    ]
+  },
   "permission_grants": [],
   "permission_levels": [
     {

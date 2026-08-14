@@ -261,7 +261,7 @@ export function IntegrationsTab() {
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption="Add a Hugging Face access token to raise download rate limits and install gated models — the ones marked with a lock in the model catalog."
+				caption="Add a Hugging Face access token to raise download rate limits and install gated models (the ones marked with a lock in the model catalog)."
 				title="Hugging Face"
 			>
 				<SettingsGroup>
@@ -304,8 +304,8 @@ export function IntegrationsTab() {
 								target="_blank"
 							>
 								huggingface.co/settings/tokens
-							</a>{" "}
-							— a <code>read</code> token is enough.
+							</a>
+							. A <code>read</code> token is enough.
 						</li>
 						<li>Paste it above and click Save.</li>
 						<li>
@@ -318,7 +318,7 @@ export function IntegrationsTab() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Add an Artificial Analysis API key to enrich the model catalog with independent benchmark stats — intelligence index, output speed, latency, and price. The catalog works fine without one."
+				caption="Add an Artificial Analysis API key to enrich the model catalog with independent benchmark stats: intelligence index, output speed, latency, and price. The catalog works fine without one."
 				title="Artificial Analysis"
 			>
 				<SettingsGroup>
@@ -356,7 +356,7 @@ export function IntegrationsTab() {
 								onCheckedChange={handleToggleRealtime}
 							/>
 						}
-						description="Off (default): cache the stats on this device and refresh once a day — kinder to the API's daily rate limit. On: fetch live every time."
+						description="Off (default): cache the stats on this device and refresh once a day, which is kinder to the API's daily rate limit. On: fetch live every time."
 						title="Live data"
 					/>
 				</SettingsGroup>
@@ -503,7 +503,7 @@ export function IntegrationsTab() {
 								</div>
 								{urlDirty && ingressUrlLoaded ? (
 									<p className="font-medium text-foreground text-xs">
-										Not saved yet — selecting Self-hosted relay checks the saved
+										Not saved yet. Selecting Self-hosted relay checks the saved
 										value, not what is typed here.
 									</p>
 								) : null}
@@ -511,11 +511,11 @@ export function IntegrationsTab() {
 									Save this first, then pick <em>Self-hosted relay</em> above:
 									that backend serves whatever base is configured and this node
 									refuses the selection until one is. Use the address this node
-									is reachable at from the public internet — scheme and host, no
+									is reachable at from the public internet: scheme and host, no
 									path (your reverse proxy or tunnel); webhook paths are
 									appended to it. The other backends publish a URL of their own
 									and ignore this. Set <code>RYU_WEBHOOK_INGRESS_URL</code> in
-									this node's environment instead if you prefer — it takes
+									this node's environment instead if you prefer. It takes
 									precedence over this field, and pins the backend to
 									Self-hosted relay.
 								</p>

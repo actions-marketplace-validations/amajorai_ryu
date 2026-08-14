@@ -98,7 +98,7 @@ export function DictationSettings() {
 					<>
 						System-wide dictation types your speech into whatever app has focus.
 						Unlike push-to-talk voice input (which runs an agent in the island),
-						this just enters text — optionally cleaned up by a model first.
+						this just enters text, optionally cleaned up by a model first.
 					</>
 				}
 				title="Dictation"
@@ -223,7 +223,7 @@ export function DictationSettings() {
 						}
 						description={
 							prefs.insertMode === "paste"
-								? "Copies the text and sends the paste shortcut — instant even for long dictations."
+								? "Copies the text and sends the paste shortcut, so it stays instant even for long dictations."
 								: "Types the text character by character. No clipboard clobber; works everywhere."
 						}
 						title="Insertion"
@@ -270,7 +270,7 @@ export function DictationSettings() {
 								onCheckedChange={(v) => writePrefs({ ...prefs, autoSend: v })}
 							/>
 						}
-						description="Press Enter after inserting — sends the message in a chat box (or adds a newline in an editor)."
+						description="Press Enter after inserting, which sends the message in a chat box (or adds a newline in an editor)."
 						title="Auto-send (press Enter)"
 					/>
 					<SettingsItem

@@ -266,10 +266,7 @@ export function GeneralTab() {
 				</SettingsGroup>
 			</SettingsSection>
 
-			<SettingsSection
-				caption="How open tabs are shown and managed."
-				title="Tabs"
-			>
+			<SettingsSection caption="How open tabs look and behave." title="Tabs">
 				<SettingsGroup>
 					<SettingsItem
 						actions={
@@ -281,7 +278,7 @@ export function GeneralTab() {
 								}
 							/>
 						}
-						description="Open pages from the sidebar and command palette in the tab you're already on instead of a new tab each time. Pinned and split tabs are never replaced, and you can still open a new tab any time — middle-click a sidebar item, use its “Open in new tab” menu, or the + button."
+						description="Open pages from the sidebar and command palette in the tab you're already on instead of a new tab each time. Pinned and split tabs are never replaced, and you can still open a new tab any time: middle-click a sidebar item, use its “Open in new tab” menu, or the + button."
 						title="Open links in the current tab"
 					/>
 					<SettingsItem
@@ -332,7 +329,7 @@ export function GeneralTab() {
 								onCheckedChange={setAutoHideTitleBar}
 							/>
 						}
-						description="Tuck the title bar and tab strip away until you move the cursor near the top of the window, like the floating sidebar peek. Off by default — the bar stays docked and always visible."
+						description="Tuck the title bar and tab strip away until you move the cursor near the top of the window, like the floating sidebar peek. Off by default, so the bar stays docked and always visible."
 						title="Auto-hide title bar"
 					/>
 					<SettingsItem
@@ -393,7 +390,7 @@ export function GeneralTab() {
 			<SplitPresetSettings />
 
 			<SettingsSection
-				caption="How Ryu surfaces your agents' own chat history."
+				caption="How Ryu shows your agents' own chat history."
 				title="Chats"
 			>
 				<SettingsGroup>
@@ -405,7 +402,7 @@ export function GeneralTab() {
 								onCheckedChange={setAutoImportThreads}
 							/>
 						}
-						description="Automatically import threads from your agents' own on-disk history (Claude Code, Codex…) into Ryu and keep them in sync — new threads appear on their own, each filed under the project folder it ran in. Ryu rescans on launch, on a timer, and when the window regains focus. You can always import manually from the Chats section or the launchpad."
+						description="Automatically import threads from your agents' own on-disk history (Claude Code, Codex…) into Ryu and keep them in sync. New threads appear on their own, each filed under the project folder it ran in. Ryu rescans on launch, on a timer, and when the window regains focus. You can always import manually from the Chats section or the launchpad."
 						title="Auto-import agent threads"
 					/>
 					<SettingsItem
@@ -494,7 +491,7 @@ export function GeneralTab() {
 								onCheckedChange={handleStartHidden}
 							/>
 						}
-						description="When Ryu starts at login, run it in the background with no window on screen — open it later from the tray icon, the dock or taskbar, or its global shortcut. Launching Ryu yourself always opens the window."
+						description="When Ryu starts at login, run it in the background with no window on screen. Open it later from the tray icon, the dock or taskbar, or its global shortcut. Launching Ryu yourself always opens the window."
 						title="Start hidden"
 					/>
 					<SettingsItem
@@ -506,7 +503,7 @@ export function GeneralTab() {
 								onCheckedChange={handleCloseToTray}
 							/>
 						}
-						description="Closing the window leaves Ryu running in the tray instead of quitting, so background agents and running turns keep going. Quit from the tray menu to stop it completely. Ignored while the tray icon is hidden — there would be no way back to the window."
+						description="Closing the window leaves Ryu running in the tray instead of quitting, so background agents and running turns keep going. Quit from the tray menu to stop it completely. Ignored while the tray icon is hidden, since that would leave no way back to the window."
 						title="Stay in tray on close"
 					/>
 					<SettingsItem

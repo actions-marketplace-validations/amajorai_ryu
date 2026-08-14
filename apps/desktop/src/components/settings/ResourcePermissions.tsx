@@ -362,7 +362,7 @@ function TargetPicker({
 				/>
 				<p className="text-muted-foreground text-xs">
 					{directoryFailed
-						? "This node did not send anything to choose from — it may be an older node, or it may be unreachable. Type the identifier, or come back once it answers."
+						? "This node did not send anything to choose from. It may be an older node, or unreachable. Type the identifier, or come back once it answers."
 						: `This node listed no ${TARGET_PLURAL[row.target_type]}, which is normal on a personal node that belongs to no organisation. Type an identifier only if you know it: a wrong one saves cleanly and applies to nobody.`}
 				</p>
 			</div>
@@ -559,7 +559,7 @@ function OverwriteCard({
 
 			{needsTarget ? (
 				<p className="text-muted-foreground text-xs">
-					Pick who this applies to — until then these settings do nothing.
+					Pick who this applies to. Until then these settings do nothing.
 				</p>
 			) : null}
 

@@ -271,7 +271,7 @@ function DependencyRows({
 		<ul className="flex flex-col gap-1.5">
 			{nodes.map((node) => (
 				<li key={node.id}>
-					<div className="flex items-center gap-2.5 rounded-md border px-3 py-2">
+					<div className="flex items-center gap-2.5 rounded-md bg-muted px-3 py-2">
 						<HugeiconsIcon
 							className="size-4 shrink-0 text-muted-foreground"
 							icon={PackageIcon}
@@ -310,10 +310,17 @@ function DependencyRows({
  */
 export function RequiredPluginsSection({
 	apps,
+	showTechnical = true,
 	subjectId,
 	subjectName,
 }: {
 	apps: readonly DeclaredDependency[];
+	/** Render the resolved TREE. Without it the section keeps the one fact a
+	 *  non-technical reader needs — "installing X also installs 3 other apps" —
+	 *  and drops the nested rows plus the sentence explaining what indentation
+	 *  means. The summary is the same computation either way, so the simple view
+	 *  is not a lossy approximation of the tree; it is the tree's own conclusion. */
+	showTechnical?: boolean;
 	subjectId?: string | null;
 	subjectName: string;
 }) {
@@ -340,11 +347,13 @@ export function RequiredPluginsSection({
 				/>
 				Requires these plugins
 			</h3>
-			<DependencyRows nodes={tree} resolved={resolved} />
+			{showTechnical ? (
+				<DependencyRows nodes={tree} resolved={resolved} />
+			) : null}
 			<p className="text-muted-foreground text-xs leading-relaxed">
 				{summarize(subjectName, tally, resolved)}
 			</p>
-			{hasNested ? (
+			{hasNested && showTechnical ? (
 				<p className="text-muted-foreground text-xs leading-relaxed">
 					Indented rows are what those dependencies need in turn.
 				</p>

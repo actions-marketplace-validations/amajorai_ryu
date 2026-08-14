@@ -60,6 +60,7 @@ export function ListingDetailTabs({
 	reviewsService,
 	overview,
 	scorecard: scorecardProp,
+	showTechnical = true,
 	activeTab: activeTabProp,
 	onTabChange,
 	kind = "plugin",
@@ -79,6 +80,13 @@ export function ListingDetailTabs({
 	 *  BADGE in its header, so the same listing is graded once rather than twice
 	 *  and the badge can never disagree with the Health tab. */
 	scorecard?: Scorecard | null;
+	/** Show the technical tabs (API, Versions, Dependencies, Health).
+	 *
+	 *  Defaults to TRUE so every existing caller — the web marketplace, the desktop
+	 *  Installed section, the e2e harness — is byte-identical without touching it.
+	 *  Only a host that can actually ask the user how much they want to see
+	 *  (`CatalogHost.useInterfaceLevel`) ever passes false. */
+	showTechnical?: boolean;
 	/** Controlled tab, for hosts whose header links INTO a tab — the store panel's
 	 *  star rating jumps to Reviews and its health badge jumps to Health. Without
 	 *  this the state would be trapped in here and those links would do nothing. */
@@ -128,8 +136,16 @@ export function ListingDetailTabs({
 
 	const readme = detail?.readme?.trim() ?? "";
 	const versions = detail?.versions ?? [];
-	const showApi = hasApiSurface(detail?.apiSurface);
-	const showDeps = hasDependencies(detail, entry);
+	// The four TECHNICAL tabs collapse at the lower interface levels. Folded into
+	// the existing predicates rather than added as a second condition at each of
+	// the eight sites (four tab entries + four panels), so a tab and its panel
+	// cannot disagree about whether they exist.
+	//
+	// Overview, README and Reviews are never gated: they are what a listing IS.
+	const showApi = hasApiSurface(detail?.apiSurface) && showTechnical;
+	const showDeps = hasDependencies(detail, entry) && showTechnical;
+	const showVersions = versions.length > 0 && showTechnical;
+	const showHealth = Boolean(scorecard) && showTechnical;
 
 	// Reviews and Health are UNCONDITIONAL (given a review service / a loaded
 	// detail). They were once conditional on content, which made the tab row
@@ -143,14 +159,12 @@ export function ListingDetailTabs({
 		...(overview ? [{ id: "overview" as const, label: "Overview" }] : []),
 		...(readme ? [{ id: "readme" as const, label: "README" }] : []),
 		...(showApi ? [{ id: "api" as const, label: "API" }] : []),
-		...(versions.length > 0
-			? [{ id: "versions" as const, label: "Versions" }]
-			: []),
+		...(showVersions ? [{ id: "versions" as const, label: "Versions" }] : []),
 		...(showDeps
 			? [{ id: "dependencies" as const, label: "Dependencies" }]
 			: []),
 		...(reviewsService ? [{ id: "reviews" as const, label: "Reviews" }] : []),
-		...(scorecard ? [{ id: "health" as const, label: "Health" }] : []),
+		...(showHealth ? [{ id: "health" as const, label: "Health" }] : []),
 	];
 
 	if (tabs.length === 0) {
@@ -203,7 +217,7 @@ export function ListingDetailTabs({
 					<ApiReferencePanel surface={detail.apiSurface} />
 				</TabsContent>
 			) : null}
-			{versions.length > 0 ? (
+			{showVersions ? (
 				<TabsContent className="pt-2" value="versions">
 					<VersionsPanel
 						fetchVersionDetail={fetchVersionDetail}
@@ -213,7 +227,11 @@ export function ListingDetailTabs({
 			) : null}
 			{showDeps ? (
 				<TabsContent className="pt-2" value="dependencies">
-					<DependenciesPanel detail={detail} entry={entry} />
+					<DependenciesPanel
+						detail={detail}
+						entry={entry}
+						showTechnical={showTechnical}
+					/>
 				</TabsContent>
 			) : null}
 			{reviewsService ? (
@@ -221,7 +239,7 @@ export function ListingDetailTabs({
 					<ReviewsPanel id={entry.id} kind={kind} service={reviewsService} />
 				</TabsContent>
 			) : null}
-			{scorecard ? (
+			{showHealth && scorecard ? (
 				<TabsContent className="pt-2" value="health">
 					<ScorecardPanel scorecard={scorecard} />
 				</TabsContent>

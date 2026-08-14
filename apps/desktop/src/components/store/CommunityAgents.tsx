@@ -28,6 +28,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { StoreCardGrid } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
+import { storeItemContextMenu } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
 	ListingAsideCard,
@@ -178,6 +179,17 @@ export function CommunityAgentsShelf({
 								onBuy={() => onBuy(card)}
 								onInstall={() => onInstall(card)}
 							/>
+						}
+						// A paid listing nobody has bought yet has no Add verb at all
+						// (Core withholds the definition until the licence exists), so it
+						// gets no menu rather than one offering an install that 402s.
+						contextMenu={
+							card.pricing && !isLicensed(card.id)
+								? undefined
+								: storeItemContextMenu({
+										installed: false,
+										onInstall: () => onInstall(card),
+									})
 						}
 						employeeId={card.id}
 						footer={

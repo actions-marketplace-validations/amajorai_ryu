@@ -23,12 +23,16 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { AvailableUpdates } from "@/src/components/downloads/AvailableUpdates.tsx";
 import { DownloadRow } from "@/src/components/downloads/DownloadRow.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAvailableUpdates } from "@/src/hooks/useAvailableUpdates.ts";
+import {
+	isUnfinishedTask,
+	useDownloadBulkActions,
+} from "@/src/hooks/useDownloadBulkActions.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import {
 	type DownloadTask,
@@ -39,6 +43,10 @@ import {
 	selectOrderedTasks,
 	useDownloadsStore,
 } from "@/src/store/useDownloadsStore.ts";
+
+/** How long the Refresh button stays in its pressed state, so a refetch that
+ *  resolves instantly still reads as an action that happened. */
+const MIN_REFRESH_MS = 600;
 
 /** Merge live-session terminal tasks with the durable history log, deduped by id
  *  (the live copy wins), newest first. */
@@ -76,6 +84,26 @@ export default function DownloadsPage() {
 			t.state === "completed" || t.state === "cancelled" || t.state === "failed"
 	);
 	const history = mergeHistory(sessionTerminal, historyQuery.data ?? []);
+	const unfinished = tasks.filter(isUnfinishedTask);
+
+	const {
+		clearFinished,
+		clearUnfinished,
+		pending: clearing,
+	} = useDownloadBulkActions(tasks);
+
+	// A refresh that resolves in 80ms and redraws the same rows is indistinguishable
+	// from a dead button, so the pressed state is held for a beat. `MIN_REFRESH_MS`
+	// is a floor on the *feedback*, never a delay on the data — the queries are
+	// already refetching while it runs.
+	const [refreshHeld, setRefreshHeld] = useState(false);
+	const refreshing = refreshHeld || loading || historyQuery.isFetching;
+	const onRefresh = useCallback(() => {
+		setRefreshHeld(true);
+		refresh();
+		historyQuery.refetch().catch(() => undefined);
+		setTimeout(() => setRefreshHeld(false), MIN_REFRESH_MS);
+	}, [historyQuery, refresh]);
 
 	const nothing =
 		updates.length === 0 &&
@@ -92,16 +120,51 @@ export default function DownloadsPage() {
 						Updates, active downloads, and everything you've downloaded before.
 					</p>
 				</div>
-				<Button
-					onClick={() => {
-						refresh();
-						historyQuery.refetch().catch(() => undefined);
-					}}
-					size="sm"
-					variant="outline"
-				>
-					Refresh
-				</Button>
+				<div className="flex shrink-0 items-center gap-2">
+					{unfinished.length > 0 && (
+						<Button
+							disabled={clearing}
+							onClick={() => {
+								clearUnfinished().catch(() => undefined);
+							}}
+							size="sm"
+							variant="ghost"
+						>
+							Clear unfinished
+						</Button>
+					)}
+					{history.length > 0 && (
+						<Button
+							disabled={clearing}
+							onClick={() => {
+								// Refetch after: History is served by this query, and clearing
+								// the durable log server-side does not invalidate its cache.
+								clearFinished()
+									.then(() => historyQuery.refetch())
+									.catch(() => undefined);
+							}}
+							size="sm"
+							variant="ghost"
+						>
+							Clear finished
+						</Button>
+					)}
+					{/* Refresh reports itself. Both feeds it kicks off resolve in well
+					    under a second on a local node, so without a held state the button
+					    looked inert on every press — the list simply redrew identical
+					    content. The state is driven by the queries' own in-flight flags
+					    plus a floor, so it is never a lie about work that already ended. */}
+					<Button
+						disabled={refreshing}
+						onClick={() => {
+							onRefresh();
+						}}
+						size="sm"
+						variant="outline"
+					>
+						{refreshing ? "Refreshing…" : "Refresh"}
+					</Button>
+				</div>
 			</header>
 
 			{nothing ? (

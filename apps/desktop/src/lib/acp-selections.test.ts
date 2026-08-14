@@ -12,7 +12,15 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 // happy-dom registers one global DOM per process; several files register it in
 // a single `bun test` run, so guard against the "already registered" throw.
-if (typeof globalThis.window === "undefined") {
+// `isRegistered` is the registrator's OWN state, and it is the only thing
+// `register()` actually checks before throwing. The previous guard tested
+// `globalThis.window`, which is a different question: bun runs every file in this
+// package in ONE process, so the registrator module — and its private
+// `#registered` flag — is shared across files while `globalThis.window` is not a
+// reliable proxy for it. The result was "Happy DOM has already been globally
+// registered" thrown from whichever file happened to be evaluated second,
+// failing 25 tests across 9 files that all pass individually.
+if (!GlobalRegistrator.isRegistered) {
 	GlobalRegistrator.register();
 }
 

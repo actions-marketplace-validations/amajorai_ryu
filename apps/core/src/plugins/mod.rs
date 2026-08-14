@@ -22,6 +22,7 @@ pub mod binding;
 pub mod builtins;
 pub mod catalog;
 pub mod graph;
+pub mod isolation;
 pub mod lifecycle;
 pub mod seed;
 
@@ -64,6 +65,15 @@ pub struct PluginRecord {
     /// than being silently re-pinned to whatever they happen to have installed.
     #[serde(default = "default_channel")]
     pub channel: String,
+    /// Where this install came from, captured at install time — the catalog
+    /// source, the publishing org, and whether that org carried the marketplace
+    /// identity check *then*. Drives [`isolation::TrustBasis`].
+    ///
+    /// `None` means nothing was captured (the record predates the column, or the
+    /// install path supplied none). That reads as **untrusted**, never as
+    /// trusted-by-default; see [`isolation::TrustPolicy::resolve_trust`].
+    #[serde(default)]
+    pub provenance: Option<isolation::PluginProvenance>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -172,6 +182,23 @@ impl PluginStore {
                 return Err(e).context("adding apps.channel column");
             }
         }
+
+        // Additive column for install provenance: which catalog source served this
+        // install, which org published it, and whether that org carried the
+        // marketplace identity check AT INSTALL TIME. Stored as JSON
+        // ([`isolation::PluginProvenance`]).
+        //
+        // NULL is meaningful and is the ONLY safe reading for a pre-existing row:
+        // "nothing was captured", which resolves to
+        // [`isolation::TrustBasis::Untrusted`]. Deliberately NOT backfilled — a
+        // backfill would have to invent a provenance nobody observed, and the one
+        // value it could invent (trusted) is exactly the wrong default.
+        if let Err(e) = conn.execute("ALTER TABLE apps ADD COLUMN provenance TEXT", []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(e).context("adding apps.provenance column");
+            }
+        }
         Ok(())
     }
 
@@ -260,12 +287,28 @@ impl PluginStore {
     /// Insert a new app record (install). Fails if an app with the same id is
     /// already present (use `update_version` for upgrades).
     pub async fn insert(&self, id: &str, version: &str) -> Result<PluginRecord> {
+        self.insert_with_provenance(id, version, None).await
+    }
+
+    /// Insert a new app record, recording where the install came from.
+    ///
+    /// Passing `None` is honest, not lax — it says the install path could not
+    /// observe a provenance (a local sideload, a path with no catalog item behind
+    /// it). It resolves to [`isolation::TrustBasis::Untrusted`], which is the
+    /// correct reading of "we do not know".
+    pub async fn insert_with_provenance(
+        &self,
+        id: &str,
+        version: &str,
+        provenance: Option<&isolation::PluginProvenance>,
+    ) -> Result<PluginRecord> {
         let now = chrono::Utc::now().to_rfc3339();
+        let provenance_json = provenance.and_then(|p| serde_json::to_string(p).ok());
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO apps (id, version, enabled, approved_grants, created_at, updated_at)
-             VALUES (?1, ?2, 0, '[]', ?3, ?3)",
-            params![id, version, now],
+            "INSERT INTO apps (id, version, enabled, approved_grants, created_at, updated_at, provenance)
+             VALUES (?1, ?2, 0, '[]', ?3, ?3, ?4)",
+            params![id, version, now, provenance_json],
         )
         .with_context(|| format!("inserting app '{id}'"))?;
         Ok(PluginRecord {
@@ -274,9 +317,35 @@ impl PluginStore {
             enabled: false,
             approved_grants: vec![],
             channel: crate::update::channel_of(version),
+            provenance: provenance.cloned(),
             created_at: Some(now.clone()),
             updated_at: Some(now),
         })
+    }
+
+    /// Record (or refresh) an install's provenance.
+    ///
+    /// Written by the catalog-resolve install path once it knows which source
+    /// served the item, and again on update — an update re-observes the publisher,
+    /// which is the point at which a revoked verification stops counting.
+    pub async fn set_provenance(
+        &self,
+        id: &str,
+        provenance: Option<&isolation::PluginProvenance>,
+    ) -> Result<Option<PluginRecord>> {
+        let provenance_json = provenance.and_then(|p| serde_json::to_string(p).ok());
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let conn = self.conn.lock().await;
+            let rows_affected = conn.execute(
+                "UPDATE apps SET provenance = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, provenance_json, now],
+            )?;
+            if rows_affected == 0 {
+                return Ok(None);
+            }
+        }
+        self.get_record(id).await
     }
 
     /// Pin the release channel this install follows (`stable`, `beta`, `nightly`,
@@ -327,7 +396,8 @@ impl PluginStore {
         let conn = self.conn.lock().await;
         let record = conn
             .query_row(
-                "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel
+                "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel,
+                        provenance
                  FROM apps WHERE id = ?1",
                 params![id],
                 row_to_record,
@@ -367,7 +437,8 @@ impl PluginStore {
     pub async fn list_all_records(&self) -> Result<Vec<PluginRecord>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel
+            "SELECT id, version, enabled, approved_grants, created_at, updated_at, channel,
+                        provenance
              FROM apps ORDER BY created_at ASC",
         )?;
         let rows = stmt
@@ -521,12 +592,19 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRecord> {
         .map(|c| c.trim().to_ascii_lowercase())
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| crate::update::channel_of(&version));
+    // A malformed provenance blob reads as absent rather than failing the row.
+    // The failure mode that matters is the other direction: an unparseable value
+    // must never resolve to "trusted", and `None` is exactly the untrusted read.
+    let provenance = row
+        .get::<_, Option<String>>(7)?
+        .and_then(|json| serde_json::from_str::<isolation::PluginProvenance>(&json).ok());
     Ok(PluginRecord {
         id: row.get(0)?,
         version,
         enabled: row.get::<_, i64>(2)? != 0,
         approved_grants,
         channel,
+        provenance,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
@@ -538,6 +616,89 @@ mod tests {
 
     fn store() -> PluginStore {
         PluginStore::open_in_memory().unwrap()
+    }
+
+    // ── Provenance: captured, never invented ─────────────────────────────────
+
+    /// The migration trap this feature turns on. Every row written before the
+    /// `provenance` column existed reads back as `None`, and `None` must resolve
+    /// to untrusted — the opposite default would silently vouch for every plugin
+    /// already on disk.
+    #[tokio::test]
+    async fn a_record_without_provenance_reads_as_untrusted() {
+        let s = store();
+        // `insert` is the pre-provenance entry point, so this is exactly the shape
+        // of a legacy row.
+        s.insert("com.test.legacy", "1.0.0").await.unwrap();
+
+        let record = s.get_record("com.test.legacy").await.unwrap().unwrap();
+        assert!(record.provenance.is_none());
+        assert_eq!(
+            isolation::TrustPolicy::default()
+                .resolve_trust("com.test.legacy", record.provenance.as_ref()),
+            isolation::TrustBasis::Untrusted
+        );
+    }
+
+    /// A captured provenance survives the round-trip through SQLite intact — the
+    /// trust decision is only as good as the fields it reads back.
+    #[tokio::test]
+    async fn provenance_round_trips_through_the_store() {
+        let s = store();
+        let captured = isolation::PluginProvenance {
+            source_id: Some(isolation::OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            publisher_org: Some("org_acme".to_owned()),
+            org_verified: true,
+            org_verified_tier: Some("gold".to_owned()),
+            signature_verified: true,
+            builtin: false,
+            captured_at: Some("2026-08-14T00:00:00Z".to_owned()),
+        };
+        s.insert_with_provenance("com.acme.app", "1.0.0", Some(&captured))
+            .await
+            .unwrap();
+
+        let record = s.get_record("com.acme.app").await.unwrap().unwrap();
+        assert_eq!(record.provenance.as_ref(), Some(&captured));
+        assert!(matches!(
+            isolation::TrustPolicy::default().resolve_trust("com.acme.app", record.provenance.as_ref()),
+            isolation::TrustBasis::VerifiedPublisher { .. }
+        ));
+    }
+
+    /// An update re-observes the publisher, so `set_provenance` must overwrite the
+    /// capture rather than merge into it. This is the only path by which a revoked
+    /// verification stops counting.
+    #[tokio::test]
+    async fn set_provenance_replaces_an_earlier_capture() {
+        let s = store();
+        let verified = isolation::PluginProvenance {
+            source_id: Some(isolation::OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            org_verified: true,
+            ..isolation::PluginProvenance::default()
+        };
+        s.insert_with_provenance("com.acme.app", "1.0.0", Some(&verified))
+            .await
+            .unwrap();
+
+        // The org lost its check; the next update re-captures without it.
+        let revoked = isolation::PluginProvenance {
+            source_id: Some(isolation::OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            org_verified: false,
+            ..isolation::PluginProvenance::default()
+        };
+        let updated = s
+            .set_provenance("com.acme.app", Some(&revoked))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.provenance.as_ref().map(|p| p.org_verified), Some(false));
+        assert_eq!(
+            isolation::TrustPolicy::default()
+                .resolve_trust("com.acme.app", updated.provenance.as_ref()),
+            isolation::TrustBasis::OfficialMarketplace
+        );
     }
 
     // ── Safe Mode: a read mask, never a write ────────────────────────────────

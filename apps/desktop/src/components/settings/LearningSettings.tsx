@@ -84,7 +84,7 @@ export function LearningSettings() {
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption="Ryu can grow with you by learning from your conversations. This is split into two levels so you can keep the private, on-device part on while opting into the heavier part only if you want. You can leave out any individual conversation, and excluded conversations are never used."
+				caption="Ryu learns from your conversations at two levels: a private one that never leaves this device, and a heavier one you opt into. You can leave out any individual conversation, and excluded conversations are never used."
 				title="Learn from my conversations"
 			>
 				<SettingsGroup>
@@ -96,7 +96,7 @@ export function LearningSettings() {
 								onCheckedChange={handleSkills}
 							/>
 						}
-						description="On by default. Ryu distills reusable skills from your chats — entirely on this device — and proposes them in your Inbox for you to approve before they go live. No conversation text ever leaves your machine."
+						description="On by default. Ryu distills reusable skills from your chats, entirely on this device, and proposes them in your Inbox for you to approve before they go live. No conversation text ever leaves your machine."
 						title="Learn skills from my chats"
 					/>
 					<SettingsItem
@@ -107,7 +107,7 @@ export function LearningSettings() {
 								onCheckedChange={handleLearning}
 							/>
 						}
-						description="Off by default. Also rate your conversations with a stronger model and, on a device with a capable graphics card, fine-tune your local model on your best ones. Rating sends conversation text to that model, which may run in the cloud — so this stays opt-in."
+						description="Off by default. Also rate your conversations with a stronger model and, on a device with a capable graphics card, fine-tune your local model on your best ones. Rating sends conversation text to that model, which may run in the cloud, so this stays opt-in."
 						title="Train my local model"
 					/>
 				</SettingsGroup>

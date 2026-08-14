@@ -723,6 +723,32 @@ impl DownloadCenter {
         self.inner.history.lock().await.clone()
     }
 
+    /// Empty the durable history log, and the file behind it. Returns how many
+    /// entries were dropped.
+    ///
+    /// Clearing a finished download with [`Self::clear`] only removes it from the
+    /// ACTIVE registry — the copy `record_history` already wrote survives, and is
+    /// what the downloads page's History section reads. Without this, "clear
+    /// finished" could empty the tray popover and leave the page's list exactly as
+    /// it was, so the history was permanently un-clearable by any UI.
+    pub async fn clear_history(&self) -> usize {
+        let dropped = {
+            let mut hist = self.inner.history.lock().await;
+            let n = hist.len();
+            hist.clear();
+            n
+        };
+        let path = history_path();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, "[]");
+        })
+        .await;
+        dropped
+    }
+
     pub async fn load(&self) {
         // Restore the durable history log first (independent of the resumable
         // active tasks below).

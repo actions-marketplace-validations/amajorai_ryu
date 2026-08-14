@@ -450,7 +450,7 @@ export default function CompanionPage() {
 	// list, so we never show the "no agents" empty-state on a connection error.
 	const [agentsError, setAgentsError] = useState(false);
 	// Bumped by the Retry affordance to re-run the load effect.
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 
 	// Load the first agent on mount / node change. The companion overlay doesn't
 	// need an agent selector — it just needs any registered agent whose allowlist
@@ -475,7 +475,9 @@ export default function CompanionPage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [nodeUrl, nodeToken]);
+		// `reloadKey` is load-bearing: `retryLoadAgents` (wired to `onRetryAgents`)
+		// only bumps it, so without it the retry does nothing at all.
+	}, [nodeUrl, nodeToken, reloadKey]);
 
 	const retryLoadAgents = useCallback(() => {
 		setReloadKey((key) => key + 1);

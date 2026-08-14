@@ -25,7 +25,7 @@ import {
 	seedDatabase,
 	snapshotDatabase,
 } from "./yjs-database.ts";
-import { RyuYjsProvider } from "./yjs-provider.ts";
+import { RyuYjsProvider, type RyuYjsStatus } from "./yjs-provider.ts";
 
 /** A render snapshot derived from the authoritative Yjs doc. */
 export interface DatabaseSnapshot {
@@ -58,6 +58,19 @@ export interface DatabaseCollab {
 	collaborative: boolean;
 	/** The live Yjs doc while collaborative, else `null` (stable identity). */
 	getCollabDoc: () => Doc | null;
+	/**
+	 * Live connection state, for status UI.
+	 *
+	 * Deliberately SEPARATE from `collaborative`, which is one-way on purpose:
+	 * once the room has synced, edits must keep routing to the CRDT even while the
+	 * socket is down, because the provider preserves the Y.Doc and uploads
+	 * everything accumulated offline on reconnect. Flipping `collaborative` back
+	 * to false would re-arm the full-JSON PUT, and that write loses to the CRDT on
+	 * the next sync — it would trade a visible outage for a silent overwrite.
+	 * What was actually wrong is that the UI said "Live" while offline; that is a
+	 * status problem, so it gets a status field.
+	 */
+	status: RyuYjsStatus;
 }
 
 /**
@@ -91,6 +104,7 @@ export function useDatabaseCollab(
 	const { roomId, ready, url, token } = options;
 	const [collaborative, setCollaborative] = useState(false);
 	const [access, setAccess] = useState<"read" | "write" | null>(null);
+	const [status, setStatus] = useState<RyuYjsStatus>("connecting");
 	const docRef = useRef<Doc | null>(null);
 	const collaborativeRef = useRef(false);
 
@@ -127,6 +141,11 @@ export function useDatabaseCollab(
 						maySeed = ack.maySeed;
 						if (!cancelled) {
 							setAccess(ack.access);
+						}
+					},
+					onStatusChange: (next) => {
+						if (!cancelled) {
+							setStatus(next);
 						}
 					},
 					onSyncChange: (synced) => {
@@ -174,5 +193,5 @@ export function useDatabaseCollab(
 		[]
 	);
 
-	return { access, collaborative, getCollabDoc };
+	return { access, collaborative, getCollabDoc, status };
 }

@@ -36,8 +36,18 @@
 	   fumadocs and storyboard all `@import` this file but never call
 	   `applyVariant`, so they used to fall through to the shadcn neutral
 	   (near-black light / near-white dark) and showed no brand colour at all.
-	   Keep in sync with `--primary` in packages/ui/src/theme/presets.ts. */
-	--primary: oklch(0.669 0.1837 248.81);
+	   Keep in sync with `--primary` in packages/ui/src/theme/presets.ts.
+
+	   Written as the sRGB HEX, not as `oklch(0.669 0.1837 248.81)` — which is the
+	   same colour only on an sRGB display. `oklch()` is not gamut-clamped: on a
+	   wide-gamut (Display P3) screen the browser renders those coordinates for
+	   real, landing outside sRGB and visibly more saturated than #0099ff. The app
+	   also paints the brand as a literal `#0099ff` in a few places (the web hero,
+	   the background-customisation default, the theme swatch), and those DO clamp
+	   to sRGB — so on every P3 Mac the product showed two different brand blues
+	   side by side, neither reliably the one in the brand definition. The hex is
+	   the authority; keep it a hex. */
+	--primary: #0099ff;
 	--primary-foreground: oklch(0.97 0.014 254.604);
 	--secondary: oklch(0.97 0 0);
 	--secondary-foreground: oklch(0.205 0 0);
@@ -117,8 +127,9 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	--card-foreground: oklch(0.985 0 0);
 	/* --popover inherits the :root reference to var(--muted); --muted below flips
 	   for dark mode, so it tracks it. */
-	/* Brand blue is mode-independent: #0099ff in light and dark alike. */
-	--primary: oklch(0.669 0.1837 248.81);
+	/* Brand blue is mode-independent: #0099ff in light and dark alike. Kept as a
+	   hex for the gamut reason spelled out on the light block above. */
+	--primary: #0099ff;
 	--primary-foreground: oklch(0.97 0.014 254.604);
 	--secondary: oklch(0.269 0 0);
 	--secondary-foreground: oklch(0.985 0 0);

@@ -16,6 +16,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 
 export interface SkillListRowData {
@@ -55,7 +56,7 @@ export function SkillListRow({
 				</span>
 				{skill.installed ? (
 					skill.active === true ? (
-						<Badge variant="secondary">Active</Badge>
+						<StatusBadge kind="active" />
 					) : skill.active === false ? (
 						<Badge variant="outline">Added</Badge>
 					) : (

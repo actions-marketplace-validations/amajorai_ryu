@@ -25,7 +25,10 @@ export function AgentChat({
 	onBranch,
 	onEditMessage,
 	onRegenerateMessage,
+	onRetryGeneration,
 	onFeedback,
+	onToggleReaction,
+	reactionsByMessage,
 	feedback,
 	messageActions,
 	onContributedMessageAction,
@@ -244,8 +247,19 @@ export function AgentChat({
 	let transcriptNode: ReactNode;
 	if (isCenteredEmptyState) {
 		transcriptNode = (
-			<div className="flex min-h-0 flex-1 items-center justify-center px-4 py-4">
-				<div className="w-full max-w-[720px]">
+			// The centred start page SCROLLS when it outgrows its pane, and it is
+			// centred with `my-auto` rather than `items-center` to make that possible:
+			// a flex item centred by `align-items` overflows its scroll container
+			// equally in BOTH directions, and the part above the top edge cannot be
+			// scrolled to — so in a short split pane the greeting would be cut off with
+			// no way to reach it. Auto margins collapse to zero once the item no longer
+			// fits, which pins it to the top and leaves every part of it reachable.
+			//
+			// This matters now because the footer slot can hold a tall surface (the app
+			// launchpad). Before it was ever filled the column always fit, so the
+			// difference was invisible.
+			<div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4">
+				<div className="my-auto flex w-full max-w-[720px] flex-col">
 					{emptyStateHeader}
 					{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
 					{inputBarNode}
@@ -289,8 +303,11 @@ export function AgentChat({
 				onOpenFile={onOpenFile}
 				onQuote={onQuote}
 				onRegenerateMessage={onRegenerateMessage}
+				onRetryGeneration={onRetryGeneration}
 				onSelectVersion={onSelectVersion}
 				onSpeak={onSpeak}
+				onToggleReaction={onToggleReaction}
+				reactionsByMessage={reactionsByMessage}
 				showCopyToolbar={showCopyToolbar}
 				slots={slots}
 				status={status}

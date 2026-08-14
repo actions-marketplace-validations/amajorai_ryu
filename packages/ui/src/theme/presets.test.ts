@@ -261,18 +261,28 @@ describe("well-known third-party preset channels", () => {
 
 // ── Brand colour ────────────────────────────────────────────────────────────
 /**
- * Convert an `oklch(L C H)` token to a `#rrggbb` string.
+ * Normalize a colour token to a `#rrggbb` string.
  *
- * The tokens are authored in OKLCH, but the brand is specified in hex, so a
+ * Most tokens are authored in OKLCH, but the brand is specified in hex, so a
  * test that compares token strings would only ever prove the token equals
  * itself. Converting is what makes "this token IS #0099ff" checkable, and it
  * catches the failure that actually happened: a token holding a *different*
  * blue that nobody notices because both render as "blue".
+ *
+ * A token that is ALREADY a hex passes straight through. The brand tokens are
+ * deliberately authored that way: `oklch()` is not gamut-clamped, so on a
+ * Display-P3 screen the browser renders those coordinates outside sRGB and paints
+ * a visibly different blue from the `#0099ff` the brand is defined as — and from
+ * the literal `#0099ff` the app uses elsewhere. Storing the hex is what makes the
+ * rendered colour match the specified one on wide-gamut displays.
  */
 function oklchToHex(token: string): string {
+	if (/^#[0-9a-f]{6}$/i.test(token)) {
+		return token.toLowerCase();
+	}
 	const m = token.match(/^oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)$/);
 	if (!m) {
-		throw new Error(`not a plain oklch() token: ${token}`);
+		throw new Error(`not a plain oklch() or #rrggbb token: ${token}`);
 	}
 	const [L, C, Hdeg] = [Number(m[1]), Number(m[2]), Number(m[3])];
 	const h = (Hdeg * Math.PI) / 180;

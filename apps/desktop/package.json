@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.1.12",
+  "version": "0.1.13",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -11,7 +11,7 @@
     "dev:vite": "vite",
     "build:vite": "NODE_OPTIONS=--max-old-space-size=8192 vite build",
     "check-types": "tsc --noEmit",
-    "test": "bun test src",
+    "test": "bun run scripts/test-isolated.ts",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",
     "test:e2e:live": "RYU_E2E_LIVE=1 playwright test available-updates-story.live",

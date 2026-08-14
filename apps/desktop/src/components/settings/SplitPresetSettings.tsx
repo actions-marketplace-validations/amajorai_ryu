@@ -44,7 +44,7 @@ export function SplitPresetSettings() {
 
 	return (
 		<SettingsSection
-			caption="Saved from a split view's context menu (Split view → Save layout as preset). A preset stores the arrangement — how many panes, side by side or stacked, and how the space is divided — and applying it lays that shape out again."
+			caption="Saved from a split view's context menu (Split view → Save layout as preset). A preset stores the arrangement (how many panes, side by side or stacked, and how the space is divided), and applying it lays that shape out again."
 			title="Pane layouts"
 		>
 			<SettingsGroup>

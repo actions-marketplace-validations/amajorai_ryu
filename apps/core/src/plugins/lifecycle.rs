@@ -251,6 +251,30 @@ impl From<anyhow::Error> for UpdateError {
 /// (`persist_installed_plugin`) calls `set_ui_code` with its verified descriptor
 /// bundle AFTER this, so an explicit bundle still wins.
 pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Result<PluginRecord> {
+    // A manifest compiled into this binary describes itself: it came from the
+    // build, not from a catalog. Everything else that reaches this entry point
+    // arrived without an observed source, and says so by passing `None` — which
+    // reads as untrusted, not as trusted-by-default. The catalog install path
+    // calls `install_app_with_provenance` with what it actually saw.
+    let provenance = if crate::plugins::builtins::is_compiled_in_manifest(&manifest.id) {
+        Some(crate::plugins::isolation::PluginProvenance::builtin())
+    } else {
+        None
+    };
+    install_app_with_provenance(store, manifest, provenance.as_ref()).await
+}
+
+/// Install `manifest`, recording where it came from.
+///
+/// The provenance is the input to [`crate::plugins::isolation`]'s trust
+/// resolution, and it is captured HERE — at install — rather than consulted live
+/// when a sidecar spawns. A local isolation decision must not depend on network
+/// reachability, because a fetch that fails open is a bypass.
+pub async fn install_app_with_provenance(
+    store: &PluginStore,
+    manifest: &PluginManifest,
+    provenance: Option<&crate::plugins::isolation::PluginProvenance>,
+) -> Result<PluginRecord> {
     // The ACL vocabulary is assembled from installed manifests and cached, so a
     // change to the installed set must drop it — otherwise an app's newly
     // declared permission levels stay unknown until restart and every grant
@@ -267,7 +291,7 @@ pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Resu
     })?;
 
     let record = store
-        .insert(&manifest.id, &manifest.version)
+        .insert_with_provenance(&manifest.id, &manifest.version, provenance)
         .await
         .map_err(|e| anyhow::anyhow!("install failed: {e}"))?;
 
@@ -1793,6 +1817,36 @@ mod tests {
         assert!(
             plan.is_empty(),
             "an already-satisfied dependency set installs nothing"
+        );
+    }
+
+    /// The regression the server-side `fetched.is_empty()` short-circuit caused.
+    ///
+    /// The commonest breaking update declares NO new dependency and merely RAISES the
+    /// `min_version` floor on one already installed. `fetched` is therefore empty —
+    /// and the caller used to return `Ok(vec![])` on that alone, before this planner
+    /// ever ran, so the under-version dependency was never detected and the update
+    /// proceeded. This asserts the planner does catch it, which is the guarantee the
+    /// caller must reach rather than short-circuit past.
+    #[test]
+    fn plan_update_dep_closure_catches_a_raised_floor_with_nothing_new_to_fetch() {
+        // Installed: target v1 requiring dep >=1.0, and dep at 1.0.0.
+        let old_app = make_dep_manifest("app", "1.0.0", &[("dep", Some("1.0.0"))]);
+        let dep = make_manifest("dep", "1.0.0", vec![]);
+        // New: target v2 raising the floor to 2.0.0 — dep is installed but too old.
+        let new_app = make_dep_manifest("app", "2.0.0", &[("dep", Some("2.0.0"))]);
+
+        let err = plan_update_dep_closure(&new_app, &[old_app, dep], &[])
+            .expect_err("a raised floor on an installed dep must be refused");
+        assert_eq!(err.code(), "version_mismatch");
+        assert_eq!(
+            err,
+            DependencyError::VersionMismatch {
+                plugin: "app".to_owned(),
+                dependency: "dep".to_owned(),
+                required: "2.0.0".to_owned(),
+                installed: "1.0.0".to_owned(),
+            }
         );
     }
 

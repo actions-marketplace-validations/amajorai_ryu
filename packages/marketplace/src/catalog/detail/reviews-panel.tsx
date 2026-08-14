@@ -260,7 +260,7 @@ function RatingSummary({
 function ReviewRow({ review }: { review: MarketplaceReview }) {
 	const date = formatDate(review.createdAt);
 	return (
-		<li className="flex flex-col gap-1.5 rounded-lg border p-3">
+		<li className="flex flex-col gap-1.5 rounded-lg bg-muted p-3">
 			<div className="flex items-center gap-2">
 				<StarRating size="size-3.5" value={review.rating} />
 				<span className="min-w-0 truncate font-medium text-sm">
@@ -364,7 +364,7 @@ function WriteReviewForm({
 	};
 
 	return (
-		<div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-3">
+		<div className="flex flex-col gap-3 rounded-lg bg-muted p-3">
 			<div className="flex flex-col gap-1.5">
 				<span className="font-medium text-sm">
 					{existing ? "Your review" : "Write a review"}

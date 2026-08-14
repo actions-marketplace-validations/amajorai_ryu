@@ -17,6 +17,7 @@ describe("appearance settings registry", () => {
 			"appearance.sidebar-mode",
 			"appearance.sidebar-variant",
 			"appearance.group-chats-by-date",
+			"appearance.sidebar-grouped-nav",
 			"appearance.sidebar-overflow-popover",
 			"appearance.group-tool-uses",
 			"appearance.expand-file-edits",

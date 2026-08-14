@@ -28,6 +28,7 @@ import {
 	Add01Icon,
 	AlertCircleIcon,
 	ArrowDown01Icon,
+	ClipboardIcon,
 	ComputerTerminal01Icon,
 	ServerStack01Icon,
 	Wrench01Icon,
@@ -52,6 +53,7 @@ import {
 	CollapsibleContent,
 	CollapsibleTrigger,
 } from "@ryu/ui/components/collapsible";
+import { ContextMenuItem } from "@ryu/ui/components/context-menu.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -78,6 +80,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@ryu/ui/components/select";
+import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Textarea } from "@ryu/ui/components/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@ryu/ui/components/toggle-group";
@@ -558,6 +561,22 @@ function ToolCards({
 			{tools.map((tool) => (
 				<StoreCatalogCard
 					action={<Badge variant="secondary">{tool.server}</Badge>}
+					// A tool has no lifecycle of its own (its SERVER is what gets added
+					// or removed), so the menu carries the one thing you actually want
+					// off this card: the exact name to type at an agent.
+					contextMenu={
+						<ContextMenuItem
+							onClick={() => {
+								navigator.clipboard
+									.writeText(tool.name)
+									.then(() => toast.success("Tool name copied"))
+									.catch(() => toast.error("Couldn't copy the tool name"));
+							}}
+						>
+							<HugeiconsIcon className="size-4" icon={ClipboardIcon} />
+							Copy tool name
+						</ContextMenuItem>
+					}
 					description={tool.description ?? "No description"}
 					icon={
 						<HugeiconsIcon className="size-5" icon={ComputerTerminal01Icon} />

@@ -15,6 +15,7 @@
 // `/api/plugins/catalog/browse`, and the source rides on the REQUEST (`?source=`)
 // rather than a node-global preference — see `sourceOverride` below.
 
+import { ALL_PLUGIN_SOURCES_ID } from "@ryu/marketplace/catalog/types";
 import {
 	keepPreviousData,
 	useInfiniteQuery,
@@ -152,6 +153,53 @@ const HIDDEN_PLUGIN_SOURCES = new Set([
 	"github-topic",
 ]);
 
+// Query descriptors shared with the Store's warm-up path (`useStorePrefetch`), so
+// a prefetch always lands under the key this hook reads. See the same block in
+// `useSkillsCatalog.ts`.
+
+export function pluginSourcesQuery(target: ApiTarget) {
+	return {
+		queryKey: ["plugins", "sources", target.url],
+		queryFn: () => fetchPluginSources(target),
+	};
+}
+
+export function installedAppsQuery(target: ApiTarget) {
+	return {
+		queryKey: ["apps", "list", target.url],
+		queryFn: () => fetchApps(target),
+	};
+}
+
+export function pluginCatalogQuery(
+	target: ApiTarget,
+	params: { origin?: "community"; query: string; source: string }
+) {
+	const { origin } = params;
+	return {
+		queryKey: [
+			"plugins",
+			"catalog",
+			target.url,
+			{ q: params.query, source: params.source, origin: origin ?? null },
+		],
+		queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+			searchPluginCatalog(target, {
+				query: params.query,
+				limit: PAGE_LIMIT,
+				cursor: pageParam,
+				origin,
+				// Community addresses its feed through `origin`; every other view
+				// names its source explicitly so no two tabs can fight over one
+				// server-side preference.
+				source: origin ? undefined : params.source,
+			}),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last: { nextCursor?: string | null }) =>
+			last.nextCursor ?? undefined,
+	};
+}
+
 export function useAppsCatalog(
 	initialQuery = "",
 	options?: { origin?: "community" }
@@ -174,10 +222,7 @@ export function useAppsCatalog(
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 
-	const sourcesQuery = useQuery({
-		queryKey: ["plugins", "sources", url],
-		queryFn: () => fetchPluginSources({ url, token }),
-	});
+	const sourcesQuery = useQuery(pluginSourcesQuery(target));
 	const sources = useMemo(
 		() =>
 			(sourcesQuery.data?.sources ?? []).filter(
@@ -198,8 +243,20 @@ export function useAppsCatalog(
 	// So selection is local state, passed per request as `?source=`. The server
 	// preference is still read, but only as the INITIAL value — an explicit local
 	// pick wins from then on, and nothing is written back.
+	//
+	// The DEFAULT is now every marketplace at once (`ALL_PLUGIN_SOURCES_ID`) rather
+	// than the node's active source. A picker that decides which subset of the store
+	// you are allowed to find turns "is X available?" into a question you answer by
+	// trying each row in turn; browsing all of them and grouping by marketplace
+	// answers it in one page, and the picker becomes a way to narrow instead.
+	//
+	// So `active` is deliberately no longer read from the sources response. It is a
+	// node-global preference, and seeding from it would put two clients on different
+	// default views of the same store for a reason neither user set — the same bleed
+	// that made this per-instance in the first place. It stays server-side for the
+	// routes that still resolve it (a request naming no source at all).
 	const [sourceOverride, setSourceOverride] = useState<string | null>(null);
-	const activeSource = sourceOverride ?? sourcesQuery.data?.active ?? "";
+	const activeSource = sourceOverride ?? ALL_PLUGIN_SOURCES_ID;
 	const selectSource = useCallback((id: string) => {
 		if (id) {
 			setSourceOverride(id);
@@ -221,34 +278,14 @@ export function useAppsCatalog(
 		[addMarketplaceMutation]
 	);
 
-	const appsQuery = useQuery({
-		queryKey: ["apps", "list", url],
-		queryFn: () => fetchApps({ url, token }),
-	});
+	const appsQuery = useQuery(installedAppsQuery(target));
 
 	const listQuery = useInfiniteQuery({
-		queryKey: [
-			"plugins",
-			"catalog",
-			url,
-			{ q: debouncedQuery, source: activeSource, origin: origin ?? null },
-		],
-		queryFn: ({ pageParam }) =>
-			searchPluginCatalog(
-				{ url, token },
-				{
-					query: debouncedQuery,
-					limit: PAGE_LIMIT,
-					cursor: pageParam,
-					origin,
-					// Community addresses its feed through `origin`; every other view
-					// names its source explicitly so no two tabs can fight over one
-					// server-side preference.
-					source: origin ? undefined : activeSource,
-				}
-			),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.nextCursor ?? undefined,
+		...pluginCatalogQuery(target, {
+			query: debouncedQuery,
+			source: activeSource,
+			origin,
+		}),
 		placeholderData: keepPreviousData,
 		enabled: activeSource.length > 0,
 	});
@@ -444,7 +481,9 @@ export function useAppsCatalog(
 		},
 	});
 
-	const select = useCallback((id: string) => setSelectedId(id), []);
+	// `select("")` is how the section closes the preview — normalise it to null so
+	// the detail query stays disabled instead of fetching an empty id.
+	const select = useCallback((id: string) => setSelectedId(id || null), []);
 
 	const install = useCallback(
 		async (id?: string, options?: { channel?: string | null }) => {

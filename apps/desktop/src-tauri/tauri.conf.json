@@ -3,7 +3,7 @@
   "productName": "Ryu (Research Preview)",
   "mainBinaryName": "Ryu",
   "identifier": "ai.amajor.ryu.desktop",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -30,7 +30,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.userjot.com; script-src-elem 'self' 'unsafe-inline' https://cdn.userjot.com; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; media-src 'self' blob: data: https:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://*:7980 ws://localhost:* ws://127.0.0.1:* wss: https:; frame-src 'self' about: blob: http: https:; object-src 'none'; base-uri 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.userjot.com; script-src-elem 'self' 'unsafe-inline' https://cdn.userjot.com; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; media-src 'self' blob: data: https:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* http://*:7980 ws://localhost:* ws://127.0.0.1:* wss: https:; frame-src 'self' about: blob: http: https:; object-src 'none'; base-uri 'self'"
     },
     "macOSPrivateApi": true
   },
@@ -56,7 +56,7 @@
       "endpoints": [
         "https://github.com/amajorai/ryu/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3N0U5QkE0RTcyRUREODAKUldTQTNTN25wSnQrdHlTV2tpUmdQYUFpenBMUDJteGNuMHYybzV5NGIwRUdEbXdSWHBiT3RuR2QK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3NTBCRjA0NDQ1QjEyMDEKUldRQkVsdEVCTDlRZDNNQmNTQWU4VmlCMlFjRk5rdXQ0Q0V4WkxhSUFBcmxOTE5oUm81ZTRRTG4K",
       "windows": {
         "installMode": "passive"
       }

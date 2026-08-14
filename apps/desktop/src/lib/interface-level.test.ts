@@ -1,11 +1,13 @@
 // The pure rules behind the Interface level ladder. Kept separate from the
 // browser story (`e2e/interface-level-story.spec.ts`, which covers the slider,
 // the fill ramp and the writes) because these are the parts that decide what the
-// COMPOSER shows, and they regress silently: a level added in the middle, or a
-// gate flipped to `!==`, still typechecks and still renders a slider.
+// composer and the node dropdown show, and they regress silently: a level added
+// in the middle, or a gate flipped to `!==`, still typechecks and still renders a
+// slider.
 
 import { describe, expect, it } from "bun:test";
 import {
+	collapsesNodeSections,
 	DEFAULT_INTERFACE_LEVEL,
 	INTERFACE_LEVELS,
 	type InterfaceLevel,
@@ -70,5 +72,25 @@ describe("what the composer shows", () => {
 			expect(model[i] || !model[i - 1]).toBe(true);
 			expect(tuning[i] || !tuning[i - 1]).toBe(true);
 		}
+	});
+});
+
+describe("what the node selector shows", () => {
+	// Kept out of the ladder sweep above on purpose: this gate is inverted
+	// relative to the composer's — true is LESS surface — so folding it into the
+	// "only ever adds surface" loop would need a negation and would read as the
+	// opposite of what it asserts.
+	it("collapses the technical blocks only at Simple", () => {
+		expect(collapsesNodeSections("simple")).toBe(true);
+		expect(collapsesNodeSections("standard")).toBe(false);
+		expect(collapsesNodeSections("advanced")).toBe(false);
+		expect(collapsesNodeSections("expert")).toBe(false);
+	});
+
+	it("folds them at the default level, where the disclosure has to work", () => {
+		// The a11y hazard this gate carries only exists at a level someone lands on
+		// without choosing it; if the default ever moves, the trigger's keyboard
+		// story stops being load-bearing and this test should be revisited.
+		expect(collapsesNodeSections(DEFAULT_INTERFACE_LEVEL)).toBe(true);
 	});
 });

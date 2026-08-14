@@ -401,6 +401,55 @@ pub fn load_run(run_id: &str) -> std::io::Result<WorkflowRun> {
     ryu_durable::FileCheckpointStore::new(runs_dir()).load(run_id)
 }
 
+/// How many runs are LIVE right now, split by why they are live.
+///
+/// Exists to answer one question honestly: "if this node restarts in the next
+/// minute, what breaks?" That is the sentence a deferred resize or update has to
+/// show before a human agrees to it, and a number nobody measured is worse than
+/// no number at all — it reads as a promise that nothing will be lost.
+///
+/// `AwaitingInput` runs are counted SEPARATELY rather than lumped in with
+/// running ones. They survive a restart by design (that is the point of a
+/// durable gate), so reporting them as work-about-to-be-destroyed would overstate
+/// the damage and train people to ignore the warning.
+///
+/// A corrupt or unreadable run file is skipped, not fatal: this is called to
+/// render a warning, and failing the whole count because one file is bad would
+/// turn a cosmetic problem into "we cannot tell you what you are about to lose".
+pub fn live_run_counts() -> LiveRunCounts {
+    let mut counts = LiveRunCounts::default();
+    let Ok(entries) = std::fs::read_dir(runs_dir()) else {
+        return counts;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(run) = serde_json::from_slice::<WorkflowRun>(&bytes) else {
+            continue;
+        };
+        match run.status {
+            RunStatus::Running => counts.running += 1,
+            RunStatus::AwaitingInput => counts.awaiting_input += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// The result of [`live_run_counts`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveRunCounts {
+    /// Runs actively executing — these are what a restart destroys.
+    pub running: u64,
+    /// Runs parked at a durable gate. These SURVIVE a restart.
+    pub awaiting_input: u64,
+}
+
 #[cfg(test)]
 mod version_store_tests {
     use super::*;

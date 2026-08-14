@@ -25,10 +25,10 @@ pub use host_api::HOST_API_VERSION;
 pub use manifest::{
     canonical_plugin_id, is_app_event, is_env_var_name, parse_min_version, plugin_dir_name,
     split_hook_event_id, validate_cli_command_path, validate_hook_event, validate_plugin_id,
-    AppDependency, CompanionSurface, Contributes, ContributionId, EnginesReq,
-    HookEventContribution, HookMatch, PluginManifest, PluginTier, Requires, Surface,
-    TurnHookContribution, WidgetContribution, HOOK_EVENT_SEPARATOR, LEGACY_PLUGIN_ID_ALIASES,
-    MAX_PLUGIN_ID_LEN, MAX_SECRET_KEY_LEN,
+    AppDependency, CompanionSurface, CompatibilityVerdict, Contributes, ContributionId, EnginesReq,
+    HookEventContribution, HookMatch, HostVersions, PluginManifest, PluginTier, Requires, Surface,
+    TurnHookContribution, UnmetRequirement, WidgetContribution, HOOK_EVENT_SEPARATOR,
+    LEGACY_PLUGIN_ID_ALIASES, MAX_PLUGIN_ID_LEN, MAX_SECRET_KEY_LEN,
 };
 pub use runnable::{RunnableKind, RunnableMeta};
 pub use schema::{

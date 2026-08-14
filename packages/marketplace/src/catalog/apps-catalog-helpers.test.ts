@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+	groupByCatalogSource,
 	isCommunityEntry,
 	isCompanionApp,
 	prettyPluginId,
@@ -185,5 +186,52 @@ describe("priceLabel", () => {
 			amountMinor: "1500",
 		};
 		expect(priceLabel(malformed.entry)).toBeNull();
+	});
+});
+
+describe("groupByCatalogSource", () => {
+	const row = (id: string, sourceId?: string, sourceName?: string) =>
+		item({
+			id,
+			catalog_source_id: sourceId,
+			catalog_source_name: sourceName,
+		});
+
+	test("groups rows under the marketplace that served them", () => {
+		const sections = groupByCatalogSource([
+			row("a", "ryu-catalog", "Ryu Marketplace"),
+			row("b", "integrations-sh", "integrations.sh"),
+			row("c", "ryu-catalog", "Ryu Marketplace"),
+		]);
+		expect(sections).toHaveLength(2);
+		expect(sections[0]?.label).toBe("Ryu Marketplace");
+		expect(sections[0]?.items.map((i) => i.entry.id)).toEqual(["a", "c"]);
+		expect(sections[1]?.label).toBe("integrations.sh");
+		expect(sections[1]?.items.map((i) => i.entry.id)).toEqual(["b"]);
+	});
+
+	test("keeps Core's emitted order rather than sorting the headings", () => {
+		// Core emits the unified first-party view first on purpose; re-sorting
+		// alphabetically would bury it under any marketplace named "Acme".
+		const sections = groupByCatalogSource([
+			row("a", "zeta-market", "Zeta"),
+			row("b", "acme-market", "Acme"),
+		]);
+		expect(sections.map((s) => s.label)).toEqual(["Zeta", "Acme"]);
+	});
+
+	test("folds unstamped rows into one labelled bucket instead of dropping them", () => {
+		const sections = groupByCatalogSource([row("a"), row("b")]);
+		expect(sections).toHaveLength(1);
+		expect(sections[0]?.label).toBe("Other marketplaces");
+		expect(sections[0]?.items).toHaveLength(2);
+	});
+
+	test("a single marketplace yields a single section (the caller then stays flat)", () => {
+		const sections = groupByCatalogSource([
+			row("a", "ryu-catalog", "Ryu Marketplace"),
+			row("b", "ryu-catalog", "Ryu Marketplace"),
+		]);
+		expect(sections).toHaveLength(1);
 	});
 });

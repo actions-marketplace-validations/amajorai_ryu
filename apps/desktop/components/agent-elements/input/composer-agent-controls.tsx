@@ -42,13 +42,11 @@ import {
 } from "@/components/agent-elements/input/mode-selector.tsx";
 import { AUTO_AGENT_ID } from "@/components/agent-elements/input/universal-picker-body.tsx";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
-import {
-	NO_OUTPUT_STYLE_ID,
-	useComposerOutputStyleSection,
-} from "@/components/agent-elements/input/use-composer-output-style-section.ts";
+import { useComposerOutputStyleSection } from "@/components/agent-elements/input/use-composer-output-style-section.ts";
 import { useUniversalPicker } from "@/components/agent-elements/input/use-universal-picker.ts";
 import type { InputBarInfoBar } from "@/components/agent-elements/input-bar.tsx";
 import type { ModelOption } from "@/components/agent-elements/types.ts";
+import { isComposerPluginSectionKey } from "@/src/components/composer/plugin-composer-controls.ts";
 import { useAgentCapabilities } from "@/src/hooks/useAgentCapabilities.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
@@ -438,29 +436,65 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	const interfaceLevel = useInterfaceLevel();
 	const showModelSection = showsModelPicker(interfaceLevel);
 	const showTuningSections = showsComposerTuning(interfaceLevel);
+	// Output style is NOT gated with the tuning sections, deliberately.
+	//
+	// The others (approval mode, thinking budget, agent config) are knobs on how
+	// hard the model works and how freely it may act — the things Simple exists to
+	// keep out of a beginner's way. A style is the opposite kind of choice: it
+	// picks how replies should READ, it is the most legible control on the bar, and
+	// it is node-wide rather than a property of the selected agent. Hiding it below
+	// Advanced meant a user who authored a style had nowhere in the product to
+	// apply it, which reads as the feature not existing.
+	//
+	// The section self-hides when the node has no styles, so this adds nothing to a
+	// Simple composer that has not opted into styles at all.
 	const bodySections = useMemo(
-		() => (showTuningSections ? [...extraSections, outputStyleSection] : []),
+		() => [...(showTuningSections ? extraSections : []), outputStyleSection],
 		[extraSections, outputStyleSection, showTuningSections]
 	);
 
-	// The trigger summary reads `Ryu · Sonnet · Plan`; a style earns a segment there
-	// only once one is actually in force. "None" is the shipped default (design §8),
-	// so summarising it would add a permanent, meaningless fourth segment to every
-	// composer — while an ACTIVE style genuinely belongs there, since it is the only
-	// signal that the agent's answers are being reshaped.
-	const styleInForce =
-		showTuningSections &&
-		outputStyleSection.items.length > 0 &&
-		outputStyleSection.value !== NO_OUTPUT_STYLE_ID;
+	// The trigger summary reads `Ryu · Sonnet · Plan` — the agent, what it runs on,
+	// and how it is allowed to act. Those are the facts that change what the NEXT
+	// message does, and they are worth permanent space.
+	//
+	// Contributed pickers are not. An output style and an app's own mode `select` are
+	// both settings you set once and leave, so spelling their current value out on the
+	// trigger buys a word of chrome per installed plugin and pushes the three facts
+	// above out of a bar that is already narrow at compact density. They stay fully
+	// present — and fully readable — one click away in `bodySections`, which is where
+	// you go to change them anyway.
+	//
+	// This narrowing is applied to `triggerSections` ONLY, never to `sections`.
+	// The two are not interchangeable: `sections` is also what the composer's
+	// keyboard shortcuts operate on (`firstExtraConfigSection` in
+	// `composer-shortcuts.ts` cycles the first non-agent/model/approval section),
+	// so dropping the contributed ones there would not hide a value — it would
+	// silently repoint the shortcut at a different setting, or leave it with
+	// nothing to cycle.
+	const summaryExtraSections = useMemo(
+		() => extraSections.filter((s) => !isComposerPluginSectionKey(s.key)),
+		[extraSections]
+	);
 	// The summary has to describe the popover it opens, so it is filtered by the
 	// same level: a trigger reading `Ryu · Sonnet` above a body with no model row
 	// is worse than either half alone.
-	const sections = [
+	const sectionsForLevel = (extras: ComposerSettingsSection[]) => [
 		agentSection,
 		...(showModelSection ? [modelSectionResolved] : []),
-		...(showTuningSections ? extraSections : []),
-		...(styleInForce ? [outputStyleSection] : []),
+		...(showTuningSections ? extras : []),
+		// Ungated, matching `bodySections` above. `sections` is also what the
+		// composer's keyboard shortcuts cycle, so leaving the style out here would
+		// make it reachable by mouse and not by keyboard — and the trigger summary
+		// would describe a popover that has a row the summary never mentions.
+		outputStyleSection,
 	];
+	/** Every composed section — the shortcut targets, and the list any surface
+	 *  rendering these as ROWS must use. */
+	const sections = sectionsForLevel(extraSections);
+	/** The same list narrowed to what a settings TRIGGER should spell out. Every
+	 *  trigger built from this hook (the composer's own, and the empty-state logo's)
+	 *  uses this, so the two can never summarise differently. */
+	const triggerSections = sectionsForLevel(summaryExtraSections);
 
 	// The universal picker body (Ryu (providers nested) · External Agents) that
 	// replaces the sibling-submenu list. The trigger summary still derives from
@@ -508,7 +542,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 			footer={(close) => <ManageModelsButton close={close} />}
 			leading={leading}
 			renderBody={renderBody}
-			sections={sections}
+			sections={triggerSections}
 			trailing={
 				compact || compactTrigger ? (
 					<UsageBar agentId={agentId} className="ml-0.5" compact />
@@ -541,6 +575,7 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		refreshRoutingAdvice,
 		rightActions: null,
 		sections,
+		triggerSections,
 		renderBody,
 	};
 }

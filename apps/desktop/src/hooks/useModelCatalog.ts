@@ -92,6 +92,62 @@ export interface UseModelCatalogResult {
 
 const SEARCH_DEBOUNCE_MS = 300;
 
+/** The facets the section opens with. Named so the Store's warm-up path can
+ *  prefetch the FIRST view a user sees rather than a key nothing reads. */
+export const MODEL_LIST_DEFAULTS = {
+	category: "all" as ModelCategory,
+	format: "gguf" as ModelFormat,
+	installedOnly: false,
+	org: "",
+	query: "",
+	sort: "trending" as ModelSort,
+};
+
+/** Query descriptor shared with the Store's warm-up path (`useStorePrefetch`), so
+ *  a prefetch lands under the key this hook reads. */
+export function modelListQuery(
+	target: ApiTarget,
+	params: {
+		format: ModelFormat;
+		installedOnly: boolean;
+		org: string;
+		query: string;
+		sort: ModelSort;
+		task: string;
+	}
+) {
+	return {
+		queryKey: [
+			"models",
+			"list",
+			target.url,
+			{
+				q: params.query,
+				sort: params.sort,
+				format: params.format,
+				installedOnly: params.installedOnly,
+				task: params.task,
+				org: params.org,
+			},
+		],
+		queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+			searchModels(target, {
+				query: params.query,
+				sort: params.sort,
+				format: params.format,
+				installedOnly: params.installedOnly,
+				task: params.task,
+				org: params.org,
+				limit: 40,
+				cursor: pageParam,
+			}),
+		initialPageParam: undefined as string | undefined,
+		// Stop once the Hub returns no further cursor.
+		getNextPageParam: (last: { nextCursor?: string | null }) =>
+			last.nextCursor ?? undefined,
+	};
+}
+
 export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -103,11 +159,18 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
-	const [sort, setSort] = useState<ModelSort>("trending");
-	const [category, setCategory] = useState<ModelCategory>("all");
-	const [format, setFormat] = useState<ModelFormat>("gguf");
-	const [installedOnly, setInstalledOnly] = useState(false);
-	const [org, setOrg] = useState("");
+	// Seeded from MODEL_LIST_DEFAULTS, not from literals: the Store's warm-up path
+	// prefetches THAT combination, and a default changed here but not there would
+	// warm a key this hook never reads.
+	const [sort, setSort] = useState<ModelSort>(MODEL_LIST_DEFAULTS.sort);
+	const [category, setCategory] = useState<ModelCategory>(
+		MODEL_LIST_DEFAULTS.category
+	);
+	const [format, setFormat] = useState<ModelFormat>(MODEL_LIST_DEFAULTS.format);
+	const [installedOnly, setInstalledOnly] = useState(
+		MODEL_LIST_DEFAULTS.installedOnly
+	);
+	const [org, setOrg] = useState(MODEL_LIST_DEFAULTS.org);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	// The format of the currently-selected card, so detail + install dispatch on
 	// the model's own format (not whatever facet is now active).
@@ -118,29 +181,14 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 	const task = installedOnly ? "" : MODEL_CATEGORY_TASK[category];
 
 	const listQuery = useInfiniteQuery({
-		queryKey: [
-			"models",
-			"list",
-			url,
-			{ q: debouncedQuery, sort, format, installedOnly, task, org },
-		],
-		queryFn: ({ pageParam }) =>
-			searchModels(
-				{ url, token },
-				{
-					query: debouncedQuery,
-					sort,
-					format,
-					installedOnly,
-					task,
-					org,
-					limit: 40,
-					cursor: pageParam,
-				}
-			),
-		initialPageParam: undefined as string | undefined,
-		// Stop once the Hub returns no further cursor.
-		getNextPageParam: (last) => last.nextCursor ?? undefined,
+		...modelListQuery(target, {
+			query: debouncedQuery,
+			sort,
+			format,
+			installedOnly,
+			task,
+			org,
+		}),
 		// Keep the previous list on screen while the next one loads (no flash on
 		// filter/sort changes) — pure-cache navigation feel.
 		placeholderData: keepPreviousData,
@@ -262,7 +310,8 @@ export function useModelCatalog(initialQuery = ""): UseModelCatalogResult {
 
 	const select = useCallback(
 		(id: string) => {
-			setSelectedId(id);
+			// `select("")` closes the preview; null keeps the detail query disabled.
+			setSelectedId(id || null);
 			// Remember the selected card's format so detail + install dispatch on
 			// it; fall back to the active facet when the card isn't in the list.
 			const card = models.find((m) => m.id === id);

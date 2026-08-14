@@ -27,6 +27,18 @@ export interface ManagedNode {
 	orgId: string;
 	orgName: string | null;
 	/**
+	 * The managed-server row this node runs on, or null when it has none.
+	 *
+	 * A DIFFERENT id from `id` above, which is the node's GatewayCredential.
+	 * Anything addressing `/api/servers/orgs/:orgId/servers/:serverId/...` — the
+	 * resize and quiet-hour-zone surfaces — needs this one and cannot derive it.
+	 *
+	 * Null is a real answer, not a missing field: adopted and resumed nodes are
+	 * never linked to a server row, so a surface that needs it must render its
+	 * absence rather than guess.
+	 */
+	serverId?: string | null;
+	/**
 	 * Bearer the desktop presents to this node's remote Core. It is a short-lived
 	 * per-request Better-Auth user JWT the control plane mints and returns ONCE at
 	 * the list level (a single `token` on the response envelope, not per node) —

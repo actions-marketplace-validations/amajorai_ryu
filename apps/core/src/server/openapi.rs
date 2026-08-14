@@ -347,6 +347,7 @@ use utoipa::OpenApi;
         super::validate_data_path,
         // Downloads
         super::downloads_history,
+        super::downloads_history_clear,
         super::downloads_settings,
         super::set_downloads_settings,
         // Events

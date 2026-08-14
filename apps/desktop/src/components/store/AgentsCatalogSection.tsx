@@ -46,7 +46,7 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
-	StoreItemContextMenuContent,
+	storeItemContextMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import {
@@ -57,6 +57,7 @@ import {
 	ListingSection,
 	ListingStatStrip,
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
+import { useInstalledOnly } from "@ryu/marketplace/catalog/installed-filter";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Empty,
@@ -67,6 +68,10 @@ import {
 } from "@ryu/ui/components/empty.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import {
+	StatusBadge,
+	UNAVAILABLE_ROW_CLASS,
+} from "@ryu/ui/components/status-badge.tsx";
 import { useMemo, useState } from "react";
 import { AgentBadgeCard } from "@/src/components/agents/AgentBadgeCard.tsx";
 import { useMarketplacePurchase } from "@/src/components/marketplace/useMarketplacePurchase.ts";
@@ -95,6 +100,11 @@ const SEARCH_DEBOUNCE_MS = 200;
 /** The flagship agent: always installed, cannot be uninstalled. */
 const FLAGSHIP_AGENT_ID = "ryu";
 
+/** Why an agent row is dimmed and un-addable. One string, three surfaces (the
+ *  card action, the detail header, the detail hero), so the card's tooltip and
+ *  the hero's chip cannot drift into two different explanations. */
+const UNAVAILABLE_AGENT_REASON = "Unavailable on this platform";
+
 /** Sort recommended agents first, then by display name. */
 function sortAgents(agents: AgentCatalogEntry[]): AgentCatalogEntry[] {
 	return [...agents].sort((a, b) => {
@@ -119,29 +129,25 @@ function InstallButton({
 	const locked = entry.id === FLAGSHIP_AGENT_ID;
 	const { percent } = useInstallProgress(["agent"], entry.name);
 	if (entry.added) {
+		// The flagship can never be removed, so it gets the shared status glyph
+		// rather than a disabled Remove button — a disabled verb reads as "not
+		// right now" when the answer is "not ever".
+		if (locked) {
+			return <StatusBadge kind="builtin" />;
+		}
 		return (
-			<Button
-				disabled={busy || locked}
-				onClick={onUninstall}
-				size="sm"
-				variant="ghost"
-			>
+			<Button disabled={busy} onClick={onUninstall} size="sm" variant="ghost">
 				{busy ? (
 					<HugeiconsIcon className="size-4 animate-spin" icon={Loading01Icon} />
 				) : (
 					<HugeiconsIcon className="size-4" icon={Delete01Icon} />
 				)}
-				{locked ? "Built in" : "Remove"}
+				Remove
 			</Button>
 		);
 	}
 	if (!entry.available) {
-		return (
-			<Button disabled size="sm" variant="ghost">
-				<HugeiconsIcon className="size-4" icon={Alert01Icon} />
-				Unavailable
-			</Button>
-		);
+		return <StatusBadge kind="unavailable" label={UNAVAILABLE_AGENT_REASON} />;
 	}
 	return (
 		<InstallProgressButton
@@ -184,12 +190,7 @@ function AgentCardAction({
 		);
 	}
 	if (!(entry.available || entry.added)) {
-		return (
-			<Button disabled size="sm" variant="ghost">
-				<HugeiconsIcon className="size-4" icon={Alert01Icon} />
-				Unavailable
-			</Button>
-		);
+		return <StatusBadge kind="unavailable" label={UNAVAILABLE_AGENT_REASON} />;
 	}
 	return (
 		<StoreItemAction
@@ -235,14 +236,34 @@ function AgentCards({
 							onUninstall={() => onUninstall(entry.id)}
 						/>
 					}
+					// An agent that cannot run here is dimmed, never hidden: "why is
+					// Codex not in this list?" is a worse question to leave the user with
+					// than a greyed row whose glyph says which platform it needs.
+					className={
+						entry.available || entry.added ? undefined : UNAVAILABLE_ROW_CLASS
+					}
+					// Mirrors `AgentCardAction` branch for branch, in its order. The
+					// flagship is checked FIRST and pinned to installed+locked exactly as
+					// the card does — it ships with Ryu whether or not its catalog row
+					// happens to carry `added`, and a right-click offering to "Add" the
+					// built-in agent is the one wrong answer here. Then: an agent this
+					// platform cannot run has no verbs at all, and everything else gets
+					// the same Add/Settings/Remove the card's own control offers.
 					contextMenu={
-						!entry.added && (entry.available || entry.added) ? (
-							<StoreItemContextMenuContent
-								canReport={false}
-								onInstall={() => onInstall(entry.id)}
-								onReport={() => undefined}
-							/>
-						) : undefined
+						entry.id === FLAGSHIP_AGENT_ID
+							? storeItemContextMenu({
+									installed: true,
+									locked: true,
+									onOpenSettings: settingsOpener(entry.id) ?? undefined,
+								})
+							: entry.available || entry.added
+								? storeItemContextMenu({
+										installed: entry.added,
+										onInstall: () => onInstall(entry.id),
+										onOpenSettings: settingsOpener(entry.id) ?? undefined,
+										onUninstall: () => onUninstall(entry.id),
+									})
+								: undefined
 					}
 					employeeId={entry.id}
 					key={entry.id}
@@ -422,7 +443,7 @@ function AgentDetailPanel({
 					badges={[
 						entry.added ? "Added" : "Not added",
 						entry.recommended ? "Recommended" : null,
-						entry.available ? null : "Unavailable on this platform",
+						entry.available ? null : UNAVAILABLE_AGENT_REASON,
 						updateAvailable ? "Update available" : null,
 					].filter((b): b is string => Boolean(b))}
 					icon={
@@ -483,12 +504,20 @@ function AgentDetailPanel({
 
 export default function AgentsCatalogSection({
 	initialQuery = "",
+	initialSelectedId,
 }: {
 	initialQuery?: string;
+	/** Open this item's preview on arrival — the id of a card clicked on the
+	 *  Store's Home shelves. */
+	initialSelectedId?: string;
 } = {}) {
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
-	const [selectedId, setSelectedId] = useState<string | null>(null);
+	// Seeded, not synced: this catalog is fetched whole and filtered client-side,
+	// so a Home shelf card's id resolves on the first render and needs no effect.
+	const [selectedId, setSelectedId] = useState<string | null>(
+		initialSelectedId ?? null
+	);
 	// A few catalog rows are ALSO installed plugins that declare settings; the
 	// resolver returns null for the rest, so the row simply has no Settings entry.
 	const settingsOpener = usePluginSettingsOpener();
@@ -512,19 +541,31 @@ export default function AgentsCatalogSection({
 
 	const sorted = useMemo(() => sortAgents(agents), [agents]);
 
+	// The Store shell's "installed only" switch (the retired "Added" tab,
+	// inverted). This catalog is fetched whole and filtered here, so it applies to
+	// the rendered list — `added` is the runtime list's word for installed.
+	const installedOnly = useInstalledOnly();
+
 	const filtered = useMemo(() => {
 		const q = debouncedQuery.trim().toLowerCase();
+		const base = installedOnly ? sorted.filter((entry) => entry.added) : sorted;
 		if (!q) {
-			return sorted;
+			return base;
 		}
-		return sorted.filter(
+		return base.filter(
 			(entry) =>
 				entry.name.toLowerCase().includes(q) ||
 				(entry.description?.toLowerCase().includes(q) ?? false)
 		);
-	}, [sorted, debouncedQuery]);
+	}, [sorted, debouncedQuery, installedOnly]);
 
 	const filteredCommunity = useMemo(() => {
+		// A published community definition has no installed state on the card, so
+		// "installed only" hides the whole shelf rather than showing rows it cannot
+		// answer for.
+		if (installedOnly) {
+			return [];
+		}
 		const q = debouncedQuery.trim().toLowerCase();
 		if (!q) {
 			return community.agents;
@@ -535,7 +576,7 @@ export default function AgentsCatalogSection({
 				(card.description?.toLowerCase().includes(q) ?? false) ||
 				(card.author?.toLowerCase().includes(q) ?? false)
 		);
-	}, [community.agents, debouncedQuery]);
+	}, [community.agents, debouncedQuery, installedOnly]);
 
 	const selectedEntry = useMemo(
 		() => filtered.find((entry) => entry.id === selectedId) ?? null,

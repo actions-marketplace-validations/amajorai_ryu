@@ -10,6 +10,59 @@ type LogoConfig =
 	| { kind: "single"; src: string; invert: boolean }
 	| { kind: "themed"; light: string; dark: string };
 
+/**
+ * Brand marks for REGISTRY agents — the ones a user installs from the catalog
+ * rather than the engines Ryu ships with. Slugs, resolved to
+ * `/assets/logos/<slug>.svg` by {@link registryLogoConfig}.
+ *
+ * This is the same table the catalog row renders from (`REGISTRY_SVGL` in
+ * `agent-catalog-logo.tsx`, which now re-exports this one). It lives HERE
+ * because the catalog is not the only place these agents appear: installing
+ * Cursor auto-creates a Cursor agent, and every surface that then draws it —
+ * sidebar row, composer picker, agent editor — goes through {@link AgentLogo},
+ * which knew only about `ENGINE_LOGOS` and so drew the Ryu ghost for all of them.
+ *
+ * Keys are registry agent ids, which is also what `normalizeEngine` yields for
+ * an `acp:<id>` engine string.
+ *
+ * A `{light, dark}` pair is only for marks with achromatic parts that vanish
+ * against the opposite surface (kimi's panel, mistral's unfilled squares). Solid
+ * brand colours (amp's blue, jetbrains' gradient) stay single-asset — a dark
+ * variant would only mis-colour them.
+ */
+export const REGISTRY_LOGO_SLUGS: Record<
+	string,
+	string | { light: string; dark: string }
+> = {
+	"amp-acp": "amp",
+	cursor: { light: "cursor_light", dark: "cursor_dark" },
+	"github-copilot-cli": { light: "copilot", dark: "copilot_dark" },
+	"grok-build": { light: "grok-light", dark: "grok-dark" },
+	junie: "jetbrains",
+	kilo: { light: "kilocode-light", dark: "kilocode-dark" },
+	kimi: { light: "kimi-icon", dark: "kimi-icon-dark" },
+	"mistral-vibe": { light: "mistral-ai_logo", dark: "mistral-ai_logo_dark" },
+	opencode: { light: "opencode", dark: "opencode-dark" },
+	"qwen-code": { light: "qwen_light", dark: "qwen_dark" },
+};
+
+/** The registry brand mark for an agent id, as a {@link LogoConfig}. */
+function registryLogoConfig(key: string): LogoConfig | undefined {
+	const slug = REGISTRY_LOGO_SLUGS[key];
+	if (!slug) {
+		return undefined;
+	}
+	const url = (s: string) => `/assets/logos/${s}.svg`;
+	return typeof slug === "string"
+		? { kind: "single", src: url(slug), invert: false }
+		: { kind: "themed", light: url(slug.light), dark: url(slug.dark) };
+}
+
+/** Registry agents that ship a brand mark of their own. */
+export function hasRegistryLogo(key: string | null | undefined): boolean {
+	return key != null && key in REGISTRY_LOGO_SLUGS;
+}
+
 const ENGINE_LOGOS: Record<string, LogoConfig> = {
 	claude: {
 		kind: "single",
@@ -87,7 +140,10 @@ export function hasBrandedEngineLogo(
 	engine: string | null | undefined
 ): boolean {
 	const key = normalizeEngine(engine);
-	return key != null && key in ENGINE_LOGOS;
+	// Registry marks count as branded now that `AgentLogo` can draw them —
+	// otherwise callers that use this to decide "does it need a fallback?" would
+	// still route a Cursor agent to a generic mark.
+	return key != null && (key in ENGINE_LOGOS || hasRegistryLogo(key));
 }
 
 /** Strip the "acp:" transport prefix and lowercase so "acp:Claude" → "claude". */
@@ -130,7 +186,17 @@ export function AgentLogo({
 	size?: string;
 }) {
 	const key = normalizeEngine(engine);
-	const known = key ? ENGINE_LOGOS[key] : undefined;
+	// `ENGINE_LOGOS` first, then the CATALOG's brand marks. Both are needed: the
+	// catalog's marks are keyed by registry agent id (`cursor`, `opencode`,
+	// `qwen-code`, …) and were only ever consulted while rendering a catalog ROW,
+	// so an agent auto-created by installing one of those — which is what happens
+	// when you install Cursor — resolved through this function, missed, and fell
+	// back to the Ryu ghost. The logo was set the whole time; nothing downstream of
+	// the catalog looked at it. `normalizeEngine` strips the `acp:` prefix, so an
+	// agent whose engine is `acp:cursor` matches the `cursor` entry directly.
+	const known =
+		(key ? ENGINE_LOGOS[key] : undefined) ??
+		(key ? registryLogoConfig(key) : undefined);
 
 	// Ryu (and any unbranded engine that falls back to it) renders via the logo
 	// component's `outline` variant on sized surfaces: the static SVG's tight

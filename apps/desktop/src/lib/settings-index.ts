@@ -415,7 +415,16 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		dialog: "app",
 		section: "appearance",
 		group: "Interface",
-		label: "Group chats by date",
+		label: "Group lists by date",
+		keywords: "chats projects spaces pages uploads buckets today yesterday",
+	},
+	{
+		id: "appearance.interface.sidebar-grouped-nav",
+		dialog: "app",
+		section: "appearance",
+		group: "Interface",
+		label: "Projects & Spaces as pickers",
+		keywords: "sidebar picker select all projects all spaces declutter",
 	},
 	{
 		id: "appearance.interface.inset-sidebar",

@@ -18,7 +18,10 @@ import { UpdatesView } from "@ryu/blocks/desktop/updates.tsx";
 import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import { sileo } from "sileo";
-import { installUpdate } from "@/src/components/updater/AutoUpdater.tsx";
+import {
+	canDeferAppUpdate,
+	installUpdate,
+} from "@/src/components/updater/AutoUpdater.tsx";
 import {
 	updateToastBody,
 	updateToastId,
@@ -30,8 +33,16 @@ import {
 	getAutoUpdateEnabled,
 	getVersionInfo,
 	setAutoUpdateEnabled,
+	type UpdateCheck,
 	updateCheckFailed,
 } from "@/src/lib/api/update.ts";
+import {
+	clearPendingAppUpdate,
+	describePendingAppUpdate,
+	getPendingAppUpdate,
+	type PendingAppUpdate,
+	scheduleAppUpdate,
+} from "@/src/lib/app-update-schedule.ts";
 import { verdictAppliesToApp } from "@/src/lib/app-version.ts";
 import { appDisplayName } from "@/src/lib/channel-brand.ts";
 import {
@@ -48,6 +59,10 @@ export function AppUpdatesSettings() {
 	const [autoUpdate, setAutoUpdate] = useState<boolean>(true);
 	const [checking, setChecking] = useState(false);
 	const [restricted, setRestricted] = useState(false);
+	// The release a check found, held so the "install later" row has something to
+	// book. Not derivable from the toast, which is fire-and-forget.
+	const [available, setAvailable] = useState<UpdateCheck | null>(null);
+	const [pending, setPending] = useState<PendingAppUpdate | null>(null);
 
 	useEffect(() => {
 		const target = toTarget(getNode());
@@ -56,16 +71,18 @@ export function AppUpdatesSettings() {
 			// The app's own version comes from Tauri. Outside a Tauri shell (the
 			// browser dev server) that call rejects, so fall back to Core's
 			// reported version rather than showing nothing.
-			const [appVersion, info, enabled] = await Promise.all([
+			const [appVersion, info, enabled, booked] = await Promise.all([
 				getVersion().catch(() => null),
 				getVersionInfo(target).catch(() => null),
 				getAutoUpdateEnabled(target),
+				getPendingAppUpdate(),
 			]);
 			if (!active) {
 				return;
 			}
 			setVersion(appVersion ?? info?.ryu_version ?? null);
 			setAutoUpdate(enabled);
+			setPending(booked);
 		})();
 		return () => {
 			active = false;
@@ -109,6 +126,15 @@ export function AppUpdatesSettings() {
 			// and a `~/.ryu/bin/ryu-core` left behind at an older version made this
 			// check answer "Update available — v0.1.3" to an app already on 0.1.3.
 			const appIsBehind = await verdictAppliesToApp(verdict);
+			// Only hold a verdict that can actually be BOOKED. A deferral is
+			// replayed at the window without a re-check, so it needs a local node's
+			// verdict, a tag to pin to, and a non-rolling channel; without those the
+			// install would silently resolve to whatever is newest then. Hiding the
+			// offer is the honest failure — the alternative is a button that takes
+			// the promise and breaks it eight hours later, unattended.
+			setAvailable(
+				appIsBehind && canDeferAppUpdate(verdict, node) ? verdict : null
+			);
 			if (!appIsBehind) {
 				// An explicit check asks a factual question and must get a factual
 				// answer — not a persistent purchase prompt. Finite duration, both
@@ -159,6 +185,37 @@ export function AppUpdatesSettings() {
 		}
 	};
 
+	// Book the found release for this machine's next quiet hour.
+	//
+	// The WHOLE verdict is stored, not just its version: what installs at the
+	// window is then the build the user is looking at right now, notes and all.
+	// Re-checking then would resolve the static feed to whatever is newest at
+	// 03:00 — a different release, on a machine they deliberately chose not to
+	// touch during the day.
+	const onDefer = async () => {
+		if (!available) {
+			return;
+		}
+		try {
+			const booked = await scheduleAppUpdate(available);
+			setPending(booked);
+			sileo.info({ title: describePendingAppUpdate(booked), duration: 8000 });
+		} catch (err) {
+			// A deferral that could not be written must never be reported as booked
+			// — that is the exact failure shape this whole feature exists to avoid.
+			sileo.error({
+				title: "Couldn't schedule the update",
+				description: err instanceof Error ? err.message : String(err),
+			});
+		}
+	};
+
+	const onCancelDefer = async () => {
+		await clearPendingAppUpdate();
+		setPending(null);
+		sileo.info({ title: "Scheduled update cancelled", duration: 4000 });
+	};
+
 	// Read straight from storage on every render. The window is written outside
 	// React (the entitlement resolve, at launch), so there is nothing to subscribe
 	// to: the normal case is that the value is already there on mount, and the
@@ -172,7 +229,7 @@ export function AppUpdatesSettings() {
 	let updatesWindowNotice: string | undefined;
 	if (windowEnd) {
 		updatesWindowNotice = restricted
-			? `Your lifetime updates ended on ${formatUpdatesCutoff(windowEnd)}. Ryu stays on the newest build they cover. Buy lifetime access again at the current price for another year — or post about Ryu at ryu.com/redeem to earn a free year.`
+			? `Your lifetime updates ended on ${formatUpdatesCutoff(windowEnd)}. Ryu stays on the newest build they cover. Buy lifetime access again at the current price for another year, or post about Ryu at ryu.com/redeem to earn a free year.`
 			: `Updates included through ${formatUpdatesCutoff(windowEnd)}.`;
 	}
 
@@ -181,9 +238,29 @@ export function AppUpdatesSettings() {
 			<UpdatesView
 				autoUpdate={autoUpdate}
 				checking={checking}
+				deferredInstallNotice={
+					pending ? describePendingAppUpdate(pending) : undefined
+				}
+				onCancelDeferredInstall={
+					pending
+						? () => {
+								onCancelDefer().catch(() => undefined);
+							}
+						: undefined
+				}
 				onCheck={() => {
 					onCheck().catch(() => undefined);
 				}}
+				// Only offered once a check has actually found something to defer.
+				// A "book it for tonight" button with no release behind it would be
+				// a promise about a version that may not exist.
+				onDeferInstall={
+					available && !pending
+						? () => {
+								onDefer().catch(() => undefined);
+							}
+						: undefined
+				}
 				onManageUpdates={
 					restricted
 						? () => useSettingsDialog.getState().openSettings("billing")

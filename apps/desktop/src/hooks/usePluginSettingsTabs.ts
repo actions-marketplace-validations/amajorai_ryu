@@ -30,7 +30,7 @@ export function usePluginSettingsTabs(): PluginSettingsTabsState {
 	const [tabs, setTabs] = useState<PluginSettingsTab[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState(false);
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 
 	const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
@@ -59,7 +59,11 @@ export function usePluginSettingsTabs(): PluginSettingsTabsState {
 		return () => {
 			cancelled = true;
 		};
-	}, []);
+		// `reloadKey` is load-bearing: it is the ONLY thing `reload()` changes, and
+		// three callers depend on it (useCoreRefresh above, PluginsSettings, and
+		// useScopedSettingsNav). Without it a newly installed plugin's settings tab
+		// never appears until the app restarts. A lint autofix emptied this once.
+	}, [reloadKey]);
 
 	return { tabs, byPlugin: groupTabsByPlugin(tabs), loading, error, reload };
 }

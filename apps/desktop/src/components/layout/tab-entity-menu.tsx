@@ -38,12 +38,15 @@ import {
 } from "@ryu/ui/components/context-menu.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
 import { toast } from "@ryu/ui/components/sileo";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import type { Tab } from "@/src/contexts/TabsContext.tsx";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
-import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
+import {
+	type PluginContextMenuItem,
+	pluginHostInvoke,
+} from "@/src/lib/api/plugins.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import { useConversationFlagsStore } from "@/src/store/useConversationFlagsStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
@@ -132,7 +135,7 @@ export function deriveTabEntity(tab: Tab): TabEntity | null {
 }
 
 /** One rendered row: shell built-in or app contribution, same shape either way. */
-interface EntityRow {
+export interface EntityRow {
 	/** Built-in glyph. Contributed rows leave this null and set `pluginIcon`. */
 	icon: IconSvgElement | null;
 	id: string;
@@ -140,6 +143,73 @@ interface EntityRow {
 	onSelect: () => void;
 	/** Iconify/Hugeicons glyph id from a contribution (`icon` takes precedence). */
 	pluginIcon?: string;
+}
+
+/**
+ * The app-contributed rows for one entity, ready to render — no shell built-ins.
+ *
+ * Split out of `useTabEntityRows` so a surface that is NOT a tab can offer the
+ * same rows. The sidebar was the gap: its chat row rendered contributions by
+ * hardcoding `anchor === "conversation"`, so an app anchoring to `space`, `agent`
+ * or `workflow` had its row appear on the tab menu and nowhere else — the sidebar
+ * is where those entities are actually listed. Anchoring stays data-driven here
+ * rather than growing a second per-surface copy that can drift from this one.
+ */
+export function useContributedRowsFor(
+	anchor: string,
+	idKey: string
+): (id: string) => EntityRow[] {
+	const { context_menu_items } = usePluginContributions();
+	// Filter + sort ONCE per anchor, not once per row. The sidebar calls the
+	// returned factory inside a list render, and a hook cannot be called there —
+	// which is the shape that pushed the chat row into hardcoding its anchor in the
+	// first place.
+	const items = useMemo(
+		() =>
+			context_menu_items
+				.filter((item) => item.anchor === anchor)
+				.sort(
+					(a, b) =>
+						(a.order ?? Number.MAX_SAFE_INTEGER) -
+						(b.order ?? Number.MAX_SAFE_INTEGER)
+				),
+		[context_menu_items, anchor]
+	);
+	return useCallback(
+		(id: string) =>
+			items.map((item) => contributedRow(item, { anchor, id, idKey })),
+		[anchor, idKey, items]
+	);
+}
+
+/** One contributed row, dispatched through the owning plugin's granted host seam. */
+function contributedRow(
+	item: PluginContextMenuItem,
+	entity: TabEntity
+): EntityRow {
+	return {
+		id: `plugin:${item.plugin}:${item.id}`,
+		label: item.label,
+		icon: null,
+		pluginIcon: item.icon,
+		onSelect: () => {
+			// The id is keyed by anchor, so a `space` row is handed `space_id`
+			// rather than a `conversation_id` its capability would ignore.
+			const run = () =>
+				pluginHostInvoke(
+					toTarget(useNodeStore.getState().getActiveNode()),
+					item.plugin,
+					item.capability ?? "",
+					{ ...item.args, [entity.idKey]: entity.id }
+				);
+			const feedback = item.feedback;
+			toast.promise(run(), {
+				loading: feedback?.loading ?? item.label,
+				success: feedback?.success ?? item.label,
+				error: feedback?.error ?? `${item.label} failed`,
+			});
+		},
+	};
 }
 
 /**
@@ -218,29 +288,7 @@ export function useTabEntityRows(tab: Tab): EntityRow[] {
 		}
 
 		for (const item of contributed) {
-			rows.push({
-				id: `plugin:${item.plugin}:${item.id}`,
-				label: item.label,
-				icon: null,
-				pluginIcon: item.icon,
-				onSelect: () => {
-					// The id is keyed by anchor, so a `space` row is handed `space_id`
-					// rather than a `conversation_id` its capability would ignore.
-					const run = () =>
-						pluginHostInvoke(
-							toTarget(useNodeStore.getState().getActiveNode()),
-							item.plugin,
-							item.capability ?? "",
-							{ ...item.args, [entity.idKey]: entity.id }
-						);
-					const feedback = item.feedback;
-					toast.promise(run(), {
-						loading: feedback?.loading ?? item.label,
-						success: feedback?.success ?? item.label,
-						error: feedback?.error ?? `${item.label} failed`,
-					});
-				},
-			});
+			rows.push(contributedRow(item, entity));
 		}
 		return rows;
 	}, [
@@ -263,7 +311,7 @@ export function useTabEntityRows(tab: Tab): EntityRow[] {
  * falls back to the neutral ⋯ glyph when the app declared none — the same
  * fallback the sidebar chat row uses for contributed rows.
  */
-function EntityRowGlyph({ row }: { row: EntityRow }) {
+export function EntityRowGlyph({ row }: { row: EntityRow }) {
 	if (row.icon) {
 		return <HugeiconsIcon className="size-4" icon={row.icon} />;
 	}

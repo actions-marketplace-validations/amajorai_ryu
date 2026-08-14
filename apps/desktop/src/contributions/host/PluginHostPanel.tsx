@@ -399,6 +399,21 @@ const COMPANION_THEME_TOKENS = [
 	"--ring",
 	"--radius",
 	"--spacing",
+	// Typography, for the same reason as the colours: a companion that inherits
+	// the surface's palette but not its type still reads as a foreign document
+	// embedded in the app, which is exactly how the app UIs looked — every one of
+	// them fell back to its own bundled default stack.
+	//
+	// Only the family STACK crosses this bridge, not the webfont bytes: the frame
+	// is a null-origin `srcdoc` document, so an `@font-face` pointing at the
+	// shell's origin is not fetchable from inside it. Forwarding the stack still
+	// aligns the two on the same generic tail (`sans-serif`) instead of leaving
+	// them on unrelated defaults; carrying the actual Inter/Geist faces in needs
+	// them inlined as `data:` URIs under the companion CSP, which is a separate
+	// change with a real bundle-size cost.
+	"--font-sans",
+	"--font-heading",
+	"--font-code",
 ] as const;
 
 /** The node event-stream channels a `shell.eventsSubscribe` call may request (grant
@@ -1846,19 +1861,18 @@ export function PluginHostPanel({
 	}
 
 	return (
-		<div className="relative flex h-full flex-col overflow-hidden">
-			{/* Visible attribution: this is plugin content, namespaced, never system
-			    chrome. */}
-			<div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-2">
-				<HugeiconsIcon
-					className="size-4 text-muted-foreground"
-					icon={PuzzleIcon}
-				/>
-				<span className="font-medium text-sm">Plugin · {panelTitle}</span>
-				<span className="ml-auto text-muted-foreground text-xs">
-					{connected ? "sandboxed · connected" : "sandboxed · starting…"}
-				</span>
-			</div>
+		// `data-plugin-*` rather than a header strip. The strip that used to sit here
+		// spent a whole row of every app's height restating what the tab already
+		// says (which plugin this is) plus a status that is only ever "connected" by
+		// the time you can read it — the not-connected case is the opaque
+		// PanelPlaceholder below, which covers the frame entirely. Attribution now
+		// rides the tab; these attributes are what a tab-strip status dot reads.
+		<div
+			className="relative flex h-full flex-col overflow-hidden"
+			data-plugin-id={companion.pluginId}
+			data-plugin-state={connected ? "connected" : "starting"}
+			data-plugin-title={panelTitle}
+		>
 			<div className="min-h-0 flex-1">
 				<ExtensionHost
 					granted={granted}

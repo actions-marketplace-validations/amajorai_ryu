@@ -87,6 +87,20 @@ export interface AcpAgentCapabilities {
 		embeddedContext?: boolean;
 		image?: boolean;
 	};
+	/**
+	 * ACP `sessionCapabilities` — which session lifecycle RPCs the agent
+	 * implements. Every member optional so an older Core that omits the key
+	 * parses unchanged; absent means "unknown", not "unsupported".
+	 *
+	 * Agents genuinely differ: captured `initialize` responses show pi-acp,
+	 * qwen-code and factory-droid advertising no `close`, which is why the
+	 * delete affordance has to read this rather than assume it.
+	 */
+	sessionCapabilities?: {
+		close?: boolean;
+		list?: boolean;
+		resume?: boolean;
+	};
 }
 
 /** The full agent-reported session config (each field null when unsupported). */

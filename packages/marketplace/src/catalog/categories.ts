@@ -29,6 +29,10 @@ export const STORE_CATEGORY_ORDER: readonly string[] = [
 	"Communication",
 	"Productivity",
 	"Creative",
+	// Themes ride in on ordinary plugins (`contributes.themes`) rather than a
+	// CatalogKind of their own, so this shelf is how one is findable in the
+	// Plugins tab. The web store's Themes TAB filters on this same value.
+	"Themes",
 	"Media & Voice",
 	"Research",
 	"Developer Tools",

@@ -4,6 +4,7 @@ import { getToolStatus } from "../utils/format-tool.ts";
 import { GenericTool } from "./generic-tool.tsx";
 import { toolRegistry } from "./tool-registry.ts";
 import { ToolRowBase } from "./tool-row-base.tsx";
+import { ToolTimingProvider } from "./tool-timing.tsx";
 
 export interface SubagentToolProps {
 	chatStatus?: string;
@@ -114,28 +115,34 @@ export const SubagentTool = memo(function SubagentTool({
 					>
 						{nestedTools.map((nestedPart, idx) => {
 							const nestedMeta = toolRegistry[nestedPart.type];
+							// Nested rows are rendered here rather than through
+							// `ToolRenderer`, so each one has to RE-provide its own
+							// timing. Inheriting the parent subagent's stamp would label
+							// every step with the whole subagent's duration.
 							if (!nestedMeta) {
 								return (
-									<ToolRowBase
-										completeLabel={
-											nestedPart.type?.replace("tool-", "") ?? "Tool"
-										}
-										isAnimating={false}
-										key={idx}
-									/>
+									<ToolTimingProvider key={idx} part={nestedPart}>
+										<ToolRowBase
+											completeLabel={
+												nestedPart.type?.replace("tool-", "") ?? "Tool"
+											}
+											isAnimating={false}
+										/>
+									</ToolTimingProvider>
 								);
 							}
 							const { isPending: nestedIsPending, isError: nestedIsError } =
 								getToolStatus(nestedPart, chatStatus);
 							return (
-								<GenericTool
-									icon={nestedMeta.icon}
-									isError={nestedIsError}
-									isPending={nestedIsPending}
-									key={idx}
-									subtitle={nestedMeta.subtitle?.(nestedPart)}
-									title={nestedMeta.title(nestedPart)}
-								/>
+								<ToolTimingProvider key={idx} part={nestedPart}>
+									<GenericTool
+										icon={nestedMeta.icon}
+										isError={nestedIsError}
+										isPending={nestedIsPending}
+										subtitle={nestedMeta.subtitle?.(nestedPart)}
+										title={nestedMeta.title(nestedPart)}
+									/>
+								</ToolTimingProvider>
 							);
 						})}
 					</div>

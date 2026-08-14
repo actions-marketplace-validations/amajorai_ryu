@@ -53,6 +53,17 @@ pub const GATEWAY_PROVIDER_ID: &str = "gateway";
 /// maps its default `openrouter/auto` model onto the OpenRouter provider. No BYOK.
 pub const MANAGED_OPENROUTER_ID: &str = "managed-openrouter";
 
+/// Pool-backed managed providers — Ryu-supplied capacity billed against a
+/// SEGREGATED donated credit pool rather than the retail pass-through one.
+///
+/// The `managed-<poolId>` shape is load-bearing: the desktop composer binds a
+/// catalog row to a pool when the row is `managed` and its id is the pool id,
+/// `managed-<poolId>`, or one of the pool's gateway provider ids
+/// (`use-universal-picker.ts`). Renaming one of these silently unbinds the pool
+/// and the row loses its label, its balance badge and its upsell escape.
+pub const MANAGED_CLOUDFLARE_ID: &str = "managed-cloudflare";
+pub const MANAGED_BEDROCK_ID: &str = "managed-bedrock";
+
 /// The Gateway's OpenRouter Auto Router model — routes each prompt to a good
 /// model at no extra fee. The zero-decision default for managed users.
 const MANAGED_DEFAULT_MODEL: &str = "openrouter/auto";
@@ -208,10 +219,21 @@ pub fn is_gateway_routing() -> bool {
     }
 }
 
-/// Providers that are *always* Gateway-routed (managed subscription or the
-/// synthetic gateway provider) — their egress must stay governed/metered.
+/// Whether a provider is MANAGED — Ryu-supplied capacity billed against a credit
+/// pool, rather than a key the user brought.
+///
+/// Keyed on the row's `credit_pool`, never on an id: this was five separate
+/// `== MANAGED_OPENROUTER_ID` comparisons, which is why the product could only
+/// ever have one managed provider, and why each of the five broke it differently
+/// when it did not.
+fn is_managed(id: &str) -> bool {
+    provider_meta(id).is_some_and(|m| !m.credit_pool.is_empty())
+}
+
+/// Providers that are *always* Gateway-routed (any managed row, or the synthetic
+/// gateway provider) — their egress must stay governed/metered.
 fn is_managed_or_gateway(id: &str) -> bool {
-    id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID
+    id == GATEWAY_PROVIDER_ID || is_managed(id)
 }
 
 /// The routing mode (`"gateway"` | `"direct"`) for a specific provider id.
@@ -1734,6 +1756,21 @@ pub struct ProviderMeta {
     pub auth_env: &'static str,
     /// "subscription" (OAuth via Pi `/login`), "api-key", or "none" (Gateway).
     pub auth_kind: &'static str,
+    /// The `CreditPoolId` this row's traffic attributes to at the Gateway, or
+    /// `""` for a BYOK provider.
+    ///
+    /// Non-empty ⇒ MANAGED: Ryu-supplied capacity, no BYOK, always Gateway-routed.
+    /// "Managed" used to be an id equality against a single constant, which is why
+    /// there could only ever be one managed provider; it is a property of the row
+    /// now, so adding supply is one entry rather than an edit at every branch that
+    /// asked the question.
+    ///
+    /// The string must match an id in `packages/auth/src/lib/credit-pools.ts`
+    /// (mirrored for the Gateway at `apps/gateway/src/credit_pools.rs`). Core does
+    /// NOT carry a third copy of that catalog — it needs one id per row, not the
+    /// table. A near-miss is silent in the worst way: the Gateway attributes the
+    /// spend to no pool, so the grant it was supposed to draw is never touched.
+    pub credit_pool: &'static str,
     pub suggested_models: &'static [&'static str],
     /// OpenAI-compatible `GET .../models` discovery URL, or `""` when the provider
     /// exposes no such endpoint (discovery then falls back to `suggested_models`).
@@ -1753,6 +1790,10 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_env: "",
         // Subscription: no BYOK; billed against the plan's Ryu $ credits.
         auth_kind: "subscription",
+        // Retail pass-through supply — the residual pool, with no donated
+        // allowance behind it. `visible: false` in the pool catalog, which is why
+        // this row keeps its own label rather than borrowing the pool's ("Ryu").
+        credit_pool: "openrouter",
         suggested_models: &[
             "openrouter/auto",
             "anthropic/claude-sonnet-4",
@@ -1769,7 +1810,82 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "",
         auth_env: "",
         auth_kind: "none",
+        credit_pool: "",
         suggested_models: &[],
+        models_url: "",
+    },
+    // ── Pool-backed managed supply ────────────────────────────────────────────
+    //
+    // Ryu runs on donated provider credit, segregated into pools so a $50 grant of
+    // cheap open-model capacity cannot be spent on expensive frontier capacity.
+    // A grant is restricted to its own pool, and the Gateway attributes a request
+    // to a pool from the provider that actually served it.
+    //
+    // Until these rows existed, the ONLY managed entry was `managed-openrouter`,
+    // whose default `openrouter/auto` routes to the `openrouter` provider and
+    // therefore attributes to the retail pool. A user holding only "Ryu Fast"
+    // credit has no budget under that key and `unrestricted` of zero, so the
+    // Gateway's pre-flight gate refused the turn with a 402 — on a wallet showing
+    // a positive balance. The credits were not merely unspent; they were
+    // unspendable through the UI.
+    //
+    // WHAT SELECTS A POOL IS THE MODEL ID, not this row. Every Gateway-routed
+    // provider writes the same `defaultProvider: "openai"` pin and the same
+    // managed-fleet patch, so Core cannot pin a provider — the Gateway's router
+    // matches the model id's PREFIX (`crates/gateway/router/src/lib.rs`). These
+    // rows exist to put routable ids in front of the user and to name the supply
+    // in the user's own words; `suggested_models` is therefore not a garnish, it
+    // is the entire list the picker will show (`models_url` is empty and a pool
+    // row is deliberately excluded from Gateway discovery, which would merge in
+    // every other provider's models and offer ids that debit the wrong pool).
+    //
+    // THERE ARE NO "Ryu Vision" / "Ryu Reasoning" ROWS, and adding them here is a
+    // money bug, not a feature. The router ships no builtin prefix for `vertex` or
+    // `openai-credits` — deliberately, because `google/gemini-*` is a live
+    // OpenRouter id and claiming that prefix would break working traffic. Their
+    // ids would fall through to `default_provider` and debit the wrong pool. Those
+    // two need an operator `routing.model_map` on the managed fleet first, which
+    // is fleet configuration, not a change here.
+    ProviderMeta {
+        id: MANAGED_CLOUDFLARE_ID,
+        // Byte-for-byte `CREDIT_POOLS.cloudflare.label`: the composer reads the
+        // pool catalog for its own label, and Settings renders THIS string raw, so
+        // a divergence shows the same supply under two names.
+        label: "Ryu Fast",
+        api: "openai-completions",
+        auth_key: "",
+        auth_env: "",
+        // Not "subscription": there is no login and no BYOK. Free-tier and
+        // referral grants land in this pool, so a user can hold it with no plan at
+        // all — and `provider_configured` treats "none" as always usable.
+        auth_kind: "none",
+        credit_pool: "cloudflare",
+        // Every id here is asserted routable to `cloudflare` by the router's own
+        // tests. Do not add one without adding it there.
+        suggested_models: &[
+            "@cf/meta/llama-3.1-8b-instruct",
+            "@cf/mistral/mistral-7b-instruct-v0.2",
+            "@cf/qwen/qwen1.5-14b-chat-awq",
+        ],
+        models_url: "",
+    },
+    ProviderMeta {
+        id: MANAGED_BEDROCK_ID,
+        label: "Ryu Frontier",
+        api: "openai-completions",
+        auth_key: "",
+        auth_env: "",
+        auth_kind: "none",
+        credit_pool: "bedrock",
+        // `anthropic.` / `amazon.` / `meta.` / `mistral.` are the routable
+        // prefixes. NOT `cohere.` / `ai21.` / `writer.` / `deepseek.`, which the
+        // router leaves unclaimed, and NOT the `us.` / `eu.` / `apac.`
+        // inference-profile forms.
+        suggested_models: &[
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "amazon.nova-pro-v1:0",
+            "meta.llama3-1-70b-instruct-v1:0",
+        ],
         models_url: "",
     },
     // Subscription LOGIN providers (Pi's OAuth). No API key — the desktop shows a
@@ -1784,6 +1900,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "openai-codex",
         auth_env: "",
         auth_kind: "subscription",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "",
     },
@@ -1795,6 +1912,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "anthropic",
         auth_env: "",
         auth_kind: "subscription",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "",
     },
@@ -1805,6 +1923,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "github-copilot",
         auth_env: "",
         auth_kind: "subscription",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "",
     },
@@ -1815,6 +1934,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "anthropic",
         auth_env: "ANTHROPIC_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[
             "claude-opus-4-20250514",
             "claude-sonnet-4-20250514",
@@ -1829,6 +1949,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "openai",
         auth_env: "OPENAI_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
         models_url: "https://api.openai.com/v1/models",
     },
@@ -1839,6 +1960,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "google",
         auth_env: "GEMINI_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["gemini-2.5-pro", "gemini-2.5-flash"],
         // Google's model list uses a non-OpenAI shape; fall back to suggestions.
         models_url: "",
@@ -1850,6 +1972,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "deepseek",
         auth_env: "DEEPSEEK_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["deepseek-chat", "deepseek-reasoner"],
         models_url: "https://api.deepseek.com/models",
     },
@@ -1860,6 +1983,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "groq",
         auth_env: "GROQ_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["llama-3.3-70b-versatile"],
         models_url: "https://api.groq.com/openai/v1/models",
     },
@@ -1870,6 +1994,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "mistral",
         auth_env: "MISTRAL_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["mistral-large-latest"],
         models_url: "https://api.mistral.ai/v1/models",
     },
@@ -1880,6 +2005,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "xai",
         auth_env: "XAI_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["grok-4", "grok-3"],
         models_url: "https://api.x.ai/v1/models",
     },
@@ -1895,6 +2021,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "cerebras",
         auth_env: "CEREBRAS_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "https://api.cerebras.ai/v1/models",
     },
@@ -1905,6 +2032,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "fireworks",
         auth_env: "FIREWORKS_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "https://api.fireworks.ai/inference/v1/models",
     },
@@ -1915,6 +2043,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "together",
         auth_env: "TOGETHER_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "https://api.together.xyz/v1/models",
     },
@@ -1925,6 +2054,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "nvidia",
         auth_env: "NVIDIA_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "https://integrate.api.nvidia.com/v1/models",
     },
@@ -1935,6 +2065,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "moonshotai",
         auth_env: "MOONSHOT_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["kimi-k2-0711-preview"],
         models_url: "https://api.moonshot.ai/v1/models",
     },
@@ -1945,6 +2076,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "zai",
         auth_env: "ZAI_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &["glm-4.6"],
         // Z.ai's model list uses a non-standard path; rely on suggestions/free-text.
         models_url: "",
@@ -1956,6 +2088,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "minimax",
         auth_env: "MINIMAX_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "",
     },
@@ -1966,6 +2099,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "huggingface",
         auth_env: "HF_TOKEN",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[],
         models_url: "https://router.huggingface.co/v1/models",
     },
@@ -1976,6 +2110,7 @@ pub const PROVIDERS: &[ProviderMeta] = &[
         auth_key: "openrouter",
         auth_env: "OPENROUTER_API_KEY",
         auth_kind: "api-key",
+        credit_pool: "",
         suggested_models: &[
             "openrouter/auto",
             "anthropic/claude-sonnet-4",
@@ -1995,9 +2130,10 @@ fn provider_meta(id: &str) -> Option<&'static ProviderMeta> {
 /// Whether a provider has a usable credential (auth.json key, environment
 /// variable, or — for custom providers — an `apiKey` in models.json).
 fn provider_configured(meta: &ProviderMeta) -> bool {
-    // "none" (gateway) needs no credential. The managed provider is a subscription
-    // gated server-side by the plan's wallet, so it is always usable here.
-    if meta.auth_kind == "none" || meta.id == MANAGED_OPENROUTER_ID {
+    // "none" (gateway, and the pool-backed managed rows) needs no credential. A
+    // managed provider is gated server-side by the wallet — a plan's credits or a
+    // pool-restricted grant — so it is always usable from here.
+    if meta.auth_kind == "none" || is_managed(meta.id) {
         return true;
     }
     // Login-based subscription providers (ChatGPT/Claude/Copilot): "configured" =
@@ -2197,7 +2333,11 @@ pub fn catalog() -> Value {
                 "routing": provider_routing(p.id),
                 // Managed/gateway providers can't be flipped off Gateway routing.
                 "routingLocked": is_managed_or_gateway(p.id),
-                "managed": p.id == MANAGED_OPENROUTER_ID,
+                "managed": is_managed(p.id),
+                // The credit pool this row's spend attributes to, so the composer
+                // can bind the row to the pool catalog and show its balance. Empty
+                // for BYOK.
+                "creditPool": p.credit_pool,
                 "configured": provider_configured(p),
                 "active": is_active(p.id),
                 "custom": false,
@@ -2302,7 +2442,7 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
     // managed-openrouter and the synthetic gateway provider both route through the
     // local Gateway via the built-in `openai` pin, so egress stays governed.
     let gateway = is_managed_or_gateway(&provider);
-    let managed = provider == MANAGED_OPENROUTER_ID;
+    let managed = is_managed(&provider);
     let base_url = non_empty(&input.base_url);
     let api_key = non_empty(&input.api_key);
     let custom_api = non_empty(&input.api);
@@ -2319,10 +2459,17 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
         );
     }
 
-    // Managed users get OpenRouter's Auto Router by default (zero decisions); the
-    // Gateway maps `openrouter/auto` onto the OpenRouter provider + credits wallet.
+    // A managed row with no explicit model gets its OWN first suggestion, not a
+    // single global default. For `managed-openrouter` that is still
+    // `MANAGED_DEFAULT_MODEL` (the Auto Router — zero decisions), because it is
+    // that row's first suggestion; for a pool row it has to be an id that routes
+    // to THAT pool, or the turn silently bills a different supply than the one the
+    // user picked. This also matches the desktop, which sends `models[0].id`.
     let effective_model = if managed && model.is_none() {
-        Some(MANAGED_DEFAULT_MODEL.to_owned())
+        provider_meta(&provider)
+            .and_then(|m| m.suggested_models.first())
+            .map(|s| (*s).to_owned())
+            .or_else(|| Some(MANAGED_DEFAULT_MODEL.to_owned()))
     } else {
         model.clone()
     };
@@ -2766,8 +2913,14 @@ fn resolve_provider_discovery(
     id: &str,
     explicit_key: Option<String>,
 ) -> Option<(String, DiscoveryAuth)> {
-    // Managed/gateway → the local Gateway's own /v1/models.
-    if is_managed_or_gateway(id) {
+    // Gateway and the retail managed row → the local Gateway's own /v1/models.
+    //
+    // Deliberately NOT every managed row. The Gateway's discovery merges every
+    // configured provider's models into one flat list with no provider or pool
+    // field on any entry, so a pool row would offer ids that route elsewhere and
+    // silently debit a pool the user holds nothing in. A pool row falls through to
+    // its own curated `suggested_models`, every one of which is asserted routable.
+    if id == GATEWAY_PROVIDER_ID || id == MANAGED_OPENROUTER_ID {
         let base = crate::sidecar::gateway::gateway_url();
         let url = format!("{}/v1/models", base.trim_end_matches('/'));
         let token =
@@ -4059,6 +4212,190 @@ mod tests {
             assert_eq!(default["maxTokens"], json!(8_192));
             assert!(declared.iter().any(|m| m == &json!({ "id": "gpt-4o" })));
         });
+    }
+
+    /// A pool row activates like the managed row, but defaults to a model that
+    /// routes to ITS OWN pool.
+    ///
+    /// The default model is the whole point. Core cannot pin a provider — every
+    /// Gateway-routed row writes the same `defaultProvider: "openai"` pin — so the
+    /// MODEL ID is the only thing that decides which supply the turn bills. A pool
+    /// row that fell back to the global `openrouter/auto` would present itself as
+    /// "Ryu Fast" and then spend the retail pool.
+    #[test]
+    fn a_pool_row_defaults_to_a_model_that_routes_to_its_own_pool() {
+        with_temp_dir(|| {
+            let view = apply(PiConfigInput {
+                provider: MANAGED_CLOUDFLARE_ID.to_owned(),
+                model: None,
+                thinking_level: None,
+                api_key: None,
+                base_url: None,
+                api: None,
+            })
+            .unwrap();
+            assert_eq!(view.provider, MANAGED_CLOUDFLARE_ID);
+            // Always Gateway-routed: a pool row's egress must stay metered, or the
+            // spend never reaches the pool it was supposed to draw from.
+            assert_eq!(view.routing, "gateway");
+            assert_eq!(view.model.as_deref(), Some("@cf/meta/llama-3.1-8b-instruct"));
+            assert_ne!(view.model.as_deref(), Some(MANAGED_DEFAULT_MODEL));
+            let settings = read_settings();
+            assert_eq!(settings.default_provider.as_deref(), Some("openai"));
+        });
+    }
+
+    /// Every pool row reaches the desktop as `managed`, routing-locked, and
+    /// carrying its pool id.
+    ///
+    /// `managed` is the line that turns the composer on: it binds the row to the
+    /// pool catalog, which is where the row's label, its balance badge and its
+    /// upsell escape come from. Before this, `managed` was an equality against one
+    /// id, so a second managed provider was invisible to all three.
+    #[test]
+    fn pool_rows_reach_the_catalog_as_managed_and_routing_locked() {
+        with_temp_dir(|| {
+            let catalog = catalog();
+            let providers = catalog["providers"].as_array().unwrap();
+            for (id, pool) in [
+                (MANAGED_CLOUDFLARE_ID, "cloudflare"),
+                (MANAGED_BEDROCK_ID, "bedrock"),
+                (MANAGED_OPENROUTER_ID, "openrouter"),
+            ] {
+                let row = providers
+                    .iter()
+                    .find(|p| p["id"] == json!(id))
+                    .unwrap_or_else(|| panic!("{id} is in the catalog"));
+                assert_eq!(row["managed"], json!(true), "{id} is managed");
+                assert_eq!(row["routingLocked"], json!(true), "{id} is locked");
+                assert_eq!(row["creditPool"], json!(pool), "{id} carries its pool");
+                // The LABEL is duplicated: Settings renders Core's string raw
+                // while the composer reads the pool catalog's. Nothing enforces
+                // the match at compile time (they are different languages), so it
+                // is pinned here against the labels in
+                // `packages/auth/src/lib/credit-pools.ts`. A drift shows the same
+                // supply under two names on two screens.
+                let expected_label = match pool {
+                    "cloudflare" => Some("Ryu Fast"),
+                    "bedrock" => Some("Ryu Frontier"),
+                    // The retail row keeps its own longer label: its pool is
+                    // `visible: false` in the catalog, so it has no user-facing
+                    // pool name to borrow.
+                    _ => None,
+                };
+                if let Some(expected) = expected_label {
+                    assert_eq!(
+                        row["label"],
+                        json!(expected),
+                        "{id}'s label must match CREDIT_POOLS byte-for-byte"
+                    );
+                }
+                assert_eq!(row["configured"], json!(true), "{id} needs no key");
+            }
+            // A BYOK row is none of those things.
+            let byok = providers.iter().find(|p| p["id"] == json!("anthropic"));
+            if let Some(byok) = byok {
+                assert_eq!(byok["managed"], json!(false));
+                assert_eq!(byok["creditPool"], json!(""));
+            }
+        });
+    }
+
+    /// A pool row keeps its curated model list instead of the Gateway's merged one.
+    ///
+    /// Gateway discovery returns every configured provider's models in one flat
+    /// list with no provider or pool on any entry. Offering that under "Ryu Fast"
+    /// would put ids in front of the user that route somewhere else entirely and
+    /// silently bill a pool they hold nothing in.
+    #[test]
+    fn a_pool_row_does_not_take_the_gateways_merged_model_list() {
+        with_temp_dir(|| {
+            assert!(resolve_provider_discovery(MANAGED_CLOUDFLARE_ID, None).is_none());
+            assert!(resolve_provider_discovery(MANAGED_BEDROCK_ID, None).is_none());
+            // The retail managed row still does — it has no curated list.
+            assert!(resolve_provider_discovery(MANAGED_OPENROUTER_ID, None).is_some());
+        });
+    }
+
+    /// A pool row's suggested models must reach that pool's supply, and must
+    /// never carry ANOTHER pool's prefix.
+    ///
+    /// This is the money guard. Core cannot pin a provider — every Gateway-routed
+    /// row writes the same `defaultProvider: "openai"` pin — so the model id's
+    /// PREFIX is the only thing deciding which supply a turn bills, and a wrong id
+    /// bills a pool the user did not choose with no error anywhere.
+    ///
+    /// Two rules, because the pools are not symmetric:
+    ///
+    ///  - A SEGREGATED pool (cloudflare, bedrock) must be reached by prefix. Its
+    ///    ids are useless otherwise: with the prefix absent they fall through to
+    ///    the fleet's `default_provider`, which is the retail pool.
+    ///  - The RESIDUAL pool (openrouter) is that fallback, so its ids legitimately
+    ///    carry no prefix — `anthropic/claude-sonnet-4` is an OpenRouter id that
+    ///    routes by falling through, and demanding a prefix of it would be
+    ///    demanding a router row that must not exist (an `anthropic/` builtin
+    ///    would re-home the id onto a provider that cannot even serve its dialect).
+    ///    What it must NOT do is carry a segregated pool's prefix, which would
+    ///    silently spend a donated allowance on retail traffic.
+    ///
+    /// The prefixes are restated here as literals ON PURPOSE. Importing them would
+    /// make this test agree with a router change automatically, and agreeing
+    /// automatically is exactly what must not happen when the disagreement is
+    /// somebody's money.
+    #[test]
+    fn every_pool_row_model_reaches_its_own_supply() {
+        // Mirrors the segregated rows of `builtin_prefixes()` in
+        // crates/gateway/router/src/lib.rs. There is deliberately NO row for
+        // `vertex` or `openai-credits` — see the PROVIDERS table.
+        let segregated: &[(&str, &[&str])] = &[
+            ("cloudflare", &["@cf/"]),
+            ("bedrock", &["anthropic.", "amazon.", "meta.", "mistral."]),
+        ];
+        /// The pool a request lands in when no builtin prefix claims the id.
+        const RESIDUAL_POOL: &str = "openrouter";
+
+        for meta in PROVIDERS.iter().filter(|m| !m.credit_pool.is_empty()) {
+            assert!(
+                !meta.suggested_models.is_empty(),
+                "`{}` has no suggested models, and a pool row gets no discovery — \
+                 the picker would show an empty list",
+                meta.id
+            );
+            let own = segregated
+                .iter()
+                .find(|(pool, _)| *pool == meta.credit_pool);
+            assert!(
+                own.is_some() || meta.credit_pool == RESIDUAL_POOL,
+                "provider `{}` claims pool `{}`, which the router has no builtin \
+                 prefix for and which is not the residual pool — its traffic would \
+                 fall through to `default_provider` and debit the wrong supply",
+                meta.id,
+                meta.credit_pool
+            );
+            for model in meta.suggested_models {
+                if let Some((_, prefixes)) = own {
+                    assert!(
+                        prefixes.iter().any(|p| model.starts_with(p)),
+                        "`{}` suggests `{model}`, which carries no prefix routing to \
+                         `{}` — that turn would fall through to the residual pool",
+                        meta.id,
+                        meta.credit_pool
+                    );
+                } else {
+                    // The residual row: no prefix required, but it must not steal
+                    // a segregated pool's.
+                    for (pool, prefixes) in segregated {
+                        assert!(
+                            !prefixes.iter().any(|p| model.starts_with(p)),
+                            "`{}` (residual) suggests `{model}`, which carries a \
+                             `{pool}` prefix — retail traffic would silently spend \
+                             the donated {pool} allowance",
+                            meta.id
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

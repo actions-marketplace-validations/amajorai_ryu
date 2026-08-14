@@ -120,6 +120,11 @@ export function ReferralPass({
 			className={className}
 			ditherSeed={seed}
 			edge={edge}
+			// No pointer glare on this face. The hero here is a CODE someone is meant
+			// to read off the card and repeat, and a white highlight sweeping over it
+			// on hover is a wash across the one string that matters. The lift and the
+			// shadow still answer the pointer.
+			glare={false}
 			metalTheme={metalTheme}
 			// The ring is withheld until the code exists, for the same reason the
 			// waitlist pass withholds it until a handle is claimed: an unfinished card

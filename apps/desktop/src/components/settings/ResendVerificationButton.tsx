@@ -32,7 +32,7 @@ export function ResendVerificationButton({
 		setLoading(true);
 		try {
 			await authClient.sendVerificationEmail({ email, callbackURL: "/" });
-			sileo.success({ title: "Verification email sent — check your inbox." });
+			sileo.success({ title: "Verification email sent. Check your inbox." });
 			setCooldown(COOLDOWN_SECONDS);
 			intervalRef.current = setInterval(() => {
 				setCooldown((prev) => {

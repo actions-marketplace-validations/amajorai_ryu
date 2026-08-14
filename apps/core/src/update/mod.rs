@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod apply;
+pub mod schedule;
 
 /// The canonical Ryu GitHub repository releases are published to.
 pub const RYU_REPO: &str = "amajorai/ryu";
@@ -54,7 +55,7 @@ pub struct VersionInfo {
 }
 
 /// A downloadable release asset matched to the running platform.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
     pub url: String,

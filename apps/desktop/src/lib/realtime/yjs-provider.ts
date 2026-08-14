@@ -38,6 +38,22 @@ import {
 } from "y-protocols/awareness";
 import { applyUpdate, Doc, encodeStateAsUpdate, encodeStateVector } from "yjs";
 
+/**
+ * Connection state of a provider, for surfaces that must not claim to be live
+ * while the socket is down.
+ *
+ * Deliberately separate from `isSynced`: a surface can be synced-once and still
+ * be offline, and telling the user "Live" in that state is what made a dead grid
+ * look healthy.
+ */
+export type RyuYjsStatus = "connecting" | "open" | "reconnecting" | "denied";
+
+/** Core's `CLOSE_POLICY` close code — an ACL denial, never worth retrying. */
+const CLOSE_POLICY = 1008;
+/** First reconnect delay; doubles per attempt up to {@link RECONNECT_MAX_MS}. */
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+
 /** Optional lifecycle callbacks (mirrors `@platejs/yjs`'s ProviderEventHandlers). */
 export interface RyuYjsProviderHandlers {
 	onConnect?: () => void;
@@ -46,6 +62,8 @@ export interface RyuYjsProviderHandlers {
 	/** The resolved access for this connection (`read` => the server drops this
 	 * member's mutations; surfaces so a caller can render a read-only UI). */
 	onJoinAck?: (ack: JoinAck) => void;
+	/** Connection state changes (see {@link RyuYjsStatus}). */
+	onStatusChange?: (status: RyuYjsStatus) => void;
 	onSyncChange?: (isSynced: boolean) => void;
 }
 
@@ -77,6 +95,13 @@ export class RyuYjsProvider implements UnifiedProvider {
 	isSynced = false;
 
 	private connection: RealtimeConnection | null = null;
+	/** Pending reconnect timer, if a retry is scheduled. */
+	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Consecutive failed opens, for the backoff curve. Reset on a clean open. */
+	private reconnectAttempt = 0;
+	/** True once the caller asked us to stop; suppresses any further retry. */
+	private closedByCaller = false;
+	private status: RyuYjsStatus = "connecting";
 	private readonly options: RyuYjsProviderOptions;
 	private readonly onDocUpdate: (update: Uint8Array, origin: unknown) => void;
 	private readonly onAwarenessUpdate: (
@@ -126,16 +151,18 @@ export class RyuYjsProvider implements UnifiedProvider {
 
 	/** Open the realtime connection (document room) and start syncing. Idempotent. */
 	connect(): void {
+		this.closedByCaller = false;
 		if (this.connection) {
 			return;
 		}
+		this.setStatus(this.reconnectAttempt === 0 ? "connecting" : "reconnecting");
 		const connection = new RealtimeConnection(this.options.target, {
 			roomId: this.options.roomId,
 			kind: "document",
 			jwt: this.options.jwt,
 			handlers: {
 				onOpen: () => this.handleOpen(),
-				onClose: () => this.handleClose(),
+				onClose: (event) => this.handleClose(event),
 				onError: () =>
 					this.options.handlers?.onError?.(new Error("realtime ws error")),
 				onJoinAck: (ack) => this.options.handlers?.onJoinAck?.(ack),
@@ -150,6 +177,10 @@ export class RyuYjsProvider implements UnifiedProvider {
 
 	/** Close the connection and stop syncing, but keep the doc/awareness intact. */
 	disconnect(): void {
+		// An explicit close is terminal: never let a scheduled retry resurrect it.
+		this.closedByCaller = true;
+		this.clearReconnectTimer();
+		this.reconnectAttempt = 0;
 		// Drop our awareness state FIRST, while the listener is still attached and
 		// the socket is still open, so the resulting `update` is broadcast as a
 		// DocSync Awareness frame and peers stop rendering our cursor immediately
@@ -180,6 +211,8 @@ export class RyuYjsProvider implements UnifiedProvider {
 
 	private handleOpen(): void {
 		this.isConnected = true;
+		this.reconnectAttempt = 0;
+		this.setStatus("open");
 		this.options.handlers?.onConnect?.();
 		// Announce our presence/cursor immediately so peers render us before the
 		// first edit; Core relays this awareness frame to the room.
@@ -194,10 +227,85 @@ export class RyuYjsProvider implements UnifiedProvider {
 		}
 	}
 
-	private handleClose(): void {
+	/**
+	 * The socket died. Reconnect unless the caller closed us or the server denied
+	 * us.
+	 *
+	 * This used to leave `this.connection` set, which wedged the provider
+	 * permanently: `connect()` early-returns while a connection object exists, so
+	 * nothing could ever re-open it. Both CRDT surfaces (the notes editor and the
+	 * database grid) construct a provider directly rather than going through
+	 * `useRealtimeRoom`, so this — not the hook — is where their reconnect has to
+	 * live.
+	 *
+	 * Reconnecting is also what recovers the edits made while offline: the Y.Doc is
+	 * deliberately preserved across a close, so on re-join Core's SyncStep1 is
+	 * answered with `encodeStateAsUpdate`, which carries everything accumulated in
+	 * the meantime. That is why this is the fix for the silent-edit-loss bug rather
+	 * than a JSON write-behind path — a JSON PUT writes `source`, which the CRDT
+	 * overwrites on the next sync.
+	 */
+	private handleClose(event?: CloseEvent): void {
 		this.isConnected = false;
 		this.setSynced(false);
 		this.options.handlers?.onDisconnect?.();
+
+		// Detach and drop the dead connection so `connect()` can build a new one.
+		// The listeners are re-attached by `connect()`; leaving them on would
+		// double-send every local update after a reconnect.
+		this.document.off("update", this.onDocUpdate);
+		this.awareness.off("update", this.onAwarenessUpdate);
+		this.connection = null;
+
+		if (this.closedByCaller) {
+			return;
+		}
+
+		// 1008 is Core's CLOSE_POLICY: an ACL denial (anonymous-on-scoped-resource,
+		// forbidden, unknown-resource). Retrying a permission error turns it into a
+		// self-inflicted DoS against the node, so this state is terminal.
+		if (event?.code === CLOSE_POLICY) {
+			this.setStatus("denied");
+			return;
+		}
+
+		this.setStatus("reconnecting");
+		this.scheduleReconnect();
+	}
+
+	/** Re-open after an exponential backoff with jitter (1s → 30s ceiling). */
+	private scheduleReconnect(): void {
+		this.clearReconnectTimer();
+		const base = Math.min(
+			RECONNECT_BASE_MS * 2 ** this.reconnectAttempt,
+			RECONNECT_MAX_MS
+		);
+		// Jitter so every editor in a room does not stampede the node in lockstep
+		// after a Core restart.
+		const delay = base / 2 + Math.random() * (base / 2);
+		this.reconnectAttempt += 1;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+			if (this.closedByCaller) {
+				return;
+			}
+			this.connect();
+		}, delay);
+	}
+
+	private clearReconnectTimer(): void {
+		if (this.reconnectTimer !== null) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+	}
+
+	private setStatus(value: RyuYjsStatus): void {
+		if (this.status === value) {
+			return;
+		}
+		this.status = value;
+		this.options.handlers?.onStatusChange?.(value);
 	}
 
 	private handleDocSync(message: DocSyncMessage): void {

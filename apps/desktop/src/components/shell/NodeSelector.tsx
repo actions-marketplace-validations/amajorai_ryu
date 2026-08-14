@@ -64,8 +64,7 @@ import {
 } from "@ryu/ui/components/tooltip.tsx";
 import { buildRyuDeepLink, parseRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import QRCode from "react-qr-code";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
@@ -80,6 +79,7 @@ import {
 	useCapabilityLayers,
 } from "@/src/hooks/useCapabilityLayers.ts";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useNodeSandboxes } from "@/src/hooks/useNodeSandboxes.ts";
 import { useNodeSystemInfo } from "@/src/hooks/useNodeSystemInfo.ts";
 import { useNodeVersion } from "@/src/hooks/useNodeVersion.ts";
@@ -152,6 +152,7 @@ import {
 } from "@/src/lib/api/sandboxes.ts";
 import type { SystemInfo } from "@/src/lib/api/system.ts";
 import { listTtsEngines, type TtsEngine } from "@/src/lib/api/voice.ts";
+import { collapsesNodeSections } from "@/src/lib/interface-level.ts";
 import {
 	type CatalogItem,
 	fetchCatalog,
@@ -160,6 +161,7 @@ import {
 	installSidecar,
 	uninstallSidecar,
 } from "@/src/lib/services-api.ts";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import {
 	isLocalNode,
@@ -671,7 +673,8 @@ export function AddNodeDialog({
 		setScanning(true);
 		setDiscovered(null);
 		try {
-			const found = await invokeWhenReady<DiscoveredNode[]>("discover_lan_nodes");
+			const found =
+				await invokeWhenReady<DiscoveredNode[]>("discover_lan_nodes");
 			// Drop URLs already configured so the picker only shows new candidates.
 			const knownUrls = new Set(nodes.map((n) => n.url.replace(/\/$/, "")));
 			setDiscovered(
@@ -1337,6 +1340,101 @@ const RETRIEVAL_ENGINES: Array<{
 ];
 
 /**
+ * A block of the node dropdown whose body folds away at the Simple interface
+ * level.
+ *
+ * Above Simple this is byte-for-byte the flat block it always was — same
+ * wrapper, same heading, no chevron, no disclosure — so the audience that
+ * manages engines and toolkits from this menu sees no change at all. At Simple
+ * the heading BECOMES the trigger and the rows below it start closed, which
+ * turns a 300px column of runtime plumbing back into a node menu about the node
+ * (who it is, what it costs, what is connected). Collapsing, not hiding: the
+ * heading still names what is in there and one click still gets it.
+ *
+ * `collapsesNodeSections` rather than an inline `level === "simple"` so the gate
+ * is named and test-locked next to the composer's, in `interface-level.ts`.
+ *
+ * The trigger MUST be a `DropdownMenuItem`, not a plain `<button>` inside the
+ * popup. Base UI drives the menu's arrow-key roving focus off the composite list
+ * that `Menu.Item` registers into (`useCompositeListItem`, by context — nesting
+ * depth does not matter); a non-item control is simply not in that list, so a
+ * plain disclosure button would make three whole blocks keyboard-unreachable at
+ * the level that is the DEFAULT for every fresh install. `closeOnClick={false}`
+ * is what makes an item safe here — without it Base UI shuts the whole dropdown
+ * on the press that was supposed to open the block. Same escape hatch
+ * `NodeLayerMenu` and `NavUser` already use for their in-menu toggles.
+ *
+ * That is also why this is hand-rolled rather than `Collapsible`: composing
+ * `Collapsible.Trigger` with `Menu.Item` puts two `useButton` instances on one
+ * element (double Enter/Space activation — toggle twice, nothing moves), and
+ * `Collapsible.Trigger`'s `data-slot="collapsible-trigger"` matches the popup's
+ * `**:data-[slot$=-trigger]:aria-expanded:bg-foreground/10!` rule, which would
+ * stamp a submenu-trigger pill on an open heading. `aria-expanded` +
+ * `aria-controls` are set by hand instead; the panel is plain conditional
+ * rendering, which the menu wants anyway so closed rows do not register as
+ * arrow-navigable items.
+ *
+ * Open state is plain `useState`, so the block is closed on every open of the
+ * menu. `DropdownMenuContent` unmounts on close anyway; persisting the choice
+ * would need `usePersistedToggle`, and at Simple "it stayed open from last time"
+ * is the outcome the level is trying to avoid.
+ */
+function CollapsibleSection({
+	children,
+	heading,
+	trailing,
+}: {
+	children: ReactNode;
+	heading: string;
+	trailing?: ReactNode;
+}) {
+	const level = useInterfaceLevel();
+	const [open, setOpen] = useState(false);
+	const panelId = useId();
+	const collapsible = collapsesNodeSections(level);
+
+	if (!collapsible) {
+		return (
+			<div className="px-1 py-0.5">
+				<div className="flex items-center justify-between px-2 pt-0.5 pb-1">
+					<p className="font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
+						{heading}
+					</p>
+					{trailing}
+				</div>
+				{children}
+			</div>
+		);
+	}
+
+	return (
+		<div className="px-1 py-0.5">
+			<div className="flex items-center justify-between gap-2 px-2 pt-0.5 pb-1">
+				{/* -mx-1 px-1 keeps the label on the same 8px gutter as the flat
+				    heading above while giving the item its own highlight box. */}
+				<DropdownMenuItem
+					aria-controls={open ? panelId : undefined}
+					aria-expanded={open}
+					className="-mx-1 min-w-0 rounded-md px-1 py-0 text-[10px] text-muted-foreground/50 uppercase tracking-wider"
+					closeOnClick={false}
+					onClick={() => setOpen((v) => !v)}
+				>
+					<span className="truncate">{heading}</span>
+					<HugeiconsIcon
+						className={cn("size-3 shrink-0 transition-transform", {
+							"rotate-180": open,
+						})}
+						icon={ArrowDown01Icon}
+					/>
+				</DropdownMenuItem>
+				{trailing}
+			</div>
+			{open && <div id={panelId}>{children}</div>}
+		</div>
+	);
+}
+
+/**
  * The "Engines" block in the node dropdown: every installed engine runtime
  * (chat / speech / image / embeddings) with its running state, live memory/CPU
  * usage, and a start/stop toggle. Joins the catalog (what's installed + its
@@ -1547,13 +1645,10 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 	}
 
 	return (
-		<div className="px-1 py-0.5">
-			<div className="flex items-center justify-between px-2 pt-0.5 pb-1">
-				<p className="font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-					Engines
-				</p>
-				<EngineQueueBadge concurrency={concurrency} />
-			</div>
+		<CollapsibleSection
+			heading="Engines"
+			trailing={<EngineQueueBadge concurrency={concurrency} />}
+		>
 			{providers.length > 0 && (
 				// The single mutually-exclusive chat slot. No start/stop and no
 				// per-engine update: engine downloads are pinned to a compile-time
@@ -1650,7 +1745,7 @@ function EnginesSection({ target }: { target: ApiTarget }) {
 					target={target}
 				/>
 			))}
-		</div>
+		</CollapsibleSection>
 	);
 }
 
@@ -2013,10 +2108,7 @@ function VoiceAndSandboxSection({
 	}
 
 	return (
-		<div className="px-1 py-0.5">
-			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-				Voice &amp; Sandbox
-			</p>
+		<CollapsibleSection heading="Voice & Sandbox">
 			{ttsEngines.length > 0 && (
 				<NodeLayerMenu
 					// The extra (non-built-in) voices only exist once the `ryutts`
@@ -2126,7 +2218,7 @@ function VoiceAndSandboxSection({
 					running={activeBackend?.detected ?? null}
 				/>
 			)}
-		</div>
+		</CollapsibleSection>
 	);
 }
 
@@ -2633,10 +2725,7 @@ function LayersSection({
 	}
 
 	return (
-		<div className="px-1 py-0.5">
-			<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/50 uppercase tracking-wider">
-				Toolkits
-			</p>
+		<CollapsibleSection heading="Toolkits">
 			<TunnelLayer query={tunnel} target={target} />
 			{rows.map(({ entry, icon, label }) => (
 				<NodeLayerMenu
@@ -2700,7 +2789,7 @@ function LayersSection({
 					version={null}
 				/>
 			))}
-		</div>
+		</CollapsibleSection>
 	);
 }
 

@@ -33,6 +33,26 @@ export interface UseIntegrationsCatalogResult {
 const SEARCH_DEBOUNCE_MS = 300;
 const PAGE_LIMIT = 60;
 
+/** Query descriptor shared with the Store's warm-up path (`useStorePrefetch`), so
+ *  a prefetch lands under the key this hook reads. */
+export function integrationsListQuery(
+	target: ApiTarget,
+	params: { query: string }
+) {
+	return {
+		queryKey: ["integrations", "list", target.url, { q: params.query }],
+		queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+			searchIntegrations(target, {
+				query: params.query,
+				limit: PAGE_LIMIT,
+				cursor: pageParam,
+			}),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last: { nextCursor?: string | null }) =>
+			last.nextCursor ?? undefined,
+	};
+}
+
 export function useIntegrationsCatalog(
 	initialQuery = ""
 ): UseIntegrationsCatalogResult {
@@ -41,20 +61,11 @@ export function useIntegrationsCatalog(
 		url: activeNode.url,
 		token: activeNode.token ?? null,
 	};
-	const { url, token } = target;
-
 	const [query, setQuery] = useState(initialQuery);
 	const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 
 	const listQuery = useInfiniteQuery({
-		queryKey: ["integrations", "list", url, { q: debouncedQuery }],
-		queryFn: ({ pageParam }) =>
-			searchIntegrations(
-				{ url, token },
-				{ query: debouncedQuery, limit: PAGE_LIMIT, cursor: pageParam }
-			),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.nextCursor ?? undefined,
+		...integrationsListQuery(target, { query: debouncedQuery }),
 		placeholderData: keepPreviousData,
 	});
 

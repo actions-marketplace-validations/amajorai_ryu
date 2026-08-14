@@ -9,7 +9,7 @@ import { StaggerLines } from "./stagger-lines.tsx";
 const steps = [
 	{
 		title: "We start with one job your team is drowning in.",
-		body: "A free session where we look at one workflow your team is drowning in, and say plainly whether we can take it off them.",
+		body: "A free session. We look at that one workflow and say plainly whether we can take it off them.",
 	},
 	{
 		title: "We set it up around your firm.",
@@ -17,7 +17,7 @@ const steps = [
 	},
 	{
 		title: "You see every action and every cost.",
-		body: "A plain record a partner can read, and a monthly ceiling you set. This is what makes sign-off possible instead of a leap of faith.",
+		body: "A plain record a partner can read, and a monthly ceiling you set. That is what they sign off on.",
 	},
 	{
 		title: "Then you add the next workflow.",

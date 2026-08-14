@@ -13,7 +13,8 @@ use agent_client_protocol::schema::{
     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
+    SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
+    SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModelRequest, TerminalId,
     TerminalOutputRequest, TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation,
@@ -131,6 +132,22 @@ pub enum AcpEvent {
     /// `[{ name, description, hint }, …]` array; each update REPLACES the
     /// client's cached list. Drives the desktop's `/` command popover.
     AvailableCommands(serde_json::Value),
+    /// The agent re-published its session config options, as the serialized
+    /// `Vec<SessionConfigOption>`. Each update REPLACES the client's cached list,
+    /// exactly like [`AcpEvent::AvailableCommands`].
+    ///
+    /// Two producers, one channel:
+    ///
+    /// - the response to `session/set_config_option`, which by protocol returns
+    ///   the FULL refreshed list rather than an acknowledgement. That is the only
+    ///   way an option existing solely for *another* option's value can ever
+    ///   appear mid-session — `session/new` could not have mentioned it. The
+    ///   probe path has always consumed this; the TURN path used to throw it
+    ///   away, so applying a pick silently stopped the pickers from learning
+    ///   what it unlocked.
+    /// - `SessionUpdate::ConfigOptionUpdate`, the agent volunteering the same
+    ///   list unprompted.
+    ConfigOptions(serde_json::Value),
     /// The agent is asking the user to approve a tool call because the active
     /// permission mode requires it. The client renders the `options` as
     /// allow/reject buttons and echoes the chosen `option_id` back via
@@ -194,6 +211,16 @@ pub enum AcpEvent {
     /// ignore a key it does not hold. Core neither validates the ids nor mirrors
     /// them into any session state of its own.
     ConfigUpdate(std::collections::BTreeMap<String, String>),
+    /// The agent refused the turn because it needs the user to authenticate
+    /// (JSON-RPC -32000, `ErrorCode::AuthRequired`) — in practice an OAuth /
+    /// subscription token that expired mid-session.
+    ///
+    /// Deliberately NOT an [`AcpEvent::Error`]: that arm tears the turn down with
+    /// a message about configuring a model, which is advice the user cannot act
+    /// on and which hides the real cause. This one names the agent so the client
+    /// can offer that agent's own advertised `authMethods` and let the user
+    /// re-run the turn once they are back in.
+    AuthNeeded { agent_id: String, message: String },
     /// A fatal error from the session; the stream ends after this.
     Error(String),
 }
@@ -395,6 +422,18 @@ struct AcpCaps {
     mcp_http: bool,
     /// `mcpCapabilities.sse` — agent can connect to SSE MCP servers.
     mcp_sse: bool,
+    /// `sessionCapabilities.list` — agent implements `session/list`.
+    session_list: bool,
+    /// `sessionCapabilities.resume` — agent implements `session/resume`.
+    session_resume: bool,
+    /// `sessionCapabilities.close` — agent implements `session/close`.
+    ///
+    /// Load-bearing rather than informational: [`close_acp_session`] used to fire
+    /// `session/close` at every agent and surface the rejection as a 502. Real
+    /// agents disagree here — captured `initialize` responses show pi-acp,
+    /// qwen-code and factory-droid advertising NO `close` — so the button that
+    /// drives it has to be able to hide itself.
+    session_close: bool,
 }
 
 /// Extract the agent's advertised capabilities from its `initialize` response.
@@ -407,6 +446,18 @@ fn read_agent_caps(init: &InitializeResponse) -> AcpCaps {
         prompt_embedded_context: caps.prompt_capabilities.embedded_context,
         mcp_http: caps.mcp_capabilities.http,
         mcp_sse: caps.mcp_capabilities.sse,
+        // Presence IS the signal: each sub-struct is empty apart from its own
+        // `_meta`, so the protocol says "supported" by sending the key at all.
+        //
+        // Only these three are read because only these three COMPILE under
+        // Core's feature set (`unstable_session_resume` + `unstable_session_close`
+        // are on; `unstable_session_fork` and
+        // `unstable_session_additional_directories` are off). Agents also send a
+        // `delete` key, which the pinned schema has no field for at all — it is
+        // dropped by serde and must not be confused with `close`.
+        session_list: caps.session_capabilities.list.is_some(),
+        session_resume: caps.session_capabilities.resume.is_some(),
+        session_close: caps.session_capabilities.close.is_some(),
     }
 }
 
@@ -422,6 +473,11 @@ fn agent_caps_json(caps: &AcpCaps) -> serde_json::Value {
             "embeddedContext": caps.prompt_embedded_context,
         },
         "mcpCapabilities": { "http": caps.mcp_http, "sse": caps.mcp_sse },
+        "sessionCapabilities": {
+            "list": caps.session_list,
+            "resume": caps.session_resume,
+            "close": caps.session_close,
+        },
     })
 }
 
@@ -1303,7 +1359,7 @@ async fn probe_acp_config_uncached(
                             .send_request(SetSessionConfigOptionRequest::new(
                                 resp.session_id.clone(),
                                 config_id.clone(),
-                                value.clone(),
+                                config_option_value(value),
                             ))
                             .block_task()
                             .await;
@@ -1340,8 +1396,20 @@ async fn probe_acp_config_uncached(
 /// `initialize` response (`auth_methods`, surfaced by [`probe_acp_config`] as
 /// `authMethods`). This drives the ACP Authentication flow — e.g. a subscription
 /// / OAuth "login" — so agents that gate `session/new` behind auth become usable.
-/// The agent subprocess owns the actual login UX (opening a browser, etc.); this
-/// just issues the `authenticate` request and waits for it to complete.
+/// The agent subprocess owns the actual login UX (opening a browser, etc.).
+///
+/// **This waits for the `authenticate` RESPONSE, not for the login.** The
+/// distinction is not academic: `connect_with` runs the connection only until
+/// the closure below returns (agent-client-protocol 0.11.1,
+/// `src/jsonrpc.rs`), and the tokio transport wraps the spawned agent in a
+/// `ChildGuard` whose `Drop` calls `start_kill` (agent-client-protocol-tokio
+/// 0.11.1, `src/acp_agent.rs:233-237`). So returning here SIGKILLs the agent.
+/// For an agent that answers `authenticate` once its browser flow is *finished*
+/// that is correct; for the common CLI shape that answers once the browser is
+/// *opened*, it kills the callback server mid-flow and the credential is never
+/// written. `acp_authenticate` (`server/mod.rs`) exists to keep that honest —
+/// it checks Pi's stored credential rather than trusting this returning `Ok`,
+/// and reports `verified: false` when there is nothing to check against.
 ///
 /// Invalidates the probe cache for this spawn command on success so the next
 /// `acp-config` read reflects the now-authenticated state.
@@ -1512,32 +1580,41 @@ pub async fn list_acp_sessions(spawn_cmd: String) -> anyhow::Result<serde_json::
 
 /// Delete/close an ACP agent session (ACP `session/close`). Best-effort — an
 /// agent that doesn't implement it returns an error the caller can surface.
-pub async fn close_acp_session(spawn_cmd: String, session_id: String) -> anyhow::Result<()> {
+pub async fn close_acp_session(spawn_cmd: String, session_id: String) -> anyhow::Result<bool> {
     let agent =
         AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
-    tokio::time::timeout(
+    let closed = tokio::time::timeout(
         ACP_PROBE_TIMEOUT,
         Client
             .builder()
             .connect_with(agent, move |cx: ConnectionTo<Agent>| {
                 let session_id = session_id.clone();
                 async move {
-                    cx.send_request(ryu_initialize_request())
-                        .block_task()
-                        .await?;
+                    // The `initialize` answer was previously thrown away, which is
+                    // why this fired `session/close` at agents that never
+                    // advertised it (captured responses show pi-acp, qwen-code and
+                    // factory-droid without it) and surfaced the rejection as a
+                    // 502. Read the capability instead and report "unsupported"
+                    // honestly — a delete that cannot work should not look like a
+                    // node that is broken.
+                    let init: InitializeResponse =
+                        cx.send_request(ryu_initialize_request()).block_task().await?;
+                    if !read_agent_caps(&init).session_close {
+                        return Ok(false);
+                    }
                     cx.send_request(CloseSessionRequest::new(SessionId::new(
                         session_id.as_str(),
                     )))
                     .block_task()
                     .await?;
-                    Ok(())
+                    Ok(true)
                 }
             }),
     )
     .await
     .map_err(|_| anyhow::anyhow!("ACP session/close timed out"))?
     .map_err(|e| anyhow::anyhow!("ACP session/close: {e}"))?;
-    Ok(())
+    Ok(closed)
 }
 
 /// The startup banner the agent declared in its `session/new` response `_meta`,
@@ -1619,6 +1696,35 @@ where
     ordered
 }
 
+/// JSON-RPC code for ACP's `ErrorCode::AuthRequired`. Compared numerically
+/// because the error arrives from the wire, where only the integer is carried.
+const ACP_AUTH_REQUIRED_CODE: i32 = -32000;
+
+/// Turn a client-supplied config value string into the ACP wire value.
+///
+/// Every layer above this holds config picks as `String` — the desktop persists
+/// `{ optionId: value }` to localStorage and posts it on the turn body — but the
+/// protocol distinguishes a select's value id from a boolean toggle
+/// (`SessionConfigKind::Boolean`, the `unstable_boolean_config` capability).
+/// Sending a boolean option the string `"true"` as a VALUE ID is simply wrong:
+/// the agent looks for an option whose id is `"true"`, finds none, and rejects
+/// the write.
+///
+/// Exactly `"true"`/`"false"` map to the boolean form; everything else is a
+/// value id. The ambiguity that leaves — a SELECT option whose value id is
+/// literally the string `"true"` would be sent as a boolean — is accepted
+/// knowingly: the alternative is threading the option's declared type through
+/// the turn body from a client that has only ever stored strings, and no
+/// observed agent names a select value `"true"`. If one ever does, the fix is a
+/// typed value on `AcpTurnConfig`, not a heuristic here.
+fn config_option_value(raw: &str) -> SessionConfigOptionValue {
+    match raw {
+        "true" => SessionConfigOptionValue::boolean(true),
+        "false" => SessionConfigOptionValue::boolean(false),
+        other => SessionConfigOptionValue::value_id(other.to_owned()),
+    }
+}
+
 /// Apply a turn's chosen session controls (mode / config options / model) to a
 /// live ACP session over its connection. Each is best-effort: a failure
 /// (unsupported capability or unknown id) is logged and skipped so the turn
@@ -1658,19 +1764,32 @@ async fn apply_turn_config(
     // below still has to see the full list to decide whether `model` was already
     // sent explicitly.
     for (config_id, value) in model_first(turn.config_options.iter().map(|(a, b)| (a, b))) {
-        if let Err(e) = connection
+        let applied: Result<SetSessionConfigOptionResponse, _> = connection
             .send_request_to(
                 Agent,
                 SetSessionConfigOptionRequest::new(
                     session_id.clone(),
                     config_id.clone(),
-                    value.clone(),
+                    config_option_value(value),
                 ),
             )
             .block_task()
-            .await
-        {
-            tracing::warn!("ACP set_config_option '{config_id}'='{value}' failed: {e}");
+            .await;
+        match applied {
+            // The response is the FULL refreshed option list, not an ack — the
+            // same contract the probe path consumes. Forwarding it is the only
+            // way an option that exists only for another option's VALUE reaches
+            // the client mid-session (codex reveals its reasoning `effort` list
+            // once a model that has one is picked). Discarding it left the
+            // pickers showing the set `session/new` happened to answer with.
+            Ok(refreshed) => {
+                if let Ok(json) = serde_json::to_value(&refreshed.config_options) {
+                    let _ = events.send(AcpEvent::ConfigOptions(json));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("ACP set_config_option '{config_id}'='{value}' failed: {e}");
+            }
         }
     }
     if let Some(model) = turn.model_id.as_ref().filter(|m| !m.is_empty()) {
@@ -1703,7 +1822,7 @@ async fn apply_turn_config(
                 SetSessionConfigOptionRequest::new(
                     session_id.clone(),
                     MODEL_CONFIG_OPTION_ID.to_owned(),
-                    model.clone(),
+                    config_option_value(&model),
                 ),
             )
             .block_task()
@@ -1962,6 +2081,8 @@ impl AgentAdapter for AcpAdapter {
                     | AcpEvent::ToolWidget(_)
                     | AcpEvent::ToolSteps { .. }
                     | AcpEvent::ConfigUpdate(_)
+                    | AcpEvent::ConfigOptions(_)
+                    | AcpEvent::AuthNeeded { .. }
                     | AcpEvent::PermissionRequest { .. } => {}
                 }
             }
@@ -2600,7 +2721,12 @@ pub async fn run_acp_instance(
                     // a normal `finish`, passing off any pre-failure agent banner as a
                     // successful reply. Read after the update loop to emit a real error
                     // frame instead.
-                    let turn_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+                    // `(code, message)`, not just the message: an expired OAuth token
+                    // arrives as JSON-RPC -32000 (`ErrorCode::AuthRequired`) and has to be
+                    // told apart from an unreachable provider, because the two need
+                    // opposite things from the user.
+                    let turn_error: Arc<Mutex<Option<(i32, String)>>> =
+                        Arc::new(Mutex::new(None));
                     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
                     let mut blocks: Vec<ContentBlock> = vec![turn_text.into()];
                     // Only attach image blocks when the agent advertised
@@ -2657,7 +2783,7 @@ pub async fn run_acp_instance(
                                 Err(e) => {
                                     tracing::error!(error = %e, "ACP prompt result: Err");
                                     if let Ok(mut g) = error_capture.lock() {
-                                        *g = Some(e.to_string());
+                                        *g = Some((i32::from(e.code), e.to_string()));
                                     }
                                 }
                             }
@@ -2986,6 +3112,22 @@ pub async fn run_acp_instance(
                                             }
                                             let _ = tx_chunk.send(AcpEvent::Usage(frame));
                                         }
+                                        SessionUpdate::ConfigOptionUpdate(u) => {
+                                            // The agent re-published its config
+                                            // options unprompted. No agent is
+                                            // known to send this today, so this
+                                            // arm is insurance: without it the
+                                            // frame fell into the catch-all
+                                            // below and the desktop's pickers
+                                            // would quietly disagree with the
+                                            // agent's real state.
+                                            if let Ok(json) =
+                                                serde_json::to_value(&u.config_options)
+                                            {
+                                                let _ = tx_chunk
+                                                    .send(AcpEvent::ConfigOptions(json));
+                                            }
+                                        }
                                         SessionUpdate::UserMessageChunk(chunk) => {
                                             // The agent replayed a user message chunk
                                             // (mainly during a session/load history
@@ -3243,8 +3385,41 @@ pub async fn run_acp_instance(
                     // banner as a successful reply. `AcpEvent::Error` (mod.rs) tears the
                     // turn down (error/finish/[DONE] frames + `set_run_status("failed")`),
                     // so we skip the usage-done frame and loop back for the next turn.
-                    if let Some(detail) = turn_error.lock().ok().and_then(|g| g.clone()) {
-                        tracing::warn!(detail = %detail, "ACP turn failed; surfacing error frame");
+                    if let Some((code, detail)) =
+                        turn_error.lock().ok().and_then(|g| g.clone())
+                    {
+                        tracing::warn!(code, detail = %detail, "ACP turn failed; surfacing error frame");
+                        // An expired OAuth token is NOT a missing model. Telling the
+                        // user to "configure a model" when their subscription login
+                        // lapsed sends them to a settings page that cannot fix it,
+                        // which is what this branch exists to stop. `AuthNeeded`
+                        // carries the agent id so the client can offer the agent's own
+                        // advertised login methods and re-run the turn afterwards.
+                        if code == ACP_AUTH_REQUIRED_CODE {
+                            let _ = tx.send(AcpEvent::AuthNeeded {
+                                // Instance-scoped: the ACP session is pinned to one
+                                // agent, so this is the agent whose login lapsed.
+                                agent_id: widget_agent_id.clone(),
+                                message: detail.clone(),
+                            });
+                            // The data part above carries the RECOVERY (the toast and
+                            // its login button); it does not end the stream. The turn
+                            // still has to be torn down, because it genuinely failed —
+                            // only `AcpEvent::Error` emits error/finish/[DONE] and
+                            // moves the run off "running". Without this the composer
+                            // would sit in streaming state with a Stop button and no
+                            // way to send: a hang, which is precisely the confusion
+                            // this branch exists to remove.
+                            let _ = tx.send(AcpEvent::Error(
+                                "Your agent login expired. Log in again, then re-send \
+                                 your message."
+                                    .to_owned(),
+                            ));
+                            if let Ok(mut g) = sink.lock() {
+                                *g = None;
+                            }
+                            continue;
+                        }
                         let _ = tx.send(AcpEvent::Error(format!(
                             "The agent could not complete the turn — no model is \
                              configured, or the model provider is unreachable. Open \
@@ -5567,6 +5742,45 @@ mod tests {
     }
 
     #[test]
+    fn acp_auth_required_code_matches_the_protocol() {
+        // The whole re-login branch hangs off this number. ACP's
+        // `ErrorCode::AuthRequired` is JSON-RPC -32000; if it ever moved, an
+        // expired token would silently fall back to the "no model configured"
+        // message again — advice that cannot fix it.
+        assert_eq!(
+            ACP_AUTH_REQUIRED_CODE,
+            i32::from(agent_client_protocol::ErrorCode::AuthRequired)
+        );
+    }
+
+    #[test]
+    fn config_option_value_maps_booleans_and_leaves_ids_alone() {
+        // `unstable_boolean_config` splits the wire value into a select's value
+        // id and a real boolean. Every layer above Core stores config picks as
+        // STRINGS, so sending a toggle the string "true" as a value id makes the
+        // agent hunt for an option whose id is "true" and reject the write.
+        assert_eq!(
+            config_option_value("true").as_bool(),
+            Some(true),
+            "\"true\" must cross the wire as a boolean, not a value id"
+        );
+        assert_eq!(config_option_value("false").as_bool(), Some(false));
+
+        // Everything else stays a value id, including strings that merely look
+        // boolean-ish — only the two exact spellings convert.
+        for id in ["high", "off", "True", "FALSE", "yes", "1", ""] {
+            assert!(
+                config_option_value(id).as_bool().is_none(),
+                "{id} must stay a value id"
+            );
+            assert_eq!(
+                config_option_value(id).as_value_id().map(|v| v.to_string()),
+                Some(id.to_owned())
+            );
+        }
+    }
+
+    #[test]
     fn plan_mode_id_is_filtered_from_set_config_option() {
         // pi-acp accepts `model` and `thought_level` and throws on anything else,
         // so sending the synthesized id would produce a rejected request and a
@@ -6572,6 +6786,78 @@ mod tests {
         );
         assert_eq!(json["mcpCapabilities"]["http"], serde_json::json!(true));
         assert_eq!(json["mcpCapabilities"]["sse"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn session_capabilities_are_read_from_a_real_claude_initialize() {
+        // Verbatim from a captured claude-acp 0.66.0 `initialize` response. The
+        // agent advertises MORE than the pinned schema models — `fork`,
+        // `additionalDirectories` (features off in Core) and `delete` (no field
+        // at all) — so this also pins that the unknown keys are dropped without
+        // breaking the parse.
+        let init: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {
+                "loadSession": true,
+                "sessionCapabilities": {
+                    "additionalDirectories": {},
+                    "close": {},
+                    "delete": {},
+                    "fork": {},
+                    "list": {},
+                    "resume": {},
+                },
+            }
+        }))
+        .expect("valid InitializeResponse");
+        let caps = read_agent_caps(&init);
+        assert!(caps.session_list);
+        assert!(caps.session_resume);
+        assert!(caps.session_close);
+
+        let json = agent_caps_json(&caps);
+        assert_eq!(json["sessionCapabilities"]["close"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn an_agent_without_close_is_reported_as_unable_to_delete() {
+        // Verbatim from captured pi-acp 0.0.33: it advertises `delete` and
+        // `list`, and NO `close`. `delete` is not a field in the pinned schema,
+        // so it must NOT be mistaken for close support — that confusion is what
+        // made the desktop show a Delete button whose request the agent rejects.
+        let init: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {
+                "sessionCapabilities": { "delete": {}, "list": {} },
+            }
+        }))
+        .expect("valid InitializeResponse");
+        let caps = read_agent_caps(&init);
+        assert!(caps.session_list);
+        assert!(
+            !caps.session_close,
+            "`delete` is not `close`; treating it as one is the original bug"
+        );
+        assert!(!caps.session_resume);
+
+        let json = agent_caps_json(&caps);
+        assert_eq!(
+            json["sessionCapabilities"]["close"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn session_capabilities_absent_entirely_reads_as_unsupported() {
+        // An agent that sends no `sessionCapabilities` at all (older builds) must
+        // read as false rather than panicking or defaulting to true.
+        let init: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": false }
+        }))
+        .expect("valid InitializeResponse");
+        let caps = read_agent_caps(&init);
+        assert!(!(caps.session_list || caps.session_resume || caps.session_close));
     }
 
     #[test]

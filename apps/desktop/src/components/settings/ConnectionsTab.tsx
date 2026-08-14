@@ -109,7 +109,7 @@ function CloudSyncSection() {
 	const signedOut = nodeAuth === "signed-out";
 	const description = signedOut
 		? "Sign in on this node to sync across devices. Until then, syncing stays paused even when this is on."
-		: "Off by default. When on, this node pushes your conversations to your Ryu account so your other devices can pick them up. Takes effect within a minute — no restart.";
+		: "Off by default. When on, this node pushes your conversations to your Ryu account so your other devices can pick them up. Takes effect within a minute, with no restart.";
 
 	return (
 		<SettingsSection

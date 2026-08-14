@@ -375,6 +375,7 @@ export function IslandSettings() {
 		const fallbackLabels: Record<string, string> = {
 			kokoro: "Kokoro 82M",
 			outetts: "OuteTTS (fallback)",
+			gateway: "Cloud (via gateway)",
 		};
 		return [
 			{ value: tts.engine, label: fallbackLabels[tts.engine] ?? tts.engine },
@@ -499,7 +500,7 @@ export function IslandSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Which agent the island talks to. The chat agent handles both your typed messages and transcribed voice; the proactive agent generates the suggestion chips. Both default to Ryu — the flagship Pi + Gateway agent. Pick “Default local model” for the fast, no-subprocess local model instead."
+				caption="Which agent the island talks to. The chat agent handles both your typed messages and transcribed voice; the proactive agent generates the suggestion chips. Both default to Ryu, the flagship Pi + Gateway agent. Pick “Default local model” for the fast, no-subprocess local model instead."
 				title="Conversation agents"
 			>
 				<SettingsGroup>
@@ -819,7 +820,7 @@ export function IslandSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Hide on fullscreen keeps the island out of immersive content (videos, games, presentations) and is Windows-only for now. Hide from screen capture excludes the island from screenshots, screen recordings, and screen-sharing — you still see it, but a shared or recorded screen does not."
+				caption="Hide on fullscreen keeps the island out of immersive content (videos, games, presentations) and is Windows-only for now. Hide from screen capture excludes the island from screenshots, screen recordings, and screen-sharing. You still see it, but a shared or recorded screen does not."
 				title="Privacy & visibility"
 			>
 				<SettingsGroup>

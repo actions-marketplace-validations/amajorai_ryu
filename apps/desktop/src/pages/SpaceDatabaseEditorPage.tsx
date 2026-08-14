@@ -141,7 +141,7 @@ export default function SpaceDatabaseEditorPage({
 	const [saveState, setSaveState] = useState<SaveState>("idle");
 	const [columnEditor, setColumnEditor] = useState<ColumnEditorState>(null);
 	// Bumped by the load-error Retry button to re-run the initial fetch.
-	const [_reloadNonce, setReloadNonce] = useState(0);
+	const [reloadNonce, setReloadNonce] = useState(0);
 
 	// Latest unsaved values, read inside the debounced flush / grid callbacks
 	// without re-arming effects or rebuilding callbacks.
@@ -191,7 +191,10 @@ export default function SpaceDatabaseEditorPage({
 		return () => {
 			cancelled = true;
 		};
-	}, [getDocument, spaceId, databaseId]);
+		// `reloadNonce` is load-bearing: the "Try again" button only bumps it, so
+		// without it the retry can never clear the error screen. Mirror of the same
+		// restore in SpaceDocEditorPage — the two must move together.
+	}, [getDocument, spaceId, databaseId, reloadNonce]);
 
 	// Adopt a snapshot (first sync + every CRDT change) into refs + render state.
 	const onSnapshot = useCallback((snapshot: DatabaseSnapshot) => {
@@ -220,7 +223,12 @@ export default function SpaceDatabaseEditorPage({
 		[]
 	);
 
-	const { access, collaborative, getCollabDoc } = useDatabaseCollab({
+	const {
+		access,
+		collaborative,
+		getCollabDoc,
+		status: collabStatus,
+	} = useDatabaseCollab({
 		roomId: databaseId,
 		ready: loaded,
 		url: node.url,
@@ -658,7 +666,18 @@ export default function SpaceDatabaseEditorPage({
 
 	let statusLabel = SAVE_LABEL[saveState];
 	if (collaborative) {
-		statusLabel = readOnly ? "Live · read-only" : "Live";
+		// "Live" must mean the socket is actually up. The room stays collaborative
+		// across a drop on purpose (edits keep accumulating in the Y.Doc and upload
+		// on reconnect), so the connection state — not `collaborative` — decides
+		// what the user is told. Saying "Live" while offline is what made a dead
+		// grid look healthy.
+		if (collabStatus === "reconnecting" || collabStatus === "connecting") {
+			statusLabel = "Reconnecting…";
+		} else if (collabStatus === "denied") {
+			statusLabel = "Disconnected";
+		} else {
+			statusLabel = readOnly ? "Live · read-only" : "Live";
+		}
 	}
 
 	const activeView = views.find((view) => view.id === activeViewId) ?? views[0];

@@ -8,7 +8,8 @@
 // beside grant-labels.ts / plugin-id.ts / safe-url.ts, the other small shared
 // presentation helpers.
 
-import type { Surface } from "./types.ts";
+import type { CompatibilityVerdict, Surface } from "./types.ts";
+import { blockingUnmet } from "./types.ts";
 
 /** Display name per surface.
  *
@@ -41,4 +42,31 @@ export const SURFACE_LABELS = {
  *  failing the whole manifest. */
 export function surfaceLabel(surface: string): string {
 	return SURFACE_LABELS[surface as Surface] ?? surface;
+}
+
+/** A one-line, user-facing reason a listing cannot be installed here, or `null`
+ *  when nothing BLOCKING is unmet.
+ *
+ *  Core is called "Ryu" rather than "Headless node": the floor is written
+ *  `engines.ryu`, and to a user on a desktop install the thing that is too old is
+ *  the app itself, not a node they have never heard of. Every other surface uses
+ *  its normal label.
+ *
+ *  Returns `null` — not an empty string — when only advisory `unknown` entries are
+ *  present, so a caller cannot accidentally render "Requires " with nothing after
+ *  it, or grey a card over a surface Core simply could not observe. */
+export function describeIncompatibility(
+	verdict: CompatibilityVerdict | null | undefined
+): string | null {
+	const blocking = blockingUnmet(verdict);
+	if (blocking.length === 0) {
+		return null;
+	}
+	const parts = blocking.map((u) => {
+		const label = u.surface === "core" ? "Ryu" : surfaceLabel(u.surface);
+		return u.code === "too_old"
+			? `${label} ${u.required} (you have ${u.present})`
+			: `${label} ${u.required} (unreadable requirement)`;
+	});
+	return `Requires ${parts.join(", ")}`;
 }

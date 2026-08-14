@@ -1,7 +1,10 @@
 import { useChat } from "@ai-sdk/react";
 import { ClipboardIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { StreamedAcpConfig } from "@ryu/blocks/composer/composer-acp-sections.ts";
+import type {
+	AcpConfigOption,
+	StreamedAcpConfig,
+} from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge";
@@ -49,6 +52,7 @@ import { InputBar } from "@/components/agent-elements/input-bar.tsx";
 import type { QueueBarProps } from "@/components/agent-elements/queue/queue-bar.tsx";
 import { formatQuotePrefix } from "@/components/agent-elements/quote.tsx";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { AppLaunchpad } from "@/src/components/chat/AppLaunchpad.tsx";
 import {
 	BtwOverlay,
 	type BtwState,
@@ -67,6 +71,7 @@ import {
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
 import { PluginComposerBarControls } from "@/src/components/composer/PluginComposerBarControls.tsx";
 import {
+	composerPluginSectionKey,
 	composerSelectOptions,
 	composerSelectValue,
 	partitionComposerControls,
@@ -105,14 +110,23 @@ import {
 	useMergedAgentThreads,
 } from "@/src/hooks/useMergedAgentThreads.ts";
 import { useMessageQueue } from "@/src/hooks/useMessageQueue.ts";
+import { useMessageReactions } from "@/src/hooks/useMessageReactions.ts";
 import { useNodeDefaultAgentId } from "@/src/hooks/useNodeDefaultAgent.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import { useSpaces } from "@/src/hooks/useSpaces.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
-import { AgentAvatar, AgentLogo, engineForAgent } from "@/src/lib/agent-logos.tsx";
-import { respondPermission } from "@/src/lib/api/acp.ts";
+import {
+	AgentAvatar,
+	AgentLogo,
+	engineForAgent,
+} from "@/src/lib/agent-logos.tsx";
+import {
+	authenticateAgent,
+	fetchAcpConfig,
+	respondPermission,
+} from "@/src/lib/api/acp.ts";
 import type {
 	AgentSummary,
 	ConversationParticipant,
@@ -970,6 +984,18 @@ export default function ChatPage({
 	// emission `key` rides along so both sides dedupe on the PART, not the value.
 	const [streamedAcpConfig, setStreamedAcpConfig] =
 		useState<StreamedAcpConfig | null>(null);
+	// The agent's config option DEFINITIONS as re-published against the LIVE
+	// session (Core's `data-ryu-acp-config-options` part) — the answer to
+	// `session/set_config_option`, which by protocol returns the whole refreshed
+	// set. Distinct from `streamedAcpConfig`, which carries option VALUES.
+	//
+	// This is the only way an option that exists solely for another option's value
+	// (codex reveals its reasoning `effort` list once a model that has one is
+	// picked) can reach the pickers against the real session: the probe that
+	// otherwise supplies them runs in a throwaway session of its own.
+	const [streamedAcpConfigOptions, setStreamedAcpConfigOptions] = useState<
+		AcpConfigOption[] | null
+	>(null);
 
 	// Whether a turn is in flight, for the pick notice below. A ref because the
 	// notice callback is created here, ABOVE `useChat`'s `status` (assigned into
@@ -1004,6 +1030,7 @@ export default function ChatPage({
 		onSelectionApplied: handleAcpSelectionApplied,
 		streamedMode: streamedAcpMode,
 		streamedConfig: streamedAcpConfig,
+		streamedConfigOptions: streamedAcpConfigOptions,
 	});
 
 	// Effective ACP selections for the request body, held in refs so the send path
@@ -1453,34 +1480,13 @@ export default function ChatPage({
 	// an assistant message. The result is client-only — Core's /api/images/generate
 	// is one-shot and isn't written to the conversation store, so the image is not
 	// re-hydrated on reload (loadMessages rebuilds history as text-only parts).
-	const handleGenerateImage = useCallback(
-		async (prompt: string) => {
-			const userId = `img-user-${Date.now()}`;
-			const assistantId = `img-${Date.now()}`;
-			// Echo the prompt as a user bubble, and reserve the image frame in the
-			// same tick: MessageList renders a `data-image-generation` part through
-			// the ImageGeneration surface, so the turn shows the generation running
-			// and the finished image fades into an already-sized frame. Core has no
-			// progress events for this path, so the status goes straight from
-			// `generating` to `complete`/`error` — no fabricated intermediate steps.
-			setMessages((prev) => [
-				...prev,
-				{
-					id: userId,
-					role: "user",
-					parts: [{ type: "text", text: prompt }],
-				} as (typeof prev)[number],
-				{
-					id: assistantId,
-					role: "assistant",
-					parts: [
-						{
-							type: "data-image-generation",
-							data: { status: "generating", prompt },
-						},
-					],
-				} as unknown as (typeof prev)[number],
-			]);
+	// The generation itself, against an assistant message that ALREADY exists.
+	// Split out from the handler below so a failed generation can be re-run in
+	// place (see `handleRetryGeneration`) instead of echoing the prompt a second
+	// time. Core has no progress events for this path, so the status goes straight
+	// from `generating` to `complete`/`error` — no fabricated intermediate steps.
+	const runImageGeneration = useCallback(
+		async (assistantId: string, prompt: string) => {
 			const settle = (parts: unknown[]) => {
 				setMessages((prev) =>
 					prev.map((m) =>
@@ -1488,6 +1494,14 @@ export default function ChatPage({
 					)
 				);
 			};
+			// Back to the in-flight frame first: on a retry the message still holds
+			// the failed part, and the frame must reserve its box again.
+			settle([
+				{
+					type: "data-image-generation",
+					data: { status: "generating", prompt },
+				},
+			]);
 			try {
 				const urls = await generateImage(chatTargetRef.current, prompt);
 				const [first, ...rest] = urls;
@@ -1534,9 +1548,105 @@ export default function ChatPage({
 		[setMessages]
 	);
 
-	// Multimodal: generate a video from the composer text, surfaced inline like the
-	// image path. Client-only (not persisted). The sdcpp vid_gen response shape is
-	// best-effort (see lib/api/video.ts) — an empty result renders a clear notice.
+	const handleGenerateImage = useCallback(
+		async (prompt: string) => {
+			const userId = `img-user-${Date.now()}`;
+			const assistantId = `img-${Date.now()}`;
+			// Echo the prompt as a user bubble, and reserve the image frame in the
+			// same tick: MessageList renders a `data-image-generation` part through
+			// the ImageGeneration surface, so the turn shows the generation running
+			// and the finished image fades into an already-sized frame.
+			setMessages((prev) => [
+				...prev,
+				{
+					id: userId,
+					role: "user",
+					parts: [{ type: "text", text: prompt }],
+				} as (typeof prev)[number],
+				{
+					id: assistantId,
+					role: "assistant",
+					parts: [
+						{
+							type: "data-image-generation",
+							data: { status: "generating", prompt },
+						},
+					],
+				} as unknown as (typeof prev)[number],
+			]);
+			await runImageGeneration(assistantId, prompt);
+		},
+		[runImageGeneration, setMessages]
+	);
+
+	// The video twin of `runImageGeneration`, on the matching
+	// `data-video-generation` part. The sdcpp vid_gen response shape is
+	// best-effort (see lib/api/video.ts) — an empty result keeps the frame and
+	// says which model to load, rather than dropping a bare error card.
+	const runVideoGeneration = useCallback(
+		async (assistantId: string, prompt: string) => {
+			const settle = (parts: unknown[]) => {
+				setMessages((prev) =>
+					prev.map((m) =>
+						m.id === assistantId ? ({ ...m, parts } as typeof m) : m
+					)
+				);
+			};
+			settle([
+				{
+					type: "data-video-generation",
+					data: { status: "generating", prompt },
+				},
+			]);
+			try {
+				const clips = await generateVideo(chatTargetRef.current, prompt);
+				const [first, ...rest] = clips;
+				if (!first) {
+					settle([
+						{
+							type: "data-video-generation",
+							data: {
+								status: "error",
+								prompt,
+								statusText:
+									"The engine returned no video. Load a video model (Wan/LTX) in the sdcpp engine and try again.",
+							},
+						},
+					]);
+					return;
+				}
+				// Same split as images: the first clip drives the generation surface,
+				// extras ride along as file parts (which render in the same frame).
+				settle([
+					{
+						type: "data-video-generation",
+						data: { status: "complete", prompt, url: first.url },
+					},
+					...rest.map((clip) => ({
+						type: "file",
+						mediaType: clip.mediaType,
+						url: clip.url,
+					})),
+				]);
+			} catch (e) {
+				settle([
+					{
+						type: "data-video-generation",
+						data: {
+							status: "error",
+							prompt,
+							statusText:
+								e instanceof Error ? e.message : "Could not generate video.",
+						},
+					},
+				]);
+			}
+		},
+		[setMessages]
+	);
+
+	// Multimodal: generate a video from the composer text, surfaced inline exactly
+	// like the image path. Client-only (not persisted).
 	const handleGenerateVideo = useCallback(
 		async (prompt: string) => {
 			const userId = `vid-user-${Date.now()}`;
@@ -1548,51 +1658,33 @@ export default function ChatPage({
 					role: "user",
 					parts: [{ type: "text", text: prompt }],
 				} as (typeof prev)[number],
+				{
+					id: assistantId,
+					role: "assistant",
+					parts: [
+						{
+							type: "data-video-generation",
+							data: { status: "generating", prompt },
+						},
+					],
+				} as unknown as (typeof prev)[number],
 			]);
-			try {
-				const clips = await generateVideo(chatTargetRef.current, prompt);
-				const parts =
-					clips.length > 0
-						? clips.map((clip) => ({
-								type: "file" as const,
-								mediaType: clip.mediaType,
-								url: clip.url,
-							}))
-						: [
-								{
-									type: "error" as const,
-									title: "Video generation",
-									message:
-										"The engine returned no video. Load a video model (Wan/LTX) in the sdcpp engine and try again.",
-								},
-							];
-				setMessages((prev) => [
-					...prev,
-					{
-						id: assistantId,
-						role: "assistant",
-						parts,
-					} as unknown as (typeof prev)[number],
-				]);
-			} catch (e) {
-				setMessages((prev) => [
-					...prev,
-					{
-						id: assistantId,
-						role: "assistant",
-						parts: [
-							{
-								type: "error" as const,
-								title: "Video generation failed",
-								message:
-									e instanceof Error ? e.message : "Could not generate video.",
-							},
-						],
-					} as unknown as (typeof prev)[number],
-				]);
-			}
+			await runVideoGeneration(assistantId, prompt);
 		},
-		[setMessages]
+		[runVideoGeneration, setMessages]
+	);
+
+	// Retry a FAILED inline generation. Not `handleRegenerateMessage`: that one
+	// branches a persisted turn server-side, and these parts are client-only (Core
+	// never wrote them to the conversation store), so there is nothing to branch.
+	// The narrowest correct call is re-running the same generator against the same
+	// assistant message — no second user echo, no new bubble.
+	const handleRetryGeneration = useCallback(
+		(messageId: string, kind: "image" | "video", prompt: string) => {
+			const run = kind === "video" ? runVideoGeneration : runImageGeneration;
+			void run(messageId, prompt);
+		},
+		[runImageGeneration, runVideoGeneration]
 	);
 
 	// Speak an assistant reply aloud via Core's /api/voice/speak, honouring the
@@ -1916,6 +2008,152 @@ export default function ChatPage({
 			setStreamedAcpMode(latestStreamedAcpMode);
 		}
 	}, [latestStreamedAcpMode]);
+
+	// The agent refused a turn because its login lapsed (Core's
+	// `data-ryu-acp-auth-required`, raised from JSON-RPC -32000). Core deliberately
+	// does NOT send this down the error path: that one tears the turn down with
+	// advice about configuring a model, which cannot fix an expired OAuth token
+	// and hides the real cause.
+	//
+	// Surfaced as an actionable toast rather than an inline block: the recovery is
+	// a single login the desktop already owns, and the turn can simply be re-run
+	// afterwards. Keyed on the emitting part so one lapse prompts once, not on
+	// every re-render of the transcript.
+	const authPromptedRef = useRef<string | null>(null);
+	const latestAuthRequired = useMemo<{
+		agentId: string;
+		key: string;
+		message: string;
+	} | null>(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role !== "assistant" || !m.parts) {
+				continue;
+			}
+			for (let j = m.parts.length - 1; j >= 0; j--) {
+				const part = m.parts[j] as { type?: string; data?: unknown };
+				if (part?.type !== "data-ryu-acp-auth-required") {
+					continue;
+				}
+				const data = part.data as
+					| { agentId?: string; message?: string }
+					| undefined;
+				if (data?.agentId) {
+					return {
+						agentId: data.agentId,
+						message: data.message ?? "",
+						key: `${m.id}:${j}`,
+					};
+				}
+			}
+		}
+		return null;
+	}, [messages]);
+	useEffect(() => {
+		if (
+			!latestAuthRequired ||
+			authPromptedRef.current === latestAuthRequired.key
+		) {
+			return;
+		}
+		authPromptedRef.current = latestAuthRequired.key;
+		const { agentId: staleAgent } = latestAuthRequired;
+		let cancelled = false;
+		// Ask the agent which login methods it advertises before offering one —
+		// the method id is agent-specific and there is no useful default.
+		fetchAcpConfig(chatTarget, staleAgent)
+			.then((cfg) => {
+				if (cancelled) {
+					return;
+				}
+				const method = cfg?.authMethods?.[0];
+				if (!method) {
+					toast.error({
+						title: "The agent needs you to log in again",
+						description:
+							latestAuthRequired.message ||
+							"Its session expired, and it advertises no login method.",
+					});
+					return;
+				}
+				toast.warning({
+					title: "Your agent login expired",
+					description: "Log in again, then re-send your message.",
+					// Held open: a login prompt that auto-dismisses while the user is
+					// reading it leaves them with a dead turn and no explanation.
+					duration: null,
+					button: {
+						title: method.name ?? "Log in",
+						onClick: () => {
+							authenticateAgent(chatTarget, staleAgent, method.id)
+								.then((res) => {
+									if (res.authenticated) {
+										toast.success({ title: "Logged back in" });
+									} else {
+										toast.error({ title: "Login did not complete" });
+									}
+								})
+								.catch(() => {
+									toast.error({ title: "Login failed" });
+								});
+						},
+					},
+				});
+			})
+			.catch(() => {
+				if (!cancelled) {
+					toast.error({
+						title: "The agent needs you to log in again",
+						description: latestAuthRequired.message || undefined,
+					});
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [latestAuthRequired, chatTarget]);
+
+	// The agent's config option DEFINITIONS, re-published on the live stream as
+	// `data-ryu-acp-config-options` (`{ configOptions }`). Most recent part wins
+	// and REPLACES the set wholesale, the same contract as the slash-command list
+	// above — an option missing from a refreshed list is one the agent has
+	// withdrawn, so merging would keep a stale picker alive forever.
+	const latestStreamedAcpConfigOptions = useMemo<
+		AcpConfigOption[] | null
+	>(() => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role !== "assistant" || !m.parts) {
+				continue;
+			}
+			for (let j = m.parts.length - 1; j >= 0; j--) {
+				const part = m.parts[j] as { type?: string; data?: unknown };
+				if (part?.type !== "data-ryu-acp-config-options") {
+					continue;
+				}
+				const data = part.data as
+					| { configOptions?: AcpConfigOption[] }
+					| undefined;
+				if (Array.isArray(data?.configOptions)) {
+					return data.configOptions;
+				}
+			}
+		}
+		return null;
+	}, [messages]);
+	useEffect(() => {
+		if (latestStreamedAcpConfigOptions) {
+			setStreamedAcpConfigOptions(latestStreamedAcpConfigOptions);
+		}
+	}, [latestStreamedAcpConfigOptions]);
+	// An option list belongs to the agent that published it. Switching agent (or
+	// thread) must drop it, or the new agent's pickers would keep rendering the
+	// previous agent's options — the memo above only ever SETS, so a stale value
+	// would otherwise survive until something else published.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: agentId/convId are the reset triggers, not read in the body.
+	useEffect(() => {
+		setStreamedAcpConfigOptions(null);
+	}, [agentId, convId]);
 
 	// Agent-requested session-config write-backs, the exact same shape one level up
 	// from the mode sync. Core streams `data-ryu-acp-config` (`{ config }`) when a
@@ -2482,6 +2720,15 @@ export default function ChatPage({
 	// presence echo so we never show ourselves as "typing".
 	const myMemberIdRef = useRef<string | null>(null);
 
+	// Emoji reactions for this conversation. A ghost chat is never persisted, so
+	// there is nothing to react TO and no room to fan reactions out over — the
+	// null conversation id disables the query the same way it skips presence.
+	const {
+		byMessage: reactionsByMessage,
+		applyRealtimeFrame: applyReactionFrame,
+		toggle: toggleReaction,
+	} = useMessageReactions(ghostMode ? null : convId);
+
 	// Remote members' latest presence (name + typing), keyed by member id. Our own
 	// member is excluded. Reset when the conversation changes.
 	const [remotePresence, setRemotePresence] = useState<
@@ -2506,6 +2753,12 @@ export default function ChatPage({
 				return;
 			}
 			const frame = data as { type?: string; message?: unknown };
+			// Reactions ride the same named-event channel as messages. Routed before
+			// the message guard below, which would otherwise drop them on the floor.
+			if (frame.type === "reaction") {
+				applyReactionFrame(data, myUserIdRef.current);
+				return;
+			}
 			if (frame.type !== "message" || typeof frame.message !== "object") {
 				return;
 			}
@@ -2547,7 +2800,7 @@ export default function ChatPage({
 				return [...prev, inserted as unknown as (typeof prev)[number]];
 			});
 		},
-		[setMessages]
+		[setMessages, applyReactionFrame]
 	);
 
 	// Apply a presence delta from another member: upsert their name/typing, or
@@ -2777,11 +3030,14 @@ export default function ChatPage({
 	}, [scrollToMessageId, currentTabId, messages.length, clearScrollToMessage]);
 
 	// Switching threads must not carry chips across conversations.
+	// `activeConversationId` is load-bearing: it is the only thing that changes on
+	// a thread switch, so without it this never runs again after mount and the
+	// chips leak into the next conversation.
 	useEffect(() => {
 		setFollowUps([]);
 		followUpAbort.current?.abort();
 		followUpAbort.current = null;
-	}, []);
+	}, [activeConversationId]);
 
 	const addImages = useCallback(
 		(files: File[]) => {
@@ -3566,9 +3822,13 @@ export default function ChatPage({
 	// conversations resets useChat (status → "ready"), which would otherwise drain
 	// stale items into the new thread — clear on every switch (mirrors the
 	// blockedMessages reset below).
+	// `activeConversationId` is load-bearing. `clearQueue` is
+	// `useCallback(() => setQueue([]), [])` — a permanently stable identity — so
+	// on its own this effect runs once at mount and NEVER on a thread switch,
+	// which is exactly the stale-drain the comment above says it prevents.
 	useEffect(() => {
 		clearQueue();
-	}, [clearQueue]);
+	}, [clearQueue, activeConversationId]);
 
 	// Clear blocked messages when a new conversation starts or services recover.
 	useEffect(() => {
@@ -3966,7 +4226,7 @@ export default function ChatPage({
 	const pluginComposerSelectSections = useMemo<ComposerSettingsSection[]>(
 		() =>
 			partitionedComposerControls.selects.map((control) => ({
-				key: `plugin:${control.plugin}:${control.id}`,
+				key: composerPluginSectionKey(control),
 				ariaLabel: control.label,
 				label: control.label,
 				items: composerSelectOptions(control).map((option) => ({
@@ -3997,6 +4257,7 @@ export default function ChatPage({
 		refreshRoutingAdvice,
 		rightActions: composerRight,
 		sections: composerSections,
+		triggerSections: composerTriggerSections,
 		renderBody: composerRenderBody,
 	} = useComposerAgentControls({
 		compact: composerCompact,
@@ -4099,6 +4360,11 @@ export default function ChatPage({
 	// they are fed to the factory as `extraSections` above, so they render inside
 	// the composer's own settings dropdown (and its universal-picker body) exactly
 	// like the ACP approval/config sections do.
+	//
+	// This ref feeds the composer's KEYBOARD SHORTCUTS, so it must stay the full
+	// list — `firstExtraConfigSection` cycles the first non-agent/model/approval
+	// section, and handing it the trigger-narrowed list would repoint that shortcut
+	// at a different setting than the one the popover shows.
 	const composerSectionsRef =
 		useRef<ComposerSettingsSection[]>(composerSections);
 	composerSectionsRef.current = composerSections;
@@ -4412,6 +4678,10 @@ export default function ChatPage({
 								id: myUserId ?? undefined,
 								name: oidcUser?.name || oidcUser?.email,
 							}}
+							// Launchpad: every openable app as a grid of icon tiles under
+							// the composer, on the start page only. Renders nothing when no
+							// enabled app contributes a UI surface.
+							emptyStateFooter={<AppLaunchpad />}
 							emptyStateHeader={
 								<EmptyStateHeader
 									logo={emptyStateLogo}
@@ -4419,7 +4689,9 @@ export default function ChatPage({
 									// composer factory — the logo opens the identical menu the
 									// composer's settings trigger does, not just an agent list.
 									renderBody={composerRenderBody}
-									sections={composerSections}
+									// The narrowed list: this logo IS a settings trigger, so it
+									// summarises exactly what the composer's own trigger does.
+									sections={composerTriggerSections}
 									// Ghost (temporary) chat: the empty-state greeting whispers
 									// "secretly" so it's obvious this thread won't be saved.
 									title={ghostMode ? "What are we secretly doing?" : undefined}
@@ -4479,13 +4751,22 @@ export default function ChatPage({
 							onRegenerateMessage={
 								activeConversationId ? handleRegenerateMessage : undefined
 							}
+							// Unconditional: a generation part is client-only, so retrying
+							// one needs no persisted conversation (unlike regenerate above).
+							onRetryGeneration={handleRetryGeneration}
 							onSelectVersion={
 								activeConversationId ? handleSelectVersion : undefined
 							}
 							onSend={handleComposerSubmit}
 							onSpeak={handleSpeak}
 							onStop={handleStop}
+							// Reactions need a persisted conversation to attach to and a
+							// realtime room to fan out over; a ghost chat has neither.
+							onToggleReaction={
+								activeConversationId && !ghostMode ? toggleReaction : undefined
+							}
 							quote={quote}
+							reactionsByMessage={reactionsByMessage}
 							seedDraft={initialSubmit ? undefined : initialPrompt}
 							showCopyToolbar
 							slots={{ InputBar: councilInputBar }}

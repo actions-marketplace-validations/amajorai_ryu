@@ -1,6 +1,7 @@
 import type { ChatStatus, UIMessage } from "ai";
 import type React from "react";
 import type { SuggestionItem } from "./input/suggestions.tsx";
+import type { MessageReactionBucket } from "./message-reactions.tsx";
 import type {
 	QuestionAnswer,
 	QuestionConfig,
@@ -298,6 +299,16 @@ export interface AgentChatProps {
 	/** Regenerate an assistant reply as a new version; receives the assistant
 	 * message id. When omitted, no regenerate button is shown. */
 	onRegenerateMessage?: (messageId: string) => void;
+	/** Re-run a failed inline media generation; receives the assistant message
+	 * holding the failed part, which media surface it is, and the prompt that
+	 * produced it. Client-only generations are not persisted, so
+	 * `onRegenerateMessage` (which branches a server-side turn) cannot serve
+	 * them. When omitted, a failed generation shows no Retry. */
+	onRetryGeneration?: (
+		messageId: string,
+		kind: "image" | "video",
+		prompt: string
+	) => void;
 	/** Switch the active version at a branch point; receives the target version's
 	 * message id. When omitted (or a turn has a single version), no pager shows. */
 	onSelectVersion?: (versionId: string) => void;
@@ -307,6 +318,9 @@ export interface AgentChatProps {
 	 * with the turn's combined text. When omitted, no speak button is shown. */
 	onSpeak?: (text: string) => void;
 	onStop: () => void;
+	/** Toggle an emoji reaction on a message. Omit to hide the feature entirely —
+	 * which is what a surface with no realtime room (island, storyboard) wants. */
+	onToggleReaction?: (messageId: string, emoji: string) => void;
 
 	questionTool?: {
 		submitLabel?: string;
@@ -321,6 +335,8 @@ export interface AgentChatProps {
 	/** Pending quote shown inside the composer, above the textarea. The surface
 	 * prepends it to the outgoing message on send. */
 	quote?: string | null;
+	/** Reaction buckets keyed by message id, in Core's first-reaction order. */
+	reactionsByMessage?: ReadonlyMap<string, readonly MessageReactionBucket[]>;
 	/** Pre-fills the composer once when it transitions to a non-empty value (e.g.
 	 * a `ryu://chat/new?prompt=…` deep link). Never sends — the user reviews and
 	 * submits. Subsequent user edits are not clobbered. */

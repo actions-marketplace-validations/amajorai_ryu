@@ -1128,9 +1128,20 @@ async fn main() {
     // App manifests: wrapped in RwLock so self-build tools can hot-install new
     // apps without restarting Core (U57). The self-build tools write into this
     // store and `GET /api/apps` reads from it; no restart required.
-    let app_manifests = Arc::new(tokio::sync::RwLock::new(
-        crate::plugin_manifest::PluginManifestLoader::load(),
-    ));
+    // `load_all` splits the pass in two: `compatible` is what the runtime gets (and
+    // is byte-for-byte what `load()` used to return), while `incompatible` holds the
+    // plugins this node's version cannot run. The second list exists ONLY so the
+    // marketplace can show them greyed with what they need — it is never activated.
+    let loaded_manifests = crate::plugin_manifest::PluginManifestLoader::load_all();
+    if !loaded_manifests.incompatible.is_empty() {
+        tracing::info!(
+            count = loaded_manifests.incompatible.len(),
+            "plugins held back as incompatible with this node's versions"
+        );
+    }
+    let incompatible_manifests =
+        Arc::new(tokio::sync::RwLock::new(loaded_manifests.incompatible));
+    let app_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.compatible));
     // Loopback client for the out-of-process `ryu-teams` sidecar (single owner of
     // `teams.db`). Port resolved from the just-loaded manifests, profile-shifted.
     let teams = crate::teams_client::TeamsClient::new(crate::teams_client::sidecar_port(
@@ -1645,6 +1656,7 @@ async fn main() {
         retrieval,
         worktree_diffs: Arc::clone(&worktree_diffs),
         app_manifests,
+        incompatible_manifests,
         app_store,
         catalog_client: Arc::new(crate::plugins::catalog::PluginCatalogClient::new()),
         skills: skill_registry,

@@ -13,6 +13,7 @@ import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
 import type { GlyphValue } from "@ryu/ui/components/glyph.ts";
 import { Label } from "@ryu/ui/components/label.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
 import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { composeRules, parseRules } from "@ryuhq/protocol/agent-rules";
 import { useQuery } from "@tanstack/react-query";
@@ -1248,12 +1249,10 @@ export default function AgentEditPage({
 				<span className="truncate font-semibold">
 					{isNew ? "New agent" : name.trim() || "Edit agent"}
 				</span>
-				{isBuiltIn ? (
-					<Badge className="gap-1" variant="secondary">
-						<HugeiconsIcon className="size-3" icon={LockedIcon} />
-						Built-in
-					</Badge>
-				) : null}
+				{/* The shared status glyph, not a second LockedIcon badge: the "Locked"
+				    chip on the very next line already wears that mark, and two identical
+				    padlocks side by side said nothing about which was which. */}
+				{isBuiltIn ? <StatusBadge kind="builtin" /> : null}
 				{isLocked && !isBuiltIn ? (
 					<Badge className="gap-1" variant="secondary">
 						<HugeiconsIcon className="size-3" icon={LockedIcon} />

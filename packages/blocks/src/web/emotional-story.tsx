@@ -86,8 +86,8 @@ export default function EmotionalStory() {
 				<div className="mb-10 max-w-2xl">
 					<SectionTitle title="The work is done. Now somebody has to put their name on it." />
 					<p className="mt-4 max-w-xl text-muted-foreground leading-relaxed">
-						That is where it stops. Not because the AI is bad, but because the
-						firm has no way to prove how the work was done.
+						That is where it stops. The firm has no way to prove how the work
+						was done.
 					</p>
 				</div>
 

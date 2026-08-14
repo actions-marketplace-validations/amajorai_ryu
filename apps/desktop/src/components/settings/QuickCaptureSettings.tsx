@@ -130,7 +130,7 @@ export function QuickCaptureSettings() {
 
 	return (
 		<SettingsSection
-			caption="Select text in any app and tap Shift twice — it lands on your Quests board with the app and page it came from. Nothing is read until you tap; Ryu never stores what you type."
+			caption="Select text in any app and tap Shift twice, and it lands on your Quests board with the app and page it came from. Nothing is read until you tap; Ryu never stores what you type."
 			title="Quick Capture"
 		>
 			<SettingsGroup>
@@ -171,7 +171,7 @@ export function QuickCaptureSettings() {
 						await openInputMonitoringSettings();
 						await refresh();
 					}}
-					requiredText="Required — the gesture can't be detected without it."
+					requiredText="Required. The gesture can't be detected without it."
 					title="Input Monitoring"
 				/>
 
@@ -183,7 +183,7 @@ export function QuickCaptureSettings() {
 						await openAccessibilitySettings();
 						await refresh();
 					}}
-					requiredText="Optional — captures still work and still record which app they came from; without it they lose the window title and page URL."
+					requiredText="Optional. Captures still work and still record which app they came from; without it they lose the window title and page URL."
 					title="Accessibility"
 				/>
 
@@ -205,7 +205,7 @@ export function QuickCaptureSettings() {
 					description={
 						status.quests_enabled
 							? undefined
-							: "Captures have nowhere to go until Quests is enabled — turn it on from the Store."
+							: "Captures have nowhere to go until Quests is enabled. Turn it on from the Store."
 					}
 					title="Quests App"
 				/>

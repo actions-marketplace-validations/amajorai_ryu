@@ -81,6 +81,15 @@ pub struct ImportedMessage {
     /// `"user"` or `"assistant"`.
     pub role: String,
     pub content: String,
+    /// When the turn actually happened, epoch millis, as recorded by the agent's
+    /// own transcript. `None` when the line carried no parseable timestamp.
+    ///
+    /// Carried because an import is a RESTORE, not a new conversation: without
+    /// it every message landed stamped "now", so a thread from three weeks ago
+    /// imported as if the whole exchange had just occurred — wrong on the row,
+    /// wrong in the date separators, and wrong for any ordering that reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 /// A fully read thread: its metadata plus the transcript.
@@ -392,9 +401,23 @@ fn parse_claude_file(path: &Path) -> Result<(Vec<ImportedMessage>, ThreadMeta)> 
         messages.push(ImportedMessage {
             role: role.to_string(),
             content: text,
+            // Claude writes an RFC3339 `timestamp` on each transcript line.
+            created_at: obj
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_millis),
         });
     }
     Ok((messages, meta))
+}
+
+/// Parse an RFC3339 / ISO-8601 instant to epoch millis. `None` on anything this
+/// does not recognise — a missing timestamp degrades to "no recorded time", never
+/// to a wrong one.
+fn parse_rfc3339_millis(raw: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// Flatten Claude's `content` (a string for user turns, or a block array with
@@ -564,6 +587,14 @@ fn parse_codex_file(path: &Path) -> Result<(Vec<ImportedMessage>, ThreadMeta)> {
                 messages.push(ImportedMessage {
                     role: role.to_string(),
                     content: text,
+                    // Codex stamps the WRAPPER line, not the payload, so this
+                    // reads `obj` and falls back to the payload rather than the
+                    // other way round.
+                    created_at: obj
+                        .get("timestamp")
+                        .or_else(|| payload.get("timestamp"))
+                        .and_then(Value::as_str)
+                        .and_then(parse_rfc3339_millis),
                 });
             }
             _ => {}
@@ -748,10 +779,12 @@ mod tests {
             ImportedMessage {
                 role: "assistant".into(),
                 content: "hi there".into(),
+            created_at: None,
             },
             ImportedMessage {
                 role: "user".into(),
                 content: "  \n  real question\nmore".into(),
+            created_at: None,
             },
         ];
         assert_eq!(first_line_title(&msgs), "real question");
@@ -760,6 +793,7 @@ mod tests {
         let only_assistant = vec![ImportedMessage {
             role: "assistant".into(),
             content: "just me".into(),
+            created_at: None,
         }];
         assert_eq!(first_line_title(&only_assistant), "just me");
 
@@ -767,8 +801,29 @@ mod tests {
         let blank = vec![ImportedMessage {
             role: "user".into(),
             content: "   \n\t".into(),
+            created_at: None,
         }];
         assert_eq!(first_line_title(&blank), "Untitled thread");
+    }
+
+    #[test]
+    fn rfc3339_timestamps_parse_to_epoch_millis() {
+        // The shape Claude writes on every transcript line.
+        assert_eq!(
+            parse_rfc3339_millis("2026-07-14T09:15:30.000Z"),
+            Some(1_784_020_530_000)
+        );
+        // Offset form (what Codex emits in some locales) resolves to the same
+        // instant as its UTC equivalent, not to the wall-clock reading.
+        assert_eq!(
+            parse_rfc3339_millis("2026-07-14T11:15:30+02:00"),
+            parse_rfc3339_millis("2026-07-14T09:15:30Z")
+        );
+        // Unparseable ⇒ None, which the caller degrades to "now". Never a wrong
+        // time: a bogus stamp would silently misplace the whole thread in history.
+        assert_eq!(parse_rfc3339_millis(""), None);
+        assert_eq!(parse_rfc3339_millis("yesterday"), None);
+        assert_eq!(parse_rfc3339_millis("1784020530000"), None);
     }
 
     #[test]
@@ -777,6 +832,7 @@ mod tests {
         let msgs = vec![ImportedMessage {
             role: "user".into(),
             content: long,
+            created_at: None,
         }];
         let title = first_line_title(&msgs);
         // 80 chars + a single ellipsis char.

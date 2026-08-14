@@ -367,7 +367,8 @@ const cards: {
 	{
 		viz: <SecurityViz />,
 		title: "Security Firewall",
-		description: "Prompt injection protection on every request, automatically.",
+		description:
+			"Every request is checked for prompt injection before it reaches a model.",
 		span: "md:col-span-2",
 	},
 	{
@@ -391,13 +392,13 @@ const cards: {
 		viz: <MemoryViz />,
 		title: "Memory & RAG",
 		description:
-			"Agents remember. Context persists. Every session builds on the last.",
+			"Agents keep long-term memory, so every session builds on the last.",
 	},
 	{
 		viz: <CostViz />,
 		title: "Cost Control",
 		description:
-			"Per-agent budgets. Real-time token tracking. No bill surprises.",
+			"Per-agent budgets and live token tracking, so the bill holds no surprises.",
 		span: "md:col-span-2",
 	},
 	{

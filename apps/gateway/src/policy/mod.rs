@@ -249,6 +249,13 @@ pub async fn resolve_token(
     let resp = http
         .get(&endpoint)
         .header("x-gateway-key", token)
+        // Tell the control plane what time it is HERE. A managed node's quiet
+        // hour (the window a deferred resize or update runs in) has to be
+        // measured in the node's own zone — an org with a node in Frankfurt and
+        // one in Singapore has two different nights — and the machine is the
+        // only party that reliably knows its own. The control plane records it
+        // as the DETECTED zone; an explicit setting always outranks it.
+        .header("x-ryu-node-timezone", local_timezone())
         .timeout(Duration::from_secs(5))
         .send()
         .await?;
@@ -259,8 +266,105 @@ pub async fn resolve_token(
     Ok(parsed.into_resolved())
 }
 
+/// This machine's IANA time zone, or `UTC` when it cannot be determined.
+///
+/// `TZ` first because an operator who sets it means it — a container is usually
+/// UTC by default and `TZ` is how you say otherwise. Then the system zone.
+///
+/// Never fails: the zone is a scheduling nicety, and a node that cannot name its
+/// own zone must still serve requests. UTC is the honest fallback — wrong for
+/// most of the world, but fixed and explicable rather than a guess.
+fn local_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        if let Some(zone) = zone_from_tz(&tz) {
+            return zone;
+        }
+    }
+    // `/etc/timezone` is the plain-text answer on Debian/Ubuntu, which is what a
+    // managed node runs. Read directly rather than adding a crate: the gateway
+    // is a self-contained workspace that is published, and one std read is not
+    // worth a dependency in it.
+    if let Ok(raw) = std::fs::read_to_string("/etc/timezone") {
+        let zone = raw.trim();
+        if !zone.is_empty() {
+            return zone.to_string();
+        }
+    }
+    // Elsewhere (and on macOS) `/etc/localtime` is a symlink into the tz
+    // database, so the zone id is the tail of its target.
+    if let Ok(link) = std::fs::read_link("/etc/localtime") {
+        if let Some(zone) = zone_from_localtime(&link.to_string_lossy()) {
+            return zone;
+        }
+    }
+    "UTC".to_string()
+}
+
+/// The zone id in a `TZ` value, or `None` when it names nothing usable.
+///
+/// `TZ=:Europe/Berlin` is legal POSIX — the leading colon tells the C library to
+/// treat the rest as a file reference — and forwarding it verbatim would send a
+/// zone id the control plane cannot parse.
+fn zone_from_tz(raw: &str) -> Option<String> {
+    let zone = raw.trim().trim_start_matches(':').trim();
+    if zone.is_empty() {
+        return None;
+    }
+    Some(zone.to_string())
+}
+
+/// The zone id embedded in an `/etc/localtime` symlink target.
+fn zone_from_localtime(target: &str) -> Option<String> {
+    let idx = target.find("/zoneinfo/")?;
+    let zone = target[idx + "/zoneinfo/".len()..].trim();
+    if zone.is_empty() {
+        return None;
+    }
+    Some(zone.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tz_env_is_used_verbatim_when_it_names_a_zone() {
+        assert_eq!(
+            super::zone_from_tz("Asia/Singapore"),
+            Some("Asia/Singapore".to_string())
+        );
+    }
+
+    #[test]
+    fn tz_env_strips_the_posix_colon_prefix() {
+        // `TZ=:Europe/Berlin` is legal POSIX; forwarded verbatim the control
+        // plane would reject it as an unknown zone.
+        assert_eq!(
+            super::zone_from_tz(":Europe/Berlin"),
+            Some("Europe/Berlin".to_string())
+        );
+    }
+
+    #[test]
+    fn an_empty_tz_env_names_nothing_rather_than_an_empty_zone() {
+        assert_eq!(super::zone_from_tz(""), None);
+        assert_eq!(super::zone_from_tz("  "), None);
+        assert_eq!(super::zone_from_tz(":"), None);
+    }
+
+    #[test]
+    fn localtime_symlink_yields_the_zone_after_zoneinfo() {
+        assert_eq!(
+            super::zone_from_localtime("/usr/share/zoneinfo/America/New_York"),
+            Some("America/New_York".to_string())
+        );
+    }
+
+    #[test]
+    fn a_localtime_target_with_no_zoneinfo_segment_yields_nothing() {
+        // Better to fall through to UTC than to send a path fragment as a zone.
+        assert_eq!(super::zone_from_localtime("/etc/localtime"), None);
+    }
+
     use super::*;
 
     #[test]

@@ -558,6 +558,73 @@ fn ui_text_end(id: &str) -> Vec<u8> {
     ui_chunk(&serde_json::json!({ "type": "text-end", "id": id }))
 }
 
+/// Milliseconds since the Unix epoch, the stamp every tool-timing field carries.
+fn tool_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
+}
+
+/// Wall-clock starts for tool calls whose opening frame has gone out, keyed by
+/// `toolCallId`.
+///
+/// Timing is stamped HERE rather than measured in the client because the client
+/// can only time a row it watched run: a reopened conversation re-mounts rows
+/// that finished days ago, so the desktop deliberately shows nothing for them
+/// rather than restarting their clocks. That left exactly the case the user
+/// cares about — "did this call take an hour and break?" — unanswerable the
+/// moment you reload. A Core stamp makes the duration a property of the
+/// persisted part instead of a property of having been watching.
+#[derive(Default)]
+struct ToolClock(std::collections::HashMap<String, i64>);
+
+impl ToolClock {
+    /// Record — or re-use — the start of `id`, returning it.
+    ///
+    /// Re-use is load-bearing: an ACP `tool_call_update` re-emits
+    /// `tool-input-available` under the same id to fill in arguments the opening
+    /// frame did not have yet, and a plan/thought snapshot re-emits on every
+    /// chunk. Restarting the clock there would erase precisely the wait this is
+    /// meant to expose, and a long call would perpetually read as just-started.
+    fn start(&mut self, id: &str) -> i64 {
+        *self.0.entry(id.to_owned()).or_insert_with(tool_now_ms)
+    }
+
+    /// Close `id`, yielding `(started_at, completed_at)`.
+    ///
+    /// `None` when this stream never opened the call — a bare output frame with
+    /// no matching input, which is not renderable anyway.
+    fn finish(&mut self, id: &str) -> Option<(i64, i64)> {
+        self.0.remove(id).map(|started| (started, tool_now_ms()))
+    }
+}
+
+/// The `providerMetadata` payload carrying one tool call's timing.
+///
+/// `providerMetadata` is the sanctioned open channel on an AI SDK tool chunk —
+/// it is `Record<string, Record<string, JSONValue>>`, it survives the chunk
+/// schema (a bare extra key would be stripped), and the SDK lands it on the part
+/// as `callProviderMetadata`, which round-trips through the persisted part
+/// schema. Namespaced under `ryu` so it can never collide with a real provider's
+/// metadata.
+///
+/// Note the SDK REPLACES `callProviderMetadata` wholesale on each frame rather
+/// than merging, which is why the closing frame repeats `startedAt` instead of
+/// contributing `completedAt` alone.
+fn tool_timing_meta(started_at: i64, completed_at: Option<i64>) -> Value {
+    let mut timing = serde_json::Map::new();
+    timing.insert("startedAt".to_owned(), Value::from(started_at));
+    if let Some(done) = completed_at {
+        timing.insert("completedAt".to_owned(), Value::from(done));
+        timing.insert(
+            "durationMs".to_owned(),
+            Value::from((done - started_at).max(0)),
+        );
+    }
+    serde_json::json!({ "ryu": Value::Object(timing) })
+}
+
 /// `tool-input-available` part — a tool call the agent has initiated.
 ///
 /// `dynamic: true` produces a `dynamic-tool` part carrying a clean `toolName`
@@ -565,25 +632,50 @@ fn ui_text_end(id: &str) -> Vec<u8> {
 /// `tool-<Name>` part — the desktop binds rich renderers (Bash terminal, Edit
 /// diff, Todo checklist, Thinking, …) to the canonical Claude-style names, so
 /// ACP tool calls mapped via [`acp_tool_ui_name`] get the full tool UI.
-fn ui_tool_input(tool_call_id: &str, tool_name: &str, input: &Value, dynamic: bool) -> Vec<u8> {
-    ui_chunk(&serde_json::json!({
+///
+/// `started_at` stamps the call's start (see [`ToolClock`]); `None` leaves the
+/// frame byte-identical to an unstamped one.
+fn ui_tool_input(
+    tool_call_id: &str,
+    tool_name: &str,
+    input: &Value,
+    dynamic: bool,
+    started_at: Option<i64>,
+) -> Vec<u8> {
+    let mut chunk = serde_json::json!({
         "type": "tool-input-available",
         "toolCallId": tool_call_id,
         "toolName": tool_name,
         "input": input,
         "dynamic": dynamic,
-    }))
+    });
+    if let Some(started) = started_at {
+        chunk["providerMetadata"] = tool_timing_meta(started, None);
+    }
+    ui_chunk(&chunk)
 }
 
 /// `tool-output-available` part — the result of a tool call. The `dynamic`
 /// flag must match the part's opening `tool-input-available` frame.
-fn ui_tool_output(tool_call_id: &str, output: &Value, dynamic: bool) -> Vec<u8> {
-    ui_chunk(&serde_json::json!({
+///
+/// `timing` is the `(started_at, completed_at)` pair from [`ToolClock::finish`];
+/// `None` leaves the frame byte-identical to an unstamped one.
+fn ui_tool_output(
+    tool_call_id: &str,
+    output: &Value,
+    dynamic: bool,
+    timing: Option<(i64, i64)>,
+) -> Vec<u8> {
+    let mut chunk = serde_json::json!({
         "type": "tool-output-available",
         "toolCallId": tool_call_id,
         "output": output,
         "dynamic": dynamic,
-    }))
+    });
+    if let Some((started, completed)) = timing {
+        chunk["providerMetadata"] = tool_timing_meta(started, Some(completed));
+    }
+    ui_chunk(&chunk)
 }
 
 /// `data-tool-widget-available` part (spec §1.1, nested under `data` per D6) — a
@@ -1032,13 +1124,26 @@ impl PartsAccumulator {
     /// `dynamic = false` → a `tool-<name>` part; `dynamic = true` → a
     /// `dynamic-tool` part carrying `toolName`. Re-emitting the same id (plan /
     /// thinking snapshots) refreshes its `input`.
-    fn tool_input(&mut self, id: &str, tool_name: &str, input: &Value, dynamic: bool) {
+    ///
+    /// `started_at` mirrors the wire frame's timing stamp onto the PERSISTED
+    /// part, under the same `callProviderMetadata` key the AI SDK client would
+    /// have written from the live stream. Without this the sealed parts would
+    /// disagree with what the user just watched, which is the whole failure mode
+    /// the stamp exists to fix: timing visible live, gone on reload.
+    fn tool_input(
+        &mut self,
+        id: &str,
+        tool_name: &str,
+        input: &Value,
+        dynamic: bool,
+        started_at: Option<i64>,
+    ) {
         if let Some(&i) = self.tool_idx.get(id) {
             self.parts[i]["input"] = input.clone();
             return;
         }
         let i = self.parts.len();
-        let part = if dynamic {
+        let mut part = if dynamic {
             serde_json::json!({
                 "type": "dynamic-tool",
                 "toolName": tool_name,
@@ -1054,6 +1159,9 @@ impl PartsAccumulator {
                 "input": input,
             })
         };
+        if let Some(started) = started_at {
+            part["callProviderMetadata"] = tool_timing_meta(started, None);
+        }
         self.parts.push(part);
         self.tool_idx.insert(id.to_owned(), i);
     }
@@ -1061,7 +1169,13 @@ impl PartsAccumulator {
     /// Patch a tool part with its terminal `output` + state. Mirrors
     /// [`ui_tool_output`]: `error` sets `output-error`, else `output-available`. A
     /// bare output with no matching input part is dropped (not renderable).
-    fn tool_output(&mut self, id: &str, output: &Value, error: bool) {
+    fn tool_output(
+        &mut self,
+        id: &str,
+        output: &Value,
+        error: bool,
+        timing: Option<(i64, i64)>,
+    ) {
         if let Some(&i) = self.tool_idx.get(id) {
             let state = if error {
                 "output-error"
@@ -1070,6 +1184,10 @@ impl PartsAccumulator {
             };
             self.parts[i]["state"] = Value::String(state.to_owned());
             self.parts[i]["output"] = output.clone();
+            if let Some((started, completed)) = timing {
+                self.parts[i]["callProviderMetadata"] =
+                    tool_timing_meta(started, Some(completed));
+            }
         }
     }
 
@@ -2368,6 +2486,59 @@ fn merge_system_prompt(existing: Option<String>, tone_prefix: Option<String>) ->
         (None, Some(p)) if !p.is_empty() => Some(p),
         (existing, _) => existing,
     }
+}
+
+// ── Ryu self-documentation pointer ────────────────────────────────────────────
+//
+// A model asked "how do I configure Ryu?" answers from pre-training, which
+// predates most of this product — so it invents settings paths, plugin fields
+// and CLI flags that never existed. The fix is not a bigger prompt: it is
+// telling the agent that an authoritative, fetchable source exists, and that
+// guessing a doc URL is worse than fetching the index.
+//
+// This is the FIRST standing Core-authored preamble layer (everything else in
+// the system block comes from the user's own configuration — persona, memory,
+// skills, output style), so it sets the pattern rather than following one:
+// a named const merged once in `route_chat_stream`, appended LAST so it never
+// outranks anything the user configured, and suppressed under Safe Mode on the
+// same rule the skills block follows — a baseline turn carries nothing extra.
+
+/// The standing pointer to Ryu's own documentation, appended to every turn's
+/// system block. Kept to a few lines because it is paid for on every turn of
+/// every channel; the `llms.txt` index is what makes brevity affordable, since
+/// the agent can expand it on demand instead of carrying doc text it may not
+/// need.
+const RYU_DOCS_HINT: &str = "## Ryu's own documentation\n\
+    You are running inside Ryu. Ryu's documentation is published at \
+    https://docs.ryuhq.com — a machine-readable index of every page is at \
+    https://docs.ryuhq.com/llms.txt, and the whole site as one document is at \
+    https://docs.ryuhq.com/llms-full.txt.\n\
+    When the user asks how to install, configure or use Ryu itself — settings, \
+    agents, plugins, apps, nodes, workflows, the marketplace, the CLI — read \
+    those docs before answering rather than relying on prior knowledge, and \
+    point the user at https://docs.ryuhq.com. Never cite a documentation URL \
+    you have not actually fetched; fetch the index and follow it instead of \
+    guessing a path. If you cannot fetch pages, say so and link \
+    https://docs.ryuhq.com rather than inventing the answer.";
+
+/// [`RYU_DOCS_HINT`], or `None` when Safe Mode is active.
+///
+/// Safe Mode's contract is a turn with nothing in the prompt but the user's own
+/// words, which is what makes it usable for diagnosing "is the model or is it
+/// us?" — a standing instruction to go read a website is exactly the sort of
+/// extra the mode exists to strip.
+fn ryu_docs_hint() -> Option<String> {
+    ryu_docs_hint_when(crate::safe_mode::is_active())
+}
+
+/// The gate itself, taking Safe Mode as an argument rather than reading the
+/// process global, so a test can pin both answers without mutating state the
+/// rest of the binary's tests share.
+fn ryu_docs_hint_when(safe_mode: bool) -> Option<String> {
+    if safe_mode {
+        return None;
+    }
+    Some(RYU_DOCS_HINT.to_owned())
 }
 
 // ── Output styles (docs/output-styles.md §5) ──────────────────────────────────
@@ -4538,6 +4709,29 @@ pub async fn route_chat_stream(
     // Persona prefix comes first so the model reads the persona before the facts.
     let long_term_system = merge_system_prompt(long_term_system, persona_prefix);
 
+    // The standing docs pointer (see `RYU_DOCS_HINT`). Merged HERE, before the
+    // plane branch, because this is the one seam every caller shares: desktop
+    // chat, voice (`voice/session.rs`), sub-agent and team replies
+    // (`run_reply_text` / `run_team_reply_text`) and the chat-channel bots
+    // (`POST /api/channels/run`, which is `run_reply_text`) all reach the model
+    // through `route_chat_stream`, and both planes below send `long_term_system`
+    // verbatim — the openai-compat plane as a leading `system` message, ACP via
+    // `build_acp_prompt`. So one merge is the whole feature, and a per-plane
+    // copy would silently miss whichever plane nobody remembered.
+    //
+    // The ONE path this does not cover is a channel with no agent bound, which
+    // runs the legacy gateway pipeline (`ChannelHost::run_pipeline`) instead of
+    // Core and therefore has no Core-assembled system block to append to.
+    //
+    // NB argument order: the hint is the FIRST argument precisely so it lands
+    // last — `merge_system_prompt` prepends its second argument. Every layer
+    // merged after this one (the compaction summary, the skills block, the
+    // output style) also prepends, so the hint stays at the tail of the block
+    // and never outranks a user-configured instruction.
+    let docs_hint = ryu_docs_hint();
+    breakdown.add_text("system", "Ryu docs", docs_hint.as_deref());
+    let long_term_system = merge_system_prompt(docs_hint, long_term_system);
+
     // The agent scope for long-term memory facts — the SAME one the recency path
     // (`assemble_long_term_system_message`) used, so backfill + dedup ids line up.
     let memory_scope = long_term_agent_scope(effective_agent_id.as_deref());
@@ -6283,8 +6477,11 @@ where
             for t in &tool_calls {
                 let args_val: Value =
                     serde_json::from_str(&t.arguments).unwrap_or(Value::Object(Default::default()));
+                // No `ToolClock` here: this path runs the call inline, so the
+                // start and the finish are two statements apart.
+                let tool_started = tool_now_ms();
                 yield Ok::<_, std::convert::Infallible>(
-                    ui_tool_input(&t.id, &t.name, &args_val, true)
+                    ui_tool_input(&t.id, &t.name, &args_val, true, Some(tool_started))
                 );
                 let result = match crate::server::widgets::exec_chat_tool(
                     &http_client,
@@ -6299,7 +6496,7 @@ where
                     Err(msg) => serde_json::json!({ "isError": true, "error": msg }),
                 };
                 yield Ok::<_, std::convert::Infallible>(
-                    ui_tool_output(&t.id, &result, true)
+                    ui_tool_output(&t.id, &result, true, Some((tool_started, tool_now_ms())))
                 );
                 // Widget emit (D1/D6) with the REAL tool-call id.
                 if let Some(ev) = crate::sidecar::adapters::mcp_bridge::build_widget_event(
@@ -7316,6 +7513,10 @@ async fn route_acp_stream(
         // tool-output frame matches its part type.
         let mut tool_dynamic: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
+        // toolCallId -> when the call opened, so its closing frame can carry a
+        // real duration. Covers every tool row this turn emits, nested sub-steps
+        // and the synthetic Thinking/plan parts included.
+        let mut tool_clock = ToolClock::default();
         // toolCallId -> the opening `tool-input-available` frame, so an update
         // that carries arguments the opening frame did not have can correct it
         // in place. Kept until the call reaches a terminal status; separate from
@@ -7381,8 +7582,9 @@ async fn route_acp_stream(
                 if thought_open {
                     let tid = format!("{THOUGHT_ID}-{thought_seq}");
                     let done = serde_json::json!({ "done": true });
-                    emit!(ui_tool_output(&tid, &done, false));
-                    acc.tool_output(&tid, &done, false);
+                    let timing = tool_clock.finish(&tid);
+                    emit!(ui_tool_output(&tid, &done, false, timing));
+                    acc.tool_output(&tid, &done, false, timing);
                     thought_open = false;
                     thought_acc.clear();
                     thought_seq += 1;
@@ -7473,11 +7675,39 @@ async fn route_acp_stream(
             checkpoint_persist!();
             match event {
                 acp::AcpEvent::UserText(text) => {
-                    // A replayed USER message chunk (ACP `user_message_chunk`,
-                    // chiefly from a `session/load` history replay). Surface it as a
-                    // data part so the client can render prior user turns of a
-                    // resumed session, rather than dropping it (it must NOT join the
-                    // assistant `reply` buffer). No-op for empty chunks.
+                    // A USER message chunk (ACP `user_message_chunk`). Surfaced as a
+                    // data part rather than dropped, and kept OUT of the assistant
+                    // `reply` buffer. No-op for empty chunks.
+                    //
+                    // INERT FORWARD-PLUMBING — `data-ryu-acp-user` has NO consumer
+                    // anywhere in the repo (`git grep ryu-acp-user` returns only this
+                    // line), and there is no generic unknown-`data-*` fallback. Do
+                    // NOT "finish" it by adding a renderer without first fixing the
+                    // premise below; an audit already proposed exactly that and the
+                    // proposal was wrong on three counts:
+                    //
+                    //   1. The comment this replaces said the chunk comes "chiefly
+                    //      from a `session/load` history replay". It cannot.
+                    //      `load_acp_session` opens its own short-lived connection
+                    //      that sends `initialize` + `LoadSessionRequest` and reads
+                    //      the response; this arm lives on the LIVE prompt
+                    //      connection. So the only way it fires is an agent echoing
+                    //      the message the user just sent — which a renderer would
+                    //      DOUBLE on screen.
+                    //   2. Nothing calls the resume path anyway: the route
+                    //      `POST /api/agents/:id/sessions/:sid/load` has no caller in
+                    //      the desktop, core-client or TUI.
+                    //   3. `emit!` fans out to the live stream only — it never
+                    //      reaches the `PartsAccumulator`, so this cannot survive a
+                    //      reload. And that accumulator is the ASSISTANT row's parts
+                    //      array, so pushing a user turn into it would persist a user
+                    //      message as part of an assistant message.
+                    //
+                    // Before building any consumer: capture a live agent actually
+                    // sending `user_message_chunk` (the probe captures in
+                    // jobs/006aadd6/tmp/acp-probes/*.json show none do), and decide
+                    // echo-vs-replay from that evidence. If it never fires, delete
+                    // this arm and its `AcpEvent::UserText` plumbing instead.
                     if text.is_empty() {
                         continue;
                     }
@@ -7496,6 +7726,18 @@ async fn route_acp_stream(
                     // `reply` buffer so it is never persisted as an assistant
                     // message row. This is what stopped a fresh chat opening with
                     // the machine's whole skills list already in it.
+                    //
+                    // INERT FORWARD-PLUMBING, same as the user-echo above:
+                    // `data-ryu-acp-startup` has NO consumer (`git grep
+                    // ryu-acp-startup` returns only this line). The suppression half
+                    // shipped and works; the render half never did, so this content
+                    // is currently invisible rather than relocated. That is the
+                    // safer of the two states — rendering it as an ordinary message
+                    // bubble would recreate the exact bug the suppression fixed, and
+                    // the probe captures show no agent sending the
+                    // `_meta.piAcp.startupInfo` this reads. If a consumer is ever
+                    // built it must be collapsed agent chrome, not a bubble;
+                    // otherwise delete this arm and the `AcpEvent::Banner` plumbing.
                     if text.is_empty() {
                         continue;
                     }
@@ -7593,8 +7835,15 @@ async fn route_acp_stream(
                     thought_open = true;
                     let tid = format!("{THOUGHT_ID}-{thought_seq}");
                     let thought_input = serde_json::json!({ "thought": thought_acc });
-                    emit!(ui_tool_input(&tid, "Thinking", &thought_input, false));
-                    acc.tool_input(&tid, "Thinking", &thought_input, false);
+                    let started = tool_clock.start(&tid);
+                    emit!(ui_tool_input(
+                        &tid,
+                        "Thinking",
+                        &thought_input,
+                        false,
+                        Some(started)
+                    ));
+                    acc.tool_input(&tid, "Thinking", &thought_input, false, Some(started));
                 }
                 acp::AcpEvent::Plan(entries) => {
                     // Same as `Thought`: the todo checklist renders as it arrives.
@@ -7605,8 +7854,15 @@ async fn route_acp_stream(
                     // Full snapshot each time, same part id: the desktop's Todo
                     // checklist updates in place as entries change status.
                     let plan_input = serde_json::json!({ "todos": entries });
-                    emit!(ui_tool_input(PLAN_TOOL_ID, "TodoWrite", &plan_input, false));
-                    acc.tool_input(PLAN_TOOL_ID, "TodoWrite", &plan_input, false);
+                    let started = tool_clock.start(PLAN_TOOL_ID);
+                    emit!(ui_tool_input(
+                        PLAN_TOOL_ID,
+                        "TodoWrite",
+                        &plan_input,
+                        false,
+                        Some(started)
+                    ));
+                    acc.tool_input(PLAN_TOOL_ID, "TodoWrite", &plan_input, false, Some(started));
                 }
                 acp::AcpEvent::ToolCall {
                     id,
@@ -7656,8 +7912,15 @@ async fn route_acp_stream(
                             Err(e) => tracing::warn!("trace open_span failed: {e:#}"),
                         }
                     }
-                    emit!(ui_tool_input(&id, &tool_name, &emit_input, dynamic));
-                    acc.tool_input(&id, &tool_name, &input_value, dynamic);
+                    let started = tool_clock.start(&id);
+                    emit!(ui_tool_input(
+                        &id,
+                        &tool_name,
+                        &emit_input,
+                        dynamic,
+                        Some(started)
+                    ));
+                    acc.tool_input(&id, &tool_name, &input_value, dynamic, Some(started));
                 }
                 acp::AcpEvent::ToolResult {
                     id,
@@ -7689,8 +7952,17 @@ async fn route_acp_stream(
                             // move this way, and only for an agent that opens a
                             // call with no arguments at all.
                             if name == open.name && dynamic == open.dynamic {
-                                emit!(ui_tool_input(&id, &name, &emit_input, dynamic));
-                                acc.tool_input(&id, &name, &raw, dynamic);
+                                // `start` re-uses the opening stamp, so correcting
+                                // the arguments never restarts the call's clock.
+                                let started = tool_clock.start(&id);
+                                emit!(ui_tool_input(
+                                    &id,
+                                    &name,
+                                    &emit_input,
+                                    dynamic,
+                                    Some(started)
+                                ));
+                                acc.tool_input(&id, &name, &raw, dynamic, Some(started));
                                 open.input = raw;
                             } else {
                                 tracing::debug!(
@@ -7726,8 +7998,9 @@ async fn route_acp_stream(
                         "status": status,
                         "output": output.unwrap_or(Value::Null),
                     });
-                    emit!(ui_tool_output(&id, &payload, dynamic));
-                    acc.tool_output(&id, &payload, is_err);
+                    let timing = tool_clock.finish(&id);
+                    emit!(ui_tool_output(&id, &payload, dynamic, timing));
+                    acc.tool_output(&id, &payload, is_err, timing);
                 }
                 acp::AcpEvent::ToolSteps {
                     parent_id,
@@ -7774,8 +8047,15 @@ async fn route_acp_stream(
                         // see `steps_opened` above for why one-shot would be wrong.
                         let frame = (step.name, step.input);
                         if steps_opened.get(&child) != Some(&frame) {
-                            emit!(ui_tool_input(&child, &frame.0, &frame.1, step.dynamic));
-                            acc.tool_input(&child, &frame.0, &frame.1, step.dynamic);
+                            let started = tool_clock.start(&child);
+                            emit!(ui_tool_input(
+                                &child,
+                                &frame.0,
+                                &frame.1,
+                                step.dynamic,
+                                Some(started)
+                            ));
+                            acc.tool_input(&child, &frame.0, &frame.1, step.dynamic, Some(started));
                             steps_opened.insert(child.clone(), frame);
                         }
                         // Only a terminal step closes its row; a child pinned to a
@@ -7788,8 +8068,9 @@ async fn route_acp_stream(
                             "output": raw_step.get("output").cloned().unwrap_or(Value::Null),
                         });
                         // `dynamic` must match the opening frame (see `ui_tool_output`).
-                        emit!(ui_tool_output(&child, &payload, step.dynamic));
-                        acc.tool_output(&child, &payload, step.status != "completed");
+                        let timing = tool_clock.finish(&child);
+                        emit!(ui_tool_output(&child, &payload, step.dynamic, timing));
+                        acc.tool_output(&child, &payload, step.status != "completed", timing);
                     }
                     // The subagent's final answer, as a `<parent>:out` `TaskOutput`
                     // part. CORE mints this id, which is the only reason the
@@ -7810,14 +8091,19 @@ async fn route_acp_stream(
                             // the part), and duplicating a long final answer into the
                             // persisted `parts` blob would double the row for nothing.
                             let input = Value::Object(serde_json::Map::new());
-                            emit!(ui_tool_input(&child, "TaskOutput", &input, false));
-                            acc.tool_input(&child, "TaskOutput", &input, false);
+                            // Deliberately UNSTAMPED. This part is opened and closed
+                            // in the same breath, so any duration it carried would be
+                            // ~0ms — a measurement of Core's own serialization, not of
+                            // work the subagent did. It also represents an answer
+                            // rather than a call, and the message list suppresses it.
+                            emit!(ui_tool_input(&child, "TaskOutput", &input, false, None));
+                            acc.tool_input(&child, "TaskOutput", &input, false, None);
                             let payload = serde_json::json!({
                                 "status": "completed",
                                 "output": answer,
                             });
-                            emit!(ui_tool_output(&child, &payload, false));
-                            acc.tool_output(&child, &payload, false);
+                            emit!(ui_tool_output(&child, &payload, false, None));
+                            acc.tool_output(&child, &payload, false, None);
                         }
                     }
                 }
@@ -7886,6 +8172,31 @@ async fn route_acp_stream(
                     emit!(ui_data(
                         "ryu-acp-commands",
                         &serde_json::json!({ "commands": commands }),
+                    ));
+                }
+                acp::AcpEvent::AuthNeeded { agent_id, message } => {
+                    // The agent needs the user to log in again (an expired OAuth /
+                    // subscription token). A data part rather than an error frame:
+                    // the turn is recoverable, and the client can render the
+                    // agent's own advertised `authMethods` as a "Log in again"
+                    // action rather than a dead-end failure. The desktop already
+                    // owns the flow behind `POST /api/agents/:id/authenticate`.
+                    emit!(ui_data(
+                        "ryu-acp-auth-required",
+                        &serde_json::json!({ "agentId": agent_id, "message": message }),
+                    ));
+                }
+                acp::AcpEvent::ConfigOptions(options) => {
+                    // The agent re-published its session config options, either in
+                    // answer to `session/set_config_option` or unprompted. Forward
+                    // the full list so the composer's per-agent pickers replace
+                    // their cached set — this is how an option that only exists for
+                    // another option's VALUE (codex's reasoning effort, revealed
+                    // once a model that has one is picked) reaches the client at
+                    // all. Same replace-wholesale contract as `ryu-acp-commands`.
+                    emit!(ui_data(
+                        "ryu-acp-config-options",
+                        &serde_json::json!({ "configOptions": options }),
                     ));
                 }
                 acp::AcpEvent::Usage(u) => {
@@ -8075,8 +8386,9 @@ async fn route_acp_stream(
                     close_thought!();
                     if plan_open {
                         let plan_done = serde_json::json!({ "done": true });
-                        emit!(ui_tool_output(PLAN_TOOL_ID, &plan_done, false));
-                        acc.tool_output(PLAN_TOOL_ID, &plan_done, false);
+                        let plan_timing = tool_clock.finish(PLAN_TOOL_ID);
+                        emit!(ui_tool_output(PLAN_TOOL_ID, &plan_done, false, plan_timing));
+                        acc.tool_output(PLAN_TOOL_ID, &plan_done, false, plan_timing);
                     }
                     if text_open {
                         let tid = format!("{TEXT_ID}-{text_seq}");
@@ -8157,8 +8469,9 @@ async fn route_acp_stream(
         close_thought!();
         if plan_open {
             let plan_done = serde_json::json!({ "done": true });
-            emit!(ui_tool_output(PLAN_TOOL_ID, &plan_done, false));
-            acc.tool_output(PLAN_TOOL_ID, &plan_done, false);
+            let plan_timing = tool_clock.finish(PLAN_TOOL_ID);
+            emit!(ui_tool_output(PLAN_TOOL_ID, &plan_done, false, plan_timing));
+            acc.tool_output(PLAN_TOOL_ID, &plan_done, false, plan_timing);
         }
         if text_open {
             let tid = format!("{TEXT_ID}-{text_seq}");
@@ -8962,6 +9275,59 @@ mod tests {
         let prompt = build_acp_prompt(merged, None, "hi");
         assert!(prompt.starts_with("Just the memory block."));
         assert!(!prompt.contains("## Skill:"));
+    }
+
+    // ── Ryu docs pointer (standing preamble layer) ─────────────────────────────
+    // `route_chat_stream` merges `ryu_docs_hint()` once, before the plane branch,
+    // with the hint as the FIRST argument so it lands at the TAIL of the block.
+    // These lock that placement — a future layer merged in the wrong argument
+    // slot would push the hint above the user's own persona/memory/style, which
+    // is the failure this ordering exists to prevent.
+
+    #[test]
+    fn ryu_docs_hint_appends_after_user_configured_layers() {
+        let long_term_system =
+            Some("Your name is Ada.\n\nRemembered: the user likes tea.".to_owned());
+        let merged = merge_system_prompt(ryu_docs_hint_when(false), long_term_system)
+            .expect("the hint alone is enough to produce a block");
+        assert!(
+            merged.starts_with("Your name is Ada."),
+            "persona still leads the block: {merged}"
+        );
+        assert!(
+            merged.trim_end().ends_with("rather than inventing the answer."),
+            "the docs hint is last: {merged}"
+        );
+        assert!(merged.contains("https://docs.ryuhq.com/llms.txt"));
+
+        // Every layer merged AFTER this one prepends, so the hint stays at the tail.
+        let with_skills =
+            merge_system_prompt(Some(merged), Some("## Skill: Greeter".to_owned())).unwrap();
+        assert!(with_skills.starts_with("## Skill: Greeter"));
+        assert!(with_skills.trim_end().ends_with("rather than inventing the answer."));
+    }
+
+    #[test]
+    fn ryu_docs_hint_is_the_whole_block_when_nothing_else_is_configured() {
+        // No persona, no memory, no recall: the `(Some(e), None)` arm must keep the
+        // hint rather than collapsing it to `None`.
+        let merged = merge_system_prompt(ryu_docs_hint_when(false), None);
+        assert_eq!(merged.as_deref(), Some(RYU_DOCS_HINT));
+    }
+
+    #[test]
+    fn safe_mode_suppresses_the_ryu_docs_hint() {
+        assert!(
+            ryu_docs_hint_when(true).is_none(),
+            "safe mode ships a baseline turn with nothing extra in the prompt"
+        );
+        assert_eq!(ryu_docs_hint_when(false).as_deref(), Some(RYU_DOCS_HINT));
+        // And suppression must leave the rest of the block untouched.
+        let long_term_system = Some("Just the memory block.".to_owned());
+        assert_eq!(
+            merge_system_prompt(ryu_docs_hint_when(true), long_term_system.clone()),
+            long_term_system
+        );
     }
 
     // ── Output-style injection (docs/output-styles.md §5) ──────────────────────
@@ -10407,8 +10773,8 @@ mod tests {
     #[test]
     fn parts_tool_input_opens_static_vs_dynamic_shape() {
         let mut acc = PartsAccumulator::default();
-        acc.tool_input("call-a", "search", &serde_json::json!({ "q": "x" }), false);
-        acc.tool_input("call-b", "custom", &serde_json::json!({ "n": 1 }), true);
+        acc.tool_input("call-a", "search", &serde_json::json!({ "q": "x" }), false, None);
+        acc.tool_input("call-b", "custom", &serde_json::json!({ "n": 1 }), true, None);
 
         // Static tool → `tool-<name>` type, no `toolName` field.
         assert_eq!(acc.parts[0]["type"], serde_json::json!("tool-search"));
@@ -10432,12 +10798,14 @@ mod tests {
             "TodoWrite",
             &serde_json::json!({ "todos": [1] }),
             false,
+            None,
         );
         acc.tool_input(
             "plan",
             "TodoWrite",
             &serde_json::json!({ "todos": [1, 2] }),
             false,
+            None,
         );
         assert_eq!(acc.parts.len(), 1);
         assert_eq!(
@@ -10449,14 +10817,14 @@ mod tests {
     #[test]
     fn parts_tool_output_patches_matching_input_part() {
         let mut acc = PartsAccumulator::default();
-        acc.tool_input("call-a", "search", &serde_json::json!({}), false);
-        acc.tool_output("call-a", &serde_json::json!({ "hits": 3 }), false);
+        acc.tool_input("call-a", "search", &serde_json::json!({}), false, None);
+        acc.tool_output("call-a", &serde_json::json!({ "hits": 3 }), false, None);
         assert_eq!(acc.parts[0]["state"], serde_json::json!("output-available"));
         assert_eq!(acc.parts[0]["output"], serde_json::json!({ "hits": 3 }));
 
         // An error output flips the state to `output-error`.
-        acc.tool_input("call-b", "run", &serde_json::json!({}), false);
-        acc.tool_output("call-b", &serde_json::json!("boom"), true);
+        acc.tool_input("call-b", "run", &serde_json::json!({}), false, None);
+        acc.tool_output("call-b", &serde_json::json!("boom"), true, None);
         assert_eq!(acc.parts[1]["state"], serde_json::json!("output-error"));
     }
 
@@ -10465,8 +10833,186 @@ mod tests {
         // A bare output frame with no opened input part is not renderable and must
         // be dropped (no phantom part appears).
         let mut acc = PartsAccumulator::default();
-        acc.tool_output("orphan", &serde_json::json!({ "x": 1 }), false);
+        acc.tool_output("orphan", &serde_json::json!({ "x": 1 }), false, None);
         assert!(acc.is_empty(), "orphan output must not create a part");
+    }
+
+    #[test]
+    fn acp_config_options_part_matches_the_name_the_desktop_reads() {
+        // A CROSS-UNIT contract no compiler checks: Core names the part and the
+        // desktop matches that string literally
+        // (`part.type !== "data-ryu-acp-config-options"` in ChatPage). Renaming
+        // either side alone makes the composer's pickers quietly stop refreshing
+        // — no error, no failing build.
+        let options = serde_json::json!([
+            { "id": "effort", "name": "Reasoning effort", "value": "high" }
+        ]);
+        let frame = decode_frame(ui_data(
+            "ryu-acp-config-options",
+            &serde_json::json!({ "configOptions": options }),
+        ));
+        assert_eq!(frame["type"], serde_json::json!("data-ryu-acp-config-options"));
+        assert_eq!(frame["data"]["configOptions"][0]["id"], serde_json::json!("effort"));
+    }
+
+    // ── Per-tool-call timing ────────────────────────────────────────────────
+
+    /// Decode one `data: {json}\n\n` SSE frame back into its value.
+    fn decode_frame(bytes: Vec<u8>) -> Value {
+        let text = String::from_utf8(bytes).expect("frame is utf-8");
+        let body = text
+            .strip_prefix("data: ")
+            .and_then(|s| s.strip_suffix("\n\n"))
+            .expect("frame is a single SSE data line");
+        serde_json::from_str(body).expect("frame body is json")
+    }
+
+    #[test]
+    fn tool_timing_meta_carries_duration_only_once_closed() {
+        // Open: a start with no end, so a client can tick a live counter but has
+        // nothing to freeze on yet.
+        let open = tool_timing_meta(1_000, None);
+        assert_eq!(open["ryu"]["startedAt"], serde_json::json!(1_000));
+        assert!(open["ryu"].get("completedAt").is_none());
+        assert!(open["ryu"].get("durationMs").is_none());
+
+        // Closed: the pair PLUS the precomputed duration, so no consumer has to
+        // subtract two epoch stamps to render a number.
+        let closed = tool_timing_meta(1_000, Some(3_500));
+        assert_eq!(closed["ryu"]["startedAt"], serde_json::json!(1_000));
+        assert_eq!(closed["ryu"]["completedAt"], serde_json::json!(3_500));
+        assert_eq!(closed["ryu"]["durationMs"], serde_json::json!(2_500));
+    }
+
+    #[test]
+    fn tool_timing_meta_clamps_a_backwards_clock() {
+        // A wall clock can step backwards (NTP correction mid-call). A negative
+        // duration would render as garbage, so it floors at zero rather than
+        // propagating.
+        let closed = tool_timing_meta(5_000, Some(4_000));
+        assert_eq!(closed["ryu"]["durationMs"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn tool_clock_reuses_the_opening_stamp_across_reemits() {
+        // The load-bearing property: an ACP `tool_call_update` re-emits the
+        // opening frame to fill in late arguments, and a plan/thought snapshot
+        // re-emits on every chunk. If either restarted the clock, a long call
+        // would perpetually read as just-started — erasing exactly the wait this
+        // feature exists to show.
+        let mut clock = ToolClock::default();
+        let first = clock.start("call-a");
+        let second = clock.start("call-a");
+        assert_eq!(first, second, "re-emitting must not restart the clock");
+
+        let (started, completed) = clock.finish("call-a").expect("call was opened");
+        assert_eq!(started, first);
+        assert!(completed >= started, "completion cannot precede the start");
+
+        // Finishing consumes the entry, so a repeated terminal frame does not
+        // resurrect a second, wrong start.
+        assert!(clock.finish("call-a").is_none());
+    }
+
+    #[test]
+    fn tool_clock_finish_is_none_for_an_unopened_call() {
+        // A bare output frame with no matching input is not renderable anyway;
+        // it must not fabricate a zero-length duration.
+        let mut clock = ToolClock::default();
+        assert!(clock.finish("never-opened").is_none());
+    }
+
+    #[test]
+    fn tool_frames_carry_timing_under_the_ryu_provider_namespace() {
+        // `providerMetadata` is the sanctioned open channel: a bare extra key on
+        // the chunk would be stripped by the AI SDK's schema, and this one lands
+        // on the part as `callProviderMetadata`.
+        let input = decode_frame(ui_tool_input(
+            "call-a",
+            "Bash",
+            &serde_json::json!({ "command": "ls" }),
+            false,
+            Some(1_000),
+        ));
+        assert_eq!(
+            input["providerMetadata"]["ryu"]["startedAt"],
+            serde_json::json!(1_000)
+        );
+
+        let output = decode_frame(ui_tool_output(
+            "call-a",
+            &serde_json::json!({ "ok": true }),
+            false,
+            Some((1_000, 4_000)),
+        ));
+        // The closing frame REPEATS `startedAt` because the SDK replaces
+        // `callProviderMetadata` wholesale rather than merging it — contributing
+        // `completedAt` alone would drop the start.
+        assert_eq!(
+            output["providerMetadata"]["ryu"]["startedAt"],
+            serde_json::json!(1_000)
+        );
+        assert_eq!(
+            output["providerMetadata"]["ryu"]["durationMs"],
+            serde_json::json!(3_000)
+        );
+    }
+
+    #[test]
+    fn unstamped_tool_frames_are_byte_identical_to_before() {
+        // `None` must add no key at all, so an unstamped producer's wire format
+        // is unchanged.
+        let input = decode_frame(ui_tool_input(
+            "call-a",
+            "Bash",
+            &serde_json::json!({}),
+            false,
+            None,
+        ));
+        assert!(input.get("providerMetadata").is_none());
+
+        let output = decode_frame(ui_tool_output(
+            "call-a",
+            &serde_json::json!({}),
+            false,
+            None,
+        ));
+        assert!(output.get("providerMetadata").is_none());
+    }
+
+    #[test]
+    fn persisted_parts_carry_the_same_timing_as_the_wire_frames() {
+        // The whole point of the Core-side stamp: a reopened conversation must
+        // show the same duration the user watched live. If the accumulator
+        // dropped the metadata, timing would be visible during the turn and gone
+        // on reload — the exact failure this replaced.
+        let mut acc = PartsAccumulator::default();
+        acc.tool_input(
+            "call-a",
+            "Bash",
+            &serde_json::json!({ "command": "sleep 3" }),
+            false,
+            Some(1_000),
+        );
+        assert_eq!(
+            acc.parts[0]["callProviderMetadata"]["ryu"]["startedAt"],
+            serde_json::json!(1_000)
+        );
+
+        acc.tool_output(
+            "call-a",
+            &serde_json::json!({ "ok": true }),
+            false,
+            Some((1_000, 4_000)),
+        );
+        assert_eq!(
+            acc.parts[0]["callProviderMetadata"]["ryu"]["durationMs"],
+            serde_json::json!(3_000)
+        );
+        assert_eq!(
+            acc.parts[0]["callProviderMetadata"]["ryu"]["completedAt"],
+            serde_json::json!(4_000)
+        );
     }
 
     #[test]

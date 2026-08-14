@@ -233,7 +233,7 @@ function EgressRow({
 			set({
 				pending: null,
 				saved: null,
-				error: "Could not save that — the node still has the old setting.",
+				error: "Could not save that. The node still has the old setting.",
 			});
 			return;
 		}
@@ -321,7 +321,7 @@ function ToolsPlanPreview({
 		<div className="flex w-full flex-col gap-2 rounded-md border border-border bg-muted/40 p-3">
 			{plan.changes.length === 0 ? (
 				<p className="text-muted-foreground text-xs leading-snug">
-					Nothing to change — every agent that can take Ryu's tools already has
+					Nothing to change. Every agent that can take Ryu's tools already has
 					them.
 				</p>
 			) : (
@@ -424,9 +424,7 @@ export function AgentEgressSection({ target }: { target: ApiTarget }) {
 		const ok = await applyToolBridgePlan(target, plan).catch(() => false);
 		setBusy(false);
 		if (!ok) {
-			setPlanError(
-				"Could not save that — the node still has the old settings."
-			);
+			setPlanError("Could not save that. The node still has the old settings.");
 			return;
 		}
 		setApplied(plan.changes.length);
@@ -446,7 +444,7 @@ export function AgentEgressSection({ target }: { target: ApiTarget }) {
 		? `Tools: ${view.toolsOnCount} have Ryu's tools · ${view.toolsOffCount} do not · ${view.toolsOtherCount} not applicable. ` +
 			`Model traffic: ${view.governedCount} through the gateway · ${view.bestEffortCount} pointed at it · ${view.directCount} straight to the provider · ${view.otherCount} local or unknown. ` +
 			"Only calls that reach the gateway are filtered by the rules above, counted against your spending limits, or recorded in the activity log. " +
-			"These are the only two layers shown here — command approval above is node-wide, and plugin hooks are a separate layer again."
+			"These are the only two layers shown here. Command approval above is node-wide, and plugin hooks are a separate layer again."
 		: "What each agent can reach: Ryu's tools, and whether its model calls pass through this gateway.";
 
 	return (
@@ -461,7 +459,7 @@ export function AgentEgressSection({ target }: { target: ApiTarget }) {
 			) : null}
 			{query.isError ? (
 				<p className="px-3.5 text-muted-foreground text-sm">
-					Could not read this node's agent settings, so nothing is shown here —
+					Could not read this node's agent settings, so nothing is shown here.
 					an empty list would read as "no agents are ungoverned".
 				</p>
 			) : null}

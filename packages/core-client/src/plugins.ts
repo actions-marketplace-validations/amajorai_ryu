@@ -206,7 +206,21 @@ export type DependencyError =
 			reason: string;
 	  }
 	| { code: "cycle"; cycle: string[] }
-	| { code: "blocked_by_dependents"; plugin: string; dependents: string[] };
+	| { code: "blocked_by_dependents"; plugin: string; dependents: string[] }
+	| {
+			/** An UPDATE was refused because it would break an installed dependent.
+			 *  The reverse of `version_mismatch`: the offending version is NOT
+			 *  installed yet, so it is reported as `incoming`, never `installed`. */
+			code: "dependent_version_mismatch";
+			/** The installed dependent that would be left broken. */
+			plugin: string;
+			/** The plugin being updated. */
+			dependency: string;
+			/** The requirement `plugin` declares, as written. */
+			required: string;
+			/** The version `dependency` would be moved to. */
+			incoming: string;
+	  };
 
 /** Structured error from enable/disable — used to surface Gateway denial,
  *  unreachability, or an unsatisfiable dependency graph via the UI without
@@ -250,6 +264,8 @@ export function describeDependencyError(
 		}
 		case "version_mismatch":
 			return `${displayName(err.plugin)} needs ${displayName(err.dependency)} ${err.required} or newer, but ${err.installed} is installed. Update it first.`;
+		case "dependent_version_mismatch":
+			return `Updating ${displayName(err.dependency)} to ${err.incoming} would break ${displayName(err.plugin)}, which needs ${err.required}. Update ${displayName(err.plugin)} first, or force the update.`;
 		case "invalid_version_req":
 			return `${displayName(err.plugin)} declares an invalid version requirement for ${displayName(err.dependency)} ("${err.requirement}"): ${err.reason}.`;
 		case "cycle":

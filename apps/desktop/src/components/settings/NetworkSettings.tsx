@@ -112,7 +112,7 @@ export function NetworkSettings() {
 				description: enabled
 					? status.reachable
 						? "This node is now on the tailnet."
-						: "The mesh daemon is starting — it may need to finish connecting."
+						: "The mesh daemon is starting; it may need to finish connecting."
 					: "This node has left the tailnet.",
 			});
 		} catch (e) {
@@ -157,7 +157,7 @@ export function NetworkSettings() {
 
 	return (
 		<SettingsSection
-			caption="Join this node to a tailnet so it can reach — and be reached by — other Ryu nodes. Uses the official tailscale + tailscaled client in userspace networking mode (no admin rights); Ryu installs it for you if this machine doesn't have it. Pick the control plane (Headscale or Tailscale) from Tunnel in the node menu."
+			caption="Join this node to a tailnet so it can reach other Ryu nodes and be reached by them. Uses the official tailscale + tailscaled client in userspace networking mode (no admin rights); Ryu installs it for you if this machine doesn't have it. Pick the control plane (Headscale or Tailscale) from Tunnel in the node menu."
 			title="Mesh (Tailscale / Headscale)"
 		>
 			<SettingsGroup>
@@ -180,7 +180,7 @@ export function NetworkSettings() {
 								? meshStatus.magicDnsName
 									? `Reachable on the tailnet as ${meshStatus.magicDnsName}.`
 									: "Reachable on the tailnet."
-								: "Enabled but not connected yet — the daemon may still be starting, or the official Tailscale client is missing or not logged in."
+								: "Enabled but not connected yet. The daemon may still be starting, or the official Tailscale client is missing or not logged in."
 						}
 						title="Status"
 					/>
@@ -322,7 +322,7 @@ export function ManagedInferenceSettings() {
 
 	return (
 		<SettingsSection
-			caption="Use the Ryu (managed) provider — included with your plan — on this self-hosted node. Requests for it go to the hosted gateway fleet and are billed to your organization's credits; every provider you supply your own key for keeps using this node's gateway."
+			caption="Use the Ryu (managed) provider, included with your plan, on this self-hosted node. Requests for it go to the hosted gateway fleet and are billed to your organization's credits; every provider you supply your own key for keeps using this node's gateway."
 			title="Managed inference"
 		>
 			<SettingsGroup>
@@ -361,8 +361,8 @@ export function ManagedInferenceSettings() {
 					    the key for exactly this copy-paste. */}
 					<p className="text-muted-foreground text-xs">
 						Your organization&apos;s Gateway keys page shows the fleet URL and
-						issues the token — copy both from there. The token is shown once,
-						and revoking it there immediately stops this node spending credits.
+						issues the token. Copy both from there. The token is shown once, and
+						revoking it there immediately stops this node spending credits.
 						Leave both fields empty to use only this node&apos;s own gateway.
 					</p>
 				</SettingsItem>

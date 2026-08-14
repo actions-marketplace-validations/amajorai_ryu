@@ -51,7 +51,7 @@ import {
 } from "@/src/components/layout/SeasonalEffects.tsx";
 import {
 	setAgentRowStyle,
-	useAgentRowStyle,
+	useAgentRowStylePref,
 } from "@/src/hooks/useAgentRowStyle.ts";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
 import {
@@ -92,7 +92,12 @@ import {
 	usePreviewSeasonalTheme,
 	useSeasonalThemeSetting,
 } from "@/src/hooks/useSeasonalEffects.ts";
-import { useSidebarMode } from "@/src/hooks/useSidebarMode.ts";
+import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
+import {
+	type SidebarMode,
+	useSidebarMode,
+} from "@/src/hooks/useSidebarMode.ts";
+import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import {
 	applyCustomTokensLive,
@@ -1008,7 +1013,7 @@ function SeasonalEffectsSettings() {
 							onCheckedChange={setSeasonalEffects}
 						/>
 					}
-					description="Drift festive particles down the titlebar around holidays — snow in December, confetti on New Year's Eve, pumpkins through October. Requires “Enable animations” to be on, and never runs while your system asks for reduced motion."
+					description="Drift festive particles down the titlebar around holidays: snow in December, confetti on New Year's Eve, pumpkins through October. Requires “Enable animations” to be on, and never runs while your system asks for reduced motion."
 					title="Seasonal effects"
 				/>
 				<SettingsItem
@@ -1047,7 +1052,7 @@ function SeasonalEffectsSettings() {
 							</Button>
 						</div>
 					}
-					description="Automatic follows the calendar. Pin a season to keep it running all year. Preview shows the selected season in the titlebar for a few seconds — it works even while the switch above is off."
+					description="Automatic follows the calendar. Pin a season to keep it running all year. Preview shows the selected season in the titlebar for a few seconds. It works even while the switch above is off."
 					title="Season"
 				/>
 			</SettingsGroup>
@@ -1068,7 +1073,16 @@ export function AppearanceTab() {
 	const invertedBackgroundsEnabled = useInvertedBackgrounds();
 	const [friendlyNames, setFriendlyNames] = useFriendlyMode();
 	const [groupChatsByDate, setGroupChatsByDate] = useChatDateGrouping();
-	const agentRowStyle = useAgentRowStyle();
+	const [sidebarGroupedNav, setSidebarGroupedNav] = useSidebarGroupedNav();
+	// The STORED choice, not the drawn one: Agent mode forces messaging rows, and a
+	// switch that flipped itself on when the user picked a sidebar mode would have
+	// nothing left to restore when they left it.
+	const agentRowStyle = useAgentRowStylePref();
+	// Only the contributed half: the three built-in modes have their own switches
+	// above, worded for what they actually do.
+	const contributedModes = useSidebarModes().modes.filter((m) =>
+		m.key.startsWith("plugin:")
+	);
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
 	const [sidebarOverflowPopover, setSidebarOverflowPopover] =
@@ -1619,8 +1633,8 @@ export function AppearanceTab() {
 							value={scaleValue}
 						/>
 						<p className="text-muted-foreground text-xs">
-							Scales the whole interface like a browser zoom — text, spacing,
-							and everything else. 100% is the default.
+							Scales the whole interface like a browser zoom: text, spacing, and
+							everything else. 100% is the default.
 						</p>
 					</div>
 
@@ -1683,7 +1697,7 @@ export function AppearanceTab() {
 			<BackgroundCustomizationSettings />
 
 			<SettingsSection
-				caption="Customize the fonts used across the interface."
+				caption="Fonts for the interface and for code."
 				title="Typography"
 			>
 				<SettingsGroup>
@@ -1765,7 +1779,7 @@ export function AppearanceTab() {
 								onCheckedChange={setAnimationsEnabled}
 							/>
 						}
-						description="Master switch for in-app animations. Turn off for a fully static interface. Your system “reduce motion” setting always overrides this and disables animations regardless."
+						description="Master switch for in-app animations. Turn off for a fully static interface. Your system “reduce motion” setting always overrides this."
 						title="Enable animations"
 					/>
 					<SettingsItem
@@ -1803,7 +1817,7 @@ export function AppearanceTab() {
 						// deliberate choice rather than a mystery, and the last sentence is
 						// there because the setting reaches installed apps and plugins too —
 						// a user who sees a plugin change wording should know why.
-						description="Use everyday wording across the app instead of technical terms. Model and skill names read as plain names rather than raw strings like “gemma-4-E2B-it-GGUF”, and options are named for what they do — a space's retrieval mode reads “Quick search” and “Connected search” rather than “Vector” and “Graph”. Installed apps and plugins follow this too. Turn it off to see the exact technical names everywhere."
+						description="Use everyday wording across the app instead of technical terms. Model and skill names read as plain names rather than raw strings like “gemma-4-E2B-it-GGUF”, and options are named for what they do: a space's retrieval mode reads “Quick search” and “Connected search” rather than “Vector” and “Graph”. Installed apps and plugins follow this too. Turn it off to see the exact technical names everywhere."
 						title="Friendly names"
 					/>
 					<SettingsItem
@@ -1866,13 +1880,62 @@ export function AppearanceTab() {
 					<SettingsItem
 						actions={
 							<Switch
+								checked={sidebarMode === "agent"}
+								id="sidebar-agent-mode-toggle"
+								onCheckedChange={(checked) =>
+									setSidebarMode(checked ? "agent" : "sections")
+								}
+							/>
+						}
+						description="Narrow the sidebar to one toggle — Sessions ⇄ Agents — opening on the agent roster, with messaging-style agent rows on. Every other section stays reachable from Customize and the command palette. Turn off to go back to the full section list."
+						title="Agent mode"
+					/>
+					{/* App-registered modes (`contributes.sidebar_modes`). Rendered from the
+					    same list the sidebar's own menu offers, so the two cannot disagree
+					    about which contributed modes are real. Inert until an enabled app
+					    ships one. */}
+					{contributedModes.map((mode) => (
+						<SettingsItem
+							actions={
+								<Switch
+									checked={sidebarMode === mode.key}
+									id={`sidebar-mode-${mode.key}`}
+									onCheckedChange={(checked) =>
+										setSidebarMode(
+											checked ? (mode.key as SidebarMode) : "sections"
+										)
+									}
+								/>
+							}
+							description={
+								mode.description ??
+								`Arrange the sidebar as ${mode.title}, offering ${mode.sections?.length ?? 0} section(s) as tabs. Turn off to go back to the full section list.`
+							}
+							key={mode.key}
+							title={mode.title}
+						/>
+					))}
+					<SettingsItem
+						actions={
+							<Switch
 								checked={groupChatsByDate}
 								id="group-chats-by-date-toggle"
 								onCheckedChange={setGroupChatsByDate}
 							/>
 						}
-						description="Group the sidebar's Chats into Today, Yesterday, Last week, and older buckets (like ChatGPT), each collapsible and reorderable under the Chats heading. Turn off for one flat list."
-						title="Group chats by date"
+						description="Group the sidebar's Chats into Today, Yesterday, Last week, and older buckets (like ChatGPT), each collapsible and reorderable. Applies to every timestamped sidebar list — Chats, a project's chats, a space's pages and files, and app-registered sections. Turn off for flat lists."
+						title="Group lists by date"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={sidebarGroupedNav}
+								id="sidebar-grouped-nav-toggle"
+								onCheckedChange={setSidebarGroupedNav}
+							/>
+						}
+						description="Collapse the Projects and Spaces sections into one picker each, instead of a row per project and per space. “All projects” lists every chat across your projects, “All spaces” every page, database and file across your spaces, and picking one narrows the list to it. Turn off to list every project and space as its own expandable row."
+						title="Projects & Spaces as pickers"
 					/>
 					<SettingsItem
 						actions={
@@ -1897,7 +1960,11 @@ export function AppearanceTab() {
 								}
 							/>
 						}
-						description="Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Turn off for the compact single-line row."
+						description={
+							sidebarMode === "agent"
+								? "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Agent mode is drawing these rows regardless; this switch is what you return to when you leave it."
+								: "Draw each agent in the sidebar the way a messaging app does: a large round avatar spanning two lines, the agent's name and the time of its last message on the first, and a preview of that message below. Turn off for the compact single-line row."
+						}
 						title="Messaging-style agent rows"
 					/>
 					<SettingsItem
@@ -1924,7 +1991,7 @@ export function AppearanceTab() {
 								step={toolDetailStep}
 							/>
 						}
-						description="How much of each reply the chat shows. None hides tool calls and file edits entirely, leaving a plain messaging view — failed steps still show, so nothing fails silently. Compact keeps every tool call collapsed to a row and caps long code blocks; Minimal opens file diffs but keeps command output and code capped; Detailed expands diffs, output and code blocks and lists every call individually. Fine-tune the pieces under Advanced."
+						description="How much of each reply the chat shows. None hides tool calls and file edits entirely, leaving a plain messaging view. Failed steps still show. Compact keeps every tool call collapsed to a row and caps long code blocks; Minimal opens file diffs but keeps command output and code capped; Detailed expands diffs, output and code blocks and lists every call individually. Fine-tune the pieces under Advanced."
 						title="Detail level"
 					/>
 				</SettingsGroup>
@@ -2050,7 +2117,7 @@ export function AppearanceTab() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Control the subscription usage meters shown for agents like Claude Code and Codex — beside the composer and, optionally, next to each agent in the sidebar."
+				caption="Subscription usage meters for agents like Claude Code and Codex, shown beside the composer and, optionally, next to each agent in the sidebar."
 				title="Usage meter"
 			>
 				<SettingsGroup>

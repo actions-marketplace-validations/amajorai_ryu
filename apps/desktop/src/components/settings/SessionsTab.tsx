@@ -54,7 +54,7 @@ export function SessionsTab() {
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption="Manage where you're signed in."
+				caption="Every device signed in to your account. Revoke any you don't recognize."
 				headerAction={
 					sessions.length > 1 &&
 					(confirmRevokeAll ? (

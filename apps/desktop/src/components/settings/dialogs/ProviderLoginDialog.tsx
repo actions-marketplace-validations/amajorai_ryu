@@ -66,6 +66,35 @@ export function ProviderLoginDialog({
 	providerLabel,
 }: ProviderLoginDialogProps) {
 	const activeNode = useActiveNode();
+	// The flow-owning effect below reads the node's CREDENTIAL through a ref and
+	// depends only on its URL. Depending on the token — as an object OR as a
+	// string — cannot work here, and depending on the string was the mistake this
+	// comment used to defend.
+	//
+	// `useNodeStore` refreshes cloud tokens on every window `focus`, and
+	// `refreshCloudTokens` -> `fetchManagedNodes()` asks the control plane to MINT
+	// a user JWT per call. better-auth stamps a fresh `iat`/`exp` every time and
+	// caches nothing, so each fetch yields a different token STRING, which
+	// `decorateLocal` then writes into the active node. This flow deliberately
+	// sends the user to the system browser, so a focus round-trip is guaranteed:
+	// for anyone on a managed node, coming back from the consent screen changed
+	// the token, re-ran the effect, and its cleanup killed the OAuth child the
+	// user had just authorized — the exact abort, on the exact path, that the
+	// object dependency caused.
+	//
+	// The URL is what identifies the target and it does not churn on refresh, so
+	// it stays a real dependency: pointing the dialog at a different node SHOULD
+	// restart the flow. The token is only ever needed at call time, and a ref
+	// hands each call the freshest one — which matters, because the credential
+	// the cleanup cancels with must not be the expired one from 15 minutes ago.
+	const nodeUrl = activeNode.url;
+	const nodeToken = activeNode.token ?? null;
+	const tokenRef = useRef(nodeToken);
+	// Declared BEFORE the flow effect so React runs it first in every commit,
+	// leaving the ref current by the time `run()` reads it.
+	useEffect(() => {
+		tokenRef.current = nodeToken;
+	}, [nodeToken]);
 	const [sessionId, setSessionId] = useState<string | null>(null);
 	const [authUrl, setAuthUrl] = useState<string | null>(null);
 	const [instructions, setInstructions] = useState<string | null>(null);
@@ -143,12 +172,24 @@ export function ProviderLoginDialog({
 	// One flow per opening of the dialog. Closing aborts the stream AND cancels
 	// the flow server-side — these providers bind fixed localhost callback ports,
 	// so a flow left running would make the next attempt fail to bind.
+	//
+	// This effect OWNS a subprocess lifecycle, so its dependency list is a
+	// correctness surface, not a lint detail: every re-run tears down a live
+	// login. `applyEvent` is intentionally absent — it is a `useCallback` over
+	// `onSuccess` (itself a stable `useCallback`) and a string, so it never
+	// changes in practice, and listing it would put a render-identity value in
+	// charge of whether the user's sign-in survives.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: re-running this effect kills the in-flight OAuth child; `applyEvent` is stable by construction, and the node token is read through `tokenRef` on purpose (see above).
 	useEffect(() => {
 		if (!open) {
 			return;
 		}
 		const controller = new AbortController();
 		let cancelled = false;
+		// Resolved per call, not once: the token is whatever the last cloud
+		// refresh left in the ref, which is the only one the node will still
+		// accept. The url is the effect's real dependency.
+		const target = () => toTarget({ token: tokenRef.current, url: nodeUrl });
 
 		const run = async () => {
 			setAuthUrl(null);
@@ -159,13 +200,10 @@ export function ProviderLoginDialog({
 			setError(null);
 			setDone(false);
 			try {
-				const started = await startProviderLogin(
-					toTarget(activeNode),
-					providerId
-				);
+				const started = await startProviderLogin(target(), providerId);
 				if (cancelled) {
 					// Raced the dialog closing — do not leave the flow running.
-					cancelProviderLogin(toTarget(activeNode), started.sessionId).catch(
+					cancelProviderLogin(target(), started.sessionId).catch(
 						() => undefined
 					);
 					return;
@@ -174,7 +212,7 @@ export function ProviderLoginDialog({
 				setSessionId(started.sessionId);
 				setStatus(null);
 				for await (const message of openProviderLoginStream(
-					toTarget(activeNode),
+					target(),
 					started.sessionId,
 					controller.signal
 				)) {
@@ -196,10 +234,10 @@ export function ProviderLoginDialog({
 			const id = sessionRef.current;
 			sessionRef.current = null;
 			if (id) {
-				cancelProviderLogin(toTarget(activeNode), id).catch(() => undefined);
+				cancelProviderLogin(target(), id).catch(() => undefined);
 			}
 		};
-	}, [open, providerId, activeNode, applyEvent]);
+	}, [open, providerId, nodeUrl]);
 
 	const submitAnswer = async () => {
 		if (!(prompt && sessionId)) {
@@ -230,15 +268,31 @@ export function ProviderLoginDialog({
 
 	const selectOptions = prompt?.prompt.options ?? [];
 	const isSelect = prompt?.prompt.type === "select" && selectOptions.length > 0;
+	const settled = done || error !== null;
+
+	// Base UI's `Dialog.Root` dismisses on backdrop click and on Escape, and
+	// dismissal here does not merely hide a panel: it runs the effect cleanup,
+	// which kills the OAuth child and drops its callback port. The gesture that
+	// triggers it is the ordinary one for re-focusing the app window after the
+	// browser — precisely what this flow asks the user to do — so an accidental
+	// click was enough to abort a sign-in that had already been authorized.
+	// Only a settled flow closes itself; until then the Cancel button below is
+	// the deliberate way out, and it stays wired straight to `onOpenChange` so a
+	// wedged flow can never trap the user.
+	const handleOpenChange = (next: boolean) => {
+		if (next || settled) {
+			onOpenChange(next);
+		}
+	};
 
 	return (
-		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent className="sm:max-w-lg">
+		<Dialog onOpenChange={handleOpenChange} open={open}>
+			<DialogContent className="sm:max-w-lg" showCloseButton={settled}>
 				<DialogHeader>
 					<DialogTitle>Sign in to {providerLabel}</DialogTitle>
 					<DialogDescription>
-						Authorize Ryu in your browser. The window stays open until it
-						finishes — closing it cancels the sign-in.
+						Authorize Ryu in your browser, then come back here. This window
+						stays open until the sign-in finishes — use Cancel to stop it.
 					</DialogDescription>
 				</DialogHeader>
 

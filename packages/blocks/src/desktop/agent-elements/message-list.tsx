@@ -28,6 +28,10 @@ import {
 	type ImageGenerationStatus,
 } from "@ryu/ui/components/motion/image-generation.tsx";
 import {
+	VideoGeneration,
+	type VideoGenerationStatus,
+} from "@ryu/ui/components/motion/video-generation.tsx";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
@@ -59,6 +63,7 @@ import {
 	memo,
 	useCallback,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -80,6 +85,8 @@ import { FloatingDateHeader } from "./floating-date-header.tsx";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
 import { CitationSources } from "./inline-citation.tsx";
 import { Markdown } from "./markdown.tsx";
+import { isServerAssignedMessageId } from "./message-reaction-id.ts";
+import type { MessageReactionBucket } from "./message-reactions.tsx";
 import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
 import { shouldShowPlanning } from "./planning-visibility.ts";
@@ -231,6 +238,20 @@ export interface MessageListProps {
 	 */
 	onRegenerateMessage?: (messageId: string) => void;
 	/**
+	 * Re-run a failed inline media generation. Called with the assistant message
+	 * holding the failed part, which of the two media surfaces it is, and the
+	 * prompt that produced it — everything the producer needs to rewrite that same
+	 * message in place. Distinct from `onRegenerateMessage`, which branches a
+	 * PERSISTED turn server-side: these generation parts are client-only, so there
+	 * is no server message to branch from. Without it, a failed generation shows
+	 * no Retry.
+	 */
+	onRetryGeneration?: (
+		messageId: string,
+		kind: "image" | "video",
+		prompt: string
+	) => void;
+	/**
 	 * Switch the active version at a branch point. When a message has more than one
 	 * version (see `versions`), a `< n / m >` pager renders; stepping it calls this
 	 * with the target version's message id.
@@ -242,6 +263,19 @@ export interface MessageListProps {
 	 * this with the turn's combined text. When omitted, no speak button is shown.
 	 */
 	onSpeak?: (text: string) => void;
+	/**
+	 * Toggle an emoji reaction on a message. When provided, each user message
+	 * grows a reaction chip row and an "add reaction" picker; without it the whole
+	 * feature is absent, which is how surfaces that have no realtime room (the
+	 * island, the storyboard) opt out.
+	 */
+	onToggleReaction?: (messageId: string, emoji: string) => void;
+	/**
+	 * Reaction buckets keyed by message id, in Core's first-reaction order.
+	 * Ordering is preserved rather than re-sorted so a chip row does not reshuffle
+	 * under the reader's cursor as counts change.
+	 */
+	reactionsByMessage?: ReadonlyMap<string, readonly MessageReactionBucket[]>;
 	showCopyToolbar?: boolean;
 	slots?: {
 		UserMessage?: React.ComponentType<{
@@ -492,12 +526,16 @@ function getImageGenerationPart(part: unknown): ImageGenerationPartData | null {
  * describing work that never happened here.
  */
 function AssistantGeneratedImage({
+	onRetry,
 	prompt,
 	showStatus,
 	status,
 	statusText,
 	url,
-}: ImageGenerationPartData & { showStatus: boolean }) {
+}: ImageGenerationPartData & {
+	onRetry?: () => void;
+	showStatus: boolean;
+}) {
 	const [size, setSize] = useState<{ height: number; width: number } | null>(
 		null
 	);
@@ -525,6 +563,7 @@ function AssistantGeneratedImage({
 			<ImageGeneration
 				aspectRatio={size ? `${size.width} / ${size.height}` : "1 / 1"}
 				mediaClassName="[&>*]:object-contain [&_img]:object-contain"
+				onRetry={onRetry}
 				prompt={prompt}
 				// Only ever the image's real dimensions — nothing is claimed before
 				// the engine has actually produced something.
@@ -546,10 +585,185 @@ function AssistantGeneratedImage({
 	);
 }
 
+const VIDEO_GENERATION_STATUSES = new Set<VideoGenerationStatus>([
+	"queued",
+	"generating",
+	"rendering",
+	"complete",
+	"error",
+]);
+
+export interface VideoGenerationPartData {
+	/** A still to hold the frame while the clip buffers, when the engine gave one. */
+	poster?: string;
+	/** The prompt that produced it, shown under the frame. */
+	prompt?: string;
+	/** Where the generation is: `generating` while Core is working, then
+	 *  `complete` (with `url`) or `error` (with `statusText` = the reason). */
+	status: VideoGenerationStatus;
+	/** Overrides the component's stock status line — used to surface the engine's
+	 *  own error text instead of a generic "Generation failed". */
+	statusText?: string;
+	/** The finished clip, once there is one. */
+	url?: string;
+}
+
 /**
- * A NON-image assistant `file` part (audio, or any other mime), resolved to a
- * playable/downloadable url + its media type. Images are handled separately by
- * {@link getAssistantImageUrl}; this covers the rest so inline audio (and other
+ * A client-only video-generation part — the video twin of
+ * {@link getImageGenerationPart}, produced by ChatPage's handleGenerateVideo in
+ * this exact shape. Same contract, same in-place rewrite when the engine
+ * answers.
+ */
+function getVideoGenerationPart(part: unknown): VideoGenerationPartData | null {
+	if (!isRecord(part) || part.type !== "data-video-generation") {
+		return null;
+	}
+	const data = isRecord(part.data) ? part.data : {};
+	const status =
+		typeof data.status === "string" &&
+		VIDEO_GENERATION_STATUSES.has(data.status as VideoGenerationStatus)
+			? (data.status as VideoGenerationStatus)
+			: "generating";
+	return {
+		poster: typeof data.poster === "string" ? data.poster : undefined,
+		prompt: typeof data.prompt === "string" ? data.prompt : undefined,
+		status,
+		statusText:
+			typeof data.statusText === "string" ? data.statusText : undefined,
+		url: typeof data.url === "string" ? data.url : undefined,
+	};
+}
+
+const SECONDS_PER_MINUTE = 60;
+
+/** `4.2` → `"0:04"`. Only ever called with a duration the element reported. */
+function formatClipDuration(seconds: number): string {
+	const whole = Math.round(seconds);
+	const minutes = Math.floor(whole / SECONDS_PER_MINUTE);
+	const rest = whole % SECONDS_PER_MINUTE;
+	return `${minutes}:${rest.toString().padStart(2, "0")}`;
+}
+
+/**
+ * The one inline surface for a generated video, in both its pending and its
+ * finished state — the twin of {@link AssistantGeneratedImage}. The frame is
+ * 16/9 until the clip reports its own dimensions on `loadedmetadata`, which is
+ * also where the duration badge comes from; nothing is claimed before the
+ * element has actually measured the media.
+ *
+ * `showStatus` is off for clips that merely *arrive* as `file` parts, exactly as
+ * for images: same frame, no status line describing work that never happened.
+ */
+function AssistantGeneratedVideo({
+	onRetry,
+	poster,
+	prompt,
+	showStatus,
+	status,
+	statusText,
+	url,
+}: VideoGenerationPartData & {
+	onRetry?: () => void;
+	showStatus: boolean;
+}) {
+	const [meta, setMeta] = useState<{
+		duration: number;
+		height: number;
+		width: number;
+	} | null>(null);
+
+	const handleLoadedMetadata = useCallback(
+		(event: React.SyntheticEvent<HTMLVideoElement>) => {
+			const { duration, videoHeight, videoWidth } = event.currentTarget;
+			if (videoWidth > 0 && videoHeight > 0) {
+				setMeta({
+					duration: Number.isFinite(duration) ? duration : 0,
+					height: videoHeight,
+					width: videoWidth,
+				});
+			}
+		},
+		[]
+	);
+
+	// Same budget as the image frame: a portrait clip narrows rather than growing
+	// tall, so BOTH edges stay within the transcript's 360px allowance.
+	const maxWidth =
+		meta && meta.height > meta.width
+			? Math.round(MAX_IMAGE_EDGE * (meta.width / meta.height))
+			: MAX_IMAGE_EDGE;
+
+	return (
+		<div className="w-full" style={{ maxWidth }}>
+			<VideoGeneration
+				aspectRatio={meta ? `${meta.width} / ${meta.height}` : "16 / 9"}
+				duration={
+					meta && meta.duration > 0
+						? formatClipDuration(meta.duration)
+						: undefined
+				}
+				mediaClassName="[&>*]:object-contain [&_video]:object-contain"
+				onRetry={onRetry}
+				poster={poster}
+				prompt={prompt}
+				showStatus={showStatus}
+				size="fluid"
+				status={status}
+				statusText={statusText}
+			>
+				{url ? (
+					// biome-ignore lint/a11y/useMediaCaption: a generated clip has no caption track
+					<video
+						aria-label={prompt ?? "Generated video"}
+						controls
+						onLoadedMetadata={handleLoadedMetadata}
+						playsInline
+						poster={poster}
+						preload="metadata"
+						src={url}
+					>
+						<a href={url}>Download video</a>
+					</video>
+				) : null}
+			</VideoGeneration>
+		</div>
+	);
+}
+
+/**
+ * An assistant video part — the `file`-part twin of {@link getAssistantImageUrl},
+ * so a clip that merely arrives (streamed by Core, or the extra clips of a
+ * multi-clip generation) gets the same reserved frame and a real player instead
+ * of a download link.
+ */
+function getAssistantVideoUrl(part: unknown): string | null {
+	if (!isRecord(part) || part.type !== "file") {
+		return null;
+	}
+	const filePart = part as {
+		mediaType?: string;
+		mimeType?: string;
+		url?: string;
+		data?: string;
+	};
+	const media = filePart.mediaType ?? filePart.mimeType;
+	if (!media?.startsWith("video/")) {
+		return null;
+	}
+	if (filePart.url) {
+		return filePart.url;
+	}
+	if (filePart.data) {
+		return `data:${media};base64,${filePart.data}`;
+	}
+	return null;
+}
+
+/**
+ * A NON-image, NON-video assistant `file` part (audio, or any other mime),
+ * resolved to a playable/downloadable url + its media type. Images and videos
+ * are handled separately by {@link getAssistantImageUrl} and
+ * {@link getAssistantVideoUrl}; this covers the rest so inline audio (and other
  * attachments Core streams) isn't silently dropped.
  */
 function getAssistantFileMeta(
@@ -565,7 +779,7 @@ function getAssistantFileMeta(
 		data?: string;
 	};
 	const media = filePart.mediaType ?? filePart.mimeType;
-	if (!media || media.startsWith("image/")) {
+	if (!media || media.startsWith("image/") || media.startsWith("video/")) {
 		return null;
 	}
 	if (filePart.url) {
@@ -1271,7 +1485,10 @@ export const MessageList = memo(function MessageList({
 	onBranch,
 	onEditMessage,
 	onRegenerateMessage,
+	onRetryGeneration,
 	onFeedback,
+	onToggleReaction,
+	reactionsByMessage,
 	feedback,
 	historyNotice,
 	messageActions,
@@ -1317,6 +1534,36 @@ export const MessageList = memo(function MessageList({
 			messages,
 			scrollerRef,
 		});
+
+	// Publish the pinned bar's measured height to the scroller root as
+	// `--chat-pin-bar-h`, so the floating date chip can sit UNDER the bar instead
+	// of in a fixed lane above it.
+	//
+	// Measured rather than hard-coded because the bar is 1–3 lines of the pinned
+	// message, so its height moves with the message. Written straight to the DOM
+	// with no React state on purpose: this component's scroll bookkeeping is what
+	// produced the React #185 update loop the comments below keep warning about,
+	// and a setState driven by a ResizeObserver is exactly the shape of that bug.
+	// A CSS variable re-styles the chip without re-rendering anything.
+	const pinBarRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const root = scrollerRef.current;
+		if (!root) {
+			return;
+		}
+		const bar = pinBarRef.current;
+		if (!bar) {
+			root.style.setProperty("--chat-pin-bar-h", "0px");
+			return;
+		}
+		const measure = () => {
+			root.style.setProperty("--chat-pin-bar-h", `${bar.offsetHeight}px`);
+		};
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(bar);
+		return () => observer.disconnect();
+	}, [pinnedMessage?.id, pinUserMessage, isCompact]);
 
 	const CustomUserMessage = slots?.UserMessage || UserMessage;
 	const CustomToolRenderer = slots?.ToolRenderer || DefaultToolRenderer;
@@ -1586,23 +1833,22 @@ export const MessageList = memo(function MessageList({
 							// release hysteresis that stops the bar un-electing its own
 							// anchor (see PIN_RELEASE_SLACK).
 							//
-							// `top-9` (36px), not `top-0`: that reserves the lane the
-							// floating date chip paints in above. The chip needs ~26px of
-							// it — `top-1.5` (6px) + 1px border + `py-0.5` (2px) + an
-							// 11px/~14px line + 2px + 1px — so 36 leaves ~10px of headroom;
-							// re-check this number if the floating chip's font size or
-							// padding changes (floating-date-header.tsx, the one place the
-							// transcript still draws a pill).
+							// `top-0`: the bar owns the TOP lane, and the floating date chip
+							// now paints below it (see `pinBarRef` for how the chip learns
+							// this bar's height). It used to be the other way round —
+							// `top-9`, reserving 36px above for the chip — which put the
+							// chip in the topmost band of the transcript, where it collided
+							// with the tab bar and read as chrome rather than as part of the
+							// conversation.
 							//
 							// It MUST be a sticky top offset and NOT padding — an offset
 							// only moves where the bar paints, whereas padding would change
 							// its offsetHeight, which is the very number PINNED_BAR_SLOT /
-							// PIN_RELEASE_SLACK measure. Reserving the lane costs nothing:
-							// the chip's visibility strictly contains the bar's, so the
-							// space above a visible bar is never empty.
+							// PIN_RELEASE_SLACK measure.
 							<div
-								className="sticky top-9 z-20 -mb-1"
+								className="sticky top-0 z-20 -mb-1"
 								data-slot="pinned-user-message-bar"
+								ref={pinBarRef}
 							>
 								<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
 									<PinnedUserMessageBar
@@ -1747,6 +1993,16 @@ export const MessageList = memo(function MessageList({
 																	setEditingId(null);
 																	onEditMessage?.(userMsgId, next);
 																}}
+																onToggleReaction={
+																	onToggleReaction
+																		? (emoji: string) =>
+																				onToggleReaction(userMsgId, emoji)
+																		: undefined
+																}
+																// A message still carrying its client-generated id
+																// cannot take a reaction: Core 404s it by design.
+																reactable={isServerAssignedMessageId(userMsgId)}
+																reactions={reactionsByMessage?.get(userMsgId)}
 															/>
 															{!isEditingThis &&
 																userVersion &&
@@ -1901,6 +2157,7 @@ export const MessageList = memo(function MessageList({
 																				key={msg.id}
 																				msg={msg}
 																				onOpenFile={onOpenFile}
+																				onRetryGeneration={onRetryGeneration}
 																				suppressQuestionTool={
 																					suppressQuestionTool
 																				}
@@ -2105,6 +2362,7 @@ function AssistantParts({
 	ToolRendererComponent,
 	toolRenderers = NO_TOOL_RENDERERS,
 	onOpenFile,
+	onRetryGeneration,
 }: {
 	msg: UIMessage;
 	isLast: boolean;
@@ -2113,6 +2371,7 @@ function AssistantParts({
 	ToolRendererComponent: React.ComponentType<ToolRendererProps>;
 	toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
 	onOpenFile?: (path: string) => void;
+	onRetryGeneration?: MessageListProps["onRetryGeneration"];
 }) {
 	const { groupToolUses, hideToolDetail } = useChatDisplayPrefs();
 	const parts = useMemo(
@@ -2259,14 +2518,46 @@ function AssistantParts({
 
 			const generation = getImageGenerationPart(part);
 			if (generation) {
+				// Retry re-runs the SAME prompt against the same message, so it needs
+				// one: a generation part that never carried a prompt (older shape, or
+				// a producer that failed before it had one) gets no dead button.
+				const retryPrompt = generation.prompt;
 				pushPart(
 					<AssistantGeneratedImage
 						key={`${msg.id}-image-generation-${i}`}
+						onRetry={
+							onRetryGeneration && retryPrompt
+								? () => onRetryGeneration(msg.id, "image", retryPrompt)
+								: undefined
+						}
 						prompt={generation.prompt}
 						showStatus
 						status={generation.status}
 						statusText={generation.statusText}
 						url={generation.url}
+					/>
+				);
+				i++;
+				continue;
+			}
+
+			const videoGeneration = getVideoGenerationPart(part);
+			if (videoGeneration) {
+				const retryPrompt = videoGeneration.prompt;
+				pushPart(
+					<AssistantGeneratedVideo
+						key={`${msg.id}-video-generation-${i}`}
+						onRetry={
+							onRetryGeneration && retryPrompt
+								? () => onRetryGeneration(msg.id, "video", retryPrompt)
+								: undefined
+						}
+						poster={videoGeneration.poster}
+						prompt={videoGeneration.prompt}
+						showStatus
+						status={videoGeneration.status}
+						statusText={videoGeneration.statusText}
+						url={videoGeneration.url}
 					/>
 				);
 				i++;
@@ -2281,6 +2572,20 @@ function AssistantParts({
 						showStatus={false}
 						status="complete"
 						url={imageUrl}
+					/>
+				);
+				i++;
+				continue;
+			}
+
+			const videoUrl = getAssistantVideoUrl(part);
+			if (videoUrl) {
+				pushPart(
+					<AssistantGeneratedVideo
+						key={`${msg.id}-video-${i}`}
+						showStatus={false}
+						status="complete"
+						url={videoUrl}
 					/>
 				);
 				i++;
@@ -2410,12 +2715,13 @@ function AssistantParts({
 		// tool row between them, which is what actually happened, rather than one
 		// bubble swallowing the tool row or three unrelated boxes.
 		//
-		// `outline` rather than the user side's filled `muted`: the transcript
-		// sits on `--background`, so an outline bubble is a hairline around the
-		// prose — legible against the user's filled bubble and, unlike a second
-		// fill, it does not stack a surface behind the code blocks and tool cards
-		// that already draw their own. `max-w-full` overrides the primitive's
-		// `max-w-[80%]`, which would squeeze code, tables and diffs.
+		// `muted` — a FILL, not a hairline. The two sides now read as one system:
+		// the agent takes the neutral filled surface the user side used to own, and
+		// the user side moves up to the theme's primary (see `user-message.tsx`). An
+		// outline around the agent's prose was the odd one out — the only bubble in
+		// the transcript drawn as a border rather than a surface.
+		// `max-w-full` overrides the primitive's `max-w-[80%]`, which would squeeze
+		// code, tables and diffs.
 		const folded: React.ReactNode[] = [];
 		let run: React.ReactNode[] = [];
 		const flushRun = () => {
@@ -2427,7 +2733,7 @@ function AssistantParts({
 					align="start"
 					className="max-w-full"
 					key={`${msg.id}-bubble-${folded.length}`}
-					variant="outline"
+					variant="muted"
 				>
 					{run}
 				</Bubble>
@@ -2455,6 +2761,7 @@ function AssistantParts({
 		hideToolDetail,
 		ToolRendererComponent,
 		toolRenderers,
+		onRetryGeneration,
 	]);
 
 	// Nothing to draw for this message — return null, not an empty div. Inside

@@ -38,11 +38,22 @@ export interface PiProvider {
 	authKind: string;
 	/** Whether a usable credential is already available (auth.json/env/models.json). */
 	configured: boolean;
+	/** The credit pool this provider's spend attributes to, or `""` for BYOK.
+	 *
+	 *  A SEGREGATED pool (`cloudflare`, `bedrock`) is where grants land — a
+	 *  free-tier or referral grant is spendable on it with no plan at all. The
+	 *  residual `openrouter` pool is the one that genuinely needs a subscription,
+	 *  because it has no donated allowance behind it. Anything that gates on
+	 *  "managed" ALONE will upsell a subscription for credit the user already
+	 *  holds. */
+	creditPool?: string;
 	/** True for user-defined custom providers from models.json. */
 	custom: boolean;
 	id: string;
 	label: string;
-	/** True for the Ryu-managed provider (included with the plan, no key needed). */
+	/** True for any Ryu-managed provider (Ryu supplies the capacity, no key
+	 *  needed). No longer implies "included with a paid plan" — see
+	 *  {@link Provider.creditPool}. */
 	managed?: boolean;
 	/**
 	 * Per-model enable overrides keyed by model id. An id absent from this map

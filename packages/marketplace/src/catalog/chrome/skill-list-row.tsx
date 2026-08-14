@@ -13,6 +13,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
 
 export interface SkillListRowData {
 	/** Whether the installed skill is active (enabled). Only meaningful when
@@ -67,7 +68,7 @@ function renderInstalledMark(skill: SkillListRowData) {
 		return null;
 	}
 	if (skill.active === true) {
-		return <Badge variant="secondary">Active</Badge>;
+		return <StatusBadge kind="active" />;
 	}
 	if (skill.active === false) {
 		return <Badge variant="outline">Added</Badge>;

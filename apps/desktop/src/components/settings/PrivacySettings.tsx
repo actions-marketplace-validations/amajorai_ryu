@@ -457,7 +457,7 @@ export function PrivacySettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Off by default. When on, Core and the Gateway export their local run-trace and audit records (already content-free: hashed args, redacted keys) to an OpenTelemetry (OTLP) endpoint you choose. With no endpoint set, nothing is exported even when this is on. The destination is fully swappable: point it at Axiom, Grafana, a self-hosted Collector, or anything OTLP-native."
+				caption="Off by default. When on, Core and the Gateway export their local run-trace and audit records (already content-free: hashed args, redacted keys) to an OpenTelemetry (OTLP) endpoint you choose. With no endpoint set, nothing is exported even when this is on. Point it at Axiom, Grafana, a self-hosted Collector, or anything OTLP-native."
 				title="Diagnostics export"
 			>
 				<SettingsGroup>
@@ -543,7 +543,7 @@ export function PrivacySettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="When a run fails, Ryu can diagnose why and propose a fix. By default the fix is proposed in your Inbox for you to approve — turn on auto-fix to let it retry on its own (bounded to a couple of attempts). The diagnosis runs through your gateway."
+				caption="When a run fails, Ryu can diagnose why and propose a fix. By default the fix is proposed in your Inbox for you to approve. Turn on auto-fix to let it retry on its own (bounded to a couple of attempts). The diagnosis runs through your gateway."
 				title="Self-healing"
 			>
 				<SettingsGroup>

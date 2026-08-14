@@ -46,14 +46,43 @@ import {
 	LibraryToolbar,
 } from "@ryu/blocks/desktop/library.tsx";
 import {
-	StoreSearchButton,
+	StoreGlobalSearch,
 	type StoreSectionTab,
 	StoreSectionTabs,
 } from "@ryu/blocks/desktop/store.tsx";
 import type { ViewMode } from "@ryu/blocks/desktop/view-toggle.tsx";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@ryu/ui/components/alert-dialog.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { BookCard } from "@ryu/ui/components/book-card.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuTrigger,
+} from "@ryu/ui/components/context-menu.tsx";
+import {
+	Dialog,
+	DialogContent,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
 import { DitherAvatar } from "@ryu/ui/components/dither-kit/avatar.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import {
+	StatusBadge,
+	type StatusKind,
+} from "@ryu/ui/components/status-badge.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import {
 	type ReactNode,
@@ -63,6 +92,10 @@ import {
 	useState,
 } from "react";
 import { AgentBadgeCard } from "@/src/components/agents/AgentBadgeCard.tsx";
+import {
+	LibraryItemMenuContent,
+	useLibraryContributedRows,
+} from "@/src/components/layout/library-entity-menu.tsx";
 import { SURFACE_PLUGIN_OWNER } from "@/src/components/layout/sidebar-sections.ts";
 import ContributedLibrarySection from "@/src/components/library/ContributedLibrarySection.tsx";
 import { MemoryLibrary } from "@/src/components/memory/MemoryLibrary.tsx";
@@ -170,15 +203,32 @@ const SORT_OPTIONS: LibrarySortOption[] = [
 
 /** A collection item normalised from its data hook into one shared shape. */
 interface LibraryItem {
-	/** Type-specific chip (status, etc.) for typed tabs. */
+	/** Type-specific chip for typed tabs — a KIND or a type-specific label. On the
+	 *  mixed tabs the item's TYPE takes this slot instead. */
 	badge: string | null;
 	icon: IconSvgElement;
 	id: string;
 	name: string;
 	open: () => void;
+	/** The same destination forced into a NEW tab, for the card's right-click
+	 *  menu. Absent for the types that open a dialog rather than a route (teams),
+	 *  where "in a new tab" has no meaning. */
+	openInNewTab?: () => void;
 	/** Optional richer card-body preview (grid view only). Local, cheap nodes
 	 * only — anything that fetches must be gated per-tab in `toCardData`. */
 	preview?: ReactNode;
+	/** Delete this item. Every collection's hook exposes one, so this is set for
+	 *  all of them; a per-ITEM refusal travels in `removeBlockedReason`. */
+	remove?: () => Promise<unknown> | unknown;
+	/** Why THIS item can't be deleted (a Ryu-owned system Space). */
+	removeBlockedReason?: string;
+	/** Persist a new name. Absent for the types whose hook exposes no rename —
+	 *  the menu then omits the row rather than offering a dead one. */
+	rename?: (title: string) => Promise<unknown> | unknown;
+	/** The item's STATUS attribute, if it has one. A separate slot from `badge`
+	 *  because the mixed tabs claim that one for the type label, and an agent can
+	 *  be both an "Agent" and "Built-in". */
+	status?: StatusKind | null;
 	subtitle: string | null;
 	type: LibraryItemType;
 	/** Normalised epoch-ms, for "Recently updated" sort. */
@@ -260,11 +310,14 @@ function LibraryCollections({
 	const [typeFilter, setTypeFilter] = useState<LibraryItemType | null>(null);
 
 	// Reset the per-tab controls when switching collections.
+	// `section` is load-bearing: it derives from in-component state driven by the
+	// tab strip, not from the router, so the page does NOT remount per tab. Without
+	// it the search query, sort and type filter leak across Library tabs.
 	useEffect(() => {
 		setQuery("");
 		setSort("updated");
 		setTypeFilter(null);
-	}, []);
+	}, [section]);
 
 	const onViewChange = (mode: ViewMode) => {
 		setView(mode);
@@ -280,19 +333,56 @@ function LibraryCollections({
 	const { favorites, toggle: toggleFavorite } = useFavorites();
 	const recents = useRecents();
 
-	// Data sources.
-	const { agents, engines, loading: agentsLoading } = useAgents();
-	const { workflows, loading: workflowsLoading } = useWorkflows();
-	const { teams, create: createTeam, update: updateTeam } = useTeams();
-	const { meetings, loading: meetingsLoading } = useMeetings();
+	// Data sources. Each collection's mutation handles are destructured beside its
+	// list because the card's right-click menu offers rename/delete inline — the
+	// Library is a browsing surface, and making the user leave it to find the
+	// sidebar row that owns those verbs was the whole gap.
+	const {
+		agents,
+		engines,
+		loading: agentsLoading,
+		remove: removeAgent,
+	} = useAgents();
+	const {
+		workflows,
+		loading: workflowsLoading,
+		remove: removeWorkflow,
+	} = useWorkflows();
+	const {
+		teams,
+		create: createTeam,
+		remove: removeTeam,
+		update: updateTeam,
+	} = useTeams();
+	const {
+		meetings,
+		loading: meetingsLoading,
+		remove: removeMeeting,
+		rename: renameMeeting,
+	} = useMeetings();
 	const {
 		spaces,
 		loading: spacesLoading,
 		create: createSpace,
+		remove: removeSpace,
 	} = useSpacesContext();
-	const { conversations, conversationsLoading } = useChatHistoryContext();
-	const { channels, loading: channelsLoading } = useChannels();
-	const { profiles, loading: identitiesLoading } = useIdentities();
+	const {
+		conversations,
+		conversationsLoading,
+		deleteConversation,
+		renameConversation,
+	} = useChatHistoryContext();
+	const {
+		channels,
+		loading: channelsLoading,
+		remove: removeChannel,
+		update: updateChannel,
+	} = useChannels();
+	const {
+		profiles,
+		loading: identitiesLoading,
+		remove: removeIdentity,
+	} = useIdentities();
 
 	// Only show a collection tab when its owning app is enabled — an uninstalled
 	// Workflows/Teams/Meetings app should leave no empty tab. Host surfaces
@@ -376,6 +466,15 @@ function LibraryCollections({
 	const [teamDialogOpen, setTeamDialogOpen] = useState(false);
 	const [editingTeamId, setEditingTeamId] = useState<string | null>(null);
 
+	// Rename and delete are reached from a card's right-click menu. The dialogs
+	// live ONCE here rather than per card: the grid renders every item in the
+	// collection, and mounting a dialog pair inside each card would put hundreds of
+	// closed dialogs in the tree to serve the one the user actually opens.
+	const [renaming, setRenaming] = useState<LibraryItem | null>(null);
+	const [renameDraft, setRenameDraft] = useState("");
+	const [deleting, setDeleting] = useState<LibraryItem | null>(null);
+	const [busy, setBusy] = useState(false);
+
 	const engineLabel = useCallback(
 		(engine: string | null): string | null => {
 			if (!engine) {
@@ -403,14 +502,26 @@ function LibraryCollections({
 				id: a.id,
 				name: a.name,
 				subtitle: engineLabel(a.engine) ?? a.description,
-				badge: a.builtIn ? "Built-in" : null,
+				badge: null,
+				// A glyph, not the word: on the mixed tabs `badge` is already spoken
+				// for by the type label, and "Built-in" spelled out down a column of
+				// agent rows was the noisiest thing on the page.
+				status: a.builtIn ? ("builtin" as const) : null,
 				icon: Target01Icon,
 				updatedAt: normalizeTimestamp(a.createdAt),
 				// openTab stamps recents from the route; no explicit stamp needed.
 				open: () => openTab(`/agents/${a.id}/edit`, { title: a.name }),
+				openInNewTab: () =>
+					openTab(`/agents/${a.id}/edit`, { title: a.name, forceNew: true }),
+				// No rename row: the agent hook's `update` takes a whole `AgentInput`,
+				// and the editor this card opens is where a name is changed.
+				remove: () => removeAgent(a.id),
+				removeBlockedReason: a.builtIn
+					? "Built-in agents ship with Ryu and can't be deleted."
+					: undefined,
 			})),
 		// engines feed engineLabel; rebuild when either changes.
-		[agents, engineLabel, openTab]
+		[agents, engineLabel, openTab, removeAgent]
 	);
 
 	const workflowItems = useMemo<LibraryItem[]>(
@@ -426,6 +537,8 @@ function LibraryCollections({
 				icon: WorkflowCircle06Icon,
 				updatedAt: normalizeTimestamp(w.updatedAt ?? w.createdAt),
 				open: () => openTab(`/workflows/${w.id}`, { title: w.name }),
+				openInNewTab: () =>
+					openTab(`/workflows/${w.id}`, { title: w.name, forceNew: true }),
 				preview: (
 					<WorkflowFlowStrip
 						edges={w.edges}
@@ -433,8 +546,9 @@ function LibraryCollections({
 						triggers={w.triggers}
 					/>
 				),
+				remove: () => removeWorkflow(w.id),
 			})),
-		[workflows, openTab]
+		[workflows, openTab, removeWorkflow]
 	);
 
 	const chatItems = useMemo<LibraryItem[]>(
@@ -448,8 +562,12 @@ function LibraryCollections({
 				icon: BookOpen01Icon,
 				updatedAt: normalizeTimestamp(c.updatedAt ?? c.createdAt),
 				open: () => openTab("/chat", { conversationId: c.id }),
+				openInNewTab: () =>
+					openTab("/chat", { conversationId: c.id, forceNew: true }),
+				rename: (title: string) => renameConversation(c.id, title),
+				remove: () => deleteConversation(c.id),
 			})),
-		[conversations, openTab]
+		[conversations, openTab, renameConversation, deleteConversation]
 	);
 
 	const spaceItems = useMemo<LibraryItem[]>(
@@ -473,8 +591,19 @@ function LibraryCollections({
 						// so the space id must live in the route to survive.
 						openTab(`/spaces/${s.id}`, { title: s.name });
 					},
+					openInNewTab: () => {
+						stampRecent("space", s.id);
+						openTab(`/spaces/${s.id}`, { title: s.name, forceNew: true });
+					},
+					remove: () => removeSpace(s.id),
+					// Core's `SpaceStore::delete_space` bails on `system = 1`, so the
+					// row would only ever produce a failure toast — same call the
+					// sidebar's Spaces row makes.
+					removeBlockedReason: s.system
+						? "System spaces can't be deleted — Ryu creates and maintains this one."
+						: undefined,
 				})),
-		[spaces, openTab]
+		[spaces, openTab, removeSpace]
 	);
 
 	const teamItems = useMemo<LibraryItem[]>(
@@ -493,8 +622,11 @@ function LibraryCollections({
 					stampRecent("team", t.id);
 					openTeam(t.id);
 				},
+				// A team opens a DIALOG, not a route — "open in new tab" has nothing to
+				// point at, and its name is edited in that same dialog.
+				remove: () => removeTeam(t.id),
 			})),
-		[teams, openTeam]
+		[teams, openTeam, removeTeam]
 	);
 
 	const meetingItems = useMemo<LibraryItem[]>(
@@ -508,8 +640,12 @@ function LibraryCollections({
 				icon: AudioWave01Icon,
 				updatedAt: normalizeTimestamp(m.updated_at ?? m.created_at),
 				open: () => openTab(`/meetings/${m.id}`, { title: m.title }),
+				openInNewTab: () =>
+					openTab(`/meetings/${m.id}`, { title: m.title, forceNew: true }),
+				rename: (title: string) => renameMeeting(m.id, title),
+				remove: () => removeMeeting(m.id),
 			})),
-		[meetings, openTab]
+		[meetings, openTab, renameMeeting, removeMeeting]
 	);
 
 	const channelItems = useMemo<LibraryItem[]>(
@@ -523,8 +659,12 @@ function LibraryCollections({
 				icon: BubbleChatIcon,
 				updatedAt: normalizeTimestamp(c.updatedAt ?? c.createdAt),
 				open: () => openTab(`/channels/${c.id}`, { title: c.name }),
+				openInNewTab: () =>
+					openTab(`/channels/${c.id}`, { title: c.name, forceNew: true }),
+				rename: (name: string) => updateChannel(c.id, { name }),
+				remove: () => removeChannel(c.id),
 			})),
-		[channels, openTab]
+		[channels, openTab, updateChannel, removeChannel]
 	);
 
 	const identityItems = useMemo<LibraryItem[]>(
@@ -552,9 +692,18 @@ function LibraryCollections({
 							title: p.profile_id,
 						});
 					},
+					openInNewTab: () => {
+						stampRecent("identity", p.profile_id);
+						openTab(`/identities/profile/${encodeURIComponent(p.profile_id)}`, {
+							title: p.profile_id,
+							forceNew: true,
+						});
+					},
+					// A profile IS its id — there is nothing to rename it to.
+					remove: () => removeIdentity(p.profile_id),
 				};
 			}),
-		[profiles, openTab]
+		[profiles, openTab, removeIdentity]
 	);
 
 	const itemsByType = useMemo<Record<LibraryItemType, LibraryItem[]>>(
@@ -626,6 +775,13 @@ function LibraryCollections({
 	// --- Build the visible list for the active tab --------------------------
 
 	const isMixed = section === "recents" || section === "favorites";
+	// Everything in the library, flattened — the corpus the global search runs
+	// over. Built from the same per-type lists the tabs render, so a search result
+	// and the row you would have found by hand are the same object.
+	const allItems = useMemo(
+		() => Object.values(itemsByType).flat(),
+		[itemsByType]
+	);
 	let baseItems: LibraryItem[];
 	if (section === "recents") {
 		baseItems = recentItems;
@@ -658,9 +814,23 @@ function LibraryCollections({
 		: // A custom-surface section owns its own loading state.
 			isItemType(section) && loadingByType[section];
 
+	// A query in the shell's field takes over the page: it searches every
+	// collection, so the result list is mixed no matter which tab is open (and the
+	// type chips become the way to narrow it back down). A custom surface (Tools)
+	// owns its own search and is left alone.
+	const searchingAll =
+		query.trim().length > 0 && !CUSTOM_SURFACE_SECTIONS.has(section);
+	const mixedView = isMixed || searchingAll;
+
 	const visibleItems = useMemo(() => {
-		let list = baseItems;
-		if (isMixed && typeFilter) {
+		// A non-empty query searches the WHOLE library, not the open collection.
+		// The field lives above the tab strip now, and a search box that sits above
+		// the thing that scopes it has to mean "everything" — scoping it to the tab
+		// underneath is the one reading the position rules out. It is also the
+		// answer to the actual question: you look for a thing in the library, not
+		// for a thing in the tab you happen to be standing on.
+		let list = searchingAll ? allItems : baseItems;
+		if (mixedView && typeFilter) {
 			list = list.filter((i) => i.type === typeFilter);
 		}
 		const q = query.trim().toLowerCase();
@@ -685,16 +855,25 @@ function LibraryCollections({
 			sorted.sort((a, b) => b.updatedAt - a.updatedAt);
 		}
 		return sorted;
-	}, [baseItems, isMixed, typeFilter, query, sort, section]);
+	}, [
+		allItems,
+		baseItems,
+		mixedView,
+		searchingAll,
+		typeFilter,
+		query,
+		sort,
+		section,
+	]);
 
 	// Which types actually appear in a mixed tab, so we only offer real chips.
 	const presentTypes = useMemo(() => {
 		const set = new Set<LibraryItemType>();
-		for (const i of baseItems) {
+		for (const i of searchingAll ? allItems : baseItems) {
 			set.add(i.type);
 		}
 		return set;
-	}, [baseItems]);
+	}, [allItems, baseItems, searchingAll]);
 
 	// --- Per-tab CTA --------------------------------------------------------
 
@@ -755,6 +934,75 @@ function LibraryCollections({
 	};
 	const cta = ctaForSection();
 
+	// --- Card context menu --------------------------------------------------
+
+	// One factory for every type's app-contributed rows. Called per card below;
+	// the hook itself runs once, which is why `useLibraryContributedRows` returns
+	// a function rather than the rows.
+	const contributedRowsFor = useLibraryContributedRows();
+
+	const beginRename = useCallback((item: LibraryItem) => {
+		setRenameDraft(item.name);
+		setRenaming(item);
+	}, []);
+
+	const commitRename = useCallback(async () => {
+		const item = renaming;
+		const title = renameDraft.trim();
+		if (!(item?.rename && title) || title === item.name) {
+			setRenaming(null);
+			return;
+		}
+		setBusy(true);
+		try {
+			await item.rename(title);
+			setRenaming(null);
+		} catch {
+			toast.error(`Couldn't rename ${item.name}`);
+		} finally {
+			setBusy(false);
+		}
+	}, [renaming, renameDraft]);
+
+	const commitDelete = useCallback(async () => {
+		const item = deleting;
+		if (!item?.remove) {
+			setDeleting(null);
+			return;
+		}
+		setBusy(true);
+		try {
+			await item.remove();
+			setDeleting(null);
+		} catch {
+			toast.error(`Couldn't delete ${item.name}`);
+		} finally {
+			setBusy(false);
+		}
+	}, [deleting]);
+
+	/** The right-click rows for one card — the same set on every surface the
+	 *  Library renders (shared card, Spaces shelf, Agents badge wall). */
+	const menuFor = (item: LibraryItem) => (
+		<LibraryItemMenuContent
+			contributedRows={contributedRowsFor(item.type, item.id)}
+			item={{
+				favorited: favorites.some(
+					(f) => f.type === item.type && f.id === item.id
+				),
+				id: item.id,
+				name: item.name,
+				onOpen: item.open,
+				onOpenInNewTab: item.openInNewTab,
+				onRename: item.rename ? () => beginRename(item) : undefined,
+				onRequestDelete: item.remove ? () => setDeleting(item) : undefined,
+				onToggleFavorite: () => toggleFavorite(item.type, item.id),
+				removeBlockedReason: item.removeBlockedReason,
+				type: item.type,
+			}}
+		/>
+	);
+
 	// On the mixed tabs, prefix each card with its type so kinds are legible.
 	const toCardData = (item: LibraryItem): LibraryCardData => {
 		// Previews are grid-only (list rows stay compact). The workflow strip is
@@ -767,7 +1015,8 @@ function LibraryCollections({
 			icon: item.icon,
 			name: item.name,
 			subtitle: item.subtitle,
-			badge: isMixed ? TYPE_META[item.type].label : item.badge,
+			badge: mixedView ? TYPE_META[item.type].label : item.badge,
+			statusIcon: item.status ? <StatusBadge kind={item.status} /> : undefined,
 			favorited: favorites.some(
 				(f) => f.type === item.type && f.id === item.id
 			),
@@ -817,71 +1066,74 @@ function LibraryCollections({
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden pt-12">
-			{/* Page chrome, inline: title, tabs, then the collection's own controls.
-			    No floating bar — the tab list is open-ended (every app may register a
-			    collection), so it scrolls in the page flow instead of wrapping into a
-			    bar pinned over the content. */}
+			{/* Page chrome, inline and in the order it works: the library-wide search
+			    (with the collection's own controls beside it), then the tabs. No
+			    floating bar — the tab list is open-ended (every app may register a
+			    collection), so it scrolls in the page flow.
+
+			    There is no section TITLE. It restated the pill that was already
+			    active directly beneath it. The search is above the tabs and searches
+			    everything, mirroring the Store; the collection's sort/view/filter
+			    controls ride the same row, so the page opens with one row of chrome
+			    instead of three. */}
 			<div className="mx-auto w-full max-w-4xl shrink-0 px-4 pt-4">
-				<div className="flex items-center justify-between gap-3">
-					<p className="font-semibold text-lg">
-						{activeContributed?.title ?? sectionMeta?.label ?? "Library"}
-					</p>
-					{customSurface ? null : (
-						<StoreSearchButton
-							onChange={setQuery}
-							placeholder={`Search ${(activeContributed?.title ?? sectionMeta?.label ?? "items").toLowerCase()}…`}
-							value={query}
-						/>
-					)}
-				</div>
+				{customSurface ? null : (
+					<StoreGlobalSearch
+						onChange={setQuery}
+						placeholder="Search your library…"
+						trailing={
+							showCollectionToolbar ? (
+								<LibraryToolbar
+									className="shrink-0 p-0"
+									ctaIcon={cta ? Add01Icon : undefined}
+									ctaLabel={cta?.label}
+									filterSlot={
+										mixedView ? (
+											<div className="flex items-center gap-0.5">
+												<LibraryFilterChip
+													active={typeFilter === null}
+													label="All"
+													onClick={() => setTypeFilter(null)}
+												/>
+												{SECTIONS.filter(
+													(
+														s
+													): s is {
+														value: LibraryItemType;
+														label: string;
+														icon: IconSvgElement;
+													} => isItemType(s.value) && presentTypes.has(s.value)
+												).map((s) => (
+													<LibraryFilterChip
+														active={typeFilter === s.value}
+														icon={TYPE_META[s.value].icon}
+														key={s.value}
+														label={s.label}
+														onClick={() => setTypeFilter(s.value)}
+													/>
+												))}
+											</div>
+										) : undefined
+									}
+									onCta={cta?.onCta}
+									onSortChange={setSort}
+									onViewChange={onViewChange}
+									showSearch={false}
+									sort={section === "recents" ? undefined : sort}
+									sortOptions={section === "recents" ? [] : SORT_OPTIONS}
+									view={view}
+								/>
+							) : null
+						}
+						value={query}
+					/>
+				)}
 				<StoreSectionTabs
 					active={active}
 					className="pt-2"
 					onSelect={setActive}
 					sections={navSections}
 				/>
-				{showCollectionToolbar ? (
-					<LibraryToolbar
-						className="px-0 py-2"
-						ctaIcon={cta ? Add01Icon : undefined}
-						ctaLabel={cta?.label}
-						filterSlot={
-							isMixed ? (
-								<div className="flex items-center gap-0.5">
-									<LibraryFilterChip
-										active={typeFilter === null}
-										label="All"
-										onClick={() => setTypeFilter(null)}
-									/>
-									{SECTIONS.filter(
-										(
-											s
-										): s is {
-											value: LibraryItemType;
-											label: string;
-											icon: IconSvgElement;
-										} => isItemType(s.value) && presentTypes.has(s.value)
-									).map((s) => (
-										<LibraryFilterChip
-											active={typeFilter === s.value}
-											icon={TYPE_META[s.value].icon}
-											key={s.value}
-											label={s.label}
-											onClick={() => setTypeFilter(s.value)}
-										/>
-									))}
-								</div>
-							) : undefined
-						}
-						onCta={cta?.onCta}
-						onSortChange={setSort}
-						onViewChange={onViewChange}
-						showSearch={false}
-						sort={section === "recents" ? undefined : sort}
-						sortOptions={section === "recents" ? [] : SORT_OPTIONS}
-						view={view}
-					/>
-				) : null}
 			</div>
 
 			{/* A custom-surface section fills the shell itself: it is a full-height
@@ -928,6 +1180,7 @@ function LibraryCollections({
 							<div className="flex flex-wrap gap-6 pt-1">
 								{visibleItems.map((item) => (
 									<SpaceBook
+										contextMenu={menuFor(item)}
 										favorited={favorites.some(
 											(f) => f.type === item.type && f.id === item.id
 										)}
@@ -956,6 +1209,7 @@ function LibraryCollections({
 												onToggle={() => toggleFavorite(item.type, item.id)}
 											/>
 										}
+										contextMenu={menuFor(item)}
 										employeeId={item.id}
 										footer={
 											item.badge ? (
@@ -980,6 +1234,7 @@ function LibraryCollections({
 							<LibraryGrid columns={2} view={view}>
 								{visibleItems.map((item) => (
 									<LibraryCard
+										contextMenu={menuFor(item)}
 										item={toCardData(item)}
 										key={refKey(item.type, item.id)}
 										onOpen={item.open}
@@ -1005,6 +1260,88 @@ function LibraryCollections({
 				open={teamDialogOpen}
 				team={editingTeam}
 			/>
+
+			{/* One rename dialog for the whole page — the card menu only names which
+			    item it is for. Submitting on Enter matches the sidebar's inline
+			    rename, which is the gesture this replaces on this surface. */}
+			<Dialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setRenaming(null);
+					}
+				}}
+				open={renaming !== null}
+			>
+				<DialogContent className="sm:max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Rename {renaming?.name}</DialogTitle>
+					</DialogHeader>
+					<Input
+						autoFocus
+						onChange={(e) => setRenameDraft(e.target.value)}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") {
+								e.preventDefault();
+								void commitRename();
+							}
+						}}
+						placeholder="Name"
+						value={renameDraft}
+					/>
+					<DialogFooter>
+						<Button
+							onClick={() => setRenaming(null)}
+							type="button"
+							variant="outline"
+						>
+							Cancel
+						</Button>
+						<Button
+							disabled={busy || renameDraft.trim().length === 0}
+							onClick={() => {
+								void commitRename();
+							}}
+							type="button"
+						>
+							Rename
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			<AlertDialog
+				onOpenChange={(open) => {
+					if (!open) {
+						setDeleting(null);
+					}
+				}}
+				open={deleting !== null}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							Delete{" "}
+							{deleting ? TYPE_META[deleting.type].label.toLowerCase() : "item"}
+							?
+						</AlertDialogTitle>
+						<AlertDialogDescription>
+							{`"${deleting?.name ?? ""}" will be permanently deleted. This cannot be undone.`}
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>Cancel</AlertDialogCancel>
+						<AlertDialogAction
+							disabled={busy}
+							onClick={() => {
+								void commitDelete();
+							}}
+							variant="destructive"
+						>
+							Delete
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
 		</div>
 	);
 }
@@ -1018,15 +1355,18 @@ function LibraryCollections({
  *  wrapper's hover and keyboard focus rather than only from a pointer over the
  *  cover. */
 function SpaceBook({
+	contextMenu,
 	favorited,
 	item,
 	onToggleFavorite,
 }: {
+	/** Rows for the book's right-click menu, same set the shared card gets. */
+	contextMenu?: ReactNode;
 	favorited: boolean;
 	item: LibraryItem;
 	onToggleFavorite: () => void;
 }) {
-	return (
+	const book = (
 		<div
 			className="group relative cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
 			onClick={item.open}
@@ -1064,5 +1404,15 @@ function SpaceBook({
 				onToggle={onToggleFavorite}
 			/>
 		</div>
+	);
+
+	if (!contextMenu) {
+		return book;
+	}
+	return (
+		<ContextMenu>
+			<ContextMenuTrigger render={book} />
+			<ContextMenuContent align="end">{contextMenu}</ContextMenuContent>
+		</ContextMenu>
 	);
 }

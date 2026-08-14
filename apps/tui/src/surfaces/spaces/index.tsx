@@ -107,7 +107,7 @@ function SpacesSurface({ active, paneId }: SurfaceProps) {
 	const [loading, setLoading] = useState(false);
 	const [loaded, setLoaded] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 
 	// Guard against a stale in-flight load clobbering fresher data after a node
 	// switch or rapid refreshes.
@@ -169,7 +169,10 @@ function SpacesSurface({ active, paneId }: SurfaceProps) {
 		if (active) {
 			runLoad();
 		}
-	}, [active, runLoad]);
+		// `reloadKey` is load-bearing: 'r' only bumps it, so without it the reload
+		// is dead. Add ONLY that — `runLoad` already changes identity on a node
+		// switch, so re-adding `url, token` would double-load.
+	}, [active, runLoad, reloadKey]);
 
 	// Lazily fetch (and cache) documents for the selected space when the selection
 	// changes. Already-cached spaces are skipped so reselecting is instant.

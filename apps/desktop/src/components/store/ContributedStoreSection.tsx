@@ -46,6 +46,7 @@ import {
 } from "@ryu/app-host/views";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
+import { storeItemContextMenu } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
@@ -786,6 +787,17 @@ function CatalogList({
 											onInstall={() => onInstall(item)}
 										/>
 									) : undefined
+								}
+								// A contributed tab declares at most an install verb, so the
+								// menu is that verb or nothing — an already-installed row
+								// gets no menu rather than an empty one.
+								contextMenu={
+									spec.install && !isInstalled(item)
+										? storeItemContextMenu({
+												installed: false,
+												onInstall: () => onInstall(item),
+											})
+										: undefined
 								}
 								description={item.description}
 								icon={

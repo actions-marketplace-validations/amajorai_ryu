@@ -12,6 +12,7 @@
 
 import { Add01Icon, Delete01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -33,12 +34,21 @@ import {
 } from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
-import { useEffect, useState } from "react";
-import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { sileo } from "sileo";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
+import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
+	CLASSIFY_MODEL_ID,
+	CLASSIFY_TIER_COPY,
+	classifyTierCannotServeModel,
+	classifyTierServable,
+	type ClassifyTierState,
+	deriveClassifyTierState,
+	fetchClassifyWeightsPresent,
 	type RouteStrategy,
 	routeStrategyCopy,
 } from "@/src/lib/api/gateway.ts";
@@ -48,6 +58,7 @@ import {
 	getAgentAutoRouting,
 	setAgentAutoRouting,
 } from "@/src/lib/api/preferences.ts";
+import { fetchSidecarStatus } from "@/src/lib/api/system.ts";
 import { useAgentAutoDialog } from "@/src/store/useAgentAutoDialog.ts";
 
 /** Editing row for one agent-auto rule, with a stable client-side id for keys. */
@@ -57,10 +68,118 @@ interface AutoRuleRow {
 	id: string;
 }
 
+// Same cadences the gateway's Smart routing card polls at: the run state flips
+// whenever the lazy sidecar starts, the weights land once after a download.
+const CLASSIFY_STATUS_POLL_MS = 5000;
+const CLASSIFY_WEIGHTS_POLL_MS = 30_000;
+
+/**
+ * The one copy for "on, with no classifier picked". Informational, not a warning:
+ * Core's `de_classifier_model` (`agent_routing/auto.rs`) resolves a blank to the
+ * classify tier's id, so the feature runs on the local classifier rather than not
+ * at all. Deliberately the gateway Smart routing card's sentence with the one
+ * noun this plane changes.
+ *
+ * It previously read "…so it never runs, and every turn falls back to the default
+ * agent" — true of the old plain `#[serde(default)] String`, false once the field
+ * gained its deserializer.
+ */
+const CLASSIFIER_DEFAULTED_COPY = `No classifier model is picked, so auto routing uses this node's local classifier (${CLASSIFY_MODEL_ID}). Enter a model id to route with something else.`;
+
+/**
+ * Live state of the local classify tier on the node this config is written to,
+ * from the same two independent probes the gateway's Smart routing card crosses:
+ *
+ *  - `/api/sidecar/status` — is the sidecar registered, and is it resident? Read
+ *    from Core, not the gateway, because the sidecar is Core's and no gateway
+ *    route reports it.
+ *  - `/api/models/installed` — are its WEIGHTS on disk? Registered-but-idle is the
+ *    sidecar's normal resting state, so the run state alone cannot tell a lazy
+ *    tier apart from one whose non-fatal onboarding download failed and which will
+ *    therefore bail on every start attempt.
+ *
+ * `undefined` for either probe while pending OR on failure (an older Core has no
+ * `/api/models/installed`), which keeps the row silent instead of crying "not
+ * downloaded" — {@link deriveClassifyTierState}, not this hook, decides what that
+ * means. Only polled while the dialog is open, and keyed by node URL so it shares
+ * one poll with every other card on the same node.
+ */
+function useClassifyTier(
+	target: ApiTarget,
+	enabled: boolean
+): ClassifyTierState {
+	const status = useQuery({
+		enabled,
+		queryKey: ["sidecar-status", target.url],
+		queryFn: () => fetchSidecarStatus(target),
+		refetchInterval: CLASSIFY_STATUS_POLL_MS,
+	});
+	const weights = useQuery({
+		enabled,
+		queryKey: ["classify-weights", target.url],
+		queryFn: () => fetchClassifyWeightsPresent(target),
+		refetchInterval: CLASSIFY_WEIGHTS_POLL_MS,
+	});
+	return deriveClassifyTierState({
+		sidecarStatus: status.isSuccess ? status.data : undefined,
+		weightsPresent: weights.isSuccess ? weights.data : undefined,
+	});
+}
+
+/**
+ * Badge tone per tier state: `running` reads as active, `unweighted` is the one
+ * state that is a genuine fault on this node, and `idle`/`absent` are neutral
+ * facts.
+ */
+function classifyBadgeVariant(
+	state: Exclude<ClassifyTierState, "unknown">
+): "default" | "destructive" | "secondary" {
+	if (state === "running") {
+		return "default";
+	}
+	if (state === "unweighted") {
+		return "destructive";
+	}
+	return "secondary";
+}
+
+/**
+ * Status + one-click adopt row for the local classify tier, rendered under the
+ * classifier field. The button only appears when this node can actually serve the
+ * tier and it isn't already the selected value — offering it otherwise would hand
+ * the user a model id whose call is guaranteed to fail.
+ */
+function ClassifyTierNote({
+	onUse,
+	state,
+	value,
+}: {
+	onUse: () => void;
+	state: ClassifyTierState;
+	value: string;
+}) {
+	if (state === "unknown") {
+		return null;
+	}
+	const copy = CLASSIFY_TIER_COPY[state];
+	const servable = classifyTierServable(state);
+	return (
+		<div className="flex flex-wrap items-center gap-2">
+			<Badge variant={classifyBadgeVariant(state)}>{copy.badge}</Badge>
+			<span className="text-muted-foreground text-xs">{copy.hint}</span>
+			{servable && value.trim() !== CLASSIFY_MODEL_ID ? (
+				<Button onClick={onUse} size="sm" type="button" variant="ghost">
+					Use it
+				</Button>
+			) : null}
+		</div>
+	);
+}
+
 export function AgentAutoRoutingEditor() {
 	const open = useAgentAutoDialog((s) => s.open);
 	const setOpen = useAgentAutoDialog((s) => s.setOpen);
-	const getNode = useActiveNodeGetter();
+	const node = useActiveNode();
 	const { agents } = useAgents();
 	// The app-wide "Friendly names" toggle picks which of the two vocabularies this
 	// picker speaks. Read per-surface rather than threaded through props: all three
@@ -75,6 +194,21 @@ export function AgentAutoRoutingEditor() {
 	const [loaded, setLoaded] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const [saveError, setSaveError] = useState<string | null>(null);
+	// Keyed on the node's OWN identity, not on a getter. `useActiveNodeGetter`
+	// closes over the store's `getActiveNode`, which is a stable reference — it
+	// does not change when the active node does — so memoising on `[getNode]`
+	// froze `target` at whatever node was active when this first rendered, and a
+	// subsequent node switch left the probes, the load and the save addressing the
+	// old box. `useActiveNode` subscribes instead, and the deps are the two
+	// primitives `toTarget` actually reads.
+	const target = useMemo(
+		() => toTarget(node),
+		// biome-ignore lint/correctness/useExhaustiveDependencies: the two fields
+		// toTarget reads are the identity that matters; depending on `node` itself
+		// would re-run on every unrelated store write.
+		[node.url, node.token]
+	);
+	const classifyTier = useClassifyTier(target, open);
 
 	// Load the current config each time the dialog opens (fresh ground truth).
 	useEffect(() => {
@@ -83,7 +217,6 @@ export function AgentAutoRoutingEditor() {
 			return;
 		}
 		let cancelled = false;
-		const target = toTarget(getNode());
 		getAgentAutoRouting(target).then((cfg) => {
 			if (cancelled) {
 				return;
@@ -102,7 +235,33 @@ export function AgentAutoRoutingEditor() {
 		return () => {
 			cancelled = true;
 		};
-	}, [open, getNode]);
+	}, [open, target]);
+
+	// The two states in which auto routing is enabled and yet inert, both of which
+	// the resolver treats as a no-op WITHOUT saying so (`is_active` returns false
+	// for the LLM strategy without a classifier, and the turn quietly falls back to
+	// the default agent):
+	//
+	//  - the LLM strategy with a blank classifier model — the whole feature is off
+	//    despite the switch reading on.
+	//  - a classifier model served only by the local classify tier on a node that
+	//    cannot serve it — either no such tier at all, or (the reachable case) the
+	//    tier's weights were never downloaded so its sidecar can never start. The
+	//    classification call errors, and routing fails open by design.
+	const classifierModel = draft.classifier_model.trim();
+	const smartLlm = draft.enabled && draft.strategy === "llm";
+	const classifierDefaulted = smartLlm && classifierModel === "";
+	// Probe the id Core will RESOLVE to, not the raw box — an empty string never
+	// matches the classify-tier prefix, so probing the raw value would skip the
+	// warning in exactly the cleared-box case that now lands on that tier.
+	const resolvedClassifier = classifierModel || CLASSIFY_MODEL_ID;
+	const classifierUnserved =
+		smartLlm && classifyTierCannotServeModel(classifyTier, resolvedClassifier);
+	const classifierUnservedReason =
+		classifyTier === "absent" || classifyTier === "unweighted"
+			? CLASSIFY_TIER_COPY[classifyTier].reason
+			: null;
+	const classifierUnservedCopy = `Auto routing is on with the local classify tier as its classifier, but ${classifierUnservedReason}, so the classification call will fail and every turn will quietly fall back to the default agent. Pick a model this node can reach.`;
 
 	const patch = (p: Partial<AgentAutoRoutingConfig>) => {
 		setDraft((prev) => ({ ...prev, ...p }));
@@ -156,9 +315,20 @@ export function AgentAutoRoutingEditor() {
 				rules: cleanRules,
 				default_agent_id: draft.default_agent_id.trim() || "ryu",
 			};
-			const target = toTarget(getNode());
 			const ok = await setAgentAutoRouting(target, config);
 			if (ok) {
+				// Closing the dialog takes the inline warnings with it, at the exact
+				// moment the user needs them: the config persisted, the switch reads on,
+				// and nothing will ever route. So an inert save says so on the way out
+				// rather than looking like every other successful one.
+				// Only the UNSERVED case still warns — a blank classifier resolves to
+				// the local tier rather than switching the feature off.
+				if (classifierUnserved) {
+					sileo.warning({
+						title: "Auto routing saved, but it will not run",
+						description: classifierUnservedCopy,
+					});
+				}
 				setOpen(false);
 			} else {
 				setSaveError("Failed to save. Is the node reachable?");
@@ -238,6 +408,25 @@ export function AgentAutoRoutingEditor() {
 									id="auto-classifier"
 									onChange={(e) => patch({ classifier_model: e.target.value })}
 									placeholder="e.g. gemma-local, or a cheap routable model"
+									value={draft.classifier_model}
+								/>
+								<p className="text-muted-foreground text-xs">
+									A cheap, fast model used only to sort requests. Any routable
+									model id works (including local models or openrouter/ slugs).
+								</p>
+								{classifierDefaulted ? (
+									<p className="text-muted-foreground text-xs">
+										{CLASSIFIER_DEFAULTED_COPY}
+									</p>
+								) : null}
+								{classifierUnserved ? (
+									<p className="text-destructive text-xs">
+										{classifierUnservedCopy}
+									</p>
+								) : null}
+								<ClassifyTierNote
+									onUse={() => patch({ classifier_model: CLASSIFY_MODEL_ID })}
+									state={classifyTier}
 									value={draft.classifier_model}
 								/>
 							</div>

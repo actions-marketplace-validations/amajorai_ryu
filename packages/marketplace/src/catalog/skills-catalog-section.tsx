@@ -50,6 +50,7 @@ import {
 	useCallback,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
 import {
@@ -63,7 +64,7 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
 import StoreItemAction, {
-	StoreItemContextMenuContent,
+	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
 import {
 	ListingAsideCard,
@@ -84,6 +85,7 @@ import {
 	useCatalogHost,
 	useNoSettingsOpener,
 } from "./host.tsx";
+import { useSyncInstalledOnly } from "./installed-filter.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
 import type {
@@ -196,9 +198,13 @@ export function skillAuthoringEnabled(
  */
 export default function SkillsCatalogSection({
 	initialQuery = "",
+	initialSelectedId,
 }: {
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
+	/** Open this item's preview on arrival — the id of a card clicked on the
+	 *  Store's Home shelves. */
+	initialSelectedId?: string;
 } = {}) {
 	const host = useCatalogHost();
 	// One resolver for the section (a host implementation reads live node state to
@@ -237,6 +243,24 @@ export default function SkillsCatalogSection({
 		setSkillEnabled,
 		togglingSkill,
 	} = host.useSkillsCatalog(initialQuery);
+
+	// The shell's "installed only" switch (the retired "Added" tab, inverted),
+	// pushed into this section's own filter — the one the data layer understands.
+	useSyncInstalledOnly(setInstalledOnly);
+
+	// A Home shelf card opens this section with its item already selected. One
+	// shot, latched: the prop is a arrival instruction, not a controlled value, so
+	// re-running it would fight the user's own next click (and `select` changes
+	// identity on every refetch, which would make a plain dep array do exactly
+	// that).
+	const preselected = useRef(false);
+	useEffect(() => {
+		if (!initialSelectedId || preselected.current) {
+			return;
+		}
+		preselected.current = true;
+		select(initialSelectedId);
+	}, [initialSelectedId, select]);
 
 	const [friendly, setFriendly] = useFriendlyMode();
 
@@ -344,7 +368,13 @@ export default function SkillsCatalogSection({
 					label: "Filters",
 					activeCount: (org ? 1 : 0) + (installedOnly ? 1 : 0),
 				}}
-				hasSelection={selectedId != null}
+				// `Boolean`, NOT `!= null`. Closing the preview calls `select("")`, and
+				// every host's `select` stores what it is given — so `!= null` stayed
+				// true on an EMPTY id: the dialog re-opened itself on close, with no
+				// selection to render ("No skill selected"), and no further click could
+				// dismiss it. Every other section already tests truthiness; this was the
+				// one that did not.
+				hasSelection={Boolean(selectedId)}
 				list={
 					<SkillList
 						cardInstall={cardInstall}
@@ -691,15 +721,21 @@ function SkillList({
 								toggleBusy={togglingSkill === s.id}
 							/>
 						}
-						contextMenu={
-							s.installed ? undefined : (
-								<StoreItemContextMenuContent
-									canReport={false}
-									onInstall={() => cardInstall(s.id)}
-									onReport={() => undefined}
-								/>
-							)
-						}
+						// The same verbs the card's own control offers, installed states
+						// included — the gesture used to work only on skills you had not
+						// added yet, which is the half with the least to do to it.
+						contextMenu={storeItemContextMenu({
+							enabled: s.installed ? enabledByKey[s.id] : undefined,
+							installed: s.installed,
+							onDisable: () => {
+								setSkillEnabled(s.id, false).catch(() => undefined);
+							},
+							onEnable: () => {
+								setSkillEnabled(s.id, true).catch(() => undefined);
+							},
+							onInstall: () => cardInstall(s.id),
+							onOpenSettings: settingsOpener(s.id) ?? undefined,
+						})}
 						// The SKILL.md one-liner when the source could give us one
 						// without a per-card round trip (installed skills always can),
 						// else the provenance line every card showed before.

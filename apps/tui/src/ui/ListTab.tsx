@@ -71,7 +71,7 @@ export function ListTab({
 	const [loaded, setLoaded] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 
 	// Track the latest request so a stale resolve cannot clobber fresh data.
 	const reqRef = useRef(0);
@@ -108,8 +108,11 @@ export function ListTab({
 		if (active) {
 			runLoad();
 		}
-		// url/token are primitives; including them re-loads on a node switch.
-	}, [active, runLoad]);
+		// `reloadKey` is load-bearing: the 'r' keybinding only bumps it, so without
+		// it 'r' is dead. Add ONLY that — do not also re-add `url, token`: `runLoad`
+		// already changes identity on a node switch (it closes over `target` from
+		// CoreContext), so including them would double-load.
+	}, [active, runLoad, reloadKey]);
 
 	const selected = rows[index];
 

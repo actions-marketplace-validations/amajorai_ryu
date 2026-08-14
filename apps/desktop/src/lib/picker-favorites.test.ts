@@ -32,7 +32,11 @@ const model = (providerId: string, modelId: string): PickerRef => ({
 /** A minimal in-memory localStorage, reset between tests. */
 function installStorage(impl?: Partial<Storage>) {
 	const map = new Map<string, string>();
-	globalThis.localStorage = {
+	// `defineProperty`, not assignment. happy-dom's global registration defines
+	// `localStorage` as a READONLY property, so `globalThis.localStorage = …`
+	// throws "Attempted to assign to readonly property" as soon as any earlier
+	// file in the same `bun test` process has registered it.
+	const storage = {
 		getItem: (k: string) => map.get(k) ?? null,
 		setItem: (k: string, v: string) => {
 			map.set(k, v);
@@ -47,6 +51,11 @@ function installStorage(impl?: Partial<Storage>) {
 		},
 		...impl,
 	} as Storage;
+	Object.defineProperty(globalThis, "localStorage", {
+		configurable: true,
+		writable: true,
+		value: storage,
+	});
 	return map;
 }
 

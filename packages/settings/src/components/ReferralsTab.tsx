@@ -278,18 +278,31 @@ export function ReferralsTab({
 			    member's own code. The full LINK is still what Copy puts on the
 			    clipboard; the card carries the code, which is the part a person
 			    repeats out loud. */}
-			<Card className="overflow-hidden">
+			{/* `overflow-visible`, against `Card`'s own baked-in `overflow-hidden`:
+			    the pass is a 3D object that turns, tilts and lifts 5% under the
+			    pointer, so its painted box is LARGER than the layout box it occupies.
+			    Clipped to the card, a hover sheared the corners off it and a drag to
+			    turn it sliced the card in half at the panel edge. Nothing else in
+			    here overflows, so there is no bleed to trade away — and the cell
+			    below is padded so the grown card has somewhere to grow into rather
+			    than only unclipping into its neighbour's text. */}
+			<Card className="overflow-visible">
 				<CardContent className="grid gap-6 md:grid-cols-[minmax(0,20rem)_minmax(0,1fr)] md:items-center">
-					<ReferralPass
-						className="mx-auto w-full max-w-[20rem]"
-						code={data.referralCode}
-						earned={
-							credits ? formatCreditsUsd(credits.cap.earnedMicroUsd) : null
-						}
-						holder={holderName}
-						joined={credits?.referrals.length ?? null}
-						metalTheme={metalTheme}
-					/>
+					{/* The gap goes on the CELL, not on the card: the pass's own className
+					    lands on the perspective host that scales, so padding there would
+					    inflate the transform box rather than leave room around it. */}
+					<div className="py-3">
+						<ReferralPass
+							className="mx-auto w-full max-w-[20rem]"
+							code={data.referralCode}
+							earned={
+								credits ? formatCreditsUsd(credits.cap.earnedMicroUsd) : null
+							}
+							holder={holderName}
+							joined={credits?.referrals.length ?? null}
+							metalTheme={metalTheme}
+						/>
+					</div>
 
 					<div className="min-w-0 space-y-5">
 						<div className="flex items-start gap-3">

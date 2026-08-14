@@ -25,6 +25,11 @@ import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import { Card, CardContent, CardHeader } from "@ryu/ui/components/card.tsx";
 import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuTrigger,
+} from "@ryu/ui/components/context-menu.tsx";
+import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
@@ -40,7 +45,7 @@ import {
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 
 /** A sort option shown in the toolbar's sort dropdown. */
 export interface LibrarySortOption {
@@ -50,7 +55,10 @@ export interface LibrarySortOption {
 
 /** One row's worth of display data, normalised by the container from any hook. */
 export interface LibraryCardData {
-	/** Optional short chip rendered top-right (kind, status, …). */
+	/** Optional short chip rendered top-right — a KIND ("Agent", "Workflow") or a
+	 *  type-specific label. Deliberately narrow: this slot is overloaded already
+	 *  (the mixed Recents/Favorites tabs put the item's TYPE here), so a status
+	 *  attribute must not compete for it. */
 	badge?: string | null;
 	/** Whether this item is currently favorited. */
 	favorited: boolean;
@@ -62,6 +70,11 @@ export interface LibraryCardData {
 	/** Optional richer preview rendered in the card body (grid view only) — a
 	 * workflow's input→output strip, a space page's markdown snippet, etc. */
 	preview?: ReactNode;
+	/** The item's STATUS attribute as a glyph (`StatusBadge`), shown before the
+	 *  badge chip. Separate from `badge` because that one is a `string` the mixed
+	 *  tabs already claim for the type label — an item can be both an "Agent" and
+	 *  "Built-in", and one slot cannot say both. */
+	statusIcon?: ReactNode;
 	/** One-line secondary text (description, engine, member count, …). */
 	subtitle?: string | null;
 }
@@ -261,17 +274,26 @@ export function LibraryGrid({
  * One item rendered as either a grid card or a list row (driven by `view`). The
  * whole surface opens the item; the favorite star is a nested, stop-propagated
  * affordance. Shared by every Library tab — there is no per-type variant.
+ *
+ * `contextMenu` mirrors the Store card's prop of the same name: the caller
+ * supplies the ROWS, this wraps the whole card (grid or list) in the trigger so
+ * right-clicking anywhere on it opens them. Base UI wants `render=` rather than
+ * a nested child — nesting a trigger around an element that already contains an
+ * interactive control (the favorite star) is what crashes.
  */
 export function LibraryCard({
 	item,
 	view = "grid",
 	onOpen = noop,
 	onToggleFavorite = noop,
+	contextMenu,
 }: {
 	item: LibraryCardData;
 	view?: ViewMode;
 	onOpen?: () => void;
 	onToggleFavorite?: () => void;
+	/** Rows for the card's right-click menu. Omit for no menu. */
+	contextMenu?: ReactNode;
 }) {
 	const star = (
 		<FavoriteStar favorited={item.favorited} onToggle={onToggleFavorite} />
@@ -285,8 +307,20 @@ export function LibraryCard({
 		}
 	};
 
-	if (view === "list") {
+	const withMenu = (card: ReactElement) => {
+		if (!contextMenu) {
+			return card;
+		}
 		return (
+			<ContextMenu>
+				<ContextMenuTrigger render={card} />
+				<ContextMenuContent align="end">{contextMenu}</ContextMenuContent>
+			</ContextMenu>
+		);
+	};
+
+	if (view === "list") {
+		return withMenu(
 			<div
 				className="group flex w-full cursor-pointer items-center gap-3 rounded-lg border bg-card px-3 py-2 text-left transition-colors hover:bg-muted"
 				onClick={onOpen}
@@ -301,6 +335,7 @@ export function LibraryCard({
 				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
 					<div className="flex items-center gap-2">
 						<span className="truncate font-medium text-sm">{item.name}</span>
+						{item.statusIcon}
 						{item.badge ? <Badge variant="outline">{item.badge}</Badge> : null}
 					</div>
 					{item.subtitle ? (
@@ -314,7 +349,7 @@ export function LibraryCard({
 		);
 	}
 
-	return (
+	return withMenu(
 		<Card
 			className="group cursor-pointer gap-0 py-0 transition-colors hover:bg-muted/40"
 			onClick={onOpen}
@@ -331,6 +366,7 @@ export function LibraryCard({
 					<span className="truncate font-medium text-sm">{item.name}</span>
 				</span>
 				<span className="flex shrink-0 items-center gap-1">
+					{item.statusIcon}
 					{item.badge ? <Badge variant="outline">{item.badge}</Badge> : null}
 					{star}
 				</span>

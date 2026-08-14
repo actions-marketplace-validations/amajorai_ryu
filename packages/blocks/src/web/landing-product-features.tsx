@@ -271,7 +271,7 @@ const featureCards: {
 		viz: <ConnectViz />,
 		title: "App Connections",
 		description:
-			"Authenticate Gmail, Slack, Notion, GitHub, and hundreds more through Composio. Agents act, never just chat.",
+			"Authenticate Gmail, Slack, Notion, GitHub, and hundreds more through Composio. Agents send the email and open the PR themselves.",
 	},
 	{
 		viz: <PagesViz />,

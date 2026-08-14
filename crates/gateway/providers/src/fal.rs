@@ -179,6 +179,10 @@ impl Provider for FalProvider {
         Box::pin(async move { self.run_inline(model, body).await })
     }
 
+    /// fal is job-based: `run_inline` normalizes to `{data:[{url}],raw}`, so
+    /// this always hands back a HOSTED URL, never inline audio bytes. That is
+    /// the URL arm of the audio envelope Core decodes — Core fetches the link
+    /// itself rather than expecting `b64_json`.
     fn synthesize_speech<'a>(
         &'a self,
         model: &'a str,

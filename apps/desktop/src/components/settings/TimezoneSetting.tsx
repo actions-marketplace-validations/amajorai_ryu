@@ -75,6 +75,27 @@ export function TimezoneSetting() {
 		[labels]
 	);
 
+	// Search matches the LABEL and the raw IANA id, with `_` and space treated as
+	// the same character. The label deliberately reads `America/Los Angeles` — the
+	// underscore is stripped because it looks like a typo in a settings row — but
+	// the default filter only sees that label, so typing the id you actually know
+	// (`Los_Angeles`, the string in every config file and error message) matched
+	// nothing and the list went empty. Comparing against the id as well means both
+	// spellings work, and normalizing the query means `los_angeles`, `los angeles`
+	// and `LosAngeles`-with-a-space all land on the same row.
+	const searchFilter = useCallback(
+		(value: string, query: string) => {
+			const needle = query.trim().toLowerCase().replace(/_/g, " ");
+			if (!needle) {
+				return true;
+			}
+			const haystack =
+				`${labelFor(value)} ${value}`.toLowerCase().replace(/_/g, " ");
+			return haystack.includes(needle);
+		},
+		[labelFor]
+	);
+
 	const handleChange = useCallback(
 		(next: string | null) => {
 			if (next) {
@@ -90,7 +111,7 @@ export function TimezoneSetting() {
 
 	return (
 		<SettingsSection
-			caption="Choose the time zone dates and clock times are shown in. This only changes how timestamps are displayed — nothing is rescheduled or re-recorded."
+			caption="Choose the time zone dates and clock times are shown in. This only changes how timestamps are displayed; nothing is rescheduled or re-recorded."
 			title="Date & time"
 		>
 			<SettingsGroup>
@@ -98,6 +119,7 @@ export function TimezoneSetting() {
 					actions={
 						<Combobox
 							autoHighlight
+							filter={searchFilter}
 							items={values}
 							itemToStringLabel={labelFor}
 							onValueChange={handleChange}

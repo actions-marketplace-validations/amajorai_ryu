@@ -59,7 +59,12 @@ export interface AcpConfigSelectOption {
  */
 export interface AcpConfigOption {
 	category?: string | null;
-	currentValue?: string;
+	/**
+	 * A select's active value id, or a boolean toggle's active state. Booleans
+	 * arrive as a real JSON `true`/`false`, never the strings — see
+	 * {@link BOOLEAN_CONFIG_ITEMS}.
+	 */
+	currentValue?: boolean | string;
 	description?: string | null;
 	id: string;
 	name: string;
@@ -271,6 +276,71 @@ export function isReasoningOption(opt: AcpConfigOption): boolean {
  * Approval/permission options (Codex's Read Only / Auto / Full Access, …) get
  * the same CLI-style icon+colour the Approval section gets; all others stay plain.
  */
+/**
+ * The two rows a boolean toggle renders as.
+ *
+ * A `type: "boolean"` option carries NO `options` array — its whole payload is
+ * `currentValue: true|false` — so it would otherwise flatten to an empty item
+ * list and draw a picker with nothing in it. The ids are the STRINGS `"true"` /
+ * `"false"` because every layer between here and the wire stores config picks as
+ * strings (localStorage, the turn body); Core's `config_option_value` maps those
+ * two exact strings back to the protocol's boolean form.
+ */
+export const BOOLEAN_CONFIG_ITEMS = [
+	{ id: "true", name: "On" },
+	{ id: "false", name: "Off" },
+];
+
+/**
+ * An effort suffix on a model id: codex ships `gpt-5.6-terra[high]`.
+ * Top-level so it is not recompiled per call.
+ */
+const MODEL_EFFORT_SUFFIX = /\[([^\]]+)\]$/;
+
+/**
+ * Whether the agent's dedicated `models` list is just its base models crossed
+ * with its reasoning-effort levels.
+ *
+ * Codex advertises effort BOTH ways: 24 entries in `models.availableModels`
+ * (`gpt-5.6-terra[low]` … `gpt-5.4-mini[ultra]`) AND a clean 4-item
+ * `category:"model"` config option beside a 6-item `thought_level` option. The
+ * dedicated list wins the model-picker priority chain, so the picker listed the
+ * cross-product while the effort slider sat next to it — the user chose effort
+ * twice, from two controls that could disagree.
+ *
+ * The test is deliberately strict (EVERY model id must end in a bracketed
+ * suffix that is one of the thought-level values, and there must be at least one
+ * of each): an agent whose list merely happens to contain one bracketed id keeps
+ * its dedicated models, which is the safe direction to be wrong in.
+ */
+export function modelsDuplicateEffortLevels(
+	config: AcpSessionConfig | null | undefined
+): boolean {
+	const models = config?.models?.availableModels ?? [];
+	if (models.length === 0) {
+		return false;
+	}
+	const effortOption = (config?.configOptions ?? []).find(isReasoningOption);
+	if (!effortOption) {
+		return false;
+	}
+	const levels = new Set(
+		flattenConfigOptions(effortOption).map((o) => o.value)
+	);
+	if (levels.size === 0) {
+		return false;
+	}
+	return models.every((m) => {
+		const suffix = MODEL_EFFORT_SUFFIX.exec(m.modelId)?.[1];
+		return suffix !== undefined && levels.has(suffix);
+	});
+}
+
+/** Whether this option is an on/off toggle rather than a select. */
+export function isBooleanConfigOption(opt: AcpConfigOption): boolean {
+	return opt.type === "boolean";
+}
+
 export function buildConfigOptionSection(
 	opt: AcpConfigOption,
 	acpOptionValues: Record<string, string>,
@@ -278,12 +348,20 @@ export function buildConfigOptionSection(
 	/** Announce a USER pick (never a streamed write-back). Optional. */
 	notify?: AcpSelectionNotify
 ): ComposerSettingsSection {
-	const items = flattenConfigOptions(opt).map((o) => ({
-		id: o.value,
-		name: formatAcpOptionLabel(opt.name, o.name),
-		description: o.description,
-	}));
-	const current = acpOptionValues[opt.id] ?? opt.currentValue;
+	const isBoolean = isBooleanConfigOption(opt);
+	const items = isBoolean
+		? BOOLEAN_CONFIG_ITEMS
+		: flattenConfigOptions(opt).map((o) => ({
+				id: o.value,
+				name: formatAcpOptionLabel(opt.name, o.name),
+				description: o.description,
+			}));
+	// `String()` rather than a cast: a boolean option's `currentValue` is a real
+	// JSON boolean, and the section's `value` is compared against the string ids
+	// above.
+	const current =
+		acpOptionValues[opt.id] ??
+		(opt.currentValue === undefined ? undefined : String(opt.currentValue));
 	return {
 		key: `cfg-${opt.id}`,
 		label: opt.name,
@@ -304,8 +382,9 @@ export function buildConfigOptionSection(
 		// Reasoning effort is the one ordered scale an agent advertises (off →
 		// low → … → max), so it reads as a slider rather than a checked list. The
 		// detents ARE the agent's own values: Pi ships an `off` level, Codex does
-		// not, and a hardcoded low→xhigh ladder would desync from both.
-		variant: isReasoningOption(opt) ? "slider" : undefined,
+		// not, and a hardcoded low→xhigh ladder would desync from both. A boolean
+		// is two states and never a scale, so it keeps the plain list.
+		variant: !isBoolean && isReasoningOption(opt) ? "slider" : undefined,
 	};
 }
 
@@ -735,18 +814,27 @@ export function useAcpSections({
 		const effectiveAcpModel =
 			acpModel ?? acpSessionConfig?.models?.currentModelId ?? null;
 
-		const hasDedicatedAcpModels = Boolean(
-			acpSessionConfig?.models &&
-				acpSessionConfig.models.availableModels.length > 0
-		);
-		const activeAgentIsAcp =
-			agents.find((a) => a.id === agentId)?.transport === "acp";
-
 		const {
 			acpModelConfigOption,
 			hideAcpModesPicker,
 			visibleAcpConfigOptions,
 		} = deriveVisibleAcpOptions(acpSessionConfig, reasoningOff);
+
+		// The dedicated `models` list normally wins the model-picker chain. It must
+		// NOT when it is only the base models crossed with the effort levels AND a
+		// clean `category:"model"` option exists to fall through to — otherwise the
+		// picker lists every model once per effort while the effort slider sits
+		// beside it, offering the same choice twice.
+		const modelsAreEffortCrossProduct =
+			modelsDuplicateEffortLevels(acpSessionConfig) &&
+			Boolean(acpModelConfigOption);
+		const hasDedicatedAcpModels = Boolean(
+			acpSessionConfig?.models &&
+				acpSessionConfig.models.availableModels.length > 0 &&
+				!modelsAreEffortCrossProduct
+		);
+		const activeAgentIsAcp =
+			agents.find((a) => a.id === agentId)?.transport === "acp";
 
 		const modelSection = buildModelSection({
 			acpModelConfigOption,
@@ -808,7 +896,13 @@ export function useAcpSections({
 			// The request body drops acp_mode when the dedicated picker is hidden —
 			// a config option owns that setting and a stale set_mode would race it.
 			acpMode: hideAcpModesPicker ? null : effectiveAcpMode,
-			acpModel: effectiveAcpModel,
+			// Same rule, one control over: when the dedicated model list was demoted
+			// as an effort cross-product, the `category:"model"` config option owns
+			// the model and `set_model` must not race it. This also drops a PERSISTED
+			// suffixed pick — someone who used codex before the demotion still has
+			// `gpt-5.6-terra[medium]` in localStorage, and re-sending it every turn
+			// would keep setting effort twice, which is the bug the demotion fixes.
+			acpModel: modelsAreEffortCrossProduct ? null : effectiveAcpModel,
 			acpOptionValues,
 		};
 	}, [

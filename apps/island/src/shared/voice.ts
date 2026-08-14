@@ -15,9 +15,22 @@ export const VOICE_PREF_KEY = "voice-input";
 /**
  * Transcription engine. The value is the `?engine=` parameter Core's
  * `/api/voice/transcribe` understands (parakeet v3, the in-process ONNX engine,
- * is the default; whisper.cpp is the alternative).
+ * is the default; whisper.cpp is the local alternative; `gateway` is the cloud
+ * slot, routed by the node's STT modality mapping rather than a local sidecar).
+ *
+ * MIRRORS the desktop's `VoiceEngine` in `apps/desktop/src/lib/api/preferences.ts`.
+ * The two must move together — the island reads the same stored preference the
+ * desktop writes, so an engine one side does not know is one it will silently
+ * rewrite on the next save.
  */
-export type VoiceEngine = "whisper" | "parakeet";
+export type VoiceEngine = "whisper" | "parakeet" | "gateway";
+
+/** Every engine the union admits, for the coercions that must not narrow it away. */
+export const VOICE_ENGINE_VALUES: readonly VoiceEngine[] = [
+	"whisper",
+	"parakeet",
+	"gateway",
+];
 
 /**
  * How the push-to-talk shortcut behaves:
@@ -60,10 +73,18 @@ export const DEFAULT_VOICE_MODE: VoiceInputMode = "toggle";
  */
 export const DEFAULT_VOICE_SHORTCUT = "CommandOrControl+Shift+A";
 
-/** Bundled model id per engine (the single model each engine serves today). */
+/**
+ * Bundled model id per engine (the single model each engine serves today).
+ *
+ * `gateway` is empty on purpose: the cloud slot's model comes from the node's
+ * STT modality mapping, so this side has none to name. Typed as a total
+ * `Record<VoiceEngine, string>` so adding an engine to the union is a COMPILE
+ * error here rather than an undefined lookup at runtime.
+ */
 export const VOICE_ENGINE_MODELS: Record<VoiceEngine, string> = {
 	whisper: "ggml-base.en",
 	parakeet: "parakeet-tdt-0.6b-v3",
+	gateway: "",
 };
 
 /** Default voice-input settings: enabled, parakeet, safe rebindable shortcut. */
@@ -75,9 +96,19 @@ export const DEFAULT_VOICE_PREFS: VoiceInputPrefs = {
 	shortcut: DEFAULT_VOICE_SHORTCUT,
 };
 
-/** Coerce an unknown value to a known engine, defaulting to parakeet. */
+/**
+ * Coerce an unknown value to a known engine, defaulting to parakeet.
+ *
+ * Checked against the full list, not one `=== "whisper"`. This is the SECOND
+ * coercion in the island (the other is in `dictation.ts`) and it feeds
+ * `parseVoicePrefs` below, which the main process and the renderer both read —
+ * so while it kept the hardcoded pair it silently rewrote a `gateway` pick made
+ * in the desktop back to parakeet on the next island save.
+ */
 function coerceEngine(value: unknown): VoiceEngine {
-	return value === "whisper" ? "whisper" : "parakeet";
+	return VOICE_ENGINE_VALUES.includes(value as VoiceEngine)
+		? (value as VoiceEngine)
+		: "parakeet";
 }
 
 /** Coerce an unknown value to a known activation mode, defaulting to toggle. */

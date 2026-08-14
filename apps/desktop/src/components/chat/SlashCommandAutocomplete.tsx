@@ -46,9 +46,12 @@ export function SlashCommandAutocomplete({
 	const filtered = commands.filter((c) => c.name.toLowerCase().includes(q));
 
 	// Reset the highlight to the top whenever the query narrows the list.
+	// `query` is load-bearing: this component stays MOUNTED while the query
+	// narrows `filtered`, so without it `active` is never reset and can point
+	// past the end of the shrunken list.
 	useEffect(() => {
 		setActive(0);
-	}, []);
+	}, [query]);
 
 	// Dismiss on click outside (ignoring clicks on the anchored textarea).
 	useEffect(() => {
@@ -86,7 +89,13 @@ export function SlashCommandAutocomplete({
 			} else if (e.key === "Enter" || e.key === "Tab") {
 				e.preventDefault();
 				e.stopPropagation();
-				onSelect(filtered[active]);
+				// Clamp independently of the dep restore above: the reset closes the
+				// common path, this is what makes a stale index unable to hand
+				// `undefined` to the select handler.
+				const picked = filtered[Math.min(active, filtered.length - 1)];
+				if (picked) {
+					onSelect(picked);
+				}
 			}
 		};
 		document.addEventListener("keydown", handler, { capture: true });

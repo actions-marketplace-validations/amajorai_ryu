@@ -103,7 +103,14 @@ function rendersRegardlessOfDetail(part: unknown): boolean {
 	if (part.type === "error") {
 		return typeof part.message === "string";
 	}
-	if (part.type === "data-image-generation") {
+	// Both generation surfaces, always together. Adding a media part type without
+	// adding it here is silent: the part renders fine at full detail and vanishes
+	// the moment tool detail is hidden, because this predicate also decides
+	// whether the message counts as having content at all.
+	if (
+		part.type === "data-image-generation" ||
+		part.type === "data-video-generation"
+	) {
 		return true;
 	}
 	if (part.type === "file") {

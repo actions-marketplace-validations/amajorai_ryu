@@ -20,7 +20,7 @@
     "baseUrl": ".",
     // `bun-types` alongside electron-vite's: the `*.test.ts` files import
     // `bun:test`, which has no declarations without it (62 TS2307s).
-    "types": ["electron-vite/node", "bun-types"],
+    "types": ["electron-vite/node", "bun"],
     "paths": {
       "@/*": ["./src/renderer/*"]
     }

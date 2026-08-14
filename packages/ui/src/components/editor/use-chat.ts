@@ -28,7 +28,7 @@ const EDITOR_AI_SYSTEM =
  * Gateway-backed editor AI. The editor fails CLOSED: it never fabricates output.
  */
 export const EDITOR_AI_UNCONFIGURED_ERROR =
-	"Editor AI is not configured. Turn it on in Settings → Editor and pick a model.";
+	"No model is available for the editor's AI. Pick a default agent for this node, or set one under Apps → Spaces.";
 
 export type ToolName = "comment" | "edit" | "generate";
 

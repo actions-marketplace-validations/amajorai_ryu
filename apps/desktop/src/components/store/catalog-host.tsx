@@ -21,9 +21,19 @@ import {
 	type CatalogInstallButtonProps,
 	type CatalogNode,
 } from "@ryu/marketplace/catalog/host";
-import type { InstalledModelEntry } from "@ryu/marketplace/catalog/types";
+import type {
+	InstalledModelEntry,
+	Surface,
+} from "@ryu/marketplace/catalog/types";
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useMemo } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import {
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useMemo,
+	useState,
+} from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { ActiveModelControl } from "@/src/components/store/ActiveModelControl.tsx";
 import { useDesktopDependencyLookup } from "@/src/components/store/dependency-lookup.ts";
@@ -32,6 +42,7 @@ import { SKILL_EDITOR_ALIAS } from "@/src/contributions/companion-alias.ts";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAppsCatalog } from "@/src/hooks/useAppsCatalog.ts";
+import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useModelCatalog } from "@/src/hooks/useModelCatalog.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
@@ -103,6 +114,38 @@ function useInstalledModels(): InstalledModelEntry[] {
 	return query.data ?? [];
 }
 
+/** The host-surface versions THIS client can vouch for.
+ *
+ *  Core computes a compatibility verdict for every listing, but it can only see
+ *  its own version and the Gateway's — it reports a `desktop` floor as an advisory
+ *  `unknown` because a desktop install never reports in. So without this, a
+ *  `desktop: ">=2.0.0"` floor is inert on the one client that knows the answer.
+ *
+ *  Only `desktop` is claimed. The island runs out-of-process and the desktop knows
+ *  only whether it is REACHABLE, not its version, so claiming one would be a guess
+ *  — and a wrong guess here silently blocks an install. Unknown stays advisory. */
+function useDesktopHostVersions(): Partial<Record<Surface, string>> {
+	const [version, setVersion] = useState<string | null>(null);
+	useEffect(() => {
+		let cancelled = false;
+		getVersion()
+			.then((v) => {
+				if (!cancelled) {
+					setVersion(v);
+				}
+			})
+			// A version we cannot read is UNKNOWN, not old: swallow and stay advisory
+			// rather than let a failed lookup grey out every listing.
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+	// Memoised so the object identity is stable — `useEntryIncompatibility` keys its
+	// own memo on it, and a fresh `{}` each render would recompute for every card.
+	return useMemo(() => (version ? { desktop: version } : {}), [version]);
+}
+
 /** Mount once above every store surface that renders the shared catalog sections. */
 export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	const activeNode = useCatalogNode();
@@ -127,6 +170,10 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 	// host must stay a stable module-shaped value (rules of hooks), and this is
 	// live query data that changes as apps are installed and enabled.
 	const dependencyLookup = useDesktopDependencyLookup();
+
+	// What this client knows about its own surfaces, overlaid on Core's verdict so
+	// a per-surface floor is enforceable rather than merely declared.
+	const hostVersions = useDesktopHostVersions();
 
 	const host = useMemo<CatalogHost>(
 		() => ({
@@ -158,6 +205,10 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			useSkillsCatalog,
 			useModelCatalog,
 			useActiveNode: useCatalogNode,
+			// A module-level hook, like `usePersistedToggle` beside it — so it adds no
+			// memo dependency and the host object stays stable across renders, which
+			// this file's own header says twice is load-bearing.
+			useInterfaceLevel,
 			usePersistedToggle,
 			// Lets a Store listing lead to its own settings tab (Gateway dialog for
 			// node-scoped tabs, App Settings for user-scoped ones) instead of leaving
@@ -169,10 +220,11 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			useInstalledModels,
 			ActiveModelControl,
 			fitStyle,
+			hostVersions,
 		}),
 		// activeNode is a dep because fetchVersionDetail closes over it — without
 		// it, switching nodes would keep reading versions from the previous one.
-		[navigate, skillEditorOwner, activeNode.url, activeNode.token]
+		[navigate, skillEditorOwner, activeNode.url, activeNode.token, hostVersions]
 	);
 
 	return (

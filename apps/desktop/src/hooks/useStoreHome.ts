@@ -68,6 +68,15 @@ export interface HomeCard {
 	 *  tab — without it every Home row fell back to the generative placeholder and
 	 *  Home, the first tab anyone sees, was the one place the icons were wrong. */
 	dither: CardDither | null;
+	/** ACP registry id and engine — AGENTS ROW ONLY, and null everywhere else.
+	 *
+	 *  They exist so Home can render the same themed brand mark the Agents tab
+	 *  does (`AgentCatalogLogo`). Home used to hand the agent's raw CDN `iconUrl`
+	 *  straight to the icon square, and those marks are solid black SVGs: Claude
+	 *  and Codex rendered black-on-black on a dark theme. The Agents tab never had
+	 *  the bug because it goes through the logo component, which pairs a
+	 *  light/dark asset for the branded engines and `dark:invert`s the rest. */
+	engine?: string | null;
 	/** Icon-primitive glyph id (`icon`), painted inside the tile. */
 	iconId: string | null;
 	/** Resolvable logo URL, or null to fall back to the item's initial. */
@@ -78,6 +87,7 @@ export interface HomeCard {
 	/** Weight format, models only: their add endpoint needs it to pick a file. */
 	modelFormat: ModelFormat | null;
 	name: string;
+	registryId?: string | null;
 	/** Short kind/format/engine chip. */
 	tag: string | null;
 }
@@ -322,7 +332,13 @@ export function useStoreHome(): UseStoreHomeResult {
 				description: a.description,
 				tag: a.engine,
 				iconId: null,
-				iconUrl: a.iconUrl,
+				// Deliberately NULL, with `engine`/`registryId` carried instead: the
+				// raw CDN mark is a solid black SVG and must not reach the icon square.
+				// StoreHome renders `AgentCatalogLogo` from those two fields, which is
+				// the same themed/inverted mark the Agents tab shows.
+				iconUrl: null,
+				engine: a.engine,
+				registryId: a.registryId,
 				dither: null,
 				// An agent with no prebuilt package for this platform can be browsed
 				// but not one-click added; treating it as already added is the honest

@@ -51,7 +51,9 @@ import {
 	type ComponentType,
 	type ReactNode,
 	useCallback,
+	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
 import {
@@ -84,6 +86,7 @@ import {
 	quantVariantRank,
 } from "./friendly.ts";
 import { type CatalogInstallButtonProps, useCatalogHost } from "./host.tsx";
+import { useSyncInstalledOnly } from "./installed-filter.tsx";
 import type {
 	FitVerdict,
 	LlmFitEstimate,
@@ -307,9 +310,13 @@ export function deviceSummaryLines(device: ModelDetail["device"]): string[] {
  */
 export default function ModelsCatalogSection({
 	initialQuery = "",
+	initialSelectedId,
 }: {
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
+	/** Open this item's preview on arrival — the id of a card clicked on the
+	 *  Store's Home shelves. */
+	initialSelectedId?: string;
 } = {}) {
 	const host = useCatalogHost();
 	const {
@@ -348,6 +355,26 @@ export default function ModelsCatalogSection({
 		selectSource,
 		selectingSource,
 	} = host.useModelCatalog(initialQuery);
+
+	// The shell's "installed only" switch (the retired "Added" tab, inverted).
+	// Pushed into this section's OWN filter rather than applied over `models`:
+	// here the flag narrows the request, so filtering the returned array would
+	// only hide rows from a page the server already scoped.
+	useSyncInstalledOnly(setInstalledOnly);
+
+	// A Home shelf card opens this section with its item already selected. One
+	// shot, latched: the prop is a arrival instruction, not a controlled value, so
+	// re-running it would fight the user's own next click (and `select` changes
+	// identity on every refetch, which would make a plain dep array do exactly
+	// that).
+	const preselected = useRef(false);
+	useEffect(() => {
+		if (!initialSelectedId || preselected.current) {
+			return;
+		}
+		preselected.current = true;
+		select(initialSelectedId);
+	}, [initialSelectedId, select]);
 
 	const [friendly, setFriendly] = useFriendlyMode();
 	// Raw Hugging Face tags in the list are off by default — there are a lot of
@@ -2159,7 +2186,7 @@ function FileRow({
 	);
 
 	return (
-		<li className="flex items-center gap-3 rounded-md border px-3 py-2">
+		<li className="flex items-center gap-3 rounded-md bg-muted px-3 py-2">
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-2">
 					{renderLabel()}

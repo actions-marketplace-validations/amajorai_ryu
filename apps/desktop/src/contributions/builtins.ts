@@ -329,15 +329,28 @@ export function seedBuiltinRoutes(): void {
 	// restore that revives one), never from the sidebar or the palette.
 	exact(PANE_CHOOSER_PATH, () => createElement(PaneChooserPage));
 	exact("/settings", () => createElement(SettingsPage));
-	// Apps + Extensions + Fleet all merged into the store's Installed section.
+	// Apps + Extensions + Fleet all used to open the Store's "Added" section. That
+	// section is gone — it was a tab that was not a category — and its view is now
+	// the shell's "Installed only" switch over a real realm. Each legacy route
+	// therefore opens the realm it actually meant, already narrowed to what is
+	// installed, instead of one undifferentiated list.
 	exact("/extensions", () =>
-		createElement(StorePage, { initialSection: "installed" })
+		createElement(StorePage, {
+			initialInstalledOnly: true,
+			initialSection: "plugins",
+		})
 	);
 	exact("/apps", () =>
-		createElement(StorePage, { initialSection: "installed" })
+		createElement(StorePage, {
+			initialInstalledOnly: true,
+			initialSection: "apps",
+		})
 	);
 	exact("/fleet", () =>
-		createElement(StorePage, { initialSection: "installed" })
+		createElement(StorePage, {
+			initialInstalledOnly: true,
+			initialSection: "apps",
+		})
 	);
 
 	// ── Pattern routes (ordered; each `$`-anchored regex uses [^/]+ per segment,

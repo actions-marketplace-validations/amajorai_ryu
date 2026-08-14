@@ -6,6 +6,7 @@
 //
 //   • not installed          → an "Add" button (with live download %), wrapped
 //                              in a right-click ContextMenu.
+//   • installed, un-removable → the shared "built in" status glyph (+ the menu).
 //   • installed, no enable    → 3-dot menu with Remove (+ Report).
 //   • installed + enabled     → 3-dot menu with Disable, Report, Remove.
 //   • installed + disabled    → 3-dot menu with Enable, Report, Remove.
@@ -25,10 +26,15 @@
 // key?" starts on the card they just installed, not in a settings dialog they
 // have to guess the tab of. A surface with no settings destination (web, or an
 // item that declares none) passes nothing and the row does not render.
+//
+// `extra` appends surface-supplied rows to that same menu. It exists so a
+// surface can make the "…" UNIVERSAL: Settings is desktop-only and Report is
+// meaningless on a first-party curated entry, so a store relying on those two
+// alone shows the menu on some cards and not others, and the grid stops reading
+// as one component. The web store passes "Copy link", which every listing has.
 
 import {
 	Alert02Icon,
-	CheckmarkCircle02Icon,
 	Delete01Icon,
 	Download04Icon,
 	MoreHorizontalIcon,
@@ -54,6 +60,8 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
+import { Fragment } from "react";
 import { useOptionalReport } from "../../report/report-provider.tsx";
 import type { ReportTarget } from "../../report/types.ts";
 
@@ -69,6 +77,27 @@ export interface StoreItemActionProps {
 	enabled?: boolean;
 	/** Overrides the "Enable" menu label (e.g. Engines' "Set as active"). */
 	enableLabel?: string;
+	/** Extra rows for the overflow menu, appended after the built-in ones. The
+	 *  read-only web store uses it for "Copy link", which is what lets EVERY card
+	 *  carry the "…" — Settings and Report are both surface- or listing-specific,
+	 *  so without a universal row the menu appeared on some cards and not others
+	 *  and the grid read as two different components again. Its presence counts
+	 *  toward whether the menu renders at all. */
+	extra?: React.ReactNode;
+	/** Non-null when this node does not meet the listing's declared host floors
+	 *  (`engines`) — the string is the user-facing reason, e.g.
+	 *  `"Requires Ryu >=0.2.0 (you have 0.1.12)"`, from `describeIncompatibility`.
+	 *
+	 *  The listing is still SHOWN: it used to vanish entirely, which left a user
+	 *  unable to discover that updating would bring it back. Instead the install
+	 *  verb is withheld and replaced by a disabled "Unavailable" pill carrying the
+	 *  reason, because Core refuses the install anyway — offering an Add button
+	 *  that is guaranteed to 409 is worse than not offering one.
+	 *
+	 *  Pass only for BLOCKING failures. A floor against a surface nobody can
+	 *  observe is advisory, and greying a card over it would hide listings for no
+	 *  reason — `describeIncompatibility` already returns null in that case. */
+	incompatible?: string | null;
 	installed: boolean;
 	/** Locked items (e.g. the flagship agent) can't be removed. */
 	locked?: boolean;
@@ -104,8 +133,10 @@ export default function StoreItemAction({
 	reportTarget,
 	affordance,
 	className,
+	extra,
 	enableLabel = "Enable",
 	disableLabel = "Disable",
+	incompatible = null,
 }: StoreItemActionProps) {
 	const reportCtx = useOptionalReport();
 	const canReport = Boolean(onReport || (reportCtx && reportTarget));
@@ -122,10 +153,11 @@ export default function StoreItemAction({
 	// Whether the trailing overflow menu has anything to hold at all. Both the
 	// read-only-affordance and the locked paths render a static primary control, so
 	// Settings/Report can only reach the user through that menu.
-	const hasOverflow = canReport || Boolean(onOpenSettings);
+	const hasOverflow = canReport || Boolean(onOpenSettings) || Boolean(extra);
 	const overflow = (
 		<StoreItemOverflowMenu
 			className={className}
+			extra={extra}
 			onOpenSettings={onOpenSettings}
 			onReport={canReport ? handleReport : undefined}
 		/>
@@ -139,6 +171,78 @@ export default function StoreItemAction({
 			<div className="flex items-center gap-0.5">
 				{affordance}
 				{overflow}
+			</div>
+		);
+	}
+
+	// Host floors are unmet on this node. Checked BEFORE every lifecycle branch
+	// below, because each of them offers a verb Core will refuse: Add and Enable
+	// both 409, and Enable in particular would read as "this is one click from
+	// working" when it is not. Remove stays available for an item already on disk.
+	if (incompatible) {
+		// The pill label stays short ("Unavailable") because this control sits in a
+		// dense card row across six sections, but the REASON must not be
+		// hover-only: `title` alone is unreachable by keyboard and invisible on
+		// touch, which is most of the surfaces this renders on. `aria-label` carries
+		// the full sentence to assistive tech and matches how the sibling "Built in"
+		// glyph exposes its own text.
+		const pill = (
+			<Button
+				aria-label={incompatible}
+				className={className}
+				disabled
+				size="sm"
+				title={incompatible}
+				variant="secondary"
+			>
+				<HugeiconsIcon
+					className="size-3.5 text-muted-foreground"
+					icon={Alert02Icon}
+				/>
+				Unavailable
+			</Button>
+		);
+		if (!installed) {
+			return hasOverflow ? (
+				<div className="flex items-center gap-0.5">
+					{pill}
+					{overflow}
+				</div>
+			) : (
+				pill
+			);
+		}
+		// Installed but held back. `hasEnableConcept={false}` so the menu offers no
+		// Enable — the plugin cannot run here, and the only useful verbs are Remove
+		// plus whatever Settings/Report the surface supplies.
+		return (
+			<div className="flex items-center gap-0.5">
+				{pill}
+				<DropdownMenu>
+					<DropdownMenuTrigger
+						render={
+							<Button
+								aria-label="Manage"
+								className={className}
+								size="icon-sm"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-4" icon={MoreHorizontalIcon} />
+							</Button>
+						}
+					/>
+					<DropdownMenuContent align="end">
+						<StoreItemMenuItems
+							canReport={canReport}
+							hasEnableConcept={false}
+							isEnabled={false}
+							onOpenSettings={onOpenSettings}
+							onReport={handleReport}
+							onUninstall={locked ? undefined : onUninstall}
+						/>
+						{extra}
+					</DropdownMenuContent>
+				</DropdownMenu>
 			</div>
 		);
 	}
@@ -182,26 +286,19 @@ export default function StoreItemAction({
 		// Locked = built-in / un-removable. It has no lifecycle verbs, but it is
 		// exactly the kind of item that DOES have settings, so the overflow menu
 		// still renders whenever there is something behind it.
+		//
+		// This used to be a disabled `<Button>` reading "Built in". A disabled button
+		// is an affordance that says "you could press this, but not now", and there
+		// is no now — the item can never be removed. It is a STATE, so it renders as
+		// the shared status glyph, with the word on hover. That also stops the widest
+		// control in a grid of listing rows being the one row you cannot act on.
+		const mark = <StatusBadge kind="builtin" label={lockedLabel} />;
 		if (!hasOverflow) {
-			return (
-				<Button className={className} disabled size="sm" variant="secondary">
-					<HugeiconsIcon
-						className="size-3.5 text-success"
-						icon={CheckmarkCircle02Icon}
-					/>
-					{lockedLabel}
-				</Button>
-			);
+			return <span className={className}>{mark}</span>;
 		}
 		return (
 			<div className="flex items-center gap-0.5">
-				<Button disabled size="sm" variant="secondary">
-					<HugeiconsIcon
-						className="size-3.5 text-success"
-						icon={CheckmarkCircle02Icon}
-					/>
-					{lockedLabel}
-				</Button>
+				{mark}
 				{overflow}
 			</div>
 		);
@@ -258,6 +355,7 @@ export default function StoreItemAction({
 					onReport={handleReport}
 					onUninstall={onUninstall}
 				/>
+				{extra}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
@@ -342,43 +440,145 @@ function StoreItemMenuItems({
 }
 
 /**
- * Reusable context menu content for not-installed store items.
- * Catalog sections use this as the `contextMenu` prop on StoreCatalogCard
- * so right-clicking the card shows Add + Report (when available).
+ * The rows of a catalog card's RIGHT-CLICK menu — the same verbs the card's own
+ * control offers, in the same order.
+ *
+ * It exists because the two menus cannot share a renderer: the dropdown is built
+ * from `DropdownMenuItem` and a context menu from `ContextMenuItem`, and Base UI
+ * gives each its own keyboard/roving-focus wiring, so one cannot be nested in
+ * the other's content. Only the DECISIONS are shared, and they are stated once
+ * here in the same shape {@link StoreItemAction} uses.
+ *
+ * Before this, right-click reached only NOT-installed cards, and only through
+ * the Add button rather than the card — so the gesture worked on exactly the
+ * listings you had not adopted yet and did nothing on the ones you manage. An
+ * installed listing is the one with more to do to it, not less.
+ *
+ * Returns `undefined` when it would render nothing, so a caller can pass the
+ * result straight to `contextMenu` and get no menu rather than an empty one.
  */
-export function StoreItemContextMenuContent({
-	onInstall,
-	onReport,
+export function storeItemContextMenu({
 	canReport,
+	disableLabel = "Disable",
+	enabled,
+	enableLabel = "Enable",
+	extra,
+	incompatible = null,
+	installed = false,
+	locked = false,
+	onDisable,
+	onEnable,
+	onInstall,
+	onOpenSettings,
+	onReport,
+	onUninstall,
 }: {
-	canReport: boolean;
+	canReport?: boolean;
+	disableLabel?: string;
+	/** `undefined` = no enable/disable concept, exactly as in StoreItemAction. */
+	enabled?: boolean;
+	enableLabel?: string;
+	/** Extra rows, already `ContextMenuItem`s. Appended last. */
+	extra?: React.ReactNode;
+	/** Non-null when host floors are unmet — Add and Enable are withheld, since
+	 *  Core refuses both, but Remove for an on-disk copy stays. */
+	incompatible?: string | null;
+	installed?: boolean;
+	/** Built-in / un-removable: no Remove row. */
+	locked?: boolean;
+	onDisable?: () => void;
+	onEnable?: () => void;
 	onInstall?: () => void;
-	onReport: () => void;
-}) {
-	return (
-		<>
-			{onInstall ? (
-				<ContextMenuItem onClick={onInstall}>
+	onOpenSettings?: () => void;
+	onReport?: () => void;
+	onUninstall?: () => void;
+}): React.ReactNode | undefined {
+	const rows: React.ReactNode[] = [];
+	const report = canReport && onReport ? onReport : undefined;
+
+	if (!installed) {
+		if (onInstall && !incompatible) {
+			rows.push(
+				<ContextMenuItem key="add" onClick={onInstall}>
 					<HugeiconsIcon className="size-4" icon={Download04Icon} />
 					Add
 				</ContextMenuItem>
-			) : null}
-			{canReport ? (
-				<>
-					{onInstall ? <ContextMenuSeparator /> : null}
-					<ContextMenuItem onClick={onReport}>
-						<HugeiconsIcon className="size-4" icon={Alert02Icon} />
-						Report
-					</ContextMenuItem>
-				</>
-			) : null}
-		</>
-	);
+			);
+		}
+		if (report) {
+			if (rows.length > 0) {
+				rows.push(<ContextMenuSeparator key="sep-report" />);
+			}
+			rows.push(
+				<ContextMenuItem key="report" onClick={report}>
+					<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+					Report
+				</ContextMenuItem>
+			);
+		}
+		if (extra) {
+			rows.push(<Fragment key="extra">{extra}</Fragment>);
+		}
+		return rows.length > 0 ? rows : undefined;
+	}
+
+	// Installed. Settings leads for the same reason it leads the dropdown: it is
+	// why you open the menu on something that is already working.
+	if (onOpenSettings) {
+		rows.push(
+			<ContextMenuItem key="settings" onClick={onOpenSettings}>
+				<HugeiconsIcon className="size-4" icon={Settings01Icon} />
+				Settings
+			</ContextMenuItem>
+		);
+	}
+	// An unmet host floor means the item cannot run here at all, so the toggle is
+	// withheld — offering Enable would read as "one click from working".
+	if (enabled !== undefined && !incompatible) {
+		if (enabled && onDisable) {
+			rows.push(
+				<ContextMenuItem key="disable" onClick={onDisable}>
+					<HugeiconsIcon className="size-4" icon={PauseIcon} />
+					{disableLabel}
+				</ContextMenuItem>
+			);
+		} else if (!enabled && onEnable) {
+			rows.push(
+				<ContextMenuItem key="enable" onClick={onEnable}>
+					<HugeiconsIcon className="size-4" icon={PlayIcon} />
+					{enableLabel}
+				</ContextMenuItem>
+			);
+		}
+	}
+	if (report) {
+		rows.push(
+			<ContextMenuItem key="report" onClick={report}>
+				<HugeiconsIcon className="size-4" icon={Alert02Icon} />
+				Report
+			</ContextMenuItem>
+		);
+	}
+	if (extra) {
+		rows.push(<Fragment key="extra">{extra}</Fragment>);
+	}
+	if (onUninstall && !locked) {
+		if (rows.length > 0) {
+			rows.push(<ContextMenuSeparator key="sep-remove" />);
+		}
+		rows.push(
+			<ContextMenuItem key="remove" onClick={onUninstall} variant="destructive">
+				<HugeiconsIcon className="size-4" icon={Delete01Icon} />
+				Remove
+			</ContextMenuItem>
+		);
+	}
+	return rows.length > 0 ? rows : undefined;
 }
 
 /**
  * Standalone 3-dot overflow for items whose primary control is static — the
- * locked ("Built in") pill, the read-only web affordance, and the "Required"
+ * locked (built-in) status glyph, the read-only web affordance, and the "Required"
  * badge a mandatory listing renders instead of lifecycle buttons. Holds Settings
  * and/or Report; renders nothing when it would be empty, so a caller can mount it
  * unconditionally.
@@ -391,12 +591,15 @@ export function StoreItemOverflowMenu({
 	onOpenSettings,
 	onReport,
 	className,
+	extra,
 }: {
 	className?: string;
+	/** Appended after Settings/Report — see {@link StoreItemActionProps.extra}. */
+	extra?: React.ReactNode;
 	onOpenSettings?: () => void;
 	onReport?: () => void;
 }) {
-	if (!(onOpenSettings || onReport)) {
+	if (!(onOpenSettings || onReport || extra)) {
 		return null;
 	}
 	return (
@@ -426,6 +629,7 @@ export function StoreItemOverflowMenu({
 						Report
 					</DropdownMenuItem>
 				) : null}
+				{extra}
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

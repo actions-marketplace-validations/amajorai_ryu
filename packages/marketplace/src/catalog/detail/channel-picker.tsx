@@ -63,6 +63,23 @@ export function useListingChannels(
 		if (!fetchChannels) {
 			return;
 		}
+		// A question nothing can answer is not worth asking. Channels resolve one of
+		// two ways: by a SCOPED marketplace id (`@scope/name`), or by a git repo URL.
+		// The git catalog publishes each listing under its DIRECTORY BASENAME
+		// (`tools/generate-marketplace.mjs` sets `name: dirName`, explicitly not the
+		// manifest id), and no alias table maps a basename onto a plugin id — so a
+		// bare `hook-observers` with no repo can never match anything upstream. It
+		// cost one guaranteed-empty request per preview open, and against an older
+		// Core it was a 400 in the console.
+		//
+		// Returning empty here keeps the "empty means UNKNOWN, never stable-only"
+		// contract above intact: the caller renders no picker, which is the same
+		// thing a failed fetch produces.
+		const askable = Boolean(repo) || id.startsWith("@");
+		if (!askable) {
+			setChannels([]);
+			return;
+		}
 		let live = true;
 		setLoading(true);
 		fetchChannels(id, repo)

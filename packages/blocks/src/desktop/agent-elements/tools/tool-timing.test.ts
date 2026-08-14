@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatToolDuration } from "./tool-timing.tsx";
+import { formatToolDuration, readToolTiming } from "./tool-timing.tsx";
 
 describe("formatToolDuration", () => {
 	// The whole reason this exists instead of reusing message-stats'
@@ -32,5 +32,57 @@ describe("formatToolDuration", () => {
 		expect(formatToolDuration(-1)).toBe("");
 		expect(formatToolDuration(Number.NaN)).toBe("");
 		expect(formatToolDuration(Number.POSITIVE_INFINITY)).toBe("");
+	});
+});
+
+/** A part shaped the way the AI SDK lands Core's `providerMetadata`. */
+function stampedPart(ryu: Record<string, unknown>) {
+	return { type: "tool-Bash", callProviderMetadata: { ryu } };
+}
+
+describe("readToolTiming", () => {
+	test("reads a completed call's full timing", () => {
+		expect(
+			readToolTiming(
+				stampedPart({ startedAt: 1000, completedAt: 4000, durationMs: 3000 })
+			)
+		).toEqual({ startedAt: 1000, completedAt: 4000, durationMs: 3000 });
+	});
+
+	test("reports an opened-but-never-closed call as start-only", () => {
+		// The hang case: this is what lets the badge render a start clock instead
+		// of a duration, which is the only thing separating a hang from a failure.
+		expect(readToolTiming(stampedPart({ startedAt: 1000 }))).toEqual({
+			startedAt: 1000,
+		});
+	});
+
+	test("derives a missing durationMs from the pair", () => {
+		expect(
+			readToolTiming(stampedPart({ startedAt: 1000, completedAt: 2500 }))
+		).toEqual({ startedAt: 1000, completedAt: 2500, durationMs: 1500 });
+	});
+
+	test("drops a completion that precedes the start", () => {
+		// A wall clock can step backwards mid-call (NTP correction). Degrading to
+		// start-only beats rendering a negative duration.
+		expect(
+			readToolTiming(stampedPart({ startedAt: 5000, completedAt: 4000 }))
+		).toEqual({ startedAt: 5000 });
+	});
+
+	test("returns null for an unstamped part so the mount clock takes over", () => {
+		expect(readToolTiming({ type: "tool-Bash" })).toBeNull();
+		expect(
+			readToolTiming({ type: "tool-Bash", callProviderMetadata: {} })
+		).toBeNull();
+		expect(readToolTiming(undefined)).toBeNull();
+		expect(readToolTiming(null)).toBeNull();
+	});
+
+	test("rejects a non-numeric or negative start", () => {
+		expect(readToolTiming(stampedPart({ startedAt: "1000" }))).toBeNull();
+		expect(readToolTiming(stampedPart({ startedAt: Number.NaN }))).toBeNull();
+		expect(readToolTiming(stampedPart({ startedAt: -1 }))).toBeNull();
 	});
 });

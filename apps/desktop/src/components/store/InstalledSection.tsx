@@ -32,6 +32,7 @@ import StoreCatalogLayout, {
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
 import StoreItemAction, {
 	StoreItemOverflowMenu,
+	storeItemContextMenu,
 } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreShelfHeading from "@ryu/marketplace/catalog/chrome/store-shelf-heading";
 import { RequiredPluginsSection } from "@ryu/marketplace/catalog/detail/dependency-graph";
@@ -68,6 +69,7 @@ import {
 } from "@ryu/ui/components/empty";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -468,6 +470,57 @@ export default function InstalledSection() {
 		);
 	};
 
+	/** The card's right-click rows — the same three branches `renderAppAction`
+	 *  takes. This surface lists ONLY installed apps, so before this the gesture
+	 *  did nothing anywhere on the page. */
+	const appContextMenu = (app: AppInfo) => {
+		const openSettings = settingsOpener(app.id) ?? undefined;
+		if (app.mandatory) {
+			return storeItemContextMenu({
+				installed: true,
+				locked: true,
+				onOpenSettings: openSettings,
+			});
+		}
+		if (app.builtIn) {
+			return storeItemContextMenu({
+				enabled: sidecarRunning(app) === true,
+				installed: true,
+				onDisable: () => {
+					handleSidecar(app, "stop").catch(() => {
+						// Errors surface via the detail panel's state.
+					});
+				},
+				onEnable: () => {
+					handleSidecar(app, "start").catch(() => {
+						// Errors surface via the detail panel's state.
+					});
+				},
+				onOpenSettings: openSettings,
+			});
+		}
+		return storeItemContextMenu({
+			enabled: app.enabled,
+			installed: true,
+			onDisable: () => {
+				handleToggle(app, false).catch(() => {
+					// Errors surface via the shared toggleError banner.
+				});
+			},
+			onEnable: () => {
+				handleToggle(app, true).catch(() => {
+					// Errors surface via the shared toggleError banner.
+				});
+			},
+			onOpenSettings: openSettings,
+			onUninstall: () => {
+				handleUninstall(app).catch(() => {
+					// Errors surface via the shared toggleError banner.
+				});
+			},
+		});
+	};
+
 	return (
 		<StoreCatalogLayout
 			detail={
@@ -530,6 +583,7 @@ export default function InstalledSection() {
 										<StoreCatalogCard
 											action={renderAppAction(app)}
 											cacheKey={iconCacheKey(app.id, installedVersionOf(app))}
+											contextMenu={appContextMenu(app)}
 											description={cardDescription(app)}
 											dither={app.iconDither}
 											icon={
@@ -1165,7 +1219,6 @@ function BuiltInAppDetail({
 			hero={
 				<ListingHero
 					badges={[
-						"Built-in",
 						app.windowsFirst ? "Windows-first" : null,
 						app.localOnly ? "Local only" : null,
 						isInstalled ? (isRunning ? "Running" : "Stopped") : "Not installed",
@@ -1180,6 +1233,7 @@ function BuiltInAppDetail({
 					iconUrl={app.iconUrl}
 					name={app.name}
 					seedId={app.id}
+					statusIcons={<StatusBadge kind="builtin" tone="hero" />}
 					tagline={cardDescription(app) ?? `v${installedVersionOf(app)}`}
 				/>
 			}

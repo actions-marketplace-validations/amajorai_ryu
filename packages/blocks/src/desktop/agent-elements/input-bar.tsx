@@ -615,8 +615,14 @@ export const InputBar = memo(function InputBar({
 	// Action bar: the workspace strip (project ▸ branch ▸ worktree) rendered as a
 	// full-width footer directly beneath the textarea, part of the outer card — a thin
 	// muted row with rounded bottom corners, exactly like the info bar's bottom variant.
+	//
+	// It carries its OWN fill and a hairline above it. The comment above has always
+	// described a "muted row", but the element had neither, so it inherited the
+	// composer card's background and read as part of the textarea rather than as a
+	// strip under it — most obviously in compact mode, where the textarea block is
+	// short enough that the two became one undifferentiated box.
 	const actionBarNode = workspaceBar ? (
-		<div className="flex h-[34px] min-w-0 items-center gap-0.5 rounded-b-2xl px-2">
+		<div className="flex h-[34px] min-w-0 items-center gap-0.5 rounded-b-2xl border-border/60 border-t bg-muted/40 px-2">
 			{workspaceBar}
 		</div>
 	) : null;

@@ -36,9 +36,13 @@ import {
 /**
  * The "None" row's id. Not a real style — Core models "no style" as a null selection,
  * but a `ComposerSettingItem` needs an id to be pickable, so the sentinel lives on the
- * client and is translated back to `null` on the way out. Exported because the trigger
- * summary in `useComposerAgentControls` tests against it to decide whether a style is
- * worth a segment.
+ * client and is translated back to `null` on the way out.
+ *
+ * Exported rather than private because it is the wire value's client-side stand-in:
+ * anything reading this section's `value` has to recognise it as "nothing selected"
+ * instead of a style id. (It used to gate an output-style segment on the composer
+ * trigger; the trigger no longer summarises this section at all — see
+ * `useComposerAgentControls` — so that is no longer a reader.)
  */
 export const NO_OUTPUT_STYLE_ID = "__no_output_style__";
 

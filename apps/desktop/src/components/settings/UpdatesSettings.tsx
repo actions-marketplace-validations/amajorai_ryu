@@ -17,8 +17,14 @@ import {
 	updateToastBody,
 	updateToastId,
 } from "@/src/components/updater/ReleaseNotes.tsx";
-import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
+import { useActiveNode, useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
+import {
+	getNodeTimeZone,
+	NODE_TIME_ZONES,
+	type NodeTimeZone,
+	setNodeTimeZone,
+} from "@/src/lib/api/node-timezone.ts";
 import {
 	checkForUpdate,
 	getAutoUpdateEnabled,
@@ -123,7 +129,167 @@ export function UpdatesSettings() {
 				version={version}
 			/>
 			<ReleaseChannelPicker />
+			<NodeTimeZonePicker />
 		</div>
+	);
+}
+
+/**
+ * The sentinel for "no override" — clearing the field, not picking a zone.
+ *
+ * A separate option rather than an empty value because the two are different
+ * decisions: "follow whatever the machine reports" is the default a correctly
+ * configured node should sit on, and it has to stay pickable after someone has
+ * set an override.
+ */
+const FOLLOW_NODE = "__follow_node__";
+
+const TIME_ZONE_ITEMS = [
+	{ value: FOLLOW_NODE, label: "Follow the node" },
+	...NODE_TIME_ZONES.map((zone) => ({ value: zone, label: zone })),
+];
+
+/**
+ * The zone a managed node's quiet hour is measured in — the hour a deferred
+ * update installs and a deferred resize powers the machine off.
+ *
+ * PER NODE, NOT PER ORG. An org with a node in Frankfurt and another in
+ * Singapore has two different nights; one org-level zone would schedule a
+ * restart into one of the two working days every time.
+ *
+ * Renders NOTHING unless the active node is a managed one carrying both ids.
+ * The zone lives on a `ProvisionedServer` row, so a local, LAN, mesh — or
+ * adopted/resumed — node has nowhere to store it, and a picker that can never
+ * save is worse than no picker. `!isLocalNode` would be the wrong predicate
+ * here: it admits LAN and mesh nodes too.
+ */
+export function NodeTimeZonePicker() {
+	const node = useActiveNode();
+	const orgId = node.orgId ?? null;
+	const serverId = node.serverId ?? null;
+	const [zone, setZone] = useState<NodeTimeZone | null>(null);
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!(orgId && serverId)) {
+			setZone(null);
+			return;
+		}
+		let active = true;
+		void (async () => {
+			try {
+				const current = await getNodeTimeZone(orgId, serverId);
+				if (active) {
+					setZone(current);
+					setError(null);
+				}
+			} catch (err) {
+				// A node whose row cannot be read is not an error worth shouting
+				// about — the section simply does not render. Reading is
+				// member-level, so this is a transport failure, not a permission one.
+				if (active) {
+					setZone(null);
+					setError(err instanceof Error ? err.message : String(err));
+				}
+			}
+		})();
+		return () => {
+			active = false;
+		};
+	}, [orgId, serverId]);
+
+	if (!(orgId && serverId && zone)) {
+		return null;
+	}
+
+	const save = async (next: string) => {
+		setSaving(true);
+		try {
+			const updated = await setNodeTimeZone(
+				orgId,
+				serverId,
+				next === FOLLOW_NODE ? null : next
+			);
+			setZone(updated);
+			setError(null);
+		} catch (err) {
+			// Writing needs org admin. Surfacing the server's own sentence is what
+			// tells a plain member why the control bounced back.
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSaving(false);
+		}
+	};
+
+	// The override governs what the CONTROL PLANE schedules — resizes. It does
+	// NOT reach this node's own deferred Core/Gateway update: `set_pending` in
+	// `apps/core/src/update/schedule.rs` computes the hour from the machine's own
+	// clock (TZ, /etc/timezone, /etc/localtime), and the zone travels one way
+	// only, node → control plane, on the resolve handshake. So when the two
+	// disagree, saying "restarts use 03:00 in <override>" would promise a quiet
+	// hour that the update path lands eight hours away from — the exact failure
+	// this whole feature exists to remove, restated as a settings caption.
+	const overrideDiverges =
+		zone.timeZone !== null &&
+		zone.detectedTimeZone !== null &&
+		zone.timeZone !== zone.detectedTimeZone;
+
+	return (
+		<SettingsSection
+			caption={
+				// The EFFECTIVE zone, not the override — the override is null on a
+				// node that is correctly following its own clock, so rendering it
+				// directly would render a blank.
+				`Scheduled resizes use 03:00 in ${zone.effectiveTimeZone}.`
+			}
+			title="Quiet hour"
+		>
+			<SettingsGroup>
+				<SettingsItem
+					actions={
+						<Select
+							disabled={saving}
+							items={TIME_ZONE_ITEMS}
+							onValueChange={(v) => {
+								save(String(v)).catch(() => undefined);
+							}}
+							value={zone.timeZone ?? FOLLOW_NODE}
+						>
+							<SelectTrigger
+								className="h-8 w-56 flex-shrink-0 text-sm"
+								id="node-time-zone-select"
+							>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value={FOLLOW_NODE}>
+									{zone.detectedTimeZone
+										? `Follow the node (${zone.detectedTimeZone})`
+										: "Follow the node (not reported yet)"}
+								</SelectItem>
+								{NODE_TIME_ZONES.map((option) => (
+									<SelectItem key={option} value={option}>
+										{option}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					}
+					description="Which night this node's scheduled resizes run in. Following the node is usually right — a machine in Frankfurt already knows it is in Frankfurt."
+					title="Time zone"
+				/>
+				{overrideDiverges ? (
+					<SettingsItem
+						description={`Deferred Core and Gateway updates are scheduled by the node itself, from its own clock — those still run at 03:00 ${zone.detectedTimeZone}, not ${zone.timeZone}. Only resizes, which the control plane performs, follow the override.`}
+						title="Updates keep the node's own night"
+					/>
+				) : null}
+				{error ? (
+					<SettingsItem description={error} title="Couldn't save" />
+				) : null}
+			</SettingsGroup>
+		</SettingsSection>
 	);
 }
 

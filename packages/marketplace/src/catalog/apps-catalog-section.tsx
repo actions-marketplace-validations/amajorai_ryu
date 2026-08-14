@@ -52,6 +52,7 @@ import {
 	SelectValue,
 } from "@ryu/ui/components/select.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
 import { useSvglIndex } from "@ryu/ui/components/svgl.ts";
 import {
 	Tooltip,
@@ -59,14 +60,16 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMarketplaceHostOptional } from "../host.tsx";
 import ItemLikeButton from "../likes/like-button.tsx";
 import { useOptionalReport } from "../report/report-provider.tsx";
 import { StarRating } from "../star-rating.tsx";
 import { formatPrice } from "../types.ts";
 import { groupByCategory } from "./categories.ts";
-import BrandOrCoverImage from "./chrome/brand-image.tsx";
+import BrandOrCoverImage, {
+	normalizeIconPadding,
+} from "./chrome/brand-image.tsx";
 import CommunityTrustNotice from "./chrome/community-trust-notice.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
@@ -74,8 +77,8 @@ import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
 import StoreItemAction, {
-	StoreItemContextMenuContent,
 	StoreItemOverflowMenu,
+	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
 import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import VerifiedBadge from "./chrome/verified-badge.tsx";
@@ -105,22 +108,27 @@ import {
 	type CatalogInstall,
 	type PluginSettingsOpener,
 	useCatalogHost,
+	useEntryIncompatibility,
 	useNoInstallingLookup,
+	useNoInterfaceLevel,
 	useNoSettingsOpener,
 } from "./host.tsx";
 import { resolveCardIcon } from "./icon-url.ts";
 import ImportToolsAction from "./import-tools-action.tsx";
+import { useInstalledOnly } from "./installed-filter.tsx";
 import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
 import { runScorecard, type Scorecard } from "./scorecard.ts";
 import { stabilityLabel } from "./stability.ts";
-import { surfaceLabel } from "./surface-labels.ts";
-import type {
-	AddMarketplaceParams,
-	AppCatalogItem,
-	CatalogEntry,
-	PluginCatalogDetail,
-	PluginCatalogSource,
+import { describeIncompatibility, surfaceLabel } from "./surface-labels.ts";
+import {
+	type AddMarketplaceParams,
+	ALL_PLUGIN_SOURCES_ID,
+	type AppCatalogItem,
+	type CatalogEntry,
+	evaluateCompatibility,
+	type PluginCatalogDetail,
+	type PluginCatalogSource,
 } from "./types.ts";
 
 /** Which slice of the plugin catalog a section instance browses. An "app" claims a
@@ -185,6 +193,91 @@ export function isCommunityEntry(item: AppCatalogItem): boolean {
 	return item.entry.origin === "community" || item.entry.reviewed === false;
 }
 
+/**
+ * The URL a community listing installs from — its repository.
+ *
+ * Community rows cannot be installed BY ID: Core keeps unreviewed listings out
+ * of the first-party catalog, so the catalog install path has nothing to resolve.
+ * They install through the same `installFromUrl` request the store's own
+ * "Install from URL" field makes, which is why this returns a URL rather than
+ * calling anything — the caller pairs it with the host's install layer.
+ *
+ * `null` when Core stamped no repository on the row, in which case the card
+ * keeps its browse-only affordance rather than offering an install that cannot
+ * run. Exported for unit tests.
+ */
+export function communityInstallUrl(item: AppCatalogItem): string | null {
+	const url = item.entry.repo_url?.trim();
+	return url ? url : null;
+}
+
+/**
+ * Collapse repeat listings of the same id, keeping the FIRST occurrence.
+ *
+ * The all-marketplaces view (`?source=all`) is a concatenation of every source's
+ * page, so one app published to two marketplaces — or present both as a built-in
+ * and as a remote listing — arrives twice. Two copies of one listing is bad
+ * enough on its own; worse, the copies need not agree about what they ARE, and a
+ * pair that disagrees about `type` lands one row in Apps and the other in
+ * Plugins. That is how the same app comes to appear in both tabs at once.
+ *
+ * First occurrence wins because Core emits the unified first-party view ahead of
+ * the federated sources, so the copy that survives is the one Ryu itself
+ * publishes — the same precedence `merged_plugin_catalog_entries` applies
+ * server-side. Order is otherwise preserved: it is meaningful here.
+ *
+ * Exported for unit tests.
+ */
+export function dedupeById(items: readonly AppCatalogItem[]): AppCatalogItem[] {
+	const seen = new Set<string>();
+	const out: AppCatalogItem[] = [];
+	for (const item of items) {
+		if (seen.has(item.entry.id)) {
+			continue;
+		}
+		seen.add(item.entry.id);
+		out.push(item);
+	}
+	return out;
+}
+
+/** One marketplace's slice of the all-marketplaces list. */
+export interface CatalogSourceSection {
+	id: string;
+	items: AppCatalogItem[];
+	label: string;
+}
+
+/**
+ * Group listings by the marketplace they came from, preserving the order Core
+ * emitted them in — that order is meaningful (the unified first-party view first,
+ * then the federated sources), so it is kept rather than re-sorted alphabetically.
+ *
+ * Rows with no stamp are folded into a single trailing bucket instead of being
+ * dropped: a source Core could not name is still a real listing the user can
+ * install, and silently hiding it would be a worse failure than an unlabelled
+ * heading. Exported for unit tests.
+ */
+export function groupByCatalogSource(
+	items: readonly AppCatalogItem[]
+): CatalogSourceSection[] {
+	const sections = new Map<string, CatalogSourceSection>();
+	for (const item of items) {
+		const id = item.entry.catalog_source_id ?? "";
+		const existing = sections.get(id);
+		if (existing) {
+			existing.items.push(item);
+			continue;
+		}
+		sections.set(id, {
+			id,
+			label: item.entry.catalog_source_name ?? "Other marketplaces",
+			items: [item],
+		});
+	}
+	return [...sections.values()];
+}
+
 const VARIANT_COPY: Record<
 	AppsCatalogVariant,
 	{ noun: string; nounPlural: string; searchPlaceholder: string }
@@ -224,10 +317,14 @@ const VARIANT_COPY: Record<
  */
 export default function AppsCatalogSection({
 	initialQuery = "",
+	initialSelectedId,
 	variant = "all",
 }: {
 	/** Seed the search box (e.g. carried over from the store-wide search). */
 	initialQuery?: string;
+	/** Open this item's preview on arrival — the id of a card clicked on the
+	 *  Store's Home shelves. */
+	initialSelectedId?: string;
 	/** Catalog slice: companion "apps", non-companion "plugins", or "all". */
 	variant?: AppsCatalogVariant;
 } = {}) {
@@ -301,12 +398,26 @@ export default function AppsCatalogSection({
 		}
 		return variant === "apps" ? isCompanionApp(it) : !isCompanionApp(it);
 	};
-	const visibleItems = items.filter(
-		(it) => !isCommunityEntry(it) && splitForVariant(it)
+	// The shell's "installed only" switch (the retired "Added" tab, inverted). Off
+	// on any surface that does not mount the provider — the web marketplace, where
+	// nothing is installed — so this is safe to apply unconditionally.
+	const installedOnly = useInstalledOnly();
+	const passesInstalledFilter = (it: AppCatalogItem) =>
+		!installedOnly || it.installed;
+	const visibleItems = dedupeById(
+		items.filter(
+			(it) =>
+				!isCommunityEntry(it) &&
+				splitForVariant(it) &&
+				passesInstalledFilter(it)
+		)
 	);
-	const communityItems = community.items
-		.filter(isCommunityEntry)
-		.filter(splitForVariant);
+	const communityItems = dedupeById(
+		community.items
+			.filter(isCommunityEntry)
+			.filter(splitForVariant)
+			.filter(passesInstalledFilter)
+	);
 	const copy = VARIANT_COPY[variant];
 
 	// Which feed owns the current selection. The two hooks each track their own
@@ -329,6 +440,67 @@ export default function AppsCatalogSection({
 		setCommunitySelected(false);
 		community.select("");
 		select("");
+	};
+
+	// A Home shelf card opens this section with its item already selected. One
+	// shot, latched: the prop is an arrival instruction, not a controlled value, so
+	// re-running it would fight the user's own next click (and `selectFirstParty`
+	// closes over hook callbacks that change identity on every refetch, which is
+	// exactly what would make a plain dep array re-fire).
+	//
+	// `selectFirstParty`, never bare `select`: it also clears the COMMUNITY hook's
+	// selection, and with both set two rows read as selected and the preview shows
+	// whichever hook won.
+	const preselected = useRef(false);
+	useEffect(() => {
+		if (!initialSelectedId || preselected.current) {
+			return;
+		}
+		preselected.current = true;
+		selectFirstParty(initialSelectedId);
+		// biome-ignore lint/correctness/useExhaustiveDependencies: `selectFirstParty`
+		// is re-created on every catalog refetch; depending on it would re-assert the
+		// arrival selection over whatever the user picked next. The latch above is
+		// the guard, and the id is the only real input.
+	}, [initialSelectedId]);
+
+	// This section — alone among the six — gates its preview on the RESOLVED item
+	// (`hasSelection` below, and `AppDetailPanel` hard-requires it), while its list
+	// pages 40 at a time. A preselected id from a shelf card can therefore sit
+	// beyond the first page, and the panel would open on an empty state. Page
+	// forward until the item resolves; bounded by `hasNextPage`, so it terminates
+	// on a miss rather than looping.
+	useEffect(() => {
+		if (!initialSelectedId || selectedItem || !hasNextPage || loadingMore) {
+			return;
+		}
+		fetchNextPage();
+	}, [
+		initialSelectedId,
+		selectedItem,
+		hasNextPage,
+		loadingMore,
+		fetchNextPage,
+	]);
+
+	// Installing a community row. Not `install(id)`: Core keeps unreviewed
+	// listings out of the first-party catalog, so there is no id for it to
+	// resolve — the repository URL is the only handle, and `installFromUrl` is the
+	// request the store's own "Install from URL" field already makes.
+	//
+	// The busy id is local because it is not one of the catalog hooks' ids: the
+	// call is keyed on a URL, so neither hook's `installing` (keyed on a listing
+	// id) can ever report it.
+	const [communityInstallingId, setCommunityInstallingId] = useState<
+		string | null
+	>(null);
+	const onInstallCommunity = (item: AppCatalogItem) => {
+		const url = communityInstallUrl(item);
+		if (!url || communityInstallingId) {
+			return;
+		}
+		setCommunityInstallingId(item.entry.id);
+		installFromUrl(url).finally(() => setCommunityInstallingId(null));
 	};
 
 	// Is THIS listing busy? One question, one answer, everywhere on the page.
@@ -431,12 +603,14 @@ export default function AppsCatalogSection({
 					canInstall={host.install != null}
 					communityFetchNextPage={community.fetchNextPage}
 					communityHasNextPage={community.hasNextPage}
+					communityInstallingId={communityInstallingId}
 					communityItems={communityItems}
 					communityLoading={community.loading}
 					communitySelectedId={communitySelected ? community.selectedId : null}
 					error={error}
 					fallbackIcon={REALM_ICONS[variant === "plugins" ? "plugins" : "apps"]}
 					fetchNextPage={fetchNextPage}
+					groupBySource={activeSource === ALL_PLUGIN_SOURCES_ID}
 					hasNextPage={hasNextPage}
 					isInstalling={isInstalling}
 					items={visibleItems}
@@ -445,6 +619,7 @@ export default function AppsCatalogSection({
 					nounPlural={copy.nounPlural}
 					onDisable={cardDisable}
 					onInstall={cardInstall}
+					onInstallCommunity={onInstallCommunity}
 					onSelect={selectFirstParty}
 					onSelectCommunity={selectCommunity}
 					searching={query.trim().length > 0}
@@ -456,6 +631,10 @@ export default function AppsCatalogSection({
 			search={{
 				value: query,
 				onChange: setQuery,
+				// The integrations.sh placeholder describes THAT feed's contents, so it
+				// only applies while that source is the whole page. In the all view the
+				// search spans every marketplace, and naming one of them would
+				// mis-describe what is about to be searched.
 				placeholder:
 					activeSource === "integrations-sh"
 						? "Search integrations (MCP, OpenAPI, GraphQL, CLI)…"
@@ -490,10 +669,15 @@ function PluginSourcePicker({
 	const [name, setName] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
 
-	const sourceItems = sources.map((s) => ({
-		value: s.id,
-		label: s.displayName,
-	}));
+	// "All marketplaces" leads, and is the default the store opens on. The picker is
+	// a NARROWING control now, not the thing that decides whether a listing is
+	// findable at all: every source is already on screen under its own heading, so
+	// choosing one here is for focusing (or for paging through a big federated feed,
+	// which the all view cannot cursor across).
+	const sourceItems = [
+		{ value: ALL_PLUGIN_SOURCES_ID, label: "All marketplaces" },
+		...sources.map((s) => ({ value: s.id, label: s.displayName })),
+	];
 
 	const submit = async () => {
 		const trimmedRepo = repo.trim();
@@ -523,7 +707,11 @@ function PluginSourcePicker({
 			<span className="font-medium text-muted-foreground text-xs">
 				Catalog source
 			</span>
-			{sources.length > 1 && (
+			{/* One real source still earns the picker: the choice on offer is now
+			    "everything" vs "just this one", which is a choice even with a single
+			    marketplace registered. It only collapses when there is nothing at all
+			    to narrow to. */}
+			{sourceItems.length > 1 && (
 				<Select
 					disabled={selectingSource}
 					items={sourceItems}
@@ -681,8 +869,11 @@ function AppList({
 	communityHasNextPage,
 	communityFetchNextPage,
 	communitySelectedId,
+	communityInstallingId,
 	onSelectCommunity,
+	onInstallCommunity,
 	settingsOpener,
+	groupBySource,
 }: {
 	items: AppCatalogItem[];
 	loading: boolean;
@@ -712,16 +903,34 @@ function AppList({
 	/** Selected community row, or null when the selection belongs to the
 	 *  first-party feed (the two feeds each track their own selection). */
 	communitySelectedId: string | null;
+	/** The community row whose install is in flight, if any. */
+	communityInstallingId: string | null;
 	onSelectCommunity: (id: string) => void;
+	/** Install a community row from its repository — see {@link communityInstallUrl}. */
+	onInstallCommunity: (item: AppCatalogItem) => void;
 	/** True while the user has a search query typed. Suppresses category shelves —
 	 *  a result list is ranked by relevance, and slicing it into headed sections
 	 *  fights that. */
 	searching?: boolean;
 	/** Resolves a listing to its "open settings" action (see the host seam). */
 	settingsOpener: PluginSettingsOpener;
+	/** True in the all-marketplaces view, where rows carry a marketplace stamp and
+	 *  are shelved by it rather than by category. */
+	groupBySource?: boolean;
 }) {
-	const reportCtx = useOptionalReport();
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+	// Resolved HERE, not inside `card`: `card` is a plain render function, not a
+	// component, so a hook inside it would run a variable number of times per
+	// render. The host's floors are one value for the whole grid anyway.
+	const { hostVersions } = useCatalogHost();
+	const incompatibilityOf = (it: AppCatalogItem) =>
+		describeIncompatibility(
+			evaluateCompatibility(
+				it.entry.engines,
+				hostVersions ?? {},
+				it.entry.compatibility
+			)
+		);
 
 	const card = (it: AppCatalogItem) => (
 		<StoreCatalogCard
@@ -740,19 +949,34 @@ function AppList({
 				/>
 			}
 			contextMenu={
-				!it.installed && canInstall ? (
-					<StoreItemContextMenuContent
-						canReport={Boolean(reportTargetForApp(it))}
+				// Mirrors the card's OWN control, installed states included — the
+				// right-click used to reach only listings you had not adopted yet,
+				// which is the half with the least to do to it.
+				//
+				// Same guard `AppCardAction` uses to withhold the install verb: a
+				// descriptor-only listing (and every listing on the read-only web
+				// store) renders a "Details" affordance, not an Add button, so a menu
+				// offering Add would contradict the card it sits on.
+				canInstall && !it.entry.descriptor_only ? (
+					<AppCardContextMenu
+						item={it}
+						onDisable={() => onDisable(it.entry.id)}
 						onInstall={() => onInstall(it.entry.id)}
-						onReport={() => reportCtx?.open(reportTargetForApp(it))}
+						onOpen={() => onSelect(it.entry.id)}
+						onOpenSettings={settingsOpener(it.entry.id)}
 					/>
 				) : undefined
 			}
 			description={it.entry.description}
+			// A listing this node cannot run is DIMMED, never hidden: it used to
+			// vanish from the catalog entirely, leaving no way to learn that updating
+			// Ryu would bring it back. The reason rides the row's action slot.
+			dimmed={Boolean(incompatibilityOf(it))}
 			dither={it.entry.icon_dither}
 			icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
 			iconBackground={it.entry.icon_background ?? undefined}
 			iconId={it.entry.icon}
+			iconPadding={it.entry.icon_padding}
 			iconUrl={it.entry.icon_url}
 			key={it.entry.id}
 			// The heart, keyed by the listing's NAMESPACE. `entry.id` IS that
@@ -781,8 +1005,10 @@ function AppList({
 			fallbackIcon={fallbackIcon}
 			fetchNextPage={communityFetchNextPage}
 			hasNextPage={communityHasNextPage}
+			installingId={communityInstallingId}
 			items={communityItems}
 			loading={communityLoading}
+			onInstallCommunity={onInstallCommunity}
 			onSelect={onSelectCommunity}
 			root={scrollEl}
 			selectedId={communitySelectedId}
@@ -841,10 +1067,42 @@ function AppList({
 	// Infinite scroll keeps working across shelves: `items` is the full accumulated
 	// page set and is regrouped on every render, so a later page's items file into
 	// the shelves that already exist instead of appending a second copy of them.
-	const sections = searching
-		? []
-		: groupByCategory(items, (it) => it.entry.category);
+	// In the all-marketplaces view the FIRST cut is by marketplace, not by category:
+	// the question that view exists to answer is "where does this come from", and a
+	// row's marketplace decides who published it, who vetted it and where an install
+	// is fetched from. Category shelving still applies inside a single-source view.
+	//
+	// Same single-shelf rule as below, for the same reason: one heading reading "Ryu
+	// Marketplace" over the entire grid — which is what a machine with no custom
+	// marketplaces added produces — says nothing, so that case falls through to
+	// category shelving instead.
+	const sourceSections = searching ? [] : groupByCatalogSource(items);
+	const sourceShelved = groupBySource && sourceSections.length > 1;
+	const sections =
+		searching || sourceShelved
+			? []
+			: groupByCategory(items, (it) => it.entry.category);
 	const shelved = sections.length > 1;
+
+	if (sourceShelved) {
+		return (
+			<div ref={setScrollEl}>
+				<div className="flex flex-col gap-6">
+					{sourceSections.map((section) => (
+						<section key={section.id}>
+							<StoreShelfHeading>{section.label}</StoreShelfHeading>
+							<StoreCardGrid>{section.items.map(card)}</StoreCardGrid>
+						</section>
+					))}
+				</div>
+				{/* No `InfiniteSentinel`: the all view is a concatenation of N feeds and
+				    Core returns no cursor for it (one cursor cannot address a position in
+				    every source), so `hasNextPage` is false here by construction. Pick a
+				    single marketplace to page through it. */}
+				{communityShelf}
+			</div>
+		);
+	}
 
 	return (
 		<div ref={setScrollEl}>
@@ -891,6 +1149,8 @@ function CommunityShelf({
 	loading,
 	selectedId,
 	onSelect,
+	onInstallCommunity,
+	installingId,
 	fallbackIcon,
 	hasNextPage,
 	fetchNextPage,
@@ -899,8 +1159,12 @@ function CommunityShelf({
 	fallbackIcon: IconSvgElement;
 	fetchNextPage: () => void;
 	hasNextPage: boolean;
+	/** The row whose install is in flight, if any. */
+	installingId: string | null;
 	items: AppCatalogItem[];
 	loading: boolean;
+	/** Install a community row from its repository (see the card's `action`). */
+	onInstallCommunity: (item: AppCatalogItem) => void;
 	onSelect: (id: string) => void;
 	root: HTMLElement | null;
 	selectedId: string | null;
@@ -924,18 +1188,31 @@ function CommunityShelf({
 				{items.map((it) => (
 					<StoreCatalogCard
 						action={
-							// Browse-only, deliberately: Core refuses a catalog install of an
-							// unreviewed listing, so an Install button here could only ever
-							// produce an error. `canInstall={false}` gives the row the same
-							// "Details" affordance a descriptor-only listing gets, and the
-							// preview carries the repository link to review it.
+							// Install, like every other card in the store. A community row is
+							// not a different KIND of listing — it is an app or plugin nobody
+							// at Ryu reviewed — so giving it a "Details" button while its
+							// neighbours say "Install" made provenance look like a capability
+							// difference, and left the shelf's one useful action two clicks
+							// away behind a preview.
+							//
+							// It routes through `installFromUrl` (the listing's repository)
+							// rather than the catalog install path, because Core will not
+							// install an unreviewed listing BY ID. That is not a way around
+							// the gate: it is the same request the store's own "Install from
+							// URL" field already makes, with the URL filled in from the row
+							// the user is looking at instead of pasted by hand. The
+							// unreviewed-code disclosure is unchanged — every row here still
+							// sits under the trust notice at the top of the shelf.
+							//
+							// A row Core gave no repository for keeps the old browse-only
+							// affordance: there is nothing to install from.
 							<AppCardAction
-								canInstall={false}
+								canInstall={Boolean(communityInstallUrl(it))}
 								item={it}
 								onDisable={() => undefined}
-								onInstall={() => onSelect(it.entry.id)}
+								onInstall={() => onInstallCommunity(it)}
 								onOpen={() => onSelect(it.entry.id)}
-								pending={false}
+								pending={installingId === it.entry.id}
 							/>
 						}
 						description={it.entry.description}
@@ -943,6 +1220,7 @@ function CommunityShelf({
 						icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
 						iconBackground={it.entry.icon_background ?? undefined}
 						iconId={it.entry.icon}
+						iconPadding={it.entry.icon_padding}
 						iconUrl={it.entry.icon_url}
 						key={it.entry.id}
 						// A community listing has no marketplace document — the namespace
@@ -960,6 +1238,9 @@ function CommunityShelf({
 						orgVerified={it.entry.org_verified}
 						orgVerifiedTier={it.entry.org_verified_tier}
 						seedId={it.entry.id}
+						// A GitHub repo rarely declares a wash, so without this its card
+						// was a bare glyph on flat `bg-muted` in a grid of painted plates.
+						seedPlate
 						selected={it.entry.id === selectedId}
 						stability={it.entry.stability}
 					/>
@@ -1006,6 +1287,67 @@ export function pluginDownloadTaskId(id: string): string {
 /** Card action for an app: Add (inline), Enabled↔Disable morph (Disable
  *  inline), or Disabled→Enable which opens the preview so its grant dialog runs.
  *  Descriptor-only rows + read-only surfaces just open the preview. */
+/**
+ * The right-click rows for an app card — the same decisions {@link AppCardAction}
+ * makes, restated for the context-menu primitive.
+ *
+ * A component rather than a call to `storeItemContextMenu` at the card site
+ * because the incompatibility verdict comes from a HOOK, and the card is rendered
+ * inside a `.map`. Only reached when `canInstall`, so the read-only web store is
+ * untouched: there, the card carries no lifecycle verbs and a menu holding
+ * nothing but "Report" would be worse than none.
+ */
+function AppCardContextMenu({
+	item,
+	onInstall,
+	onDisable,
+	onOpen,
+	onOpenSettings,
+}: {
+	item: AppCatalogItem;
+	onDisable: () => void;
+	onInstall: () => void;
+	onOpen: () => void;
+	onOpenSettings?: (() => void) | null;
+}) {
+	const incompatible = useEntryIncompatibility(item.entry);
+	const reportCtx = useOptionalReport();
+	const target = reportTargetForApp(item);
+	const canReport = Boolean(reportCtx && target);
+	const onReport = () => reportCtx?.open(target);
+
+	// A mandatory listing is un-removable and un-disableable (Core 403s both), so
+	// it gets the locked shape: Settings and Report only.
+	if (isMandatoryListing(item.entry)) {
+		return (
+			<>
+				{storeItemContextMenu({
+					canReport,
+					installed: true,
+					locked: true,
+					onOpenSettings: onOpenSettings ?? undefined,
+					onReport,
+				})}
+			</>
+		);
+	}
+	return (
+		<>
+			{storeItemContextMenu({
+				canReport,
+				enabled: item.enabled,
+				incompatible,
+				installed: item.installed,
+				onDisable,
+				onEnable: onOpen,
+				onInstall,
+				onOpenSettings: onOpenSettings ?? undefined,
+				onReport,
+			})}
+		</>
+	);
+}
+
 function AppCardAction({
 	item,
 	canInstall,
@@ -1024,6 +1366,12 @@ function AppCardAction({
 	/** Reveal this listing's settings tab; absent when it declares none. */
 	onOpenSettings?: (() => void) | null;
 }) {
+	// Called before every early return below — rules of hooks. Re-evaluates the
+	// listing's declared floors with THIS client's surface versions overlaid on
+	// Core's verdict, which is what makes a desktop/island floor enforceable at all
+	// (Core cannot observe those surfaces and reports them as advisory).
+	const incompatible = useEntryIncompatibility(item.entry);
+
 	// A mandatory listing gets NO lifecycle control at all — not a disabled one.
 	// Core refuses both disable and uninstall for it with a 403 and no force
 	// override, so any button here could only ever produce an error toast. A greyed
@@ -1069,6 +1417,7 @@ function AppCardAction({
 			<StoreItemAction
 				busy={pending}
 				enabled={item.enabled}
+				incompatible={incompatible}
 				installed={item.installed}
 				onDisable={onDisable}
 				onEnable={onOpen}
@@ -1127,24 +1476,48 @@ function reportTargetForApp(item: AppCatalogItem) {
 	};
 }
 
-/** The Add / Enable / Disable button cluster plus inline action error.
- *  Enable is gated behind a grant-confirmation dialog because enable is where
- *  the Gateway validates (and may deny) the app's declared grants. On a
- *  read-only surface (installLayer === null) this renders the host's affordance
- *  (Open in Ryu) instead of the lifecycle buttons. */
-function AppActions({
+/** The Add / Enable / Disable button — the ONE control the preview dialog exists
+ *  for, and therefore the one that rides in the hero, right-aligned on the title's
+ *  row (see {@link ListingHero.actions}).
+ *
+ *  It used to sit on a solid band below the hero, on the reasoning that "a button
+ *  on a saturated dither either loses its own surface colour or has to fake one".
+ *  That is true of a GHOST button and false of a filled one — but the old
+ *  reasoning was still half right, and honouring it is what the move actually
+ *  costs: every branch below had to be re-surfaced. The Add button was `ghost`
+ *  (no fill), the two link/Disable buttons were `outline` (border only), and two
+ *  branches were bare `text-muted-foreground` prose. All four dissolve into an
+ *  author-supplied wash. They are `secondary` + {@link HERO_CTA_CLASS}, or a
+ *  hero-toned `StatusBadge`, so each keeps a surface the scrim cannot eat.
+ *
+ *  Split from {@link AppSecondaryActions} along STATE, not along layout: this half
+ *  owns the pre-install train choice and the enable-grant confirmation, which are
+ *  driven by these buttons; the other half owns the post-install train switch and
+ *  its confirmation. The two are mutually exclusive (`installed`), so only one of
+ *  them ever resolves the channel list and there is still exactly one fetch.
+ *
+ *  Enable is gated behind a grant-confirmation dialog because enable is where the
+ *  Gateway validates (and may deny) the app's declared grants. On a read-only
+ *  surface (installLayer === null) this renders the host's affordance (Open in Ryu)
+ *  instead of the lifecycle buttons. */
+/** Every hero CTA gets an opaque surface of its own.
+ *
+ *  The hero wash is an author-supplied dither under a black scrim: a `ghost`
+ *  button has no fill at all and an `outline` one has only a border, so both
+ *  dissolve into whatever colour the listing happens to declare. `secondary`
+ *  gives a real plate, and the ring lifts it off a busy wash without inventing a
+ *  second button style. */
+const HERO_CTA_CLASS = "shadow-sm ring-1 ring-black/10";
+
+function AppPrimaryAction({
 	item,
 	install,
 	installing,
 	installTaskId,
 	setEnabled,
 	lifecyclePending,
-	error,
 	installLayer,
 	renderAffordance,
-	onOpenSettings,
-	status,
-	switchChannel,
 }: {
 	item: AppCatalogItem;
 	install: (
@@ -1157,55 +1530,27 @@ function AppActions({
 	installTaskId: string;
 	setEnabled: (enabled: boolean) => Promise<void>;
 	lifecyclePending: boolean;
-	error: string | null;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
-	/** Reveal this listing's settings tab; absent when it declares none. */
-	onOpenSettings?: (() => void) | null;
-	/** Price / installed-state pills, pushed to the far end of the action bar.
-	 *  They belong beside the verb they qualify ("Enable" — because it is already
-	 *  Installed), not up in the hero where they competed with the app's name. */
-	status?: ReactNode;
-	/** Move this INSTALLED listing onto another release train. Absent ⇒ the host
-	 *  cannot update, so no switch is offered. */
-	switchChannel?: (id: string, channel: string | null) => Promise<void>;
 }) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const { entry, grants, installed, enabled } = item;
 
-	// Release trains. Resolved for any listing whose channel can still be chosen:
-	// before install (which train to add) and after (which train to follow). An
-	// installed listing that the host cannot update is the one case with no choice
-	// to make, so it does not pay for the read.
-	const canSwitch = installed && Boolean(switchChannel);
+	// Which train to ADD. Resolved only before install — the post-install "which
+	// train do I follow" question belongs to AppSecondaryActions, and the two are
+	// mutually exclusive, so between them the list is fetched once.
 	const { channels } = useListingChannels(
 		entry.id,
 		entry.repo_url,
-		installed && !canSwitch ? undefined : host.fetchListingChannels
+		installed ? undefined : host.fetchListingChannels
 	);
 	const [channel, setChannel] = useState<string | null>(null);
-	// The train a switch is WAITING ON confirmation for. A switch re-resolves and
-	// re-installs a different build, can move the version backwards, and is not
-	// undone by picking the old train again (that resolves whatever THAT train
-	// holds now, not the build you had) — so it is confirmed, like enabling is.
-	const [pendingChannel, setPendingChannel] = useState<string | null>(null);
-	const [switchOpen, setSwitchOpen] = useState(false);
 
-	// The train this install follows may have no PROMOTED build — that is exactly
-	// the case the pin exists for (someone on `canary` while the canary train is
-	// empty). The resolved list only carries trains with a build, so the pinned one
-	// is added back; without it the selector would render a value matching no
-	// option and show blank for a plugin that is very much on a channel.
-	const followed = item.channel ?? null;
-	const switchOptions =
-		followed && !channels.some((c) => c.channel === followed)
-			? [...channels, { channel: followed, installable: true, version: null }]
-			: channels;
-
-	// Rejections are captured into the hook's `error` state (rendered below), so
-	// these fire-and-forget handlers swallow them to avoid a floating promise.
+	// Rejections are captured into the hook's `error` state (rendered by
+	// AppSecondaryActions), so these fire-and-forget handlers swallow them to
+	// avoid a floating promise.
 	const noop = () => {
 		// intentionally empty: error is surfaced via the hook
 	};
@@ -1227,10 +1572,14 @@ function AppActions({
 		// including the install/enable ones — a mandatory app is always already
 		// installed and enabled, so any other branch could only offer a wrong verb.
 		action = (
-			<p className="text-muted-foreground text-sm">
-				Part of Ryu. This app is required for the app to run and can't be
-				disabled or removed.
-			</p>
+			// A chip, not a paragraph of muted prose: this renders on the hero's
+			// dither under a black scrim, where `text-muted-foreground` is close to
+			// unreadable and a sentence competes with the listing's own name.
+			<StatusBadge
+				kind="builtin"
+				label="Part of Ryu — required, and cannot be disabled or removed"
+				tone="hero"
+			/>
 		);
 	} else if (entry.descriptor_only) {
 		// integrations.sh ships only a docs link, never a runnable config. For an
@@ -1274,17 +1623,20 @@ function AppActions({
 			const href = safeHttpUrl(entry.integration_url);
 			action = href ? (
 				<Button
+					className={HERO_CTA_CLASS}
 					render={<a href={href} rel="noopener noreferrer" target="_blank" />}
 					size="sm"
-					variant="outline"
+					variant="secondary"
 				>
 					<HugeiconsIcon className="size-4" icon={Link01Icon} />
 					View setup docs
 				</Button>
 			) : (
-				<p className="text-muted-foreground text-sm">
-					Browse-only descriptor — no install URL on file.
-				</p>
+				<StatusBadge
+					kind="unavailable"
+					label="Browse-only descriptor — no install URL on file"
+					tone="hero"
+				/>
 			);
 		}
 	} else if (!installLayer) {
@@ -1306,7 +1658,7 @@ function AppActions({
 				/>
 				<InstallButton
 					busyLabel="Adding…"
-					idleVariant="ghost"
+					idleVariant="default"
 					installing={installing}
 					onClick={runInstall}
 					// The exact task id, not just the display name: Core labels a plugin
@@ -1326,10 +1678,11 @@ function AppActions({
 	} else if (enabled) {
 		action = (
 			<Button
+				className={HERO_CTA_CLASS}
 				disabled={lifecyclePending}
 				onClick={runDisable}
 				size="sm"
-				variant="outline"
+				variant="secondary"
 			>
 				{lifecyclePending ? <Spinner className="size-4" /> : null}
 				Disable
@@ -1349,12 +1702,103 @@ function AppActions({
 	}
 
 	return (
+		<>
+			{action}
+			{/* Enable confirmation: list grants before enabling. Install-only.
+			    Rendered from here because `confirmOpen` is this component's state and
+			    the button that sets it is right above; the dialog itself portals out,
+			    so living inside the hero costs it nothing. */}
+			{installLayer ? (
+				<AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>Enable {entry.name}?</AlertDialogTitle>
+							<AlertDialogDescription>
+								{grants.length === 0
+									? "This plugin requests no special permissions."
+									: "Enabling grants this plugin the following permissions. They are validated by the Gateway."}
+							</AlertDialogDescription>
+						</AlertDialogHeader>
+						{grants.length > 0 && <GrantList grants={grants} />}
+						<AlertDialogFooter>
+							<AlertDialogCancel>Cancel</AlertDialogCancel>
+							<AlertDialogAction onClick={confirmEnable}>
+								Allow
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
+			) : null}
+		</>
+	);
+}
+
+/** Everything the hero's CTA row is NOT: the Settings shortcut, the release-train
+ *  switch for an installed listing, the price / installed-state pills, and the
+ *  inline action error.
+ *
+ *  These stay on a solid band under the hero because each of them is prose or a
+ *  bordered form control — a `Select` and a sentence do not read on a saturated
+ *  dither, and an error message least of all. */
+function AppSecondaryActions({
+	item,
+	error,
+	onOpenSettings,
+	status,
+	switchChannel,
+}: {
+	item: AppCatalogItem;
+	error: string | null;
+	/** Reveal this listing's settings tab; absent when it declares none. */
+	onOpenSettings?: (() => void) | null;
+	/** Price / installed-state pills, pushed to the far end of the band. */
+	status?: ReactNode;
+	/** Move this INSTALLED listing onto another release train. Absent ⇒ the host
+	 *  cannot update, so no switch is offered. */
+	switchChannel?: (id: string, channel: string | null) => Promise<void>;
+}) {
+	const host = useCatalogHost();
+	const { entry, installed } = item;
+
+	// Which train an installed listing FOLLOWS. An installed listing the host
+	// cannot update is the one case with no choice to make, so it does not pay for
+	// the read — and neither does an uninstalled one, whose train choice belongs to
+	// AppPrimaryAction.
+	const canSwitch = installed && Boolean(switchChannel);
+	const { channels } = useListingChannels(
+		entry.id,
+		entry.repo_url,
+		canSwitch ? host.fetchListingChannels : undefined
+	);
+	// The train a switch is WAITING ON confirmation for. A switch re-resolves and
+	// re-installs a different build, can move the version backwards, and is not
+	// undone by picking the old train again (that resolves whatever THAT train
+	// holds now, not the build you had) — so it is confirmed, like enabling is.
+	const [pendingChannel, setPendingChannel] = useState<string | null>(null);
+	const [switchOpen, setSwitchOpen] = useState(false);
+
+	// The train this install follows may have no PROMOTED build — that is exactly
+	// the case the pin exists for (someone on `canary` while the canary train is
+	// empty). The resolved list only carries trains with a build, so the pinned one
+	// is added back; without it the selector would render a value matching no
+	// option and show blank for a plugin that is very much on a channel.
+	const followed = item.channel ?? null;
+	const switchOptions =
+		followed && !channels.some((c) => c.channel === followed)
+			? [...channels, { channel: followed, installable: true, version: null }]
+			: channels;
+
+	const noop = () => {
+		// intentionally empty: error is surfaced via the hook
+	};
+
+	return (
 		<div className="flex w-full flex-col gap-2">
 			<div className="flex w-full flex-wrap items-center gap-2">
-				{action}
-				{/* Beside the lifecycle verb, not inside it: configuring an app is not
-				    part of installing or disabling it, and this is where a user who
-				    just clicked into the listing looks for its API key. */}
+				{/* Configuring an app is not part of installing or disabling it, which
+				    is why this is here and not in the hero beside the lifecycle verb —
+				    but it is still where a user who just clicked into the listing looks
+				    for its API key. */}
 				{onOpenSettings ? (
 					<Button onClick={onOpenSettings} size="sm" variant="outline">
 						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
@@ -1426,29 +1870,6 @@ function AppActions({
 					</AlertDialogContent>
 				</AlertDialog>
 			) : null}
-
-			{/* Enable confirmation: list grants before enabling. Install-only. */}
-			{installLayer ? (
-				<AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
-					<AlertDialogContent>
-						<AlertDialogHeader>
-							<AlertDialogTitle>Enable {entry.name}?</AlertDialogTitle>
-							<AlertDialogDescription>
-								{grants.length === 0
-									? "This plugin requests no special permissions."
-									: "Enabling grants this plugin the following permissions. They are validated by the Gateway."}
-							</AlertDialogDescription>
-						</AlertDialogHeader>
-						{grants.length > 0 && <GrantList grants={grants} />}
-						<AlertDialogFooter>
-							<AlertDialogCancel>Cancel</AlertDialogCancel>
-							<AlertDialogAction onClick={confirmEnable}>
-								Allow
-							</AlertDialogAction>
-						</AlertDialogFooter>
-					</AlertDialogContent>
-				</AlertDialog>
-			) : null}
 		</div>
 	);
 }
@@ -1461,7 +1882,7 @@ function GrantList({ grants }: { grants: string[] }) {
 			{grants.map((g) => {
 				const description = grantDescription(g);
 				return (
-					<li className="rounded-md border px-3 py-1.5" key={g}>
+					<li className="rounded-md bg-muted px-3 py-1.5" key={g}>
 						<div className="font-medium text-sm">{grantLabel(g)}</div>
 						{description ? (
 							<div className="text-muted-foreground text-xs">{description}</div>
@@ -1525,8 +1946,21 @@ function AppDetailPanel({
 	/** Resolves this listing to its "open settings" action (see the host seam). */
 	settingsOpener: PluginSettingsOpener;
 }) {
-	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } =
-		useCatalogHost();
+	const host = useCatalogHost();
+	const { Markdown, fetchVersionDetail: hostFetchVersionDetail } = host;
+	// How much of this listing the user has asked to see. Read ONCE here and
+	// threaded down as a narrow boolean: a detail panel must not learn the ladder,
+	// or every new level becomes an edit in a dozen components. The
+	// one-of-two-hooks shape is the file's existing convention (see
+	// `useInstallingLookup` / `usePluginSettingsOpener` above) and keeps the render
+	// to exactly one hook call either way.
+	const useHostInterfaceLevel = host.useInterfaceLevel ?? useNoInterfaceLevel;
+	const interfaceLevel = useHostInterfaceLevel();
+	// Technical detail = the four dense tabs (API, Versions, Dependencies,
+	// Health), the trust/tags rail, raw grant ids and capability strings. NOT the
+	// grant LABELS — see `DependenciesPanel.showTechnical`.
+	const showTechnical =
+		interfaceLevel === "advanced" || interfaceLevel === "expert";
 	// Reviews live on the control plane, reached through the money-layer host. Read
 	// optionally: a surface that mounts the catalog without the money layer (test
 	// harnesses, the storyboard) simply gets no Reviews tab.
@@ -1639,33 +2073,33 @@ function AppDetailPanel({
 	// Hero chips: the identity facts (Built-in / Community / Required / kinds).
 	// Free-form `tags` stay OUT of the hero — a listing with nine of them turned
 	// the header into a tag cloud — and live in the rail instead.
+	// STATUS attributes leave the string row and become glyphs; "Community",
+	// "Required", the stability word and the kind chips stay prose, because they
+	// are facts ABOUT the listing rather than states OF it.
+	const heroStatusIcons = entry.built_in ? (
+		<StatusBadge kind="builtin" tone="hero" />
+	) : null;
 	const heroBadges = [
-		entry.built_in ? "Built-in" : null,
 		isCommunityEntry(item) ? "Community" : null,
 		stabilityLabel(entry.stability),
 		isMandatoryListing(entry) ? "Required" : null,
-		...entry.kinds.map((k) => k.toUpperCase()),
+		// `companion` is deliberately dropped. Every app in the Apps tab IS a
+		// companion — that is the definition of the tab (`isCompanionApp` is its
+		// filter) — so the chip appeared on essentially every listing and told the
+		// reader nothing. The remaining kinds still distinguish one listing from
+		// another and stay.
+		...entry.kinds.filter((k) => k !== "companion").map((k) => k.toUpperCase()),
 	].filter((b): b is string => Boolean(b));
 
 	return (
 		<ListingDetailShell
 			actions={
-				<AppActions
+				<AppSecondaryActions
 					error={error}
-					install={install}
-					installing={isInstalling(entry.id)}
-					installLayer={installLayer}
-					installTaskId={pluginDownloadTaskId(entry.id)}
 					item={item}
-					lifecyclePending={lifecyclePending}
 					onOpenSettings={settingsOpener(entry.id)}
-					renderAffordance={renderAffordance}
-					setEnabled={setEnabled}
 					status={
 						<>
-							{/* Same control, same namespace key as the card it was opened
-							    from, so the two can never disagree about the total. */}
-							<ItemLikeButton namespace={entry.id} stopPropagation={false} />
 							<PriceBadge entry={entry} />
 							{entry.descriptor_only ? (
 								<Badge variant="outline">
@@ -1685,6 +2119,7 @@ function AppDetailPanel({
 					entry={entry}
 					onOpenHealth={() => setTab("health")}
 					scorecard={scorecard}
+					showTechnical={showTechnical}
 				/>
 			}
 			gallery={
@@ -1695,10 +2130,35 @@ function AppDetailPanel({
 			}
 			hero={
 				<AppHero
+					actions={
+						<>
+							<AppPrimaryAction
+								install={install}
+								installing={isInstalling(entry.id)}
+								installLayer={installLayer}
+								installTaskId={pluginDownloadTaskId(entry.id)}
+								item={item}
+								lifecyclePending={lifecyclePending}
+								renderAffordance={renderAffordance}
+								setEnabled={setEnabled}
+							/>
+							{/* Same control, same namespace key as the card it was opened
+							    from, so the two can never disagree about the total. It rides
+							    the hero's own translucent chip treatment because the button
+							    is deliberately chrome-free and inherits a muted foreground
+							    that is invisible on a saturated wash. */}
+							<ItemLikeButton
+								className="rounded-full bg-white/15 px-2 py-1 text-white/85 backdrop-blur-sm hover:text-white"
+								namespace={entry.id}
+								stopPropagation={false}
+							/>
+						</>
+					}
 					badges={heroBadges}
 					detail={detail}
 					entry={entry}
 					showArt={showHero}
+					statusIcons={heroStatusIcons}
 				/>
 			}
 			notice={
@@ -1719,6 +2179,7 @@ function AppDetailPanel({
 						onOpenHealth: () => setTab("health"),
 						onOpenReviews: () => setTab("reviews"),
 						scorecard,
+						showTechnical,
 						showRating: Boolean(reviewsService),
 					})}
 				/>
@@ -1747,6 +2208,7 @@ function AppDetailPanel({
 				overview={overview}
 				reviewsService={reviewsService}
 				scorecard={scorecard}
+				showTechnical={showTechnical}
 			/>
 		</ListingDetailShell>
 	);
@@ -1764,6 +2226,7 @@ function appStatItems({
 	onOpenReviews,
 	scorecard,
 	showRating,
+	showTechnical,
 }: {
 	detail: PluginCatalogDetail | null;
 	entry: CatalogEntry;
@@ -1771,6 +2234,9 @@ function appStatItems({
 	onOpenReviews: () => void;
 	scorecard: Scorecard | null;
 	showRating: boolean;
+	/** Include the Health cell. It links to the Health tab, which the same flag
+	 *  hides — so the two must move together. */
+	showTechnical: boolean;
 }): ListingStat[] {
 	// Annotated as `(ListingStat | null)[]` so an absent fact contributes `null`
 	// rather than widening the array's inferred element union per branch.
@@ -1799,7 +2265,9 @@ function appStatItems({
 					value: (entry.rating_average ?? 0).toFixed(1),
 				}
 			: null,
-		scorecard?.grade && scorecard.score !== null
+		// Gated with the Health TAB it jumps to, not independently: leaving the cell
+		// behind a hidden tab is a click that silently does nothing.
+		showTechnical && scorecard?.grade && scorecard.score !== null
 			? {
 					label: "Health",
 					onClick: onOpenHealth,
@@ -1836,29 +2304,38 @@ function AppDetailAside({
 	entry,
 	onOpenHealth,
 	scorecard,
+	showTechnical,
 }: {
 	detail: PluginCatalogDetail | null;
 	entry: CatalogEntry;
 	onOpenHealth: () => void;
 	scorecard: Scorecard | null;
+	/** Show the reference material a technical reader wants. The Information grid
+	 *  (developer, category, version, licence, links) is NOT gated by it — that is
+	 *  exactly what a non-technical buyer scans. */
+	showTechnical: boolean;
 }) {
-	const hasTags = entry.tags.length > 0;
-	// Guarded on the DATA, not on whether the child rendered: the shell reserves a
-	// whole 18rem column for a truthy `aside`, and a fragment of three nulls is
-	// truthy — that is a wide empty gutter on every listing with no metadata.
+	// Both gated cards resolve BEFORE the emptiness check below. Gating only the
+	// children would leave the shell reserving a whole 18rem column for a fragment
+	// of three nulls, which is truthy — a wide empty gutter on every listing.
+	const showTags = entry.tags.length > 0 && showTechnical;
+	// The Trust card's only control jumps to the Health tab, which is itself hidden
+	// at the same level — so gating them together is what stops Simple offering a
+	// click that goes nowhere.
+	const showTrust = Boolean(scorecard) && showTechnical;
 	const hasInfo = appInfoRows({ detail, entry }).length > 0;
-	if (!(hasInfo || hasTags || scorecard)) {
+	if (!(hasInfo || showTags || showTrust)) {
 		return null;
 	}
 	return (
 		<>
 			<AppInformationSection detail={detail} entry={entry} />
-			{scorecard ? (
+			{showTrust && scorecard ? (
 				<ListingAsideCard title="Trust">
 					<ScorecardBadge onClick={onOpenHealth} scorecard={scorecard} />
 				</ListingAsideCard>
 			) : null}
-			{hasTags ? (
+			{showTags ? (
 				<ListingAsideCard title="Tags">
 					<div className="flex flex-wrap gap-1">
 						{entry.tags.map((t) => (
@@ -1928,7 +2405,7 @@ function AppIncludedSection({
 			<ul className="flex flex-col gap-1.5">
 				{runnables.map((runnable) => (
 					<li
-						className="flex items-center gap-2.5 rounded-md border px-3 py-2"
+						className="flex items-center gap-2.5 rounded-md bg-muted px-3 py-2"
 						key={runnable.id}
 					>
 						<HugeiconsIcon
@@ -1938,9 +2415,17 @@ function AppIncludedSection({
 						<span className="min-w-0 flex-1 truncate text-sm">
 							{runnable.name ?? runnable.id}
 						</span>
-						<Badge className="shrink-0 text-xs" variant="secondary">
-							{runnableKindLabel(runnable.kind)}
-						</Badge>
+						{/* The kind chip, EXCEPT for `companion`. In the Apps tab every
+						    listing is one, so the badge repeated on every row of every
+						    listing and distinguished nothing; the row's own glyph already
+						    carries the kind. Deleting the map entry would not have done it
+						    — `runnableKindLabel` falls back to a capitalized raw kind and
+						    would still have printed "Companion". */}
+						{runnable.kind === "companion" ? null : (
+							<Badge className="shrink-0 text-xs" variant="secondary">
+								{runnableKindLabel(runnable.kind)}
+							</Badge>
+						)}
 					</li>
 				))}
 			</ul>
@@ -2054,13 +2539,20 @@ function AppInformationSection({
  *  a listing without art opened with no header at all — the dialog started at a
  *  bare `<h2>` mid-air. */
 function AppHero({
+	actions,
 	badges,
 	detail,
 	entry,
 	showArt,
+	statusIcons,
 	tagline,
 }: {
+	/** The primary CTA cluster, right-aligned on the title row — see
+	 *  {@link ListingHero.actions}. */
+	actions?: ReactNode;
 	badges: string[];
+	/** Status glyphs for the chip row — see {@link ListingHero.statusIcons}. */
+	statusIcons?: ReactNode;
 	/** The loaded detail payload, when there is one. Only its verification fields
 	 *  are read here: the detail is the fuller, fresher record, so it wins over the
 	 *  card's copy the same way the health scorecard resolves `reviewed`. */
@@ -2106,6 +2598,7 @@ function AppHero({
 		: entry.org_verified_tier;
 	return (
 		<ListingHero
+			actions={actions}
 			badges={badges}
 			banner={showArt ? entry.banner : null}
 			dither={showArt ? entry.icon_dither : null}
@@ -2116,6 +2609,7 @@ function AppHero({
 						brand={isBrandMark === true}
 						dark={previewIconUrlDark ?? null}
 						light={previewIconUrl}
+						padding={normalizeIconPadding(entry.icon_padding)}
 					/>
 				) : previewIconId ? (
 					<Icon icon={previewIconId} size={34} />
@@ -2124,6 +2618,7 @@ function AppHero({
 				)
 			}
 			iconBackground={entry.icon_background ?? null}
+			iconPadding={entry.icon_padding}
 			name={entry.name}
 			nameBadge={
 				// `tone="hero"` because every foreground in this band is fixed white over
@@ -2135,6 +2630,7 @@ function AppHero({
 					tone="hero"
 				/>
 			}
+			statusIcons={statusIcons}
 			tagline={tagline}
 		/>
 	);

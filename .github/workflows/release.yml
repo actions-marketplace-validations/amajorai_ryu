@@ -657,6 +657,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # ── `--latest` gate. This workflow CANNOT build the ghost/shadow archives
+          #    (the header explains why: mirror-public.sh does not mirror apps/ghost
+          #    or apps/shadow), and Core's GhostDownloader/ShadowDownloader resolve
+          #    `releases/latest/download/<name>-<os>-<arch>.<ext>` against whatever is
+          #    latest, unpinned. So flipping an overlay-built release to `--latest`
+          #    silently 404s both downloaders. v0.1.12 did exactly that: 41 assets,
+          #    no ghost/shadow, promoted to latest, green run.
+          #
+          #    The release is still published and installable by its tag — tagging
+          #    here is the documented escape hatch when Actions is blocked on the
+          #    private repo, and hard-failing before publish would remove it. What is
+          #    refused is only the `latest` pointer, so the unpinned downloads keep
+          #    resolving against the last COMPLETE release. The job exits non-zero so
+          #    the omission is a red job, not a silent one.
+          names="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          missing=()
+          for want in \
+            ghost-linux-x86_64.tar.gz ghost-macos-aarch64.tar.gz ghost-windows-x86_64.zip \
+            shadow-linux-x86_64.tar.gz shadow-macos-aarch64.tar.gz shadow-windows-x86_64.zip; do
+            printf '%s\n' "$names" | grep -qx "$want" || missing+=("$want")
+          done
+          if (( ${#missing[@]} )); then
+            echo "Publishing $TAG as stable, but NOT as latest — these are absent:"
+            printf '  %s\n' "${missing[@]}"
+            gh release edit "$TAG" --prerelease=false
+            echo "::error::$TAG is not latest: ghost/shadow archives are missing, and Core"
+            echo "::error::downloads them from releases/latest/download unpinned."
+            echo "::error::Remedy: tag on the private repo (amajorai/ryu-closed) instead —"
+            echo "::error::its release.yml builds them and mirror-releases.yml copies every"
+            echo "::error::asset here under the same tag, at which point latest is safe."
+            exit 1
+          fi
           echo "All build jobs green — promoting $TAG to stable."
           gh release edit "$TAG" --prerelease=false --latest
           gh release view "$TAG" --json tagName,isPrerelease,isDraft \

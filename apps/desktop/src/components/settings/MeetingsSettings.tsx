@@ -62,7 +62,7 @@ export function MeetingsSettings() {
 	const [diarization, setDiarization] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [loadError, setLoadError] = useState(false);
-	const [_reloadKey, setReloadKey] = useState(0);
+	const [reloadKey, setReloadKey] = useState(0);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -108,7 +108,9 @@ export function MeetingsSettings() {
 		return () => {
 			cancelled = true;
 		};
-	}, []);
+		// `reloadKey` is load-bearing: the "Retry" button only bumps it, so without
+		// it the button is dead.
+	}, [reloadKey]);
 
 	const templateOptions = useMemo(
 		() => templates.map((t) => ({ value: t.id, label: t.name })),
@@ -282,7 +284,7 @@ export function MeetingsSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Label who said what in the transcript. Diarization runs on the recording after a meeting ends, using a local model (the Ryu diarize sidecar, pyannote). It's off by default — the model is large and gated; enable it and install the sidecar to use it. Your microphone side is always labeled “Me”."
+				caption="Label who said what in the transcript. Diarization runs on the recording after a meeting ends, using a local model (the Ryu diarize sidecar, pyannote). It's off by default because the model is large and gated; enable it and install the sidecar to use it. Your microphone side is always labeled “Me”."
 				title="Speaker labels"
 			>
 				<SettingsCard>
@@ -307,7 +309,7 @@ export function MeetingsSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Ryu notices when a meeting app starts using your microphone (e.g. Zoom, Teams) and offers to take notes — it does not listen to your mic to detect. Choose whether to prompt, and which apps count as a meeting."
+				caption="Ryu notices when a meeting app starts using your microphone (e.g. Zoom, Teams) and offers to take notes. It does not listen to your mic to detect that. Choose whether to prompt, and which apps count as a meeting."
 				title="Automatic detection"
 			>
 				<SettingsCard className="space-y-4">

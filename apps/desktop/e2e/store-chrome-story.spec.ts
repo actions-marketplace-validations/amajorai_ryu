@@ -1,6 +1,6 @@
 // Real-browser spec for the Store/Library page chrome story (`e2e/harness/
 // store-chrome-story.{html,tsx}`), which mounts the REAL `StoreSectionTabs` and
-// `StoreBottomSearch` from `packages/blocks/src/desktop/store.tsx`.
+// `StoreGlobalSearch` from `packages/blocks/src/desktop/store.tsx`.
 //
 // Why a browser and not happy-dom: every claim here is a LAYOUT claim — whether
 // the strip overflows, which edge is faded, whether the bottom bar covers the
@@ -15,9 +15,14 @@
 //   • the group dividers (non-tab spans inside the tab list) do not swallow
 //     arrow-key focus;
 //   • the scrolled-edge fade engages ONLY while that edge has more to show
-//     (`data-fade`: none → end → both → start);
-//   • the bottom search field is bare (no border, ring or shadow) and, with the
-//     scrolling column padded by the bar's height, the last row clears it.
+//     (`data-edges`: none → end → both → start), and an overflowing edge also
+//     carries its scroll chevron — the affordance that replaced the strip's
+//     visible scrollbars;
+//   • NEITHER scrollbar is reachable on the strip: the old code hid them with a
+//     `scrollbar-none` class defined in no stylesheet, and left `overflow-y` to
+//     resolve to `auto` beside a non-visible `overflow-x`;
+//   • the global search sits ABOVE the tabs, in the flow, and is bare (no
+//     border, ring or shadow).
 
 import { expect, type Page, test } from "@playwright/test";
 
@@ -37,13 +42,13 @@ const wideScroller = (page: Page) =>
 		'[data-testid="wide-panel"] [data-slot="store-section-tabs-scroller"]'
 	);
 
-/** The bare bottom input of one page shell (`page` = 640px, `cramped` = 360px). */
-const bottomSearch = (page: Page, shell: string) =>
+/** The bare global input of one page shell (`page` = 640px, `cramped` = 360px). */
+const globalSearch = (page: Page, shell: string) =>
 	page.locator(
-		`[data-testid="${shell}-shell"] [data-slot="store-bottom-search"]`
+		`[data-testid="${shell}-shell"] [data-slot="store-global-search"]`
 	);
 
-test.describe("store section tabs — pills, fade, and the bottom search", () => {
+test.describe("store section tabs — pills, edges, and the global search", () => {
 	test("renders the shared pill tabs, not hand-rolled buttons", async ({
 		page,
 	}) => {
@@ -64,10 +69,16 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 
 	test("selecting a tab reports the section value", async ({ page }) => {
 		await page.goto(STORY_URL);
+		// Scoped to the narrow panel: the story mounts THREE strips (the two sizing
+		// panels plus the one inside the page shell), so a bare role lookup is a
+		// strict-mode violation.
+		//
 		// Models sits past the right edge of the 420px column, so it has to be
 		// scrolled into view first — and the click must land AFTER that scroll
 		// settles, or it hits whichever pill is still under the pointer.
-		const models = page.getByRole("tab", { name: "Models" });
+		const models = page
+			.getByTestId("narrow-panel")
+			.getByRole("tab", { name: "Models" });
 		await models.scrollIntoViewIfNeeded();
 		await expect(models).toBeInViewport();
 		await models.click();
@@ -77,8 +88,11 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 	test("arrow keys walk the strip across a group divider", async ({ page }) => {
 		await page.goto(STORY_URL);
 		// Agents is the last tab of the "discover" cluster; Workflows opens "build",
-		// so a divider <span> sits between them inside the tab list.
-		const agents = page.getByRole("tab", { name: "Agents" });
+		// so a divider <span> sits between them inside the tab list. Scoped to one
+		// panel — the story mounts three strips.
+		const agents = page
+			.getByTestId("narrow-panel")
+			.getByRole("tab", { name: "Agents" });
 		await agents.click();
 		await agents.focus();
 		await page.keyboard.press("ArrowRight");
@@ -102,7 +116,7 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		expect(metrics.scroll).toBeGreaterThan(metrics.client);
 		// The measurement rides the element's own scroll event, so these are polled
 		// with headroom: a loaded CI box can be several frames late.
-		await expect(scroller).toHaveAttribute("data-fade", "end", {
+		await expect(scroller).toHaveAttribute("data-edges", "end", {
 			timeout: 10_000,
 		});
 
@@ -110,7 +124,7 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		await scroller.evaluate((el) => {
 			el.scrollLeft = Math.round((el.scrollWidth - el.clientWidth) / 2);
 		});
-		await expect(scroller).toHaveAttribute("data-fade", "both", {
+		await expect(scroller).toHaveAttribute("data-edges", "both", {
 			timeout: 10_000,
 		});
 
@@ -118,7 +132,7 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		await scroller.evaluate((el) => {
 			el.scrollLeft = el.scrollWidth;
 		});
-		await expect(scroller).toHaveAttribute("data-fade", "start", {
+		await expect(scroller).toHaveAttribute("data-edges", "start", {
 			timeout: 10_000,
 		});
 
@@ -132,7 +146,7 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 	test("a strip that fits carries no mask at all", async ({ page }) => {
 		await page.goto(STORY_URL);
 		const scroller = wideScroller(page);
-		await expect(scroller).toHaveAttribute("data-fade", "none");
+		await expect(scroller).toHaveAttribute("data-edges", "none");
 		const mask = await scroller.evaluate(
 			(el) => getComputedStyle(el).maskImage
 		);
@@ -150,9 +164,9 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		await expect(strays).toHaveCount(0);
 	});
 
-	test("the bottom search field is bare", async ({ page }) => {
+	test("the global search field is bare", async ({ page }) => {
 		await page.goto(STORY_URL);
-		const input = bottomSearch(page, "page");
+		const input = globalSearch(page, "page");
 		await expect(input).toBeVisible();
 		const style = await input.evaluate((el) => {
 			const s = getComputedStyle(el);
@@ -169,33 +183,9 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		expect(style.outlineStyle).toBe("none");
 	});
 
-	// Both widths: the padded column has to clear the bar in a cramped pane too,
-	// where the bar is the same height but the rows are narrower.
-	for (const shell of ["page", "cramped"]) {
-		test(`the bottom bar does not cover the last row (${shell})`, async ({
-			page,
-		}) => {
-			await page.goto(STORY_URL);
-			const scroller = page.getByTestId(`${shell}-scroller`);
-			await scroller.evaluate((el) => {
-				el.scrollTop = el.scrollHeight;
-			});
-			const lastRow = page.getByTestId(`${shell}-last-row`);
-			await expect(lastRow).toBeVisible();
-			const rowBox = await lastRow.boundingBox();
-			const barBox = await bottomSearch(page, shell).boundingBox();
-			expect(rowBox).not.toBeNull();
-			expect(barBox).not.toBeNull();
-			if (rowBox && barBox) {
-				// The last row is fully readable above the bar's top edge.
-				expect(rowBox.y + rowBox.height).toBeLessThanOrEqual(barBox.y + 1);
-			}
-		});
-	}
-
-	test("typing in the bottom search reports the query", async ({ page }) => {
+	test("typing in the global search reports the query", async ({ page }) => {
 		await page.goto(STORY_URL);
-		const input = bottomSearch(page, "page");
+		const input = globalSearch(page, "page");
 		await input.fill("notion");
 		await expect(input).toHaveValue("notion");
 		// Escape clears it in place — there is no dialog to dismiss.
@@ -203,54 +193,101 @@ test.describe("store section tabs — pills, fade, and the bottom search", () =>
 		await expect(input).toHaveValue("");
 	});
 
-	// The bar shares the bottom of the pane with the shell's split-pane badge
-	// (`Layout.tsx` → `PaneBadge`, `absolute bottom-2 left-2 z-10`). Neither the
-	// pane box nor the page root opens a stacking context, so a z-index on the bar
-	// outranks the badge and an opaque strip erases it. The bar therefore carries
-	// none — asserted on the mechanism, not just the pixels, so a "z-30 to fix
-	// something else" cannot come back silently.
-	test("the bar never outranks the pane badge", async ({ page }) => {
+	test("the search sits above the tabs, in the flow", async ({ page }) => {
 		await page.goto(STORY_URL);
-		const bar = page.locator(
-			'[data-testid="page-shell"] [data-slot="store-bottom-search"]'
+		const input = globalSearch(page, "page");
+		const strip = page.locator(
+			'[data-testid="page-shell"] [data-slot="store-section-tabs-scroller"]'
 		);
-		// The slot is on the input; the positioned strip is its grandparent
-		// (strip → centered row → input).
-		const barLayer = await bar.evaluate((el) => {
-			const strip = el.parentElement?.parentElement;
-			return strip ? getComputedStyle(strip).zIndex : "missing";
-		});
-		expect(barLayer).toBe("auto");
-		const badgeLayer = await page
-			.getByTestId("page-badge")
-			.evaluate((el) => getComputedStyle(el).zIndex);
-		expect(badgeLayer).toBe("10");
-	});
-
-	test("the pane badge paints over the bar, not under it", async ({ page }) => {
-		await page.goto(STORY_URL);
-		const badge = page.getByTestId("page-badge");
-		const box = await badge.boundingBox();
-		expect(box).not.toBeNull();
-		if (!box) {
-			return;
+		const inputBox = await input.boundingBox();
+		const stripBox = await strip.boundingBox();
+		expect(inputBox).not.toBeNull();
+		expect(stripBox).not.toBeNull();
+		if (inputBox && stripBox) {
+			expect(inputBox.y + inputBox.height).toBeLessThanOrEqual(stripBox.y + 1);
 		}
-		const topmost = await page.evaluate(
-			({ x, y }) => {
-				const el = document.elementFromPoint(x, y);
-				return el?.closest("[data-testid]")?.getAttribute("data-testid") ?? "";
-			},
-			{ x: box.x + 8, y: box.y + box.height / 2 }
-		);
-		expect(topmost).toBe("page-badge");
+		// In the flow, not floated over the content: the retired bottom bar was
+		// `absolute`, and that is what forced every section to reserve its height.
+		const positioned = await input.evaluate((el) => {
+			let node: HTMLElement | null = el as HTMLElement;
+			while (node && node.getAttribute("data-testid") !== "page-shell") {
+				if (getComputedStyle(node).position === "absolute") {
+					return true;
+				}
+				node = node.parentElement;
+			}
+			return false;
+		});
+		expect(positioned).toBe(false);
 	});
 
-	// A cramped pane is the worst case for both: the badge covers a bigger share
-	// of the row, and the input has the least room. The input must still be the
-	// element you hit where it is visible, and the shell must not scroll sideways.
-	test("the bar survives a narrow pane", async ({ page }) => {
+	test("nothing scrolls the last row out of reach", async ({ page }) => {
 		await page.goto(STORY_URL);
-		const input = bottomSearch(page, "cramped");
+		const scroller = page.getByTestId("page-scroller");
+		await scroller.evaluate((el) => {
+			el.scrollTop = el.scrollHeight;
+		});
+		await expect(page.getByTestId("page-last-row")).toBeInViewport();
+	});
+
+	// The strip's own scrollbars. `overflow-x-auto` alone resolves `overflow-y` to
+	// `auto` too, so a one-line pill row reserved a vertical bar as well as a
+	// horizontal one — and the class meant to hide them (`scrollbar-none`) is
+	// defined in no stylesheet in this repo. Asserted on the computed overflow and
+	// on the measured gap between the client box and the border box, which is what
+	// a painted scrollbar actually costs.
+	test("the strip shows neither scrollbar", async ({ page }) => {
+		await page.goto(STORY_URL);
+		const metrics = await narrowScroller(page).evaluate((el) => {
+			const s = getComputedStyle(el);
+			return {
+				gutterX: el.offsetHeight - el.clientHeight,
+				gutterY: el.offsetWidth - el.clientWidth,
+				overflowY: s.overflowY,
+			};
+		});
+		expect(metrics.overflowY).toBe("hidden");
+		expect(metrics.gutterX).toBeLessThanOrEqual(1);
+		expect(metrics.gutterY).toBeLessThanOrEqual(1);
+	});
+
+	test("an overflowing edge offers a chevron that pages the strip", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const scroller = narrowScroller(page);
+		await expect(scroller).toHaveAttribute("data-edges", "end", {
+			timeout: 10_000,
+		});
+		const forward = page
+			.locator('[data-testid="narrow-panel"]')
+			.getByRole("button", { name: "Scroll right" });
+		await expect(forward).toHaveCount(1);
+		// At rest it is invisible; the strip's hover is what reveals it.
+		expect(await forward.evaluate((el) => getComputedStyle(el).opacity)).toBe(
+			"0"
+		);
+		const before = await scroller.evaluate((el) => el.scrollLeft);
+		await forward.dispatchEvent("click");
+		await expect
+			.poll(async () => scroller.evaluate((el) => el.scrollLeft), {
+				timeout: 10_000,
+			})
+			.toBeGreaterThan(before);
+	});
+
+	test("a strip that fits offers no chevrons", async ({ page }) => {
+		await page.goto(STORY_URL);
+		await expect(
+			page
+				.locator('[data-testid="wide-panel"]')
+				.getByRole("button", { name: /Scroll (left|right)/ })
+		).toHaveCount(0);
+	});
+
+	test("the field survives a narrow pane", async ({ page }) => {
+		await page.goto(STORY_URL);
+		const input = globalSearch(page, "cramped");
 		await expect(input).toBeVisible();
 		const box = await input.boundingBox();
 		expect(box).not.toBeNull();

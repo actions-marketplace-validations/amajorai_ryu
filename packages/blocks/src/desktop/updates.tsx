@@ -17,6 +17,24 @@ import { Switch } from "@ryu/ui/components/switch";
 export interface UpdatesViewProps {
 	autoUpdate?: boolean;
 	checking?: boolean;
+	/**
+	 * Sentence naming an install already booked for the machine's quiet hour.
+	 * When set, the row offers to cancel instead of to book.
+	 *
+	 * The caller owns the wording, and must not promise the hour itself: unlike a
+	 * node, a laptop is usually asleep or quit at 03:00, so the truthful sentence
+	 * is about the next launch after the window. See
+	 * `apps/desktop/src/lib/app-update-schedule.ts`.
+	 */
+	deferredInstallNotice?: string;
+	/** Cancels the booked install. Renders the cancel action only when supplied. */
+	onCancelDeferredInstall?: () => void;
+	/**
+	 * Books the update for the machine's next quiet hour. Renders the row only
+	 * when supplied — the Gateway tab governs a node's binaries, which defer
+	 * through the node's own scheduler, and leaves this off.
+	 */
+	onDeferInstall?: () => void;
 	onCheck?: () => void;
 	/** Called when the owner asks to manage/extend their updates window. Renders
 	 *  the action button only when supplied. */
@@ -56,8 +74,11 @@ export function UpdatesView({
 	productName,
 	autoUpdate = true,
 	checking,
+	deferredInstallNotice,
 	onToggle,
+	onCancelDeferredInstall,
 	onCheck,
+	onDeferInstall,
 	onManageUpdates,
 	updatesWindowNotice,
 }: UpdatesViewProps) {
@@ -93,6 +114,32 @@ export function UpdatesView({
 						description="Manually check for a new release now."
 						title="Check for updates"
 					/>
+					{deferredInstallNotice || onDeferInstall ? (
+						<SettingsItem
+							actions={
+								deferredInstallNotice ? (
+									onCancelDeferredInstall ? (
+										<Button
+											onClick={onCancelDeferredInstall}
+											size="sm"
+											variant="outline"
+										>
+											Cancel
+										</Button>
+									) : undefined
+								) : (
+									<Button onClick={onDeferInstall} size="sm" variant="outline">
+										Install later
+									</Button>
+								)
+							}
+							description={
+								deferredInstallNotice ??
+								"Restarting mid-task loses whatever is running. Book the install for tonight instead."
+							}
+							title="Install later"
+						/>
+					) : null}
 					{updatesWindowNotice ? (
 						<SettingsItem
 							actions={

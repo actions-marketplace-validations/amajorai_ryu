@@ -302,8 +302,13 @@ function MotionNavigationMenu({
 
 	useLayoutEffect(() => {
 		updateViewportPosition();
+		// `activeValue` is load-bearing — it is the "whenever the active menu
+		// changes" the comment promises. `updateViewportPosition` reads the open
+		// trigger out of the DOM rather than closing over `activeValue`, so its
+		// identity does not change when the menu does and this would otherwise run
+		// only once. The work is rAF-debounced, so an extra call is harmless.
 		// biome-ignore lint/correctness/useExhaustiveDependencies: reposition whenever the active menu changes
-	}, [updateViewportPosition]);
+	}, [updateViewportPosition, activeValue]);
 
 	useLayoutEffect(() => {
 		const root = rootRef.current;

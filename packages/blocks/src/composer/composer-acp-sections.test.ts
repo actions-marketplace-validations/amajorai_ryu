@@ -9,8 +9,10 @@ import {
 	flattenConfigOptions,
 	formatAcpOptionLabel,
 	isApprovalConfigOption,
+	isBooleanConfigOption,
 	isReasoningOption,
 	mergeStreamedConfig,
+	modelsDuplicateEffortLevels,
 	persistStreamedConfig,
 	seedAcpSelections,
 	shouldAdoptStreamedConfig,
@@ -534,5 +536,184 @@ describe("per-agent isolation", () => {
 		const store = fakeStore();
 		persistStreamedConfig(store, null, { "ryu.plan": "off" });
 		expect(store.config).toEqual({});
+	});
+});
+
+describe("boolean config options (unstable_boolean_config)", () => {
+	// A `type: "boolean"` option carries NO `options` array — its entire payload
+	// is `currentValue: true|false`. Before this, it flattened to an empty item
+	// list and drew a picker with nothing in it.
+	const toggle: AcpConfigOption = {
+		id: "web_search",
+		name: "Web search",
+		type: "boolean",
+		currentValue: true,
+	};
+
+	it("is recognised as a toggle, not a select", () => {
+		expect(isBooleanConfigOption(toggle)).toBe(true);
+		expect(
+			isBooleanConfigOption({ id: "effort", name: "Effort", type: "select" })
+		).toBe(false);
+	});
+
+	it("renders two rows even though the option advertises none", () => {
+		const section = buildConfigOptionSection(toggle, {}, () => {
+			// no-op
+		});
+		expect(section.items.map((i) => i.id)).toEqual(["true", "false"]);
+		expect(section.items.map((i) => i.name)).toEqual(["On", "Off"]);
+	});
+
+	it("reflects a real JSON boolean as the selected string id", () => {
+		// Every layer between here and the wire stores picks as strings, so the
+		// section's value has to be the STRING form or nothing looks selected.
+		const on = buildConfigOptionSection(toggle, {}, () => {
+			// no-op
+		});
+		expect(on.value).toBe("true");
+
+		const off = buildConfigOptionSection(
+			{ ...toggle, currentValue: false },
+			{},
+			() => {
+				// no-op
+			}
+		);
+		expect(off.value).toBe("false");
+	});
+
+	it("lets a stored pick override the advertised state", () => {
+		const section = buildConfigOptionSection(
+			toggle,
+			{ web_search: "false" },
+			() => {
+				// no-op
+			}
+		);
+		expect(section.value).toBe("false");
+	});
+
+	it("never renders as a slider", () => {
+		// The slider variant is for an ORDERED scale (reasoning effort). Two
+		// states are not a scale.
+		const section = buildConfigOptionSection(
+			{ ...toggle, id: "reasoning", name: "Reasoning" },
+			{},
+			() => {
+				// no-op
+			}
+		);
+		expect(section.variant).toBeUndefined();
+	});
+
+	it("survives the visibility filter", () => {
+		// The filter drops `category:"model"` and reasoning-when-off. A toggle is
+		// neither, so it must reach the composer.
+		const { visibleAcpConfigOptions } = deriveVisibleAcpOptions(
+			{ configOptions: [toggle], models: null, modes: null },
+			false
+		);
+		expect(visibleAcpConfigOptions).toHaveLength(1);
+		expect(visibleAcpConfigOptions[0].id).toBe("web_search");
+	});
+});
+
+// Built from a real `codex-acp` probe capture, not from an assumption about the
+// id shape: codex ships 4 base models x 6 effort levels in `availableModels`
+// AND a clean 4-item `category:"model"` option beside a `thought_level` one.
+const CODEX_BASE_MODELS = [
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-5.5",
+	"gpt-5.4-mini",
+];
+const CODEX_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+function codexConfig(): AcpSessionConfig {
+	return {
+		models: {
+			currentModelId: "gpt-5.6-terra[medium]",
+			availableModels: CODEX_BASE_MODELS.flatMap((base) =>
+				CODEX_EFFORTS.map((effort) => ({
+					modelId: `${base}[${effort}]`,
+					name: `${base} (${effort})`,
+				}))
+			),
+		},
+		modes: null,
+		configOptions: [
+			{
+				id: "model",
+				name: "Model",
+				category: "model",
+				type: "select",
+				currentValue: "gpt-5.6-terra",
+				options: CODEX_BASE_MODELS.map((m) => ({ value: m, name: m })),
+			},
+			{
+				id: "reasoning_effort",
+				name: "Reasoning effort",
+				category: "thought_level",
+				type: "select",
+				currentValue: "medium",
+				options: CODEX_EFFORTS.map((e) => ({ value: e, name: e })),
+			},
+		],
+	};
+}
+
+describe("modelsDuplicateEffortLevels", () => {
+	it("detects the codex base x effort cross-product", () => {
+		expect(modelsDuplicateEffortLevels(codexConfig())).toBe(true);
+	});
+
+	it("leaves a plain model list alone", () => {
+		const config = codexConfig();
+		config.models = {
+			currentModelId: "sonnet",
+			availableModels: [
+				{ modelId: "sonnet", name: "Sonnet" },
+				{ modelId: "opus", name: "Opus" },
+			],
+		};
+		expect(modelsDuplicateEffortLevels(config)).toBe(false);
+	});
+
+	it("needs an effort option to compare against", () => {
+		// Suffixed ids alone prove nothing — without a thought_level option there
+		// is no second control to be duplicating.
+		const config = codexConfig();
+		config.configOptions = (config.configOptions ?? []).filter(
+			(o) => o.category !== "thought_level"
+		);
+		expect(modelsDuplicateEffortLevels(config)).toBe(false);
+	});
+
+	it("is strict: ONE unsuffixed model keeps the dedicated list", () => {
+		// Safe direction to be wrong in — an agent whose list merely happens to
+		// contain a bracketed id must not lose its own model picker.
+		const config = codexConfig();
+		config.models?.availableModels.push({
+			modelId: "gpt-5.6-nova",
+			name: "GPT-5.6-Nova",
+		});
+		expect(modelsDuplicateEffortLevels(config)).toBe(false);
+	});
+
+	it("ignores a bracketed suffix that is not an effort level", () => {
+		const config = codexConfig();
+		config.models = {
+			currentModelId: "llama[8b]",
+			availableModels: [{ modelId: "llama[8b]", name: "Llama 8B" }],
+		};
+		expect(modelsDuplicateEffortLevels(config)).toBe(false);
+	});
+
+	it("says no when there are no models at all", () => {
+		const config = codexConfig();
+		config.models = null;
+		expect(modelsDuplicateEffortLevels(config)).toBe(false);
+		expect(modelsDuplicateEffortLevels(null)).toBe(false);
 	});
 });

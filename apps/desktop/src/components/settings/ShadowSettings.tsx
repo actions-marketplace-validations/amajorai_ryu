@@ -95,7 +95,7 @@ export function ShadowSettings() {
 								}}
 							/>
 						}
-						description="Incognito mode — Shadow records nothing at all (no frames, no text, no events) until you turn this back off."
+						description="Incognito mode. Shadow records nothing at all (no frames, no text, no events) until you turn this back off."
 						title="Pause all capture"
 					/>
 					<SettingsItem
@@ -163,8 +163,8 @@ export function ShadowSettings() {
 
 			{shadowReachable === false && (
 				<p className="px-3 text-muted-foreground text-xs">
-					Shadow is not running — these settings are saved and will apply when
-					it starts.
+					Shadow is not running. These settings are saved and will apply when it
+					starts.
 				</p>
 			)}
 		</div>

@@ -5,16 +5,28 @@
 // The shape is the one every app store converged on, top to bottom:
 //
 //   ┌──────────────────────────────────────────────────────────────┐
-//   │ HERO — full-bleed wash, icon tile, name, tagline, badges     │
+//   │ HERO — full-bleed wash, icon tile, name + CTA on one row     │
 //   ├──────────────────────────────────────────────────────────────┤
-//   │ ACTION BAR — primary CTA + secondary controls, solid surface │
-//   ├──────────────────────────────────────────────────────────────┤
-//   │ STAT STRIP — divided cells: rating · version · category · …  │
+//   │ STAT STRIP — cells: rating · version · category · …          │
 //   ├──────────────────────────────────────────────────────────────┤
 //   │ GALLERY — screenshot rail (only when the listing ships one)  │
 //   ├───────────────────────────────┬──────────────────────────────┤
 //   │ MAIN — description, tabs      │ ASIDE — Information, links   │
 //   └───────────────────────────────┴──────────────────────────────┘
+//
+// THE CTA LIVES IN THE HERO. It used to sit on its own solid band below, on the
+// stated reasoning that a button on a saturated dither "loses its own surface
+// colour". That is true of a bare button and false of the arrangement here: the
+// hero already paints a bottom-weighted scrim for the title, the CTA rides the
+// same baseline as the title inside it, and a real Button keeps its own fill on
+// top of both. What the separate band actually cost was a whole strip of chrome
+// between the listing's identity and the one thing the user opened the dialog to
+// do — and, on a short listing, it was the widest empty row on the page.
+//
+// NO BORDERS INSIDE. Every panel below the hero is a `bg-muted` plate on the
+// dialog's background, never an outlined box: at this density a dialog of
+// bordered cards inside a bordered dialog reads as a form, and the borders were
+// doing no work the fill does not already do.
 //
 // WHY A SHELL AND NOT TEN PANELS. Every realm grew its own detail body, and each
 // one was authored for the 26rem side pane that `StoreCatalogLayout` used to open
@@ -58,9 +70,14 @@ export function ListingDetailShell({
 }: {
 	/** {@link ListingHero}. Omitted only by a listing with no presentation at all. */
 	hero?: ReactNode;
-	/** The install/enable/open controls. Rendered on a SOLID band below the hero,
-	 *  not inside it: the hero wash is a saturated dither and a button sitting on
-	 *  it either loses its own surface colour or has to fake one. */
+	/** Secondary controls that did not fit the hero's CTA row.
+	 *
+	 *  The PRIMARY install/enable/open control belongs in the hero itself
+	 *  ({@link ListingHero.actions}) — it is the reason the dialog is open, so it
+	 *  sits with the listing's name, not on a strip below it. This slot is the
+	 *  overflow: a channel picker, a long grant summary, anything that would turn
+	 *  the title row into a toolbar. It renders on a solid band and, when a
+	 *  listing has nothing of the sort, renders nothing at all. */
 	actions?: ReactNode;
 	/** {@link ListingStatStrip}. */
 	stats?: ReactNode;
@@ -79,7 +96,7 @@ export function ListingDetailShell({
 			{hero}
 			{notice ? <div className="px-5 pt-4 lg:px-7">{notice}</div> : null}
 			{actions ? (
-				<div className="flex flex-wrap items-center gap-2 border-border/60 border-b px-5 py-3 lg:px-7">
+				<div className="flex flex-wrap items-center gap-2 px-5 py-3 lg:px-7">
 					{actions}
 				</div>
 			) : null}
@@ -106,12 +123,15 @@ export function ListingDetailShell({
 export function ListingHero({
 	name,
 	nameBadge,
+	actions,
 	tagline,
 	badges,
+	statusIcons,
 	cacheKey,
 	icon,
 	iconId,
 	iconName,
+	iconPadding,
 	iconUrl,
 	seedId,
 	banner,
@@ -120,6 +140,18 @@ export function ListingHero({
 	fallback,
 }: {
 	name: ReactNode;
+	/** The primary controls — Add/Remove, the like heart — right-aligned on the
+	 *  TITLE's row, inside the hero.
+	 *
+	 *  They used to sit on a separate solid band under the hero. Putting them here
+	 *  is not decoration: the dialog exists so the user can decide about this
+	 *  listing, and the decision control belongs against the listing's name rather
+	 *  than a strip of chrome further down. `items-end` on the row keeps them on
+	 *  the title's baseline while the tagline and chips flow below.
+	 *
+	 *  They render over the hero's bottom-weighted scrim, so a real Button keeps
+	 *  its own fill and does not have to fake a surface. */
+	actions?: ReactNode;
 	/** A small marker rendered immediately after the title — today the publisher
 	 *  verification check.
 	 *
@@ -133,10 +165,22 @@ export function ListingHero({
 	 *  rendered among them would be read as a claim about the listing. */
 	nameBadge?: ReactNode;
 	tagline?: ReactNode;
-	/** Status/kind/tag pills. Rendered on the wash, so they get a translucent
-	 *  chip treatment rather than the page's Badge variants, which assume a
-	 *  neutral surface. */
+	/** Kind/tag pills — "Companion", "BETA", a category, a transport. Rendered on
+	 *  the wash, so they get a translucent chip treatment rather than the page's
+	 *  Badge variants, which assume a neutral surface.
+	 *
+	 *  STATUS attributes do not belong here: see {@link statusIcons}. */
 	badges?: string[];
+	/** The listing's STATUS attributes (Active / Unavailable / Built-in / Default)
+	 *  as `StatusBadge` glyphs, rendered at the head of the chip row.
+	 *
+	 *  A separate slot rather than more `badges` strings, for the same reason
+	 *  `nameBadge` is separate: `badges` is `string[]`, keyed on the string, and
+	 *  thirteen call sites pass legitimate prose chips through it. Widening it to
+	 *  `ReactNode[]` would make every one of those a candidate for accidental
+	 *  status treatment, and there would be nothing left to tell a status apart
+	 *  from a category at a glance — which was the original problem. */
+	statusIcons?: ReactNode;
 	/** Persist the icon bytes under `<id>@<version>` — set it for anything
 	 *  INSTALLED, leave it unset while browsing a catalog. Forwarded verbatim to
 	 *  {@link AppIcon}. */
@@ -166,6 +210,8 @@ export function ListingHero({
 	/** Display name for the icon's alt text and as its seed of last resort. A
 	 *  STRING, unlike `name`, which is a ReactNode the title row may decorate. */
 	iconName?: string | null;
+	/** The listing's declared inset for its logo (manifest `iconPadding`). */
+	iconPadding?: string | null;
 	/** Raster logo URL — the manifest's `iconUrl`, straight through. */
 	iconUrl?: string | null;
 	/** Stable seed for the generative tile: ALWAYS the item's unique id, so the
@@ -186,7 +232,7 @@ export function ListingHero({
 	// glyph, the ring and the counter-direction ramp — while the resolution order,
 	// the dither validation and the icon cache come from the one component.
 	return (
-		<div className="relative h-40 shrink-0 overflow-hidden sm:h-44">
+		<div className="relative h-56 shrink-0 overflow-hidden sm:h-64">
 			{/* `live` — the ONE opt-in to a WebGL context in the catalog. A hero is a
 			    single band per open detail pane, which is the only place an
 			    `animated-gradient` banner can animate without instances evicting each
@@ -216,6 +262,7 @@ export function ListingHero({
 					fallback={icon}
 					iconBackground={iconBackground}
 					iconId={iconId}
+					iconPadding={iconPadding}
 					iconUrl={iconUrl}
 					name={iconName}
 					seedId={seedId}
@@ -226,19 +273,30 @@ export function ListingHero({
 					{/* `truncate` sits on the INNER span, not the h2: the row has to be a
 					    flex line so `nameBadge` keeps its width while the title alone
 					    gives way. With `truncate` on the h2 the badge was clipped along
-					    with the overflowing name. */}
-					<h2 className="flex min-w-0 items-center gap-2 font-semibold text-white text-xl drop-shadow-md sm:text-2xl">
-						<span className="truncate">{name}</span>
-						{nameBadge}
-					</h2>
+					    with the overflowing name.
+
+					    The CTA cluster shares this line and is `shrink-0`, so a long name
+					    truncates and the button the dialog exists for never does. */}
+					<div className="flex min-w-0 items-center gap-3">
+						<h2 className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-white text-xl drop-shadow-md sm:text-2xl">
+							<span className="truncate">{name}</span>
+							{nameBadge}
+						</h2>
+						{actions ? (
+							<div className="flex shrink-0 items-center gap-1.5">
+								{actions}
+							</div>
+						) : null}
+					</div>
 					{tagline ? (
 						<p className="line-clamp-2 text-sm text-white/85 drop-shadow sm:text-[0.9375rem]">
 							{tagline}
 						</p>
 					) : null}
-					{badges && badges.length > 0 ? (
+					{statusIcons || (badges && badges.length > 0) ? (
 						<div className="mt-2 flex flex-wrap items-center gap-1.5">
-							{badges.map((badge) => (
+							{statusIcons}
+							{(badges ?? []).map((badge) => (
 								<span
 									className="rounded-full bg-white/15 px-2 py-0.5 font-medium text-[11px] text-white/90 leading-4 backdrop-blur-sm"
 									key={badge}
@@ -280,12 +338,16 @@ export function ListingStatStrip({ items }: { items: ListingStat[] }) {
 		return null;
 	}
 	return (
-		<div className="overflow-x-auto border-border/60 border-y bg-muted/25">
+		<div className="overflow-x-auto bg-muted">
 			{/* No `min-w-max`: with it the row always took its NATURAL width, so a
 			    long cell ("Runs on: Desktop, Island, Mobile") pushed the strip past
 			    the dialog and clipped itself even at 1600px. Each cell keeps a
 			    `min-w` floor instead — they share the space when there is room, and
 			    the band scrolls only once the floors no longer fit. */}
+			{/* The cell dividers STAY. Dropping the strip's outer border was the point
+			    (it was a box inside a box), but without the `divide-x` the row's cells
+			    merge into one grey band and the strip loses the only structure that
+			    made nine facts readable at a glance. */}
 			<div className="flex divide-x divide-border/60">
 				{items.map((stat) => {
 					const body = (
@@ -366,7 +428,7 @@ export function ListingGalleryRail({
 				const frame = (
 					<img
 						alt={`${name} screenshot ${index + 1}`}
-						className="h-48 w-auto max-w-none rounded-xl border border-border/60 object-cover sm:h-60"
+						className="h-48 w-auto max-w-none rounded-xl bg-muted object-cover sm:h-60"
 						loading="lazy"
 						src={url}
 					/>
@@ -426,8 +488,12 @@ export function ListingSection({
 	);
 }
 
-/** A card in the right rail. Bordered rather than bare so the rail reads as
- *  reference material sitting beside the main column, not as a second body. */
+/** A card in the right rail. Filled rather than bare so the rail reads as
+ *  reference material sitting beside the main column, not as a second body.
+ *
+ *  The distinction is carried by the FILL (`bg-muted` on the dialog's own
+ *  background), not by an outline: a bordered card inside a bordered dialog
+ *  inside a bordered pane is three rectangles saying the same thing. */
 export function ListingAsideCard({
 	title,
 	children,
@@ -436,7 +502,7 @@ export function ListingAsideCard({
 	children: ReactNode;
 }) {
 	return (
-		<div className="rounded-2xl border border-border/60 bg-muted/25 p-4">
+		<div className="rounded-2xl bg-muted p-4">
 			{title ? (
 				<h3 className="mb-3 font-medium text-muted-foreground text-xs uppercase tracking-wider">
 					{title}
@@ -460,7 +526,7 @@ export function ListingInfoGrid({ rows }: { rows: ListingInfoRow[] }) {
 		return null;
 	}
 	return (
-		<dl className="flex flex-col divide-y divide-border/60 text-sm">
+		<dl className="flex flex-col text-sm">
 			{rows.map((row) => (
 				<div
 					className="flex items-baseline justify-between gap-3 py-2 first:pt-0 last:pb-0"

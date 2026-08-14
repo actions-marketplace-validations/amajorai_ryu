@@ -9,9 +9,9 @@ use tracing::debug;
 use crate::{error::ProviderError, quota::ProviderQuotas};
 
 use super::{
-    audio_speech_url, audio_transcriptions_url, chat_completions_url, check_response_status,
-    check_stream_status, discover_openai_models, images_url, models_from_response, send_with_retry,
-    Provider,
+    audio_response_to_envelope, audio_speech_url, audio_transcriptions_url, chat_completions_url,
+    check_response_status, check_stream_status, discover_openai_models, images_url,
+    models_from_response, send_with_retry, Provider,
 };
 
 pub struct OpenAiProvider {
@@ -200,6 +200,13 @@ impl Provider for OpenAiProvider {
         Box::pin(async move {
             let mut payload = body.clone();
             payload["model"] = Value::String(model.to_string());
+            // `/v1/audio/speech` answers with raw audio bytes, and its default
+            // format is mp3. Ask for wav unless the caller chose otherwise, so
+            // Core can serve the bytes under its own `audio/wav` content type
+            // without transcoding.
+            if payload.get("response_format").is_none() {
+                payload["response_format"] = Value::String("wav".to_string());
+            }
             debug!(provider = "openai", model, "sending TTS request");
 
             let url = audio_speech_url(&self.base_url);
@@ -217,7 +224,9 @@ impl Provider for OpenAiProvider {
             )
             .await?;
 
-            check_response_status(resp, "openai", None).await
+            // NOT `check_response_status`: this endpoint returns `audio/*`
+            // bytes, which `resp.json()` cannot parse.
+            audio_response_to_envelope(resp, "openai", None).await
         })
     }
 
@@ -479,6 +488,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(server.requests()[0].path, "/audio/speech");
+    }
+
+    // The three tests below cover what the one above structurally cannot: its
+    // mock replies `application/json`, so it exercised the JSON pass-through and
+    // never the real shape of `/v1/audio/speech`, which is raw audio bytes. That
+    // is why "openai response parse error" was invisible to the suite until now.
+
+    #[tokio::test]
+    async fn synthesize_speech_wraps_audio_bytes_as_base64_envelope() {
+        // Deliberately non-UTF-8, like a real mp3 frame header.
+        let audio: Vec<u8> = vec![0xFF, 0xFB, 0x90, 0x00, 0x01, 0x02, 0xFE];
+        let server = MockServer::always(MockResponse::ok_bytes("audio/mpeg", audio.clone())).await;
+        let p = provider_with(server.base_url().to_string(), vec!["k"]);
+
+        let out = p
+            .synthesize_speech("tts-1", &json!({ "input": "hi", "voice": "alloy" }))
+            .await
+            .unwrap();
+
+        assert_eq!(out["object"], "audio");
+        assert_eq!(out["data"][0]["content_type"], "audio/mpeg");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(out["data"][0]["b64_json"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, audio);
+    }
+
+    #[tokio::test]
+    async fn synthesize_speech_defaults_response_format_to_wav() {
+        let server = MockServer::always(MockResponse::ok_bytes("audio/wav", vec![1, 2, 3])).await;
+        let p = provider_with(server.base_url().to_string(), vec!["k"]);
+        let _ = p
+            .synthesize_speech("tts-1", &json!({ "input": "hi", "voice": "alloy" }))
+            .await
+            .unwrap();
+        assert_eq!(server.requests()[0].json()["response_format"], "wav");
+
+        // …but never over the caller's own choice.
+        let server2 = MockServer::always(MockResponse::ok_bytes("audio/mpeg", vec![1])).await;
+        let p2 = provider_with(server2.base_url().to_string(), vec!["k"]);
+        let _ = p2
+            .synthesize_speech(
+                "tts-1",
+                &json!({ "input": "hi", "voice": "alloy", "response_format": "opus" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(server2.requests()[0].json()["response_format"], "opus");
+    }
+
+    #[tokio::test]
+    async fn synthesize_speech_keeps_typed_rate_limit_and_json_errors() {
+        // A 429 on the audio endpoint must still be the typed error the circuit
+        // breaker and the fallback chain branch on.
+        let server = MockServer::always(MockResponse::json(429, r#"{"error":{}}"#)).await;
+        let p = provider_with(server.base_url().to_string(), vec!["k"]);
+        let err = p
+            .synthesize_speech("tts-1", &json!({ "input": "hi" }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "expected RateLimited, got {err:?}"
+        );
+
+        // A 400 JSON error body still surfaces `error.message`.
+        let server = MockServer::always(MockResponse::json(
+            400,
+            r#"{"error":{"message":"'voice' is a required property"}}"#,
+        ))
+        .await;
+        let p = provider_with(server.base_url().to_string(), vec!["k"]);
+        let err = p
+            .synthesize_speech("tts-1", &json!({ "input": "hi" }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("'voice' is a required property"),
+            "error message not surfaced: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesize_speech_passes_json_replies_through_verbatim() {
+        // Some OpenAI-compatible relays answer in JSON; that must not be
+        // base64'd as if the JSON text were audio.
+        let server = MockServer::always(MockResponse::ok_json(r#"{"audio":"AAAA"}"#)).await;
+        let p = provider_with(server.base_url().to_string(), vec!["k"]);
+        let out = p
+            .synthesize_speech("tts-1", &json!({ "input": "hi" }))
+            .await
+            .unwrap();
+        assert_eq!(out["audio"], "AAAA");
     }
 
     #[tokio::test]

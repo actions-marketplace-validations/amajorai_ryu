@@ -159,7 +159,7 @@ function AgentCard({
 					{!(configQuery.isPending || configQuery.isError) &&
 					models.length === 0 ? (
 						<span className="text-muted-foreground text-xs">
-							This agent advertises no model list of its own — it picks models
+							This agent advertises no model list of its own. It picks models
 							itself, so there is nothing to hide here.
 						</span>
 					) : null}
@@ -217,7 +217,7 @@ export function AgentModelsSettings({
 
 	return (
 		<SettingsSection
-			caption="Hide the models you never use from an agent's picker. External agents report their own model lists, so these switches are separate from the provider lists above — and the agent still keeps every model it was going to pick for itself. Ryu's own models are the provider models above."
+			caption="Hide the models you never use from an agent's picker. External agents report their own model lists, so these switches are separate from the provider lists above, and the agent still keeps every model it was going to pick for itself. Ryu's own models are the provider models above."
 			title="Agent models"
 		>
 			{agentsQuery.isPending ? (

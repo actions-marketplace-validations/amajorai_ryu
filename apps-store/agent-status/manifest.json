@@ -6,6 +6,7 @@
   "tagline": "See which agents are working, stuck, or done",
   "category": "Productivity",
   "icon": "lucide:activity",
+  "iconDither": { "from": 118, "to": "transparent", "direction": "down" },
   "keywords": ["runs", "status", "sidebar", "agents", "inbox"],
   "surfaces": {
     "gateway": { "support": "none" },

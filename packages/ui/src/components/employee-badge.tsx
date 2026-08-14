@@ -9,10 +9,11 @@ import { PassCardShell } from "./pass-card-shell.tsx";
  * The agent's employee badge — the same physical card object the waitlist pass
  * is, with an agent's details on the front instead of a member's.
  *
- * It shares `PassCardShell`, so it is genuinely the same card: the metal ring,
- * the generative dither backdrop seeded from the agent's name, real thickness,
- * the slow float, the pointer tilt, and drag-to-turn with the Ryu mark on the
- * back. Only the front-face content is written here.
+ * It shares `PassCardShell`, so it is genuinely the same card: the metal ring
+ * (see {@link EmployeeBadgeProps.ringed} — a grid turns it off), the generative
+ * dither backdrop seeded from the agent's name, real thickness, the slow float,
+ * the pointer tilt, and drag-to-turn with the Ryu mark on the back. Only the
+ * front-face content is written here.
  *
  * It used to be a flat bordered panel with a lanyard notch that merely evoked an
  * ID card. Reusing the shell rather than restyling this one to match is the
@@ -51,10 +52,22 @@ export interface EmployeeBadgeProps {
 	 * the caller — the block reserves the room and does not scale it.
 	 */
 	logo?: ReactNode;
-	/** Which tuning of the metal ring to paint; pass the app's resolved theme. */
+	/**
+	 * Which tuning of the metal ring to paint; pass the app's resolved theme.
+	 * Still read with {@link ringed} off — it also colours the milled edge and
+	 * decides which face the shader would be lit for.
+	 */
 	metalTheme?: "auto" | "dark" | "light";
 	name: string;
 	onClick?: () => void;
+	/**
+	 * Paint the animated metal ring around the card. Defaults on for the one hero
+	 * badge on a settings page; a GRID passes `false`. The geometry does not move
+	 * either way (see `PassCardShell`'s `CardRingFrame`) — off simply drops the
+	 * `metal-fx` WebGL instance, which is both the visual noise of twenty
+	 * shimmering rings on one screen and twenty live shader instances behind it.
+	 */
+	ringed?: boolean;
 	role?: string;
 	stats?: EmployeeStat[];
 	/**
@@ -110,6 +123,7 @@ export function EmployeeBadge({
 	metalTheme = "auto",
 	name,
 	onClick,
+	ringed = true,
 	role,
 	stats,
 	still = false,
@@ -126,6 +140,7 @@ export function EmployeeBadge({
 			className={cn(onClick && "cursor-pointer", className)}
 			ditherSeed={name || employeeId}
 			metalTheme={metalTheme}
+			ringed={ringed}
 			still={still}
 		>
 			{/* `min-h` rather than a fixed height: the name is the hero and can wrap

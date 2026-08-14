@@ -121,7 +121,7 @@ export function DeveloperTab() {
 	return (
 		<div className="space-y-6">
 			<SettingsSection
-				caption="Enables debug tools for troubleshooting in production builds: visual annotation toolbar, console capture on crash, one-click diagnostics, and more. Your choice is remembered on this device."
+				caption="Enables debug tools for troubleshooting in production builds: visual annotation toolbar, console capture on crash, and one-click diagnostics. Your choice is remembered on this device."
 				title="Developer Mode"
 			>
 				<SettingsGroup>
@@ -169,7 +169,7 @@ export function DeveloperTab() {
 								}
 								description={
 									consoleActive
-										? "Capturing — up to 500 entries are kept in memory."
+										? "Capturing. Up to 500 entries are kept in memory."
 										: "Not yet active. It activates on next reload or when you toggle Developer Mode on."
 								}
 								title="Console buffer status"
@@ -232,7 +232,7 @@ export function DeveloperTab() {
 							actions={<Switch checked={bridge.live} disabled />}
 							description={
 								bridge.live
-									? `Listening on ${bridge.host}:${bridge.port}. This socket accepts any local connection without a credential — and a page open in your browser counts as local — so restart Ryu to close it when you are done.`
+									? `Listening on ${bridge.host}:${bridge.port}. This socket accepts any local connection without a credential, and a page open in your browser counts as local, so restart Ryu to close it when you are done.`
 									: "Not listening. The bridge is registered while Ryu starts, so it attaches on the next restart with Developer Mode on."
 							}
 							title="Bridge status"
@@ -248,7 +248,7 @@ export function DeveloperTab() {
 										Copy MCP config
 									</Button>
 								}
-								description={`Paste this into your agent's MCP config and attach on port ${bridge.port}. The protocol carries no bearer token, so the port is the whole connection detail — treat it as a credential and keep it off shared machines.`}
+								description={`Paste this into your agent's MCP config and attach on port ${bridge.port}. The protocol carries no bearer token, so the port is the whole connection detail, so treat it as a credential and keep it off shared machines.`}
 								title="Agent connection"
 							>
 								<pre className="overflow-x-auto rounded-md bg-background/60 p-2.5 font-mono text-[11px] text-muted-foreground leading-relaxed">
@@ -284,14 +284,14 @@ export function DeveloperTab() {
 											}
 											toast.success(
 												next
-													? "Daily reset on — this build's data folder clears at the first launch after midnight"
+													? "Daily reset on. This build's data folder clears at the first launch after midnight"
 													: "Daily reset off"
 											);
 										});
 									}}
 								/>
 							}
-							description={`Deletes everything in ${midnightWipe.status.data_dir} — chats, agents, spaces, installed apps and downloads — at the first launch after midnight. Your encryption key survives so the node still boots, and several missed days still clear it exactly once.${midnightWipe.status.last_wipe_date ? ` Last cleared ${midnightWipe.status.last_wipe_date}.` : ""}`}
+							description={`Deletes everything in ${midnightWipe.status.data_dir} (chats, agents, spaces, installed apps and downloads) at the first launch after midnight. Your encryption key survives so the node still boots, and several missed days still clear it exactly once.${midnightWipe.status.last_wipe_date ? ` Last cleared ${midnightWipe.status.last_wipe_date}.` : ""}`}
 							title="Wipe this data folder at midnight"
 						/>
 						{midnightWipe.error ? (

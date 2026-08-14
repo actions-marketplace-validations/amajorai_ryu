@@ -197,6 +197,20 @@ describe("describeDependencyError", () => {
 		);
 	});
 
+	test("dependent_version_mismatch names the dependent an update would break", () => {
+		expect(
+			describeDependencyError({
+				code: "dependent_version_mismatch",
+				plugin: "@ryu/meetings",
+				dependency: "@ryu/spaces",
+				required: ">=1.2, <2",
+				incoming: "2.0.0",
+			})
+		).toBe(
+			"Updating @ryu/spaces to 2.0.0 would break @ryu/meetings, which needs >=1.2, <2. Update @ryu/meetings first, or force the update."
+		);
+	});
+
 	test("cycle joins the chain with arrows", () => {
 		expect(
 			describeDependencyError({ code: "cycle", cycle: ["a", "b", "a"] })

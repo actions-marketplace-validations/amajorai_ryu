@@ -67,7 +67,9 @@ use crate::{
     audit::AuditRecord,
     budget::{BudgetDecision, CreditReservation},
     cache::Cache,
-    config::{AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId},
+    config::{
+        AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId,
+    },
     error::GatewayError,
     evaluators::{Evaluator, EvaluatorImpl, EvaluatorRegistry, EvaluatorTarget},
     firewall::{inspector::InspectorClient, FirewallScanner},
@@ -1836,7 +1838,7 @@ pub async fn run(
         // loop; if no debit fires (credits inactive, no org) the permit stays
         // here and drops on return, which is correct.
         reservation: mut credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Clamp)?;
     // One response, one header: firewall (Ok-path) alert first so it wins a tie
     // against a same-tier budget alert (deterministic).
     let policy_alert = merge_alert(pre_alert, budget_alert);
@@ -2490,7 +2492,7 @@ pub async fn run_stream(
         // `StreamObserverState` below and released when the stream ends by ANY
         // means, including a client that hangs up mid-answer.
         reservation: credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision)?;
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Clamp)?;
     // Firewall (Ok-path) alert first so it wins a same-tier tie deterministically.
     let policy_alert = merge_alert(pre_alert, budget_alert);
 
@@ -2913,7 +2915,7 @@ pub async fn run_multimodal(
         // `.take()`n into the task below; if no debit fires (credits inactive,
         // no org, zero rate, empty output) it stays here and drops on return.
         reservation: mut credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision).map_err(|e| {
+    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Untouched).map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
         e
@@ -3034,15 +3036,40 @@ pub async fn run_multimodal(
                 // rate on success. Cloud media providers don't report a
                 // usage.cost like chat, so managed nodes meter media at a fixed
                 // rate through the same at-cost + markup path as tokens. NOP
-                // unless credits are active, an org is present, and a rate is set
-                // (default 0 = free), so local/BYOK installs are unaffected.
+                // unless credits are active and an org is present, so local/BYOK
+                // installs are unaffected. (The rates themselves no longer default
+                // to 0 — an unset one resolves to a real fallback, and only an
+                // explicit 0 in the deploy config gives a modality away.)
                 // Filter empty org (mirrors the chat debit path) and, for image,
                 // skip billing a "success" that produced no media (content-
                 // filtered / empty output).
                 if let Some(org_id) = ctx.org_id.clone().filter(|s| !s.is_empty()) {
-                    let cost = state.config.credits.media_cost_micro_usd(&modality);
+                    // Priced from the compute time the provider REPORTED where
+                    // it gave one; the flat rate is a fallback, and `estimated`
+                    // records which of the two paid for this row so a later
+                    // reconciliation against the provider invoice can tell them
+                    // apart.
+                    let (cost, estimated) = state
+                        .config
+                        .credits
+                        .media_cost_from_response(&modality, &response);
                     let has_output = modality != Modality::Image
                         || response["data"].as_array().is_some_and(|a| !a.is_empty());
+                    // OUTSIDE the `cost > 0` guard, deliberately. A fallback that
+                    // prices to zero is the exact combination that shipped unbilled
+                    // media twice, and inside the guard it is the one case that
+                    // cannot warn — no debit, no log, no invoice line to reconcile
+                    // against. This is the smallest change that would have surfaced
+                    // both on their first production call.
+                    if estimated && has_output {
+                        warn!(
+                            modality = modality.as_str(),
+                            cost,
+                            billed = cost > 0,
+                            "credits: media billed at the FLAT fallback rate — the \
+                             provider reported no compute time"
+                        );
+                    }
                     if cost > 0 && has_output {
                         let fail_closed_sticky =
                             state.config.credits.fail_closed && ctx.managed_inference;
@@ -3199,7 +3226,7 @@ pub async fn submit_video_job(
     // id and the render happens out of band, so there is no request lifetime for
     // a permit to track. Video spend is bounded by `cost_per_video_micro_usd` on
     // the post-render debit instead.
-    let _budget = enforce_budget(&state, &ctx, &mut body, &mut decision).map_err(|e| {
+    let _budget = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Untouched).map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
 
@@ -3262,7 +3289,33 @@ pub async fn submit_video_job(
 
     if terminal_success && has_output {
         if let Some(org_id) = job_org.filter(|s| !s.is_empty()) {
-            let cost = state.config.credits.media_cost_micro_usd(&Modality::Video);
+            // PRICED FROM THE PROVIDER'S REPORTED COMPUTE TIME, exactly like the
+            // synchronous media path above — not from the flat rate.
+            //
+            // This read `media_cost_micro_usd(Video)` (the flat rate) and then
+            // `if cost > 0`, which meant an async video job billed NOTHING under
+            // the default config, because `cost_per_video_micro_usd` defaults to
+            // 0. The startup gate deliberately stopped guarding the video rate on
+            // the grounds that "image and video are metered from the provider's
+            // reported cost, so a flat rate of 0 there is an unreached fallback
+            // rather than a leak" — true of the sync path, false here, which is
+            // what made this silent. `to_response()` flattens the provider's
+            // output, so `usage.compute_seconds` is present when the provider
+            // reports it.
+            let (cost, estimated) = state
+                .config
+                .credits
+                .media_cost_from_response(&Modality::Video, &response);
+            // Outside the `cost > 0` guard — see the sync media path above. A
+            // fallback priced at zero is precisely the case that must not be silent.
+            if estimated {
+                warn!(
+                    cost,
+                    billed = cost > 0,
+                    "credits: video job billed at the FLAT fallback rate — \
+                     the provider reported no compute time"
+                );
+            }
             if cost > 0 {
                 let fail_closed_sticky = state.config.credits.fail_closed && ctx.managed_inference;
                 tokio::spawn(debit_wallet_for_request(
@@ -3336,7 +3389,26 @@ pub async fn poll_video_job(
         .is_some_and(|a| !a.is_empty());
     if newly_succeeded && poll_has_output {
         if let Some(org_id) = job.org_id.clone().filter(|s| !s.is_empty()) {
-            let cost = state.config.credits.media_cost_micro_usd(&Modality::Video);
+            // Same fix as the submit path: price from the compute time the
+            // provider REPORTED, with the flat rate as a marked fallback. The
+            // poll's own output is the provider payload `to_response()` flattens,
+            // so `usage.compute_seconds` lives there when it is reported at all.
+            // A job with no output resolves to `Null`, which simply misses the
+            // lookup and falls back — the same as any provider that reports none.
+            let poll_payload = poll.output.clone().unwrap_or(serde_json::Value::Null);
+            let (cost, estimated) = state
+                .config
+                .credits
+                .media_cost_from_response(&Modality::Video, &poll_payload);
+            // Outside the `cost > 0` guard — see the sync media path above.
+            if estimated {
+                warn!(
+                    cost,
+                    billed = cost > 0,
+                    "credits: video job billed at the FLAT fallback rate — \
+                     the provider reported no compute time"
+                );
+            }
             if cost > 0 {
                 let fail_closed_sticky = state.config.credits.fail_closed && ctx.managed_inference;
                 tokio::spawn(debit_wallet_for_request(
@@ -3527,6 +3599,7 @@ fn enforce_budget(
     ctx: &RequestContext,
     body: &mut Value,
     decision: &mut RouteDecision,
+    ceiling: OutputCeiling,
 ) -> Result<BudgetOutcome, GatewayError> {
     if ctx.is_master_key {
         return Ok(BudgetOutcome::default());
@@ -3581,6 +3654,20 @@ fn enforce_budget(
     // wallet cannot cover this" and "your wallet cannot cover this as well as
     // everything else you have running" are one condition, and splitting them
     // would leak the node's concurrency accounting into a public error surface.
+    // BOUND THE COST BEFORE CLAIMING IT. The clamp lowers this request's output
+    // ceiling to what the wallet can still pay for, so the reservation below is a
+    // claim against a request that physically cannot exceed it — rather than the
+    // $0.01 floor standing in for an unbounded completion. Must run BEFORE
+    // `maybe_reserve_credit`, which estimates from the very ceiling this writes.
+    if let Some(clamped) = clamp_output_ceiling(state, ctx, body, routed_pool, ceiling) {
+        debug!(
+            org_id = ?ctx.org_id,
+            pool = ?routed_pool,
+            max_output_tokens = clamped,
+            "credits: lowered this request's output ceiling to the affordable maximum"
+        );
+    }
+
     let reservation = maybe_reserve_credit(state, ctx, body, routed_pool).map_err(|err| {
         state.metrics.inc_budget_exceeded();
         warn!(
@@ -3878,6 +3965,154 @@ fn reservation_estimate_micro_usd(state: &AppState, body: &Value) -> i64 {
         .unwrap_or(0);
     let estimate = credits.debit_amount(request_cost_micro_usd(state, 0, max_tokens));
     estimate.max(credits.min_reserve_micro_usd).min(i64::MAX as u64) as i64
+}
+
+/// Whether this request body carries an output-token ceiling the credit clamp
+/// may lower.
+///
+/// Only text completions do. `run_multimodal` and `submit_video_job` route
+/// through the same [`enforce_budget`], and writing a `max_tokens` into an image
+/// or video body would at best be ignored and at worst rejected by the provider
+/// as an unknown field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputCeiling {
+    /// A chat/text-completion body — clamp its token ceiling to what the wallet
+    /// can actually pay for.
+    Clamp,
+    /// An image/video/other body — leave it alone.
+    Untouched,
+}
+
+/// How many output tokens `available_micro_usd` buys at the flat rate.
+///
+/// The inverse of [`request_cost_micro_usd`] over the output term, un-doing the
+/// billing markup first so the answer is in the same currency the caller's
+/// budget is denominated in.
+///
+/// Saturates to `u64::MAX` when the node charges nothing per token (a rate of
+/// zero divides into any balance infinitely), which the caller reads as "no
+/// affordability limit" — correct, because a node that meters nothing cannot
+/// overdraw anyone.
+fn affordable_output_tokens(
+    state: &AppState,
+    available_micro_usd: i64,
+    model: &str,
+) -> u64 {
+    // PER-MODEL, not the flat blended rate. Output prices span roughly 500x
+    // across the catalog, so a single rate made this ceiling far too generous on
+    // exactly the frontier models where an overdraft is worth having, and
+    // needlessly tight on cheap ones — truncating completions the org could
+    // always afford. Falls back to the flat rate when the model is not in the
+    // price table.
+    let per_1k = state
+        .config
+        .control_plane
+        .output_price_per_1k_micro_usd(model);
+    if per_1k == 0 {
+        return u64::MAX;
+    }
+    let available = available_micro_usd.max(0) as u64;
+    // Undo the markup: `debit_amount` is what turns raw provider cost into the
+    // figure charged, and the budget is measured in charged micro-USD. Dividing
+    // before un-marking-up would hand out a ceiling the debit then exceeds.
+    let raw = state.config.credits.undo_debit_amount(available);
+    raw.saturating_mul(1000) / per_1k
+}
+
+/// CLAMP THIS REQUEST'S OUTPUT CEILING TO WHAT THE WALLET CAN PAY FOR.
+///
+/// The hole this closes: metering is post-paid, and a request that names no
+/// `max_tokens` reserved only `min_reserve_micro_usd` — a flat $0.01 that bounds
+/// CONCURRENCY, not cost. So an org holding one cent could front a single
+/// arbitrarily expensive completion, and the overdraft was limited only by how
+/// much the model felt like generating. Prepaid credit is supposed to be a hard
+/// cap; work is supposed to stop at zero.
+///
+/// The fix is to make the ceiling real rather than to refuse the request. A
+/// request stating no ceiling is given the largest one its balance covers; a
+/// request stating one keeps it, unless it is larger than the balance covers, in
+/// which case it is lowered. The request then physically cannot cost more than
+/// the org can pay, so the reservation that follows is an honest claim rather
+/// than a floor standing in for one.
+///
+/// INJECTION, NOT REJECTION — deliberately, and a departure from the original
+/// spec in `docs/pricing-remaining-work.md`, which called for a MANDATORY
+/// `max_output_tokens`. Refusing every request that omits one would 402 every
+/// existing managed client the moment this shipped, to fix a problem the client
+/// did not cause. The cost of injecting instead is that a caller can now be
+/// truncated at a ceiling it never set (`finish_reason: "length"`); that is the
+/// honest consequence of running out of money mid-completion, and it is strictly
+/// better than the alternative of serving the completion and eating the bill.
+///
+/// NET OF IN-FLIGHT CLAIMS. The headroom is the org's whole remaining balance,
+/// and `try_reserve` is what subtracts the requests already running. Clamping
+/// against the gross figure would let three concurrent unbounded requests each
+/// size themselves at the full balance — the first would claim all of it and its
+/// siblings would 402, which is not a bound, it is a race. Subtracting
+/// `in_flight_micro_usd` first means concurrent requests each get a smaller
+/// honest ceiling instead. A claim landing between this read and `try_reserve`
+/// only makes the ceiling generous, and `try_reserve` still refuses
+/// authoritatively — so the residual race degrades to today's behaviour rather
+/// than past it.
+///
+/// THE CEILING IS LOOSE ON EXPENSIVE TRAFFIC. It is derived from the flat
+/// `cost_per_1k_micro_usd`, which [`reservation_estimate_micro_usd`] already
+/// documents as under-stating frontier models — the gateway holds no per-model
+/// price table. So this bounds the overdraft, it does not eliminate it: a
+/// frontier completion can still finish somewhat past the balance. A bound with
+/// known slack is the improvement over no bound at all; tightening it needs the
+/// per-model prices, which is the same missing piece the estimate waits on.
+///
+/// Returns the ceiling written, for logging. `None` when nothing was changed.
+fn clamp_output_ceiling(
+    state: &AppState,
+    ctx: &RequestContext,
+    body: &mut Value,
+    pool: Option<&str>,
+    ceiling: OutputCeiling,
+) -> Option<u64> {
+    if ceiling != OutputCeiling::Clamp || !state.config.credits.reserve_enabled {
+        return None;
+    }
+    let org_id = ctx.org_id.as_deref().filter(|s| !s.is_empty())?;
+    // `None` ⇒ the org has no managed cap at all (BYOK, unmanaged, master key).
+    // Nothing to clamp against, and imposing a ceiling on a tenant who is not
+    // spending our money would be a pure regression.
+    let headroom = credit_headroom_micro_usd(ctx, pool)?;
+    let available = headroom.saturating_sub(state.wallet.in_flight_micro_usd(org_id));
+    // The model named on the BODY — what will actually be dispatched, and so
+    // what the ceiling has to be priced against. An empty/absent model falls
+    // through to the flat rate inside `output_price_per_1k_micro_usd`.
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    let affordable = affordable_output_tokens(state, available, model);
+    if affordable == u64::MAX {
+        return None;
+    }
+
+    // Write back to the key the CLIENT used. Adding `max_tokens` to a body that
+    // said `max_completion_tokens` would leave both present, which some
+    // providers reject outright.
+    let key = if body.get("max_completion_tokens").is_some() {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+    let requested = body.get(key).and_then(Value::as_u64).unwrap_or(0);
+    // `0`/absent means "no ceiling stated", which is the unbounded case — give it
+    // the affordable one. Otherwise only ever lower, never raise: a client asking
+    // for less than it can afford is stating a preference, not a budget.
+    let effective = if requested == 0 {
+        affordable
+    } else {
+        requested.min(affordable)
+    };
+    if effective == requested {
+        return None;
+    }
+    if let Some(map) = body.as_object_mut() {
+        map.insert(key.to_string(), Value::from(effective));
+    }
+    Some(effective)
 }
 
 fn preflight_credit_gate(ctx: &RequestContext, pool: Option<&str>) -> Option<GatewayError> {
@@ -5282,6 +5517,196 @@ mod tests {
             maybe_reserve_credit(&state, &ctx, &json!({}), None),
             Err(GatewayError::InsufficientCredits)
         ));
+    }
+
+    /// Run the clamp over a chat body and hand back what it became.
+    fn clamped(state: &AppState, ctx: &RequestContext, mut body: Value) -> Value {
+        clamp_output_ceiling(state, ctx, &mut body, None, OutputCeiling::Clamp);
+        body
+    }
+
+    #[test]
+    fn an_unstated_ceiling_becomes_the_affordable_one() {
+        // THE OVERDRAFT GUARD. Naming no ceiling used to reserve the $0.01 floor
+        // and then generate without limit, so a dust balance could front an
+        // arbitrarily expensive completion. It now gets the largest ceiling the
+        // balance actually covers.
+        let state = reserve_state(10_000, 1000); // 1000 micro-USD per 1k tokens
+        let ctx = managed_ctx(50_000); // $0.05 ⇒ 50k tokens at that rate
+        let body = clamped(&state, &ctx, json!({ "messages": [] }));
+        assert_eq!(body["max_tokens"], json!(50_000));
+    }
+
+    #[test]
+    fn a_ceiling_the_balance_cannot_cover_is_lowered() {
+        let state = reserve_state(10_000, 1000);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(&state, &ctx, json!({ "max_tokens": 1_000_000 }));
+        assert_eq!(body["max_tokens"], json!(50_000));
+    }
+
+    #[test]
+    fn a_ceiling_within_budget_is_left_exactly_alone() {
+        // Asking for less than you can afford is a preference, not a budget —
+        // the clamp only ever lowers.
+        let state = reserve_state(10_000, 1000);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(&state, &ctx, json!({ "max_tokens": 128 }));
+        assert_eq!(body["max_tokens"], json!(128));
+    }
+
+    /// A state whose price table knows one expensive model.
+    fn priced_state(
+        min_reserve_micro_usd: u64,
+        flat_per_1k: u64,
+        model: &str,
+        output_per_1k: u64,
+    ) -> AppState {
+        let mut config = crate::GatewayConfig::default();
+        config.credits.reserve_enabled = true;
+        config.credits.min_reserve_micro_usd = min_reserve_micro_usd;
+        config.control_plane.cost_per_1k_micro_usd = flat_per_1k;
+        config.control_plane.model_pricing.insert(
+            model.to_string(),
+            crate::config::ModelPrice {
+                input_per_1k_micro_usd: 3000,
+                output_per_1k_micro_usd: output_per_1k,
+            },
+        );
+        let audit = crate::audit::AuditLogger::new(&crate::config::AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .expect("disabled audit logger");
+        let evals = crate::evals::EvalsRunner::new(crate::config::EvalsConfig::default());
+        AppState::new_for_test(config, audit, evals)
+    }
+
+    #[test]
+    fn an_expensive_model_gets_a_tighter_ceiling_than_the_flat_rate_would() {
+        // THE RESIDUAL THE OVERDRAFT FIX LEFT. Priced at the flat 1000/1k this
+        // balance buys 50k tokens; the model actually costs 10x that, so the
+        // flat rate authorised 10x more generation than the org could pay for —
+        // and it did so on precisely the frontier models where the overdraft is
+        // worth having.
+        let state = priced_state(10_000, 1000, "frontier-", 10_000);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(
+            &state,
+            &ctx,
+            json!({ "model": "frontier-xl-2026", "messages": [] }),
+        );
+        assert_eq!(body["max_tokens"], json!(5000));
+    }
+
+    #[test]
+    fn a_cheap_model_is_not_truncated_by_a_blended_rate() {
+        // The other half of the same bug: a blended rate charges a cheap model
+        // as though it were expensive and cuts completions the org could always
+        // afford.
+        let state = priced_state(10_000, 1000, "cheap-", 100);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(
+            &state,
+            &ctx,
+            json!({ "model": "cheap-mini", "messages": [] }),
+        );
+        assert_eq!(body["max_tokens"], json!(500_000));
+    }
+
+    #[test]
+    fn a_model_absent_from_the_table_falls_back_to_the_flat_rate() {
+        let state = priced_state(10_000, 1000, "frontier-", 10_000);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(
+            &state,
+            &ctx,
+            json!({ "model": "something-unpriced", "messages": [] }),
+        );
+        assert_eq!(body["max_tokens"], json!(50_000));
+    }
+
+    #[test]
+    fn the_clamp_writes_back_the_spelling_the_client_used() {
+        // Adding `max_tokens` next to a `max_completion_tokens` the client sent
+        // leaves both present, which some providers reject outright.
+        let state = reserve_state(10_000, 1000);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(&state, &ctx, json!({ "max_completion_tokens": 1_000_000 }));
+        assert_eq!(body["max_completion_tokens"], json!(50_000));
+        assert!(
+            body.get("max_tokens").is_none(),
+            "must not add the other spelling alongside it"
+        );
+    }
+
+    #[test]
+    fn the_clamp_is_net_of_this_orgs_in_flight_claims() {
+        // Clamping against the GROSS balance would let concurrent unbounded
+        // requests each size themselves at the whole wallet — the first would
+        // claim all of it and its siblings would 402. That is a race, not a
+        // bound. Each concurrent request must get a smaller honest ceiling.
+        let state = reserve_state(10_000, 1000);
+        let ctx = managed_ctx(50_000);
+        let held = maybe_reserve_credit(&state, &ctx, &json!({ "max_tokens": 30_000 }), None)
+            .expect("within balance")
+            .expect("a managed tenant takes a real permit");
+        // $0.05 balance less the $0.03 already claimed leaves 20k tokens' worth.
+        let body = clamped(&state, &ctx, json!({ "messages": [] }));
+        assert_eq!(body["max_tokens"], json!(20_000));
+        drop(held);
+    }
+
+    #[test]
+    fn the_clamp_leaves_non_text_bodies_untouched() {
+        // `run_multimodal` and `submit_video_job` share `enforce_budget`, and a
+        // token ceiling is meaningless — at best ignored, at worst rejected as an
+        // unknown field.
+        let state = reserve_state(10_000, 1000);
+        let ctx = managed_ctx(50_000);
+        let mut body = json!({ "prompt": "a cat" });
+        clamp_output_ceiling(&state, &ctx, &mut body, None, OutputCeiling::Untouched);
+        assert_eq!(body, json!({ "prompt": "a cat" }));
+    }
+
+    #[test]
+    fn the_clamp_spares_tenants_who_are_not_spending_our_money() {
+        // BYOK/unmanaged traffic has no managed cap to clamp against, and
+        // imposing a ceiling on it would be a pure regression.
+        let state = reserve_state(10_000, 1000);
+        let mut unmanaged = managed_ctx(50_000);
+        unmanaged.managed_inference = false;
+        let body = clamped(&state, &unmanaged, json!({ "messages": [] }));
+        assert!(body.get("max_tokens").is_none());
+
+        // Managed but uncapped: no control-plane budget at all.
+        let mut uncapped = managed_ctx(50_000);
+        uncapped.remaining_budget_micro_usd = None;
+        let body = clamped(&state, &uncapped, json!({ "messages": [] }));
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn a_node_that_meters_nothing_imposes_no_ceiling() {
+        // A zero per-token rate cannot overdraw anyone, so there is nothing to
+        // bound — and dividing by it must not be mistaken for "afford nothing".
+        let state = reserve_state(10_000, 0);
+        let ctx = managed_ctx(50_000);
+        let body = clamped(&state, &ctx, json!({ "messages": [] }));
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn the_ceiling_accounts_for_the_billing_markup() {
+        // The budget is denominated in CHARGED micro-USD but a token count costs
+        // RAW provider micro-USD. Sizing the ceiling without undoing the markup
+        // hands out one the debit then exceeds — the very overdraft this closes.
+        let mut state = reserve_state(10_000, 1000);
+        state.config.credits.markup_bps = 10_000; // +100%: charged = 2x raw
+        let ctx = managed_ctx(50_000);
+        let body = clamped(&state, &ctx, json!({ "messages": [] }));
+        // $0.05 of BUDGET buys $0.025 of raw provider spend = 25k tokens.
+        assert_eq!(body["max_tokens"], json!(25_000));
     }
 
     #[test]

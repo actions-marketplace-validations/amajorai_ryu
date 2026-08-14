@@ -154,6 +154,16 @@ pub struct ServerState {
     /// a new manifest and `GET /api/apps` sees it immediately without restart.
     /// Loaded at startup from built-ins + `~/.ryu/apps/*/ryu.json`.
     pub app_manifests: Arc<tokio::sync::RwLock<Vec<crate::plugin_manifest::PluginManifest>>>,
+    /// Manifests held back because this node does not meet their `engines` floors.
+    ///
+    /// Deliberately a SEPARATE field from `app_manifests` rather than a flag on it:
+    /// every consumer that iterates `app_manifests` runs plugins, and an
+    /// incompatible one must never be picked up by hook dispatch, sidecar spawn,
+    /// contributions, or route mounting. Only the catalog projection reads this, to
+    /// render a greyed card explaining what the plugin needs. See
+    /// [`crate::plugin_manifest::IncompatibleManifest`].
+    pub incompatible_manifests:
+        Arc<tokio::sync::RwLock<Vec<crate::plugin_manifest::IncompatibleManifest>>>,
     /// Persisted app lifecycle state (install/enable/version). Backed by SQLite
     /// at `~/.ryu/apps.db`. Populated on demand by the install/enable endpoints.
     pub app_store: PluginStore,
@@ -2373,6 +2383,9 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             "/api/plugins/catalog/install",
             post(install_plugin_from_catalog),
         )
+        // Isolation + trust report. Listed before `/:id/*` routes purely for
+        // readability — axum matches the static segment regardless.
+        .route("/api/plugins/isolation", get(plugins_isolation_handler))
         .route("/api/plugins/:id/install", post(install_app_handler))
         .route("/api/plugins/:id/enable", post(enable_app_handler))
         .route("/api/plugins/:id/grants", post(set_app_grants_handler))
@@ -2741,7 +2754,10 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         // every artifact. SSE `stream` registered before the `:id/*` routes so
         // the static segment is matched first. ─────────────────────────────────
         .route("/api/downloads", get(list_downloads))
-        .route("/api/downloads/history", get(downloads_history))
+        .route(
+            "/api/downloads/history",
+            get(downloads_history).delete(downloads_history_clear),
+        )
         .route(
             "/api/downloads/settings",
             get(downloads_settings).put(set_downloads_settings),
@@ -2987,6 +3003,12 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/delegate/stream", post(delegate_stream))
         // ── Self-update apply (headless binaries; protected) ────────────────
         .route("/api/update/apply", post(update_apply))
+        .route(
+            "/api/update/schedule",
+            get(get_update_schedule)
+                .post(schedule_update)
+                .delete(cancel_update_schedule),
+        )
         // ── Cross-surface preferences (theme sync: desktop ↔ island) ────────
         // SSE stream is registered before the `:key` route so the static
         // `stream` segment is matched first.
@@ -3598,6 +3620,7 @@ fn workflow_routes(app_store: &PluginStore) -> Router<ServerState> {
             post(restore_workflow_version),
         )
         .route("/workflows/:id/run", post(run_workflow))
+        .route("/workflows/runs/live", get(live_workflow_runs))
         .route("/workflows/runs/:run_id", get(get_workflow_run))
         .route("/workflows/runs/:run_id/resume", post(resume_workflow_run))
         .route_layer(middleware::from_fn_with_state(
@@ -4082,6 +4105,93 @@ mod update_check_wire_shape_tests {
             serde_json::Value::Bool(false)
         );
         assert_eq!(body["latest_unrestricted"], body["current"]);
+    }
+}
+
+
+/// `POST /api/update/schedule` — install this update at the node's next quiet
+/// hour instead of now.
+///
+/// The asset is PINNED from the request body, not re-resolved when the window
+/// arrives: installing "whatever is latest at 03:00" would put a version the
+/// user never saw onto a machine they deliberately chose not to touch during
+/// the day.
+#[utoipa::path(
+    post,
+    path = "/api/update/schedule",
+    tag = "Health",
+    summary = "Defer an update to the node's next quiet hour",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn schedule_update(Json(body): Json<serde_json::Value>) -> axum::response::Response {
+    let asset: crate::update::ReleaseAsset = match serde_json::from_value(
+        body.get("asset").cloned().unwrap_or(body.clone()),
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid asset: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let version = body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    match crate::update::schedule::set_pending(asset, version) {
+        Ok(pending) => (StatusCode::OK, Json(json!(pending))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/update/schedule` — the deferred update, if any.
+///
+/// Also reports the node's zone so a client can say WHEN without guessing: the
+/// viewer's zone is usually not the node's, and "03:00" with no zone is exactly
+/// the ambiguity deferring is supposed to remove.
+#[utoipa::path(
+    get,
+    path = "/api/update/schedule",
+    tag = "Health",
+    summary = "The deferred update, if one is pending",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn get_update_schedule() -> axum::response::Response {
+    let pending = crate::update::schedule::get_pending();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "pending": pending,
+            "timeZone": crate::update::schedule::local_timezone(),
+        })),
+    )
+        .into_response()
+}
+
+/// `DELETE /api/update/schedule` — forget the deferred update.
+#[utoipa::path(
+    delete,
+    path = "/api/update/schedule",
+    tag = "Health",
+    summary = "Cancel a deferred update",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn cancel_update_schedule() -> axum::response::Response {
+    match crate::update::schedule::clear_pending() {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -5262,6 +5372,23 @@ async fn list_downloads(State(state): State<ServerState>) -> Json<serde_json::Va
 async fn downloads_history(State(state): State<ServerState>) -> Json<serde_json::Value> {
     let history = state.downloads.history().await;
     Json(json!({ "history": history }))
+}
+
+/// `DELETE /api/downloads/history` — empty the durable finished-downloads log.
+///
+/// The per-task `DELETE /api/downloads/{id}` only drops a row from the ACTIVE
+/// registry; the history copy outlives it. Without this route the downloads
+/// page's History section could never be emptied by any UI.
+#[utoipa::path(
+    delete,
+    path = "/api/downloads/history",
+    tag = "Downloads",
+    summary = "Clear the durable finished-downloads history",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn downloads_history_clear(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    let cleared = state.downloads.clear_history().await;
+    Json(json!({ "ok": true, "cleared": cleared }))
 }
 
 /// `GET /api/downloads/settings` — how many downloads run at once, and why.
@@ -6740,7 +6867,17 @@ async fn delete_acp_session_handler(
             .into_response();
     };
     match crate::sidecar::adapters::acp::close_acp_session(spawn_cmd, sid).await {
-        Ok(()) => Json(serde_json::json!({ "deleted": true })).into_response(),
+        Ok(true) => Json(serde_json::json!({ "deleted": true })).into_response(),
+        // The agent connected fine and simply does not implement `session/close`
+        // (pi-acp, qwen-code and factory-droid advertise no `close` capability).
+        // A 200 saying so, not the 502 this used to return — nothing failed, and
+        // a transport error here would mean something very different.
+        Ok(false) => Json(serde_json::json!({
+            "deleted": false,
+            "unsupported": true,
+            "error": "This agent does not support deleting sessions.",
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "deleted": false, "error": e.to_string() })),
@@ -8775,6 +8912,65 @@ fn is_merged_plugin_view(id: &str) -> bool {
     PLUGIN_MERGED_SOURCE_IDS.contains(&id)
 }
 
+/// The sentinel `?source=` value meaning "every marketplace at once".
+///
+/// This is the store's DEFAULT view. A source picker is a reasonable control when
+/// the sources are rivals, but they are not: a listing lives on exactly one of them,
+/// so picking a source is really picking which subset of the store you are allowed
+/// to find — and the only way to answer "is X available?" was to try each row in
+/// turn. Under this id every source is browsed and the client groups the results
+/// under a heading per marketplace, so the picker narrows an already-complete list
+/// instead of being the thing that makes it complete.
+///
+/// Not a registered source: it never appears in `sources_for`, it cannot be the
+/// node's active-source preference, and it resolves to a LIST of real sources at
+/// both the browse and detail seams.
+const PLUGIN_ALL_SOURCES_ID: &str = "all";
+
+/// Plugin sources the "all" view must not fold in.
+///
+/// Mirrors the desktop store's own `HIDDEN_PLUGIN_SOURCES`, for the same reasons:
+///   - `ryu-apps` is a stub with no feed behind it;
+///   - `ryu-marketplace` is the hosted COMMERCE backend, already folded into the
+///     merged first-party view — browsing it again would duplicate every paid
+///     listing under a second heading;
+///   - `github-topic` is the Community feed. It is unreviewed, it is fetched
+///     separately via `?origin=community`, and it must never render without the
+///     trust notice that section carries. Folding it in here would both duplicate
+///     those rows and strip that notice off the copies.
+const PLUGIN_ALL_EXCLUDED_SOURCES: [&str; 3] = ["ryu-apps", "ryu-marketplace", "github-topic"];
+
+/// How long one federated source may take before the all-marketplaces view gives up
+/// on it. Long enough for a cold git-catalog fetch, short enough that a wedged
+/// marketplace cannot hold the store's default page.
+const PLUGIN_ALL_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The marketplaces the "all" view browses, in display order: the unified
+/// first-party view first (it answers offline, from compiled manifests plus a
+/// cached catalog), then every other registered, non-excluded plugin source.
+fn all_plugin_view_sources(state: &ServerState) -> Vec<crate::catalog_source::SourceMeta> {
+    state
+        .catalog_sources
+        .sources_for(crate::catalog_source::CatalogKind::Plugin)
+        .into_iter()
+        .filter(|s| is_all_plugin_view_source(&s.id))
+        .collect()
+}
+
+/// Whether a registered plugin source id is browsed by the all-marketplaces view.
+///
+/// Split out as a pure predicate so it is testable without a `ServerState`: which
+/// sources this admits is a correctness question (a `github-topic` slipping in
+/// would render unreviewed listings with no trust notice), not a plumbing detail.
+fn is_all_plugin_view_source(id: &str) -> bool {
+    if PLUGIN_ALL_EXCLUDED_SOURCES.contains(&id) {
+        return false;
+    }
+    // Both first-party ids address the SAME merged view. Only the canonical one is
+    // browsed, or every first-party listing would appear twice — once per heading.
+    !is_merged_plugin_view(id) || id == PLUGIN_MERGED_VIEW_ID
+}
+
 /// Resolve which plugin catalog source a browse/detail request addresses.
 ///
 /// Precedence: an explicit `?source=<id>` (validated against the registry) → the
@@ -8795,6 +8991,7 @@ async fn resolve_plugin_source_id(
         let trimmed = requested.trim();
         if !trimmed.is_empty()
             && (is_merged_plugin_view(trimmed)
+                || trimmed == PLUGIN_ALL_SOURCES_ID
                 || state
                     .catalog_sources
                     .source_by_id(crate::catalog_source::CatalogKind::Plugin, trimmed)
@@ -8882,10 +9079,34 @@ static BUILTIN_APP_ENTRIES: std::sync::LazyLock<Vec<serde_json::Value>> =
 
 async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::Value> {
     // 1. Loaded built-in / installed plugin manifests — always offline-safe.
-    let manifest_entries: Vec<serde_json::Value> = {
+    let mut manifest_entries: Vec<serde_json::Value> = {
         let manifests = state.app_manifests.read().await;
         manifests.iter().map(plugin_manifest_to_entry).collect()
     };
+
+    // 1b. Plugins held back by an unmet host floor. They are NOT in
+    //     `app_manifests` (that list is what the runtime activates), but a
+    //     marketplace that silently omits them is exactly the behaviour this
+    //     replaces: the user saw nothing and had no way to learn that updating
+    //     would bring the plugin back. Projected through the SAME card function so
+    //     they render identically, then stamped `installed_but_incompatible` so the
+    //     client greys the card and refuses the install verb rather than offering
+    //     one that will 409.
+    {
+        let incompatible = state.incompatible_manifests.read().await;
+        for inc in incompatible.iter() {
+            let mut entry = plugin_manifest_to_entry(inc.for_catalog());
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("installed_but_incompatible".to_owned(), json!(true));
+                // Authoritative verdict from the load pass. `plugin_manifest_to_entry`
+                // recomputes one from `engines`, which agrees today; carrying the
+                // load-time verdict keeps the card honest if the two ever diverge
+                // (an observed Gateway version arriving after manifests loaded).
+                obj.insert("compatibility".to_owned(), json!(inc.verdict()));
+            }
+            manifest_entries.push(entry);
+        }
+    }
 
     // 2. Ryu Marketplace federated source (best-effort; never blanks built-ins).
     let mut marketplace_entries: Vec<serde_json::Value> = Vec::new();
@@ -8966,6 +9187,112 @@ async fn merged_plugin_catalog_entries(state: &ServerState) -> Vec<serde_json::V
         .into_iter()
         .filter(|e| e.get("hidden").and_then(serde_json::Value::as_bool) != Some(true))
         .collect()
+}
+
+/// Every non-excluded marketplace's plugin listings, in one list, each row stamped
+/// with the marketplace it came from.
+///
+/// The stamp (`catalog_source_id` / `catalog_source_name`) is what makes this a
+/// grouped view rather than an undifferentiated pile — the client renders one
+/// heading per source and files each row under it. It is a NEW pair of keys rather
+/// than a reuse of the existing `source`, which is per-entry provenance
+/// (`"built-in"`, a repo host, …) and does not name a browsable marketplace.
+///
+/// Ordering and dedup are one rule: sources are visited in
+/// [`all_plugin_view_sources`] order and the FIRST source to claim an id keeps it.
+/// So the unified first-party view — which answers from compiled manifests and a
+/// cached catalog, and is the one that knows an app is built in — always wins over
+/// a federated source that happens to list the same id, and no listing can appear
+/// under two headings.
+///
+/// Every source is best-effort: one that errors, rate-limits or times out
+/// contributes nothing and is logged, exactly as it would when browsed alone. A
+/// dead marketplace must not blank the other four.
+async fn all_plugin_catalog_entries(
+    state: &ServerState,
+    query: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let needle = query.trim().to_ascii_lowercase();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for meta in all_plugin_view_sources(state) {
+        let entries: Vec<serde_json::Value> = if is_merged_plugin_view(&meta.id) {
+            merged_plugin_catalog_entries(state)
+                .await
+                .into_iter()
+                .filter(|e| plugin_entry_matches_query(e, &needle))
+                .collect()
+        } else {
+            let Some(source) = plugin_source_by_id(state, &meta.id).await else {
+                continue;
+            };
+            let q = crate::catalog_source::CatalogQuery {
+                query: query.to_string(),
+                limit,
+                ..Default::default()
+            };
+            // Bounded, and that bound is the point. `state.client` is a
+            // `reqwest::Client::new()` with NO timeout, so a marketplace that
+            // accepts the connection and then stops talking hangs its request
+            // forever. Browsing that source alone, the cost was one stuck tab the
+            // user had chosen; here it is the DEFAULT store page for everyone, and
+            // a source is only ever a bonus shelf on it. A slow one is dropped from
+            // this render rather than allowed to hold the whole page.
+            match tokio::time::timeout(
+                PLUGIN_ALL_SOURCE_TIMEOUT,
+                source.search(&state.client, &q),
+            )
+            .await
+            {
+                Ok(Ok(val)) => val
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|it| plugin_marketplace_item_to_entry(it, source.id()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        source = %meta.id,
+                        error = %e,
+                        "plugin source failed in the all-marketplaces view; skipping it"
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        source = %meta.id,
+                        timeout_secs = PLUGIN_ALL_SOURCE_TIMEOUT.as_secs(),
+                        "plugin source timed out in the all-marketplaces view; skipping it"
+                    );
+                    continue;
+                }
+            }
+        };
+
+        for mut entry in entries {
+            let Some(id) = entry.get("id").and_then(|v| v.as_str()).map(str::to_owned) else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("catalog_source_id".to_string(), json!(meta.id));
+                obj.insert(
+                    "catalog_source_name".to_string(),
+                    json!(meta.display_name.clone()),
+                );
+            }
+            out.push(entry);
+        }
+    }
+    out
 }
 
 fn plugin_entry_matches_query(entry: &serde_json::Value, needle: &str) -> bool {
@@ -9067,6 +9394,22 @@ async fn plugin_catalog_browse(
     }
 
     let active_id = resolve_plugin_source_id(&state, &params).await;
+
+    // Every marketplace at once — the store's default view.
+    if active_id == PLUGIN_ALL_SOURCES_ID {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "entries": all_plugin_catalog_entries(&state, query, limit).await,
+                // No cursor: the page is a concatenation of N independently
+                // paginated feeds, and one opaque cursor cannot address a position
+                // in all of them. Each source contributes at most `limit` rows and
+                // the client renders them under a heading per marketplace — see
+                // `all_plugin_catalog_entries`.
+                "next_cursor": serde_json::Value::Null,
+            })),
+        );
+    }
 
     // The unified first-party view: the merged offline-safe catalog. Reached by
     // EITHER first-party id (see `PLUGIN_MERGED_SOURCE_IDS`) so the open git
@@ -9320,7 +9663,27 @@ async fn plugin_catalog_detail(
         community_plugin_source(&state).await.into_iter().collect()
     } else {
         let source_id = resolve_plugin_source_id(&state, &params).await;
-        if is_merged_plugin_view(&source_id) {
+        if source_id == PLUGIN_ALL_SOURCES_ID {
+            // The all-marketplaces view browses N sources, so a listing opened from
+            // it may belong to any of them — and the client sends back the view's
+            // id, not the row's. Resolving `all` to a single source would therefore
+            // hand every card in the DEFAULT view an empty preview; it resolves to
+            // the same ordered candidate list the browse used instead, and the walk
+            // below returns the first source that can answer for this id.
+            let mut list = Vec::new();
+            for meta in all_plugin_view_sources(&state) {
+                if is_merged_plugin_view(&meta.id) {
+                    for id in PLUGIN_MERGED_SOURCE_IDS {
+                        if let Some(source) = plugin_source_by_id(&state, id).await {
+                            list.push(source);
+                        }
+                    }
+                } else if let Some(source) = plugin_source_by_id(&state, &meta.id).await {
+                    list.push(source);
+                }
+            }
+            list
+        } else if is_merged_plugin_view(&source_id) {
             let mut list = Vec::new();
             // Git catalog first: it carries every free/open listing, and it answers
             // from a cached manifest rather than a network round-trip per item.
@@ -9518,6 +9881,32 @@ fn local_detail_trust_signals(compiled_in: bool) -> (&'static str, &'static str,
     }
 }
 
+/// The version to SHOW for a locally loaded manifest.
+///
+/// A compiled-in manifest ships INSIDE this binary, so the version the user
+/// actually has is whatever Core release delivered it — not the `version` the
+/// manifest declares, which is an authoring-time constant no release bump ever
+/// rewrites (`scripts/release/bump-version.sh` covers Cargo.toml / package.json /
+/// tauri.conf.json / Cargo.lock only, and `tools/mirror-satellites.sh` says
+/// outright that `manifest.json` holds the APP version, not the train's). Every
+/// packaged manifest therefore still declares "1.0.0" while Core ships 0.1.x,
+/// which is the phantom v1.0.0 the Store's detail dialog showed for every
+/// built-in app and plugin — a version number that was never released.
+///
+/// A DISK manifest keeps its own version: it was installed from a catalog that
+/// has a real publish train, and overriding it would misreport the installed
+/// build of every sideloaded plugin. The predicate is therefore PROVENANCE
+/// (`is_compiled_in_manifest`), the same one `local_detail_trust_signals` keys
+/// on — never the emitted `"source": "built-in"`, which `plugin_manifest_to_entry`
+/// hardcodes for disk manifests too and so cannot tell the two apart.
+fn display_version(m: &crate::plugin_manifest::PluginManifest) -> String {
+    if crate::plugins::builtins::is_compiled_in_manifest(&m.id) {
+        env!("CARGO_PKG_VERSION").to_owned()
+    } else {
+        m.version.clone()
+    }
+}
+
 fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
     let manifests = crate::plugin_manifest::PluginManifestLoader::load();
     let m = manifests.iter().find(|m| m.id == id)?;
@@ -9538,7 +9927,7 @@ fn local_plugin_detail(id: &str) -> Option<serde_json::Value> {
     let mut obj = serde_json::Map::new();
     obj.insert("id".to_owned(), json!(m.id));
     obj.insert("name".to_owned(), json!(m.name));
-    obj.insert("version".to_owned(), json!(m.version));
+    obj.insert("version".to_owned(), json!(display_version(m)));
     obj.insert("description".to_owned(), json!(m.description));
     obj.insert("source".to_owned(), json!(source));
     obj.insert("origin".to_owned(), json!(origin));
@@ -9677,7 +10066,7 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         "id": m.id,
         "name": m.name,
         "description": m.description.clone().unwrap_or_default(),
-        "version": m.version,
+        "version": display_version(m),
         "source": "built-in",
         "kinds": kinds,
         "type": if is_app { "app" } else { "plugin" },
@@ -9709,6 +10098,9 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         }
         if let Some(bg) = &m.icon_background {
             obj.insert("icon_background".to_owned(), json!(bg));
+        }
+        if let Some(pad) = &m.icon_padding {
+            obj.insert("icon_padding".to_owned(), json!(pad));
         }
         if let Some(accent) = &m.accent_color {
             obj.insert("accent_color".to_owned(), json!(accent));
@@ -9792,6 +10184,13 @@ fn merge_plugin_contract_fields(
     if let Some(bg) = &m.icon_background {
         obj.insert("iconBackground".to_owned(), json!(bg));
     }
+    // camelCase twin of the `icon_padding` insert in `plugin_manifest_to_entry`.
+    // Both are required: the CARD payload is snake_case and the DETAIL payload is
+    // camelCase, and a field present in only one makes the hero and the card frame
+    // the same logo differently.
+    if let Some(pad) = &m.icon_padding {
+        obj.insert("iconPadding".to_owned(), json!(pad));
+    }
     if let Some(accent) = &m.accent_color {
         obj.insert("accentColor".to_owned(), json!(accent));
     }
@@ -9842,6 +10241,26 @@ fn merge_plugin_contract_fields(
     }
     if !m.targets.is_empty() {
         obj.insert("targets".to_owned(), json!(m.targets));
+    }
+    // `engines` + this node's verdict on it.
+    //
+    // Both go on the CARD, not just the detail payload. A browse surface has to grey
+    // a card and say "needs Core 0.2.0 — you have 0.1.12" while rendering a grid;
+    // making that a per-card detail fetch is not a real option. `engines` used to
+    // reach only the version-detail document, where it drove a scorecard badge and
+    // nothing else, which is why nothing in the marketplace has ever reflected a
+    // version floor.
+    //
+    // `compatibility` is computed HERE because only the node serving the entry knows
+    // what is running. It reports floors for surfaces Core cannot observe as
+    // advisory `unknown` rather than as failures; a client that knows its own
+    // surface version re-evaluates from `engines` and may harden one into a refusal.
+    if let Some(engines) = &m.engines {
+        obj.insert("engines".to_owned(), json!(engines));
+        obj.insert(
+            "compatibility".to_owned(),
+            json!(crate::plugin_manifest::node_host_versions().evaluate(Some(engines))),
+        );
     }
     // `surfaces`, flattened to the list the store renders as platform badges.
     //
@@ -10013,9 +10432,30 @@ fn plugin_marketplace_item_to_entry(
         {
             obj.insert("targets".to_owned(), json!(targets));
         }
+        // `engines` gets the same treatment, plus a verdict computed HERE — the
+        // hosted card cannot carry one, because the registry has no idea what
+        // versions this node is running.
+        //
+        // Same trust posture as `requires` above: the card is untrusted upstream
+        // JSON and this is a DISPLAY path, so a lying or absent field costs a greyed
+        // badge, never safety. The authoritative check runs against the signed
+        // manifest in `resolve_plugin_from_catalog`, which refuses the install
+        // regardless of what the card claimed.
+        if let Some(engines) = it
+            .get("engines")
+            .filter(|v| v.is_object())
+            .and_then(|v| serde_json::from_value::<crate::plugin_manifest::EnginesReq>(v.clone()).ok())
+        {
+            obj.insert("engines".to_owned(), json!(engines));
+            obj.insert(
+                "compatibility".to_owned(),
+                json!(crate::plugin_manifest::node_host_versions().evaluate(Some(&engines))),
+            );
+        }
         for key in [
             "icon",
             "icon_background",
+            "icon_padding",
             "accent_color",
             "developer",
             "tagline",
@@ -10572,7 +11012,7 @@ async fn install_app_bundle(
         }
     }
 
-    match persist_installed_plugin(&state, manifest, ui_code).await {
+    match persist_installed_plugin(&state, manifest, ui_code, None).await {
         Ok(body) => Json(body).into_response(),
         Err((status, msg)) => json_error(status, msg),
     }
@@ -10622,6 +11062,7 @@ async fn persist_installed_plugin(
     state: &ServerState,
     manifest: crate::plugin_manifest::PluginManifest,
     ui_code: Option<String>,
+    provenance: Option<crate::plugins::isolation::PluginProvenance>,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     // Validate the id BEFORE it is ever used as a filesystem path component.
     if let Err(e) = crate::plugin_manifest::validate_plugin_id(&manifest.id) {
@@ -10635,6 +11076,43 @@ async fn persist_installed_plugin(
                 manifest.version
             ),
         ));
+    }
+    // HOST-FLOOR GATE, second line. `resolve_plugin_from_catalog` already refuses
+    // an incompatible plugin on the catalog path, but this is the sink EVERY
+    // install path shares — install-from-URL, install-bundle and the built-in
+    // install-by-id never touch that resolver. Without a check here they would
+    // write a plugin to disk and to the lifecycle store that the next manifest load
+    // moves straight into the incompatible lane: installed, inert, and reported to
+    // the user as a success.
+    //
+    // Blocking entries only, for the same reason as everywhere else — a floor
+    // against a surface Core cannot observe must not make a plugin uninstallable.
+    if let Some(engines) = &manifest.engines {
+        let verdict = crate::plugin_manifest::node_host_versions().evaluate(Some(engines));
+        if !verdict.compatible {
+            let detail: Vec<String> = verdict
+                .blocking()
+                .map(|u| match u {
+                    crate::plugin_manifest::UnmetRequirement::TooOld {
+                        surface,
+                        required,
+                        present,
+                    } => format!(
+                        "{} {required} (this node has {present})",
+                        surface.engines_key()
+                    ),
+                    other => format!("{} {}", other.surface().engines_key(), "requirement unmet"),
+                })
+                .collect();
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "`{}` requires {} — update Ryu to install it",
+                    manifest.id,
+                    detail.join(", ")
+                ),
+            ));
+        }
     }
     for entry in &manifest.runnables {
         if let Err(e) = crate::plugin_manifest::schema::validate_runnable(entry) {
@@ -10682,7 +11160,13 @@ async fn persist_installed_plugin(
     reload_manifests_inner(state).await;
 
     // Create the lifecycle record (installed, disabled) and store the ui_code.
-    if let Err(e) = crate::plugins::lifecycle::install_app(&state.app_store, &manifest).await {
+    if let Err(e) = crate::plugins::lifecycle::install_app_with_provenance(
+        &state.app_store,
+        &manifest,
+        provenance.as_ref(),
+    )
+    .await
+    {
         let msg = e.to_string();
         let status = if msg.contains("UNIQUE constraint") || msg.contains("already") {
             StatusCode::CONFLICT
@@ -10809,6 +11293,13 @@ async fn install_plugin_from_catalog(
     // phase 2 rather than hanging here.
     let mut fetched: Vec<crate::plugin_manifest::PluginManifest> = Vec::new();
     let mut ui_codes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Captured per resolved id so the install sink can persist WHO served each
+    // manifest — including dependencies, which are installed on the user's behalf
+    // and would otherwise land with no provenance at all (i.e. untrusted).
+    let mut provenances: std::collections::HashMap<
+        String,
+        crate::plugins::isolation::PluginProvenance,
+    > = std::collections::HashMap::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     queue.push_back(id.clone());
@@ -10836,7 +11327,8 @@ async fn install_plugin_from_catalog(
             let dep_channel = (next == id).then_some(channel.as_deref()).flatten();
             match resolve_plugin_from_catalog(&state, &next, buyer_token.clone(), dep_channel).await
             {
-                Ok((m, ui_code)) => {
+                Ok((m, ui_code, provenance)) => {
+                    provenances.insert(next.clone(), provenance);
                     // A source that answers a request for `next` with a manifest for
                     // some OTHER id would let a dependency name be swapped for an
                     // arbitrary plugin. Refuse.
@@ -10905,11 +11397,12 @@ async fn install_plugin_from_catalog(
         |manifest| {
             let state = state.clone();
             let ui_code = ui_codes.get(&manifest.id).cloned();
+            let provenance = provenances.get(&manifest.id).cloned();
             // The SAME sink the single-plugin path used: validate → write manifest →
             // reload → lifecycle record (installed, DISABLED). Enabling stays with
             // `enable_app`, which runs its own dependency closure over what we just
             // made present.
-            async move { persist_installed_plugin(&state, manifest, ui_code).await }
+            async move { persist_installed_plugin(&state, manifest, ui_code, provenance).await }
         },
         |plugin_id| {
             let state = state.clone();
@@ -11027,7 +11520,14 @@ async fn resolve_plugin_from_catalog(
     id: &str,
     buyer_token: Option<String>,
     channel: Option<&str>,
-) -> Result<(crate::plugin_manifest::PluginManifest, Option<String>), (StatusCode, String)> {
+) -> Result<
+    (
+        crate::plugin_manifest::PluginManifest,
+        Option<String>,
+        crate::plugins::isolation::PluginProvenance,
+    ),
+    (StatusCode, String),
+> {
     let tracked = state
         .downloads
         .register_indeterminate_as(
@@ -11044,11 +11544,66 @@ async fn resolve_plugin_from_catalog(
             },
         )
         .await;
-    tracked.map_err(|e| match e.downcast::<CatalogResolveFailed>() {
+    let resolved = tracked.map_err(|e| match e.downcast::<CatalogResolveFailed>() {
         Ok(failed) => (failed.status, failed.message),
         // The only other way out is a user Cancel from the download center.
         Err(other) => (StatusCode::CONFLICT, other.to_string()),
-    })
+    })?;
+
+    // HOST-FLOOR GATE. Every path that pulls a manifest out of the catalog comes
+    // through here — a direct install, an update, and the transitive dependency
+    // closure of either — so this is the one place that can guarantee a plugin this
+    // node cannot run is never written to disk or into the store.
+    //
+    // Gating at install rather than only at load is what makes the marketplace card
+    // honest: the card is SHOWN (see the incompatible lane), and the verb behind it
+    // refuses with the specific floor that failed instead of installing something
+    // that would silently vanish on next boot.
+    //
+    // Only BLOCKING entries refuse. A floor against a surface Core cannot observe
+    // is advisory and must not stop an install — otherwise every plugin declaring a
+    // mobile or island floor would be uninstallable on every node.
+    let (manifest, _, _) = &resolved;
+    if let Some(engines) = &manifest.engines {
+        let verdict = crate::plugin_manifest::node_host_versions().evaluate(Some(engines));
+        if !verdict.compatible {
+            let detail: Vec<String> = verdict
+                .blocking()
+                .map(|u| match u {
+                    crate::plugin_manifest::UnmetRequirement::TooOld {
+                        surface,
+                        required,
+                        present,
+                    } => format!(
+                        "{} {required} (this node has {present})",
+                        surface.engines_key()
+                    ),
+                    crate::plugin_manifest::UnmetRequirement::InvalidRequirement {
+                        surface,
+                        required,
+                        reason,
+                    } => format!(
+                        "{} has an invalid requirement '{required}': {reason}",
+                        surface.engines_key()
+                    ),
+                    // Not reachable: `Unknown` is never blocking.
+                    crate::plugin_manifest::UnmetRequirement::Unknown { surface, required } => {
+                        format!("{} {required}", surface.engines_key())
+                    }
+                })
+                .collect();
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "`{}` requires {} — update Ryu to install it",
+                    manifest.id,
+                    detail.join(", ")
+                ),
+            ));
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// A catalog resolve failure carried through `anyhow` so the download center can
@@ -11073,7 +11628,14 @@ async fn resolve_plugin_from_catalog_inner(
     id: &str,
     buyer_token: Option<String>,
     channel: Option<&str>,
-) -> Result<(crate::plugin_manifest::PluginManifest, Option<String>), (StatusCode, String)> {
+) -> Result<
+    (
+        crate::plugin_manifest::PluginManifest,
+        Option<String>,
+        crate::plugins::isolation::PluginProvenance,
+    ),
+    (StatusCode, String),
+> {
     use crate::catalog_source::CatalogKind;
 
     let active = state
@@ -11164,7 +11726,36 @@ async fn resolve_plugin_from_catalog_inner(
             .get("ui_code")
             .and_then(|v| v.as_str())
             .map(str::to_owned);
-        return Ok((manifest, ui_code));
+        // Capture WHO served this and what they were vouched for, at the one
+        // moment we actually observe it. `install_descriptor_at` has already run
+        // the signature gate fail-closed, so reaching here means it verified.
+        //
+        // `orgVerified` is read from the descriptor but only *counts* when the
+        // source is the official marketplace — `TrustPolicy::resolve_trust`
+        // enforces that, because any other source asserting the flag is just
+        // publisher-controlled JSON.
+        let provenance = crate::plugins::isolation::PluginProvenance {
+            source_id: Some(descriptor.source_id.clone()),
+            publisher_org: descriptor
+                .raw
+                .get("publisherOrg")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            org_verified: descriptor
+                .raw
+                .get("orgVerified")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            org_verified_tier: descriptor
+                .raw
+                .get("orgVerifiedTier")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            signature_verified: true,
+            builtin: false,
+            captured_at: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        return Ok((manifest, ui_code, provenance));
     }
 
     Err(first_err.unwrap_or_else(|| {
@@ -11293,15 +11884,31 @@ async fn fire_activation_event_handler(
     Json(json!({ "success": true, "event": event }))
 }
 
-/// Re-load all manifests from disk and swap the in-memory set. `load()` returns
-/// a `Vec` directly (not a `Result`), so this never fails; a parse error in one
-/// manifest only drops that manifest with a logged warning.
+/// Re-load all manifests from disk and swap the in-memory set. `load_all()`
+/// returns the two lanes directly (not a `Result`), so this never fails; a parse
+/// error in one manifest only drops that manifest with a logged warning.
+///
+/// BOTH lanes are swapped. Refreshing only the runtime list would leave
+/// `incompatible_manifests` frozen at whatever boot found: a plugin installed
+/// mid-session that this node cannot run would be missing from the marketplace
+/// until a restart (the very "it just vanished" behaviour the lane exists to end),
+/// and one that became compatible — because the user updated Core and the manifests
+/// were reloaded — would keep its stale "Unavailable" pill.
 async fn reload_manifests_inner(state: &ServerState) {
-    let manifests = crate::plugin_manifest::PluginManifestLoader::load();
-    let mut lock = state.app_manifests.write().await;
-    let count = manifests.len();
-    *lock = manifests;
-    tracing::info!("app manifests hot-reloaded: {count} loaded");
+    let loaded = crate::plugin_manifest::PluginManifestLoader::load_all();
+    let count = loaded.compatible.len();
+    let held_back = loaded.incompatible.len();
+    // Ordered: the runtime list first, so no window exists in which a plugin is
+    // absent from BOTH lanes and a concurrent catalog read renders it nowhere.
+    {
+        let mut lock = state.app_manifests.write().await;
+        *lock = loaded.compatible;
+    }
+    {
+        let mut lock = state.incompatible_manifests.write().await;
+        *lock = loaded.incompatible;
+    }
+    tracing::info!("app manifests hot-reloaded: {count} loaded, {held_back} held back");
 }
 
 /// Compute the set of MCP tool name slugs claimed by disabled apps.
@@ -11404,6 +12011,135 @@ async fn find_manifest(
 ) -> Option<crate::plugin_manifest::PluginManifest> {
     let manifests = state.app_manifests.read().await;
     manifests.iter().find(|m| m.id == id).cloned()
+}
+
+/// Load the user's host-access trust policy from preferences.
+///
+/// Both keys fail SAFE on a read error: an unreadable allowlist is an empty one
+/// (nothing extra trusted), and an unreadable enforcement flag is off (report,
+/// don't break). Neither direction can be turned into a bypass by breaking the
+/// preferences store.
+async fn load_trust_policy() -> crate::plugins::isolation::TrustPolicy {
+    use crate::plugins::isolation::{REQUIRE_TRUST_PREF, TRUSTED_IDS_PREF, TrustPolicy};
+    let Ok(store) = crate::server::preferences::PreferencesStore::open_default() else {
+        return TrustPolicy::default();
+    };
+    let trusted_ids = match store.get(TRUSTED_IDS_PREF).await {
+        Ok(Some(raw)) => serde_json::from_str::<Vec<String>>(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        _ => Default::default(),
+    };
+    let require_trust_for_host_access = matches!(
+        store.get(REQUIRE_TRUST_PREF).await,
+        Ok(Some(v)) if v.trim() == "1" || v.trim().eq_ignore_ascii_case("true")
+    );
+    TrustPolicy {
+        trusted_ids,
+        require_trust_for_host_access,
+    }
+}
+
+/// `GET /api/plugins/isolation` — which installed plugins run sandboxed, which
+/// run with full host access, and on whose authority.
+///
+/// Answers the question nothing else in Core could: a manifest's declared
+/// `permissions` block is enforced on the Deno lane and only *recorded* on the
+/// native sidecar lane, so "this plugin declares permissions" has never implied
+/// "those permissions are enforced". Each report separates the two facts —
+/// `enforcement` is about the lane's mechanism, `host_access` is about trust.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/isolation",
+    tag = "Plugins",
+    responses((status = 200, description = "Per-plugin isolation and trust report"))
+)]
+async fn plugins_isolation_handler(State(state): State<ServerState>) -> axum::response::Response {
+    let policy = load_trust_policy().await;
+    // The RAW, Safe-Mode-unmasked read, deliberately. This is a management/report
+    // surface (it spawns, injects and routes nothing), and it is the one caller for
+    // which the masked read would actively lie: under Safe Mode every record reports
+    // `enabled = false`, so a report on what is INSTALLED would describe an empty
+    // machine. Each row carries its own `enabled` bit instead.
+    let records = match state.app_store.list_all_records().await {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let manifests = state.app_manifests.read().await;
+    let mut reports = Vec::with_capacity(records.len());
+    let mut manifests_missing = 0_usize;
+    for record in &records {
+        // An installed plugin whose manifest is not loaded must still appear. It is
+        // precisely the row someone auditing isolation would want to see, and
+        // dropping it would make `summary.total` count what was reported rather than
+        // what is installed — a report that silently under-reports.
+        let Some(manifest) = manifests.iter().find(|m| m.id == record.id) else {
+            manifests_missing += 1;
+            let trust = policy.resolve_trust(&record.id, record.provenance.as_ref());
+            reports.push(json!({
+                "id": record.id,
+                "name": record.id,
+                "version": record.version,
+                "enabled": record.enabled,
+                // No manifest ⇒ no lane list can be derived. That is unknown, NOT
+                // "declares nothing", so `fully_sandboxed` is null rather than true.
+                "lanes": [],
+                "fully_sandboxed": serde_json::Value::Null,
+                "unenforceable_lanes": [],
+                "trust": trust,
+                "host_access": serde_json::Value::Null,
+                "manifest_loaded": false,
+                "refused_by_policy": false,
+            }));
+            continue;
+        };
+        let report = crate::plugins::isolation::resolve(
+            manifest,
+            record.provenance.as_ref(),
+            &policy,
+        );
+        let refused = report.should_refuse_host_access(&policy);
+        let mut value = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("enabled".to_owned(), json!(record.enabled));
+            obj.insert("version".to_owned(), json!(record.version));
+            obj.insert("manifest_loaded".to_owned(), json!(true));
+            // Surfaced per-plugin so a client never has to re-derive the policy
+            // decision from the flag plus the verdict.
+            obj.insert("refused_by_policy".to_owned(), json!(refused));
+        }
+        reports.push(value);
+    }
+    let unvetted = reports
+        .iter()
+        .filter(|r| r["host_access"]["state"] == "unvetted")
+        .count();
+    let sandboxed = reports
+        .iter()
+        .filter(|r| r["fully_sandboxed"] == json!(true))
+        .count();
+    Json(json!({
+        "plugins": reports,
+        "summary": {
+            // Every INSTALLED plugin, including any whose manifest is not loaded —
+            // those are counted separately rather than dropped.
+            "total": reports.len(),
+            "fully_sandboxed": sandboxed,
+            "host_access_unvetted": unvetted,
+            "manifests_missing": manifests_missing,
+        },
+        "policy": {
+            "require_trust_for_host_access": policy.require_trust_for_host_access,
+            "trusted_ids": policy.trusted_ids.iter().collect::<Vec<_>>(),
+        },
+        // Stated in the payload so no client has to infer it: the native sidecar
+        // lane has no isolation mechanism at all today. `unenforceable_lanes` is a
+        // statement about Ryu, not about the plugin or the user.
+        "note": "sidecar and mcp_server lanes have no OS-level isolation in this build; \
+                 turn hooks, capability adapters and UI bundles are mechanically sandboxed",
+    }))
+    .into_response()
 }
 
 /// `POST /api/apps/:id/install` — record the app as installed (disabled).
@@ -12523,6 +13259,7 @@ async fn plugin_contributions(
     let mut views = Vec::new();
     let mut sidebar_sections = Vec::new();
     let mut sidebar_buttons = Vec::new();
+    let mut sidebar_modes = Vec::new();
     let mut themes = Vec::new();
     let mut dock_panels = Vec::new();
     let mut output_styles = Vec::new();
@@ -12620,6 +13357,17 @@ async fn plugin_contributions(
             c.sidebar_buttons
                 .iter()
                 .filter_map(|b| serde_json::to_value(b).ok())
+                .map(tag),
+        );
+        // Sidebar MODES — how the sidebar as a whole is arranged, next to the two
+        // members that say what is in it. Same tag-and-collect shape; the sections a
+        // mode names stay opaque to Core, which never resolves them (the shell owns
+        // the section vocabulary, and a mode may legitimately name a section from a
+        // sibling app that is not installed).
+        sidebar_modes.extend(
+            c.sidebar_modes
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
                 .map(tag),
         );
         // Colour themes (`contributes.themes`) — a marketplace theme is a plugin that
@@ -12783,6 +13531,7 @@ async fn plugin_contributions(
         "views": views,
         "sidebar_sections": sidebar_sections,
         "sidebar_buttons": sidebar_buttons,
+        "sidebar_modes": sidebar_modes,
         "themes": themes,
         "dock_panels": dock_panels,
         // Contributed output styles (design §4). The DECLARATION view — which
@@ -14287,7 +15036,7 @@ async fn update_app_handler(
     //    Resolution is channel-scoped: a train with no build errors out here (the
     //    resolve reports which channel was asked for) rather than falling back.
     let buyer_token = buyer_bearer_from_headers(&headers);
-    let (manifest, ui_code) = match resolve_plugin_from_catalog(
+    let (manifest, ui_code, resolved_provenance) = match resolve_plugin_from_catalog(
         &state,
         &id,
         buyer_token.clone(),
@@ -14361,6 +15110,34 @@ async fn update_app_handler(
         }
     }
 
+    // 3b. REVERSE gate: would this new version break something already installed?
+    //
+    //     Step 4 below validates the target's FORWARD edges (target -> its own
+    //     dependencies). It structurally cannot see the reverse edges, which live on
+    //     OTHER manifests: moving `@ryu/spaces` 1.2.0 -> 2.0.0 while an installed
+    //     `@ryu/meetings` declares `">=1.2, <2"` satisfies every forward edge and
+    //     still leaves a broken dependent enabled. Refuse by default and name the
+    //     blocker; `force=true` is the deliberate override, matching how `disable`
+    //     treats its own `blocked_by_dependents` refusal.
+    if !body.force {
+        let installed_now: Vec<crate::plugin_manifest::PluginManifest> =
+            state.app_manifests.read().await.clone();
+        if let Err(dep_err) =
+            crate::plugins::graph::validate_dependents_of_update(&manifest, &installed_now)
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "success": false,
+                    "error": dep_err.to_string(),
+                    "dependency_error": dep_err,
+                    "hint": "pass force=true to update anyway",
+                })),
+            )
+                .into_response();
+        }
+    }
+
     // 4. Resolve + install any NEW dependencies the new version declares.
     let installed_dependencies =
         match install_new_dependencies_for_update(&state, &manifest, buyer_token).await {
@@ -14397,6 +15174,21 @@ async fn update_app_handler(
                 }
             } else {
                 updated
+            };
+            // Re-observe the publisher on every update. This is the ONE moment a
+            // revoked org verification stops counting: provenance is captured, not
+            // fetched at spawn (see `plugins::isolation`), so a capture only
+            // refreshes when the plugin is re-resolved from a source. A failure
+            // here leaves the previous capture in place rather than clearing it to
+            // untrusted — the install did succeed, and the stale-but-real capture
+            // is a better record than none.
+            let updated = match state
+                .app_store
+                .set_provenance(&id, Some(&resolved_provenance))
+                .await
+            {
+                Ok(Some(record)) => record,
+                Ok(None) | Err(_) => updated,
             };
             reload_manifests_inner(&state).await;
             // Live contributions refresh — same lossy `system:plugins` nudge as
@@ -14464,6 +15256,13 @@ async fn install_new_dependencies_for_update(
     //    so it is never fetched as its own dependency) terminates cyclic data.
     let mut fetched: Vec<PluginManifest> = Vec::new();
     let mut ui_codes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Captured per resolved id so the install sink can persist WHO served each
+    // manifest — including dependencies, which are installed on the user's behalf
+    // and would otherwise land with no provenance at all (i.e. untrusted).
+    let mut provenances: std::collections::HashMap<
+        String,
+        crate::plugins::isolation::PluginProvenance,
+    > = std::collections::HashMap::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
@@ -14501,7 +15300,8 @@ async fn install_new_dependencies_for_update(
         // A dependency resolves on its own default train, never the target's — see
         // the note on `resolve_plugin_from_catalog`.
         match resolve_plugin_from_catalog(state, &next, buyer_token.clone(), None).await {
-            Ok((m, ui_code)) => {
+            Ok((m, ui_code, provenance)) => {
+                provenances.insert(next.clone(), provenance);
                 if m.id != next {
                     return Err((
                         StatusCode::BAD_GATEWAY,
@@ -14527,9 +15327,15 @@ async fn install_new_dependencies_for_update(
         }
     }
 
-    if fetched.is_empty() {
-        return Ok(vec![]);
-    }
+    // NOTE: deliberately NO `if fetched.is_empty() { return }` short-circuit here.
+    // An empty `fetched` does NOT mean "nothing to check": the commonest breaking
+    // update declares no NEW dependency and merely RAISES the `min_version` floor on
+    // one already installed. `plan_update_dep_closure` documents that exact case as
+    // surfacing a typed `VersionMismatch` — a short-circuit on `fetched.is_empty()`
+    // returned Ok before the planner ever ran, so the documented guarantee never
+    // fired and the update proceeded onto an under-version dependency. The planner
+    // is pure and in-memory, so always running it costs nothing; with nothing new to
+    // install it validates the forward edges and returns an empty order.
 
     // ── Plan: the pure update-closure planner (target excluded, installed
     //    subtracted, NEW edges seen). One resolver, tested in `plugins::lifecycle`.
@@ -14555,7 +15361,8 @@ async fn install_new_dependencies_for_update(
         |m| {
             let state = state.clone();
             let ui_code = ui_codes.get(&m.id).cloned();
-            async move { persist_installed_plugin(&state, m, ui_code).await }
+            let provenance = provenances.get(&m.id).cloned();
+            async move { persist_installed_plugin(&state, m, ui_code, provenance).await }
         },
         |plugin_id| {
             let state = state.clone();
@@ -18341,7 +19148,7 @@ async fn import_agent_thread_handler(
     for msg in &imported.messages {
         if let Err(e) = state
             .conversations
-            .append_message_as(
+            .append_message_at(
                 &conversation_id,
                 &msg.role,
                 &msg.content,
@@ -18349,6 +19156,11 @@ async fn import_agent_thread_handler(
                 None,
                 None,
                 tenancy.clone(),
+                // When the turn actually happened, per the agent's own transcript.
+                // `None` for a line that carried no parseable timestamp, which falls
+                // back to now — the old behaviour, but now only for the messages
+                // that genuinely have no recorded time rather than for all of them.
+                msg.created_at,
             )
             .await
         {
@@ -19235,7 +20047,7 @@ async fn import_openapi_tools(
 
     let tools = api.tools.len();
     let manifest = build_openapi_plugin_manifest(&plugin_id, &api);
-    match persist_installed_plugin(&state, manifest, None).await {
+    match persist_installed_plugin(&state, manifest, None, None).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({
@@ -19354,7 +20166,7 @@ async fn import_graphql_tool(
         );
     }
     let manifest = build_graphql_plugin_manifest(&plugin_id, &name, url, &domain);
-    match persist_installed_plugin(&state, manifest, None).await {
+    match persist_installed_plugin(&state, manifest, None, None).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({
@@ -19523,7 +20335,7 @@ async fn persist_mcp_plugin_record(state: &ServerState, plan: &crate::mcp_catalo
         return;
     };
 
-    match persist_installed_plugin(state, manifest, None).await {
+    match persist_installed_plugin(state, manifest, None, None).await {
         Ok(_) => tracing::info!(
             server = %plan.server_name,
             "MCP install: created disabled plugin-governance record"
@@ -27757,11 +28569,11 @@ async fn gateway_restart(State(state): State<ServerState>) -> Json<serde_json::V
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn gateway_status(State(state): State<ServerState>) -> Json<serde_json::Value> {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     // Read the effective config from disk so the status endpoint always reflects
     // the persisted config even when the gateway is temporarily down.
@@ -27843,7 +28655,7 @@ async fn gateway_status(State(state): State<ServerState>) -> Json<serde_json::Va
 )]
 async fn engine_concurrency(State(state): State<ServerState>) -> Json<serde_json::Value> {
     use crate::sidecar::active_engine::{local_engine_base_url, ActiveEngineStore};
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     // 1. Gateway admission snapshot.
     let base = gateway_url();
@@ -27852,7 +28664,7 @@ async fn engine_concurrency(State(state): State<ServerState>) -> Json<serde_json
         .client
         .get(format!("{base}/v1/concurrency"))
         .timeout(std::time::Duration::from_millis(2000));
-    if let Some(t) = gateway_token().as_deref() {
+    if let Some(t) = gateway_admin_key().as_deref() {
         req = req.bearer_auth(t);
     }
     let admission = match req.send().await {
@@ -27914,11 +28726,11 @@ async fn engine_concurrency(State(state): State<ServerState>) -> Json<serde_json
 async fn gateway_get_config(
     State(state): State<ServerState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     let mut req = state
         .client
@@ -28011,11 +28823,11 @@ unreachable.",
 async fn gateway_get_evaluators(
     State(state): State<ServerState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     let mut req = state
         .client
@@ -28246,7 +29058,7 @@ async fn gateway_run_evals(
     req_headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     // Code evaluators are a CORE capability: pull them out, run them here, and
     // NEVER forward them to the gateway (which would reject/ignore them). Also
@@ -28274,7 +29086,7 @@ async fn gateway_run_evals(
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     let mut req = state
         .client
@@ -28349,11 +29161,11 @@ async fn gateway_audit(
     State(state): State<ServerState>,
     axum::extract::Query(params): axum::extract::Query<AuditQueryParams>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     // Build the query string from supported filter params.
     let mut query_parts: Vec<String> = Vec::new();
@@ -28448,11 +29260,11 @@ async fn gateway_budget_spend(
     State(state): State<ServerState>,
     axum::extract::Query(params): axum::extract::Query<BudgetSpendQueryParams>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::sidecar::gateway::{gateway_token, gateway_url};
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
 
     let base = gateway_url();
     let base = base.trim_end_matches('/');
-    let token = gateway_token();
+    let token = gateway_admin_key();
 
     let mut query_parts: Vec<String> = Vec::new();
     if let Some(uid) = &params.user_id {
@@ -29033,6 +29845,29 @@ async fn run_workflow(
             (status, Json(json!({ "success": false, "error": e })))
         }
     }
+}
+
+/// `GET /workflows/runs/live` — how much work a restart would destroy.
+///
+/// The input to the "restart now or tonight?" decision. Answered by the NODE
+/// because the node is the only party that knows what is running on it — the
+/// control plane cannot reach in, and a number it guessed would be worse than
+/// none: it would read as a promise that nothing will be lost.
+///
+/// `awaiting_input` is reported separately and deliberately not added to
+/// `running`: those runs are parked at durable gates and survive a restart, so
+/// counting them as losses would overstate the damage and teach people to
+/// ignore the warning.
+#[utoipa::path(
+    get,
+    path = "/workflows/runs/live",
+    tag = "Workflows",
+    summary = "Count the runs a restart would interrupt",
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn live_workflow_runs() -> axum::response::Response {
+    let counts = crate::workflow::store::live_run_counts();
+    (StatusCode::OK, Json(json!(counts))).into_response()
 }
 
 #[utoipa::path(
@@ -30405,7 +31240,7 @@ mod connection_identity_tests {
 #[cfg(test)]
 mod plugin_catalog_tests {
     use super::{
-        is_top_level_route, local_detail_trust_signals, local_plugin_detail,
+        display_version, is_top_level_route, local_detail_trust_signals, local_plugin_detail,
         manifest_declares_destination, manifest_policy_types, merge_plugin_catalog_entries,
         plugin_manifest_to_entry, plugin_marketplace_item_to_entry, plugin_runtime_dir,
     };
@@ -30429,6 +31264,43 @@ mod plugin_catalog_tests {
     /// manifest. The compiled-in side is asserted end-to-end against the real
     /// payload; the disk side is asserted on the exact predicate the branch keys on,
     /// for ids a squatter can actually claim.
+    /// A built-in's DISPLAYED version is Core's, not its manifest's.
+    ///
+    /// Every packaged manifest declares the authoring-time constant "1.0.0" and no
+    /// release bump rewrites it (the bump script covers Cargo.toml / package.json /
+    /// tauri.conf.json / Cargo.lock only). Relaying that string made the Store's
+    /// detail dialog advertise "v1.0.0" for every built-in app and plugin while Core
+    /// shipped 0.1.x — a version the user had never released.
+    ///
+    /// Both projectors are pinned, because the dialog reads them in different
+    /// places: the hero stat takes `detail?.version ?? entry.version`, but the
+    /// Information grid reads `entry.version` ALONE. Fixing only the detail payload
+    /// leaves the grid still claiming 1.0.0.
+    #[test]
+    fn a_compiled_in_manifest_shows_cores_version() {
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load();
+        let m = manifests
+            .iter()
+            .find(|m| crate::plugins::builtins::is_compiled_in_manifest(&m.id))
+            .expect("at least one manifest is compiled in");
+        let core_version = json!(env!("CARGO_PKG_VERSION"));
+        assert_eq!(plugin_manifest_to_entry(m)["version"], core_version);
+        assert_eq!(
+            local_plugin_detail(&m.id).expect("compiled-in")["version"],
+            core_version
+        );
+
+        // A disk manifest keeps its own version — it came from a catalog with a real
+        // publish train, and overriding it would misreport every sideloaded build.
+        let sideloaded = PluginManifest {
+            id: "com.evil.plugin".to_owned(),
+            name: "Sideloaded".to_owned(),
+            version: "2.5.1".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(display_version(&sideloaded), "2.5.1");
+    }
+
     #[test]
     fn local_detail_trust_signals_track_manifest_provenance() {
         let detail = local_plugin_detail("@ryu/ghost").expect("ghost is a compiled-in fixture");
@@ -30558,6 +31430,54 @@ mod plugin_catalog_tests {
         assert_eq!(e["permission_grants"], json!(["network.fetch"]));
         // No destination of any kind → a plugin.
         assert_eq!(e["type"], "plugin");
+    }
+
+    /// `engines` and this node's verdict on it must be on the CARD, not only in the
+    /// detail payload — a browse grid greys a card and says "needs Core 0.2.0"
+    /// without fetching a detail document per tile. Before this, `engines` reached
+    /// only the version-detail document, which is why no marketplace surface has
+    /// ever reflected a version floor.
+    #[test]
+    fn engines_and_compatibility_reach_the_card() {
+        let m = crate::plugin_manifest::PluginManifest {
+            id: "floored".to_owned(),
+            name: "Floored".to_owned(),
+            version: "1.0.0".to_owned(),
+            engines: Some(crate::plugin_manifest::EnginesReq {
+                ryu: ">=0.0.1".to_owned(),
+                mobile: Some(">=99.0.0".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let e = plugin_manifest_to_entry(&m);
+
+        assert_eq!(e["engines"]["ryu"], ">=0.0.1");
+        assert_eq!(e["engines"]["mobile"], ">=99.0.0");
+        // Core satisfies its own floor, and `mobile` is a surface Core cannot
+        // observe — so it is reported but must NOT make the plugin uninstallable.
+        assert_eq!(
+            e["compatibility"]["compatible"], true,
+            "an unobservable surface must stay advisory"
+        );
+        assert_eq!(e["compatibility"]["unmet"][0]["code"], "unknown");
+        assert_eq!(e["compatibility"]["unmet"][0]["surface"], "mobile");
+    }
+
+    /// A manifest with no `engines` block gets neither key — absent means "declares
+    /// no floors", which a client must be able to tell from "declares floors that
+    /// are all satisfied".
+    #[test]
+    fn a_manifest_without_engines_gets_no_compatibility_keys() {
+        let m = crate::plugin_manifest::PluginManifest {
+            id: "floorless".to_owned(),
+            name: "Floorless".to_owned(),
+            version: "1.0.0".to_owned(),
+            ..Default::default()
+        };
+        let e = plugin_manifest_to_entry(&m);
+        assert!(e.get("engines").is_none());
+        assert!(e.get("compatibility").is_none());
     }
 
     /// A manifest's `banner` reaches the card VERBATIM, whatever keys it carries.
@@ -30933,6 +31853,7 @@ mod app_tool_filter_tests {
             enabled,
             approved_grants: vec![],
             channel: crate::update::STABLE_CHANNEL.to_owned(),
+            provenance: None,
             created_at: None,
             updated_at: None,
         }
@@ -32403,6 +33324,50 @@ mod pure_helper_tests {
         assert!(plugin_entry_matches_query(&entry, "acme"));
         // No hit anywhere.
         assert!(!plugin_entry_matches_query(&entry, "zzz"));
+    }
+
+    // ── all-marketplaces view ────────────────────────────────────────────────
+    //
+    // The default store view browses every registered plugin source at once. What
+    // it must NOT fold in is the security-relevant half of that: `github-topic` is
+    // the unreviewed community feed, fetched separately via `?origin=community` so
+    // its rows always carry a trust notice. A copy of those rows reaching this view
+    // would render them under a marketplace heading with no notice at all.
+    #[test]
+    fn all_plugin_view_excludes_the_community_and_commerce_sources() {
+        assert!(!is_all_plugin_view_source("github-topic"));
+        assert!(!is_all_plugin_view_source("ryu-apps"));
+        // The hosted commerce backend is already folded INTO the merged first-party
+        // view; browsing it again would duplicate every paid listing.
+        assert!(!is_all_plugin_view_source("ryu-marketplace"));
+    }
+
+    #[test]
+    fn all_plugin_view_browses_the_canonical_first_party_view_once() {
+        assert!(is_all_plugin_view_source(PLUGIN_MERGED_VIEW_ID));
+        // Every id in the merged pair other than the canonical one is suppressed, so
+        // the first-party listings can only be emitted under a single heading.
+        for id in PLUGIN_MERGED_SOURCE_IDS {
+            if id != PLUGIN_MERGED_VIEW_ID {
+                assert!(!is_all_plugin_view_source(id));
+            }
+        }
+    }
+
+    #[test]
+    fn all_plugin_view_admits_federated_and_custom_marketplaces() {
+        assert!(is_all_plugin_view_source("integrations-sh"));
+        assert!(is_all_plugin_view_source("mp-my-team"));
+    }
+
+    // The sentinel is a VIEW, not a registered source: it must never collide with
+    // an id the merged-view test would also claim, or a request for "all" would
+    // resolve to a single source and the default store page would lose every
+    // marketplace but one.
+    #[test]
+    fn all_sources_sentinel_is_not_a_merged_view_id() {
+        assert!(!is_merged_plugin_view(PLUGIN_ALL_SOURCES_ID));
+        assert!(!PLUGIN_ALL_EXCLUDED_SOURCES.contains(&PLUGIN_ALL_SOURCES_ID));
     }
 
     // ── app_space_name ───────────────────────────────────────────────────────

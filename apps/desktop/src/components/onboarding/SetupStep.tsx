@@ -63,7 +63,7 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 	const [customizing, setCustomizing] = useState(false);
 	const [loading, setLoading] = useState(true);
 	const [loadError, setLoadError] = useState<string | null>(null);
-	const [_retryCount, setRetryCount] = useState(0);
+	const [retryCount, setRetryCount] = useState(0);
 	const [catalog, setCatalog] = useState<CatalogItem[]>([]);
 	const [deps, setDeps] = useState<DependencyStatus[]>([]);
 	const [categoryStates, setCategoryStates] = useState<
@@ -139,7 +139,11 @@ export function SetupStep({ nodeUrl, token, onInstall }: SetupStepProps) {
 		return () => {
 			cancelled = true;
 		};
-	}, [nodeUrl, token]);
+		// `retryCount` is load-bearing, not noise: both the "Try again" button and
+		// the back-online effect below only bump it, so dropping it from the deps
+		// leaves onboarding on a permanent spinner with no way out. A lint autofix
+		// has emptied this array once already.
+	}, [nodeUrl, token, retryCount]);
 
 	useEffect(() => {
 		if (online && loadError) {

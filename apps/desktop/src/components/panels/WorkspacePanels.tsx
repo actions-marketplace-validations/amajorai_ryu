@@ -645,6 +645,30 @@ const BUILTIN_TAB_ICONS: Record<BuiltinTabKind, typeof ComputerTerminal01Icon> =
 /** A contributed panel as a dock tab type. A `native` panel takes the glyph of
  *  its registered shell component (bundled, offline-safe); anything else falls
  *  back to the manifest's declared icon id. */
+/** The icon id of the app a `/plugin/<id>` page belongs to, or `null`.
+ *
+ *  Layout registers one `/plugin/<id>` route per enabled companion, so an app
+ *  opened as a PAGE is addressed by its own id — which is all this needs to find
+ *  the app and read the mark its manifest declares. Anything that is not such a
+ *  route (a settings page, the launchpad, …) returns null and keeps the generic
+ *  page glyph. Exported for unit tests. */
+export function routeAppIcon(
+	path: string,
+	apps: readonly { icon?: string | null; id: string }[]
+): string | null {
+	const PLUGIN_ROUTE = "/plugin/";
+	if (!path.startsWith(PLUGIN_ROUTE)) {
+		return null;
+	}
+	// The id may itself contain slashes (`@scope/name`), so take the whole
+	// remainder rather than the first segment.
+	const id = path.slice(PLUGIN_ROUTE.length);
+	if (!id) {
+		return null;
+	}
+	return apps.find((a) => a.id === id)?.icon ?? null;
+}
+
 function contributedTabType(panel: PluginDockPanel): TabTypeDef {
 	const native =
 		panel.panel === "native"
@@ -2293,7 +2317,10 @@ function SimpleTerminal({ cwd }: { cwd?: string | null }) {
 		if (outputRef.current) {
 			outputRef.current.scrollTop = outputRef.current.scrollHeight;
 		}
-	}, []);
+		// `lines`/`running` are load-bearing: they are the only things that change
+		// as output arrives, so without them the terminal pins to its first frame
+		// and never follows new output.
+	}, [lines, running]);
 
 	const promptLabel = currentCwd
 		? `${currentCwd.split(PATH_SEPARATOR_RE).at(-1) ?? currentCwd} $ `
@@ -3249,6 +3276,9 @@ function WorkspacePanelsImpl({
 	// read is best-effort, so a momentarily unreachable node must not destroy the
 	// user's open tabs.
 	const { dock_panels: dockPanels } = usePluginContributions();
+	// Installed apps, for resolving the icon of an app opened as a PAGE tab
+	// (`/plugin/<id>`) — see `routeAppIcon`.
+	const { apps } = useApps();
 	const bottomTabTypes = useMemo(
 		() => [
 			...BOTTOM_TAB_TYPES,
@@ -3300,11 +3330,18 @@ function WorkspacePanelsImpl({
 				return panel ? tabTypeIcon(contributedTabType(panel)) : {};
 			}
 			if (isRouteTabKind(kind)) {
-				return { glyph: File01Icon };
+				// An app opened as a PAGE (`/plugin/<id>`, registered per enabled
+				// companion in Layout) is still that app, so it wears the app's own
+				// icon. Only contributed dock PANELS resolved theirs before, so the
+				// same app showed its mark when docked and a generic page glyph when
+				// opened as a tab — the tab strip and the sidebar's vertical tabs both
+				// read this, so both were affected.
+				const appIcon = routeAppIcon(routeTabPath(kind), apps);
+				return appIcon ? { iconId: appIcon } : { glyph: File01Icon };
 			}
 			return { glyph: BUILTIN_TAB_ICONS[kind] };
 		},
-		[dockPanels, subagentView]
+		[apps, dockPanels, subagentView]
 	);
 	// The artifact currently pinned to the right panel's artifact tab (if any).
 	const [artifactView, setArtifactView] = useState<Artifact | null>(null);

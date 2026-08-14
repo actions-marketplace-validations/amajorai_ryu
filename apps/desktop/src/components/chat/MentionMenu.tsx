@@ -32,9 +32,14 @@ export function MentionMenu({
 	const flat = useMemo(() => flattenGroups(groups), [groups]);
 
 	// Reset the highlight to the top whenever the candidate set changes.
+	// The dep is the PRIMITIVE `flat.length`, deliberately, not `flat`: `flat` is
+	// a useMemo over the `groups` prop and the call site may pass a fresh array
+	// literal, which would re-run this on every render and reset the highlight on
+	// every keystroke. The component stays mounted while the list narrows, so
+	// without this dep `active` is never reset.
 	useEffect(() => {
 		setActive(0);
-	}, []);
+	}, [flat.length]);
 
 	// Dismiss on click outside (ignoring clicks on the anchored textarea).
 	useEffect(() => {
@@ -72,7 +77,12 @@ export function MentionMenu({
 			} else if (e.key === "Enter" || e.key === "Tab") {
 				e.preventDefault();
 				e.stopPropagation();
-				onSelect(flat[active]);
+				// Clamp independently of the dep restore above, so a stale index can
+				// never hand `undefined` to the select handler.
+				const picked = flat[Math.min(active, flat.length - 1)];
+				if (picked) {
+					onSelect(picked);
+				}
 			}
 		};
 		document.addEventListener("keydown", handler, { capture: true });

@@ -80,8 +80,12 @@ export interface ComposerSlot {
 	renderBody: (close: () => void) => ReactNode;
 	/**
 	 * The composed Agent · Model · Thinking sections — the SAME ones inside the
-	 * composer's settings menu — so an empty-state logo can open the identical
-	 * dropdown (exactly like ChatPage's `EmptyStateHeader`).
+	 * composer's settings menu.
+	 *
+	 * This is the FULL list, including the contributed pickers (output style, an
+	 * app's own `select`). It is what the composer's keyboard shortcuts act on, and
+	 * what any surface rendering these as rows must use. A surface building its own
+	 * settings TRIGGER wants {@link triggerSections} instead.
 	 */
 	sections: ComposerSettingsSection[];
 	/**
@@ -97,6 +101,13 @@ export interface ComposerSlot {
 	 * `const files = takeImages(); sendMessage(files ? { text, files } : { text });`
 	 */
 	takeImages: () => ComposerSendFile[] | undefined;
+	/**
+	 * {@link sections} narrowed to what a settings trigger should spell out — the
+	 * contributed pickers are dropped, so an empty-state logo summarises exactly
+	 * what the composer's own trigger does instead of listing one extra segment per
+	 * installed app.
+	 */
+	triggerSections: ComposerSettingsSection[];
 	/**
 	 * Render this near the surface root: the full-screen voice-mode overlay while a
 	 * session is open, else `null`.
@@ -227,28 +238,34 @@ export function useComposerSlot(
 		[runtime.setAgentId]
 	);
 
-	const { infoBar, leftActions, rightActions, sections, renderBody } =
-		useComposerAgentControls({
-			agents,
-			// Derived, never hardcoded: a dock/builder pane with no conversation yet
-			// is opening one, which is the same first clause the turn path tests
-			// (`req.conversation_id.is_none()`). Hardcoding false here would let a
-			// cross-agent rule fire on a turn whose own composer said it wouldn't.
-			atConversationStart: !conversationId,
-			agentId: runtime.agentId,
-			onSelectAgent: handleSelectAgent,
-			teams,
-			teamId,
-			onSelectTeam,
-			onCreateAgent,
-			modelOptions: runtime.modelOptions,
-			model: runtime.effectiveModel,
-			onModelChange: runtime.setModel,
-			modelSection: acp.modelSection,
-			extraSections: acp.extraSections,
-			compact,
-			compactTrigger,
-		});
+	const {
+		infoBar,
+		leftActions,
+		rightActions,
+		sections,
+		triggerSections,
+		renderBody,
+	} = useComposerAgentControls({
+		agents,
+		// Derived, never hardcoded: a dock/builder pane with no conversation yet
+		// is opening one, which is the same first clause the turn path tests
+		// (`req.conversation_id.is_none()`). Hardcoding false here would let a
+		// cross-agent rule fire on a turn whose own composer said it wouldn't.
+		atConversationStart: !conversationId,
+		agentId: runtime.agentId,
+		onSelectAgent: handleSelectAgent,
+		teams,
+		teamId,
+		onSelectTeam,
+		onCreateAgent,
+		modelOptions: runtime.modelOptions,
+		model: runtime.effectiveModel,
+		onModelChange: runtime.setModel,
+		modelSection: acp.modelSection,
+		extraSections: acp.extraSections,
+		compact,
+		compactTrigger,
+	});
 
 	// Staged image attachments (the composer "+"). Data URL for the model turn;
 	// also persisted into the Uploads system space (best-effort), matching ChatPage.
@@ -450,6 +467,7 @@ export function useComposerSlot(
 		inputBar,
 		renderBody,
 		sections,
+		triggerSections,
 		takeClipText,
 		takeImages,
 		voiceModeOverlay,

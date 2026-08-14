@@ -20,8 +20,17 @@
 //
 // The transfer routes are the exception and take explicit org ids, because a
 // transfer names two orgs and neither of them is necessarily the active one.
+//
+// Because the active org is the fact every org-scoped surface is implicitly
+// parameterised by, this module also owns the ONE cached read of it that the
+// whole app shares — `useActiveOrgId` at the bottom. It lives next to
+// `getActiveOrgId`/`setActiveOrg` rather than in a hook of its own so the
+// accessor, the mutation and the cache key that ties them together cannot drift
+// apart.
 
+import { useQuery } from "@tanstack/react-query";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
+import { queryClient as appQueryClient } from "@/src/lib/query-client.ts";
 
 function authToken(): string | null {
 	try {
@@ -161,6 +170,48 @@ export async function getActiveOrgId(): Promise<string | null> {
 		session?: { activeOrganizationId?: string | null };
 	} | null;
 	return body?.session?.activeOrganizationId ?? null;
+}
+
+/**
+ * Where {@link getActiveOrgId}'s answer is cached. Exported so the switcher can
+ * name it, and so nobody re-derives a second key for the same fact.
+ */
+export const ACTIVE_ORG_KEY = ["settings", "orgs", "active"] as const;
+
+/**
+ * The org THIS session is scoped to, as a hook.
+ *
+ * Every org-scoped surface needs it for one of two reasons: to put it in a
+ * TanStack query key (so the previous org's response is not served for a paint
+ * after a switch), or — for the surfaces that are plain state + `useEffect`
+ * rather than queries — as an effect DEPENDENCY, so the switch re-runs a load
+ * whose request is byte-identical but whose answer is not. `/api/credits/*` and
+ * friends carry no `?orgId=`; they resolve the org from the session row, so the
+ * id is a re-run key here, never an argument.
+ *
+ * DELIBERATELY PINNED to the app-wide client (the second argument) instead of
+ * whatever `QueryClientProvider` happens to be above the caller. The settings
+ * dialog runs its own isolated `new QueryClient()` while the gateway dialog is
+ * mounted outside that provider entirely, so reading the ambient client would
+ * make a component's answer depend on which dialog it is rendered inside, and
+ * would leave the two with independently stale copies of the single fact that
+ * decides whose numbers every other surface is showing.
+ *
+ * `staleTime: 0` overrides the app-wide 5-minute default: the same account can
+ * switch org from the web or a second window, and a cached id that is five
+ * minutes behind the session row would scope the whole app to the wrong org.
+ */
+export function useActiveOrgId(): string | null {
+	const { data } = useQuery(
+		{
+			enabled: hasOrgAuth(),
+			queryFn: getActiveOrgId,
+			queryKey: ACTIVE_ORG_KEY,
+			staleTime: 0,
+		},
+		appQueryClient
+	);
+	return data ?? null;
 }
 
 /** Rescope this session to `organizationId`. */

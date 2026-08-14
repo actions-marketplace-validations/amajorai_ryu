@@ -494,9 +494,10 @@ async fn transcribe(
     .map(|t| t.trim().to_string())
 }
 
-/// Synthesize one sentence to WAV bytes. Uses OuteTTS (built-in) or, for any other
-/// engine id, the resident RyuTTS sidecar `/generate` — the low-latency path for
-/// repeated per-sentence synthesis (mirrors `server::voice::speak`).
+/// Synthesize one sentence to WAV bytes. Uses OuteTTS (built-in), the Gateway's
+/// cloud TTS slot for `gateway`, or, for any other engine id, the resident
+/// RyuTTS sidecar `/generate` — the low-latency path for repeated per-sentence
+/// synthesis (mirrors `server::voice::speak`).
 async fn synthesize_sentence(
     deps: &VoiceSessionDeps,
     cfg: &VoiceConfig,
@@ -510,6 +511,35 @@ async fn synthesize_sentence(
         .unwrap_or_else(crate::sidecar::providers::ryutts::default_tts_engine);
     if engine == "outetts" {
         return crate::sidecar::providers::outetts::synthesize(text).await;
+    }
+
+    // The cloud slot, so picking "Cloud (via gateway)" in settings works in
+    // realtime voice mode too and not just in read-aloud. `VoiceOutput::Audio`
+    // carries raw WAV to the client, so a provider that hands back anything
+    // else (fal/replicate return a hosted mp3) is treated as a failure and
+    // degrades to OuteTTS rather than streaming bytes the client cannot decode.
+    if engine == "gateway" {
+        match crate::server::voice::synth_via_gateway(
+            &deps.client,
+            cfg.tts_voice.as_deref(),
+            None,
+            text,
+        )
+        .await
+        {
+            Ok((audio, content_type)) if content_type.starts_with("audio/wav") => return Ok(audio),
+            Ok((_, content_type)) => {
+                tracing::warn!(
+                    "voice-session gateway TTS returned {content_type}, not audio/wav; \
+                     falling back to OuteTTS"
+                );
+                return crate::sidecar::providers::outetts::synthesize(text).await;
+            }
+            Err(e) => {
+                tracing::warn!("voice-session gateway TTS failed ({e}); falling back to OuteTTS");
+                return crate::sidecar::providers::outetts::synthesize(text).await;
+            }
+        }
     }
 
     let url = format!(

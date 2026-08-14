@@ -307,7 +307,7 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Off by default. With a budget set, Ryu keeps the newest turns that fit and always keeps the system prompt — your instructions, recalled memory and skills — which the engine's own overflow handling can otherwise drop. Everything below the budget is ignored while it is off."
+			caption="Off by default. With a budget set, Ryu keeps the newest turns that fit and always keeps the system prompt (your instructions, recalled memory and skills), which the engine's own overflow handling can otherwise drop. Everything below the budget is ignored while it is off."
 			title="Conversation context"
 		>
 			<SettingsCard className="space-y-4">
@@ -332,8 +332,8 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 					<p className="text-muted-foreground text-xs">
 						Total tokens per turn, request plus reply. <strong>Auto</strong>{" "}
 						reuses the “Context size” saved for the model in an agent's engine
-						settings, which only local engines offer. A model without one — any
-						cloud model, and any local model you haven't set it on — keeps
+						settings, which only local engines offer. A model without one (any
+						cloud model, and any local model you haven't set it on) keeps
 						sending the whole conversation, so pick a number if you are unsure.
 					</p>
 				</div>
@@ -380,7 +380,7 @@ function ContextWindowSection({ target }: { target: ApiTarget }) {
 						Held back from the budget so the answer has room.{" "}
 						{historyCeiling === null
 							? "Applies once a budget is set."
-							: `Leaves at most ${historyCeiling.toLocaleString()} tokens for history — less once your system prompt, recalled memory and skills are counted.`}
+							: `Leaves at most ${historyCeiling.toLocaleString()} tokens for history, less once your system prompt, recalled memory and skills are counted.`}
 					</p>
 				</div>
 
@@ -461,7 +461,7 @@ function ToolRankerSection({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="How Ryu picks which tools and skills to offer the model for a given request. Keyword matching is the default and needs nothing installed. Meaning-based ranking compares your request to each tool or skill using the embedding model this node is configured with — where no embedding model is reachable it quietly falls back to keyword order rather than failing the search."
+			caption="How Ryu picks which tools and skills to offer the model for a given request. Keyword matching is the default and needs nothing installed. Meaning-based ranking compares your request to each tool or skill using the embedding model this node is configured with. Where no embedding model is reachable, it quietly falls back to keyword order rather than failing the search."
 			title="Tool and skill search"
 		>
 			<SettingsCard>
@@ -742,7 +742,7 @@ export function MemoryTab() {
 			<ContextWindowSection target={target} />
 
 			<SettingsSection
-				caption="On by default. Instead of giving the model every enabled skill's full instructions on every reply, Ryu shares a short list and the agent loads a skill's full instructions on demand when relevant — saving context on smaller local models. Only agents that run tools (the default Ryu agent) load on demand; others always get full instructions. Turn off to always include full skill instructions."
+				caption="On by default. Instead of giving the model every enabled skill's full instructions on every reply, Ryu shares a short list and the agent loads a skill's full instructions on demand when relevant, which saves context on smaller local models. Only agents that run tools (the default Ryu agent) load on demand; others always get full instructions. Turn off to always include full skill instructions."
 				title="Skill loading"
 			>
 				<SettingsGroup>

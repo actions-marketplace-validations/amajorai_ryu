@@ -26,6 +26,7 @@ import {
 } from "@ryu/marketplace/catalog/detail/listing-detail-shell";
 import { Badge } from "@ryu/ui/components/badge";
 import { Button } from "@ryu/ui/components/button";
+import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { createRoot } from "react-dom/client";
 import "../../src/index.css";
 
@@ -52,9 +53,13 @@ function Story() {
 		<div className="min-h-svh bg-muted/40 p-8">
 			<div className={DIALOG_CLASS} data-testid="dialog">
 				<ListingDetailShell
+					// SECONDARY controls only. The primary CTA moved into the hero's
+					// title row (see `hero.actions` below) and this band is what did not
+					// fit up there: Settings, and the price/installed pills. Mirroring
+					// the real `AppSecondaryActions` split matters — a story that keeps
+					// the old arrangement is a picture of a layout that no longer ships.
 					actions={
 						<>
-							<Button size="sm">Add</Button>
 							<Button size="sm" variant="outline">
 								Settings
 							</Button>
@@ -103,12 +108,36 @@ function Story() {
 					}
 					hero={
 						<ListingHero
-							badges={["Built-in", "Required", "COMPANION", "TOOL"]}
+							// The PRIMARY control, on the title's row and on the wash — the
+							// arrangement the real Apps section ships. `secondary` + a ring
+							// rather than the `ghost`/`outline` variants the band used: a
+							// button with no fill dissolves into an author-supplied dither.
+							actions={
+								<>
+									{/* The PRIMARY variant, matching the real InstallButton's
+									    `idleVariant="default"`. A saturated brand fill is the one
+									    thing that reads on any author-supplied wash in either
+									    theme — `secondary` is a near-black plate in dark mode and
+									    disappears into the dither, which is exactly the failure
+									    the ghost variant had. */}
+									<Button className="shadow-sm" size="sm">
+										Add
+									</Button>
+									<span className="rounded-full bg-white/15 px-2 py-1 text-white/85 backdrop-blur-sm">
+										♥
+									</span>
+								</>
+							}
+							// "Built-in" is a STATUS glyph now, not a word in this array, and
+							// "COMPANION" is gone entirely — every listing in the Apps tab is
+							// one, so the chip said nothing.
+							badges={["Required", "TOOL"]}
 							dither={{ from: 250, to: "transparent", direction: "down" }}
 							icon={
 								<span className="font-semibold text-2xl text-white">E</span>
 							}
 							name="Example App With A Fairly Long Listing Name"
+							statusIcons={<StatusBadge kind="builtin" tone="hero" />}
 							tagline="Clears your inbox, sends emails, manages your calendar, and checks you in for flights."
 						/>
 					}
@@ -139,7 +168,7 @@ function Story() {
 					<ListingSection title="Permissions">
 						<ul className="flex flex-col gap-1.5">
 							{["Read files", "Network access", "Run commands"].map((g) => (
-								<li className="rounded-md border px-3 py-1.5" key={g}>
+								<li className="rounded-md bg-muted px-3 py-1.5" key={g}>
 									<div className="font-medium text-sm">{g}</div>
 									<div className="text-muted-foreground text-xs">
 										A one-line plain-English description of the grant.

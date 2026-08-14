@@ -103,7 +103,7 @@ export function DevMetricsPanel() {
 		>
 			<SettingsGroup>
 				<SettingsItem
-					description="Time to first token is the wait before anything appears — queueing, routing, and the model thinking. Total is the whole turn, so total minus first token is how long the model spent writing."
+					description="Time to first token is the wait before anything appears: queueing, routing, and the model thinking. Total is the whole turn, so total minus first token is how long the model spent writing."
 					title="Chat turns"
 				>
 					<div className="grid grid-cols-2 gap-3 sm:grid-cols-5">

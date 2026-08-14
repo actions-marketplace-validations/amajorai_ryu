@@ -51,7 +51,7 @@ import type { ReactNode } from "react";
 import { useCachedIconUrl } from "../icon-cache.ts";
 import { resolveCardIcon } from "../icon-url.ts";
 import type { CardDither } from "../types.ts";
-import BrandOrCoverImage from "./brand-image.tsx";
+import BrandOrCoverImage, { normalizeIconPadding } from "./brand-image.tsx";
 import { ditherDissolves, normalizeDither, opaqueDither } from "./dither.ts";
 import { OPPOSITE_DIRECTION } from "./dither-banner.tsx";
 
@@ -73,6 +73,10 @@ export interface AppIconProps {
 	iconBackground?: string | null;
 	/** Icon-primitive id (Iconify `prefix:name`, bare Hugeicons name, `svgl:<slug>`). */
 	iconId?: string | null;
+	/** The listing's declared inset for its raster mark (manifest `iconPadding`).
+	 *  A raw wire string; validated here rather than by the caller, so a card and a
+	 *  hero cannot disagree about what an unrecognized value means. */
+	iconPadding?: string | null;
 	/** Raster logo URL. */
 	iconUrl?: string | null;
 	/** Display name — the seed of last resort, and the img alt. */
@@ -80,6 +84,18 @@ export interface AppIconProps {
 	/** Stable seed for the generative tile — ALWAYS the item's unique id (the
 	 *  plugin id, not its label), so the same app tiles identically everywhere. */
 	seedId?: string | null;
+	/** Paint the seeded generative tile BEHIND the item's art when it declares no
+	 *  plate of its own (no `dither`, no `iconBackground`), instead of the flat
+	 *  theme surface.
+	 *
+	 *  For community listings. A packaged first-party manifest always declares a
+	 *  wash, so first-party cards are painted squares; a GitHub-discovered repo
+	 *  usually declares only an `icon`, which left its card as a bare glyph on flat
+	 *  `bg-muted` sitting in a grid of painted plates — the community rows read as
+	 *  a different, lesser component rather than as the same one. The seed is the
+	 *  listing's own id, so the plate distinguishes listings from each other rather
+	 *  than lumping one publisher's repos under a shared mark. */
+	seedPlate?: boolean;
 	/** Pixel size handed to the Icon primitive. Keep in step with `className`'s
 	 *  box: an Icon needs an explicit box, unlike a class-sized Hugeicons element. */
 	size?: number;
@@ -112,10 +128,12 @@ export default function AppIcon({
 	dither,
 	fallback,
 	iconBackground,
+	iconPadding,
 	iconId,
 	iconUrl,
 	name,
 	seedId,
+	seedPlate = false,
 	size = 20,
 	variant = "card",
 }: AppIconProps) {
@@ -126,9 +144,22 @@ export default function AppIcon({
 	// is a fixed white it cannot adapt away from, so the dissolved end of a 5rem
 	// tile would swallow the glyph. `opaqueDither` re-ramps the listing's OWN hue,
 	// so the tile still carries the app's colour — it just covers its box.
-	const safeDither = isHero
-		? opaqueDither(normalizeDither(dither))
-		: normalizeDither(dither);
+	// The hero re-ramps a wash to opaque ONLY when that wash dissolves. That is the
+	// case the fixed white glyph cannot survive (the dissolved end of a 5rem tile
+	// shows the banner through, and white on a light banner is invisible), and it
+	// is the whole reason the re-ramp exists.
+	//
+	// It used to apply to EVERY hero wash, including the ones that already cover
+	// their box — so an app with a two-tone plate was painted one way on its card
+	// and a different, more saturated way in the preview dialog. Same app, same
+	// declared plate, two colours: exactly the "why is the icon in the preview
+	// different from the actual app icon" report. A wash that already covers its
+	// box now paints identically in both places.
+	const declaredDither = normalizeDither(dither);
+	const safeDither =
+		isHero && declaredDither && ditherDissolves(declaredDither)
+			? opaqueDither(declaredDither)
+			: declaredDither;
 	const svglIndex = useSvglIndex();
 	const {
 		iconId: resolvedIconId,
@@ -184,6 +215,7 @@ export default function AppIcon({
 				brand={isBrandMark === true}
 				dark={cachedDark ?? resolvedIconUrlDark ?? null}
 				light={cachedLight ?? resolvedIconUrl}
+				padding={normalizeIconPadding(iconPadding)}
 			/>
 		);
 	} else {
@@ -192,6 +224,12 @@ export default function AppIcon({
 
 	const flatBackground =
 		!safeDither && iconBackground ? { background: iconBackground } : undefined;
+
+	// The seeded plate stands in for a declared one, so it applies only when the
+	// item has art to sit ON and declared no plate itself. `isPlaceholder` already
+	// covers the art-less case with the same tile at full bleed.
+	const usesSeedPlate =
+		seedPlate && !isPlaceholder && !safeDither && !iconBackground && !!seed;
 
 	// The glyph colour follows how far the wash actually covers the square. A
 	// two-tone dither paints edge to edge, so white always reads on it. The
@@ -207,6 +245,10 @@ export default function AppIcon({
 			glyphColor = ditherDissolves(safeDither)
 				? "text-foreground"
 				: "text-white";
+		} else if (usesSeedPlate) {
+			// The seeded tile paints edge to edge in saturated colour, the same
+			// condition under which a two-tone dither takes white above.
+			glyphColor = "text-white";
 		} else {
 			glyphColor = APP_ICON_TILE_CARD_GLYPH;
 		}
@@ -217,7 +259,7 @@ export default function AppIcon({
 			className={cn(
 				isHero ? APP_ICON_TILE_HERO : APP_ICON_TILE_CARD,
 				glyphColor,
-				isPlaceholder || safeDither || iconBackground
+				isPlaceholder || safeDither || iconBackground || usesSeedPlate
 					? ""
 					: isHero
 						? APP_ICON_TILE_HERO_SURFACE
@@ -230,6 +272,13 @@ export default function AppIcon({
 				<DitherAvatar animate={false} className="size-full" name={seed} />
 			) : (
 				<>
+					{usesSeedPlate ? (
+						<DitherAvatar
+							animate={false}
+							className="absolute inset-0 size-full"
+							name={seed}
+						/>
+					) : null}
 					{safeDither ? (
 						<DitherGradient
 							// On a hero the tile washes in the OPPOSITE direction to the

@@ -61,7 +61,7 @@ export default function VerticalSolutions() {
 					<SectionTitle title="Set up for the way your firm already works." />
 					<p className={sectionSubtitleClass}>
 						Your document types, your rules, your reviewers, your approval
-						steps. Ready in days, not a six month project.
+						steps, running on real work within days.
 					</p>
 				</StaggerLines>
 

@@ -187,6 +187,7 @@ pub fn inject_search_tool(body: &mut Value, always_on: &[Value]) {
 /// managed-plan tool-call cost). Only `composio__*` ids that pass the allowlist
 /// gate and reach Core are counted; `tool_search`, denied calls, and free
 /// builtin/MCP/app tools never increment it.
+///
 pub async fn run_tool_loop(
     body: &mut Value,
     provider: &dyn Provider,
@@ -241,6 +242,11 @@ pub async fn run_tool_loop(
                 // Bill Composio executions at dispatch (Composio charges per
                 // action). Counted whether the call succeeds or errors, since
                 // both reach Core; free builtin/MCP/app tools are not counted.
+                //
+                // CLASSIFIED HERE BECAUSE THIS IS THE LAST PLACE THE NAME EXISTS.
+                // Composio bills premium tools at 3x base, and the debit site
+                // downstream sees only counts — so a class decided anywhere later
+                // would have to be guessed. See `BillableToolCalls`.
                 if name.starts_with(COMPOSIO_TOOL_PREFIX) {
                     billable_tool_calls = billable_tool_calls.saturating_add(1);
                 }

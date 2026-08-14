@@ -28,6 +28,7 @@
 // (`acpMode` / `acpModel` / `acpOptionValues`) onto its per-turn request body.
 
 import type {
+	AcpConfigOption,
 	AcpSectionsResult,
 	AcpSelectionStore,
 	ComposerModelSection,
@@ -35,7 +36,7 @@ import type {
 } from "@ryu/blocks/composer/composer-acp-sections";
 import { useAcpSections } from "@ryu/blocks/composer/composer-acp-sections";
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type { ComposerSettingItem } from "@/components/agent-elements/input/composer-settings-menu.tsx";
 import {
 	groupModelItems,
@@ -134,6 +135,23 @@ export interface ComposerAcpSectionsParams {
 	 */
 	streamedConfig?: StreamedAcpConfig | null;
 	/**
+	 * The agent's config option DEFINITIONS as re-published on the live chat
+	 * stream (Core's `data-ryu-acp-config-options` part), which supersede the
+	 * probed set when present.
+	 *
+	 * Distinct from `streamedConfig`, which carries option VALUES the agent asked
+	 * the client to change. This is the option list itself — the answer to
+	 * `session/set_config_option`, which by protocol returns the FULL refreshed
+	 * set. It is the only channel by which an option that exists solely for
+	 * another option's value (codex's reasoning effort, revealed once a model
+	 * that has one is selected) can appear against the LIVE session: the probe
+	 * that normally supplies these runs in a throwaway session of its own.
+	 *
+	 * Session-scoped surfaces (launchpad/dock) leave this undefined and keep
+	 * using the probe alone.
+	 */
+	streamedConfigOptions?: AcpConfigOption[] | null;
+	/**
 	 * An agent-INITIATED permission-mode change observed on the live chat stream
 	 * (Core's `data-ryu-acp-mode` part). Session-scoped surfaces leave it undefined.
 	 */
@@ -160,6 +178,7 @@ export function useComposerAcpSections({
 	onSelectionApplied,
 	streamedMode,
 	streamedConfig,
+	streamedConfigOptions,
 }: ComposerAcpSectionsParams): ComposerAcpSectionsResult {
 	const activeNode = useActiveNode();
 	const isRyuAgent = agentId === "ryu";
@@ -221,10 +240,31 @@ export function useComposerAcpSections({
 
 	// The active agent's advertised permission modes / reasoning-effort config
 	// options / models. A picker renders only for what the agent reports.
-	const { config: acpSessionConfig, loading: acpConfigLoading } = useAcpConfig(
-		agentId,
-		acpSelections
-	);
+	const { config: probedSessionConfig, loading: acpConfigLoading } =
+		useAcpConfig(agentId, acpSelections);
+	// The live session's own answer wins over the probe's. The probe runs in a
+	// SEPARATE throwaway session, so it can never see an option the agent revealed
+	// in response to a pick applied to the real one. Only `configOptions` is
+	// replaced — models and modes still come from the probe, which is the only
+	// thing that reports them before a chat exists.
+	// Scoped to the agent the options were published FOR. The caller clears its
+	// streamed state on an agent switch, but this is the load-bearing half: an
+	// override that outlived its agent would pin the new agent's pickers to the
+	// previous one's option list, and the probe — which is correct — would be
+	// silently discarded.
+	const streamedForAgent = useRef<string | null>(null);
+	if (streamedConfigOptions) {
+		streamedForAgent.current = agentId ?? null;
+	}
+	const streamedIsForThisAgent = streamedForAgent.current === (agentId ?? null);
+	const acpSessionConfig = useMemo(() => {
+		if (
+			!(streamedConfigOptions && probedSessionConfig && streamedIsForThisAgent)
+		) {
+			return probedSessionConfig;
+		}
+		return { ...probedSessionConfig, configOptions: streamedConfigOptions };
+	}, [probedSessionConfig, streamedConfigOptions, streamedIsForThisAgent]);
 	// The active agent's effective capabilities — a reasoning-off override
 	// suppresses the thinking picker (Jan-style). Pass the engine model so
 	// vision/tools detection follows the composer's model selection, and the SAME

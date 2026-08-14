@@ -21,10 +21,14 @@
 //     that have never been written, so an existing user's setup survives the
 //     upgrade and only a fresh install gets the Simple treatment.
 //
-// What the level itself gates live (no write involved) is the composer: at
-// Simple the chat bar offers the agent picker and nothing else — no model, no
-// approval mode, no thinking budget, no output style. See
-// `composer-agent-controls.tsx`.
+// What the level itself gates live (no write involved) is two surfaces:
+//
+//   - The composer: at Simple the chat bar offers the agent picker and nothing
+//     else — no model, no approval mode, no thinking budget, no output style.
+//     See `composer-agent-controls.tsx`.
+//   - The node dropdown: at Simple the Engines, Voice & Sandbox and Toolkits
+//     blocks start folded behind their own headings rather than listing flat.
+//     See `NodeSelector.tsx`.
 
 import { setPersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { TOOL_DETAIL_PRESETS } from "@/src/lib/tool-detail-ladder.ts";
@@ -236,6 +240,22 @@ export function showsModelPicker(level: InterfaceLevel): boolean {
  */
 export function showsComposerTuning(level: InterfaceLevel): boolean {
 	return level === "advanced" || level === "expert";
+}
+
+/**
+ * Does this level fold the node dropdown's technical blocks — Engines, Voice &
+ * Sandbox, Toolkits — behind a disclosure?
+ *
+ * Simple folds them; every level above lists them flat, exactly as before. Same
+ * trade as the composer gates above, one notch softer: collapsing is not even
+ * hiding. The heading stays on screen, the block is one click away, and every
+ * row inside it still works — so someone who manages engines from this menu
+ * raises the level once and never meets the disclosure again, and someone who
+ * does not gets a node menu about the node (who it is, what it costs, what is
+ * connected) instead of three blocks of runtime plumbing.
+ */
+export function collapsesNodeSections(level: InterfaceLevel): boolean {
+	return level === "simple";
 }
 
 seedInterfaceLevel();

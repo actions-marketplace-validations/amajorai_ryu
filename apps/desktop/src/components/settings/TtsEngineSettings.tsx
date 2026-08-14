@@ -67,7 +67,7 @@ export function TtsEngineSettings() {
 		[]
 	);
 	const [loadFailed, setLoadFailed] = useState(false);
-	const [_reloadNonce, setReloadNonce] = useState(0);
+	const [reloadNonce, setReloadNonce] = useState(0);
 	const [testState, setTestState] = useState<"idle" | "speaking">("idle");
 	const [testFailed, setTestFailed] = useState(false);
 	const [models, setModels] = useState<TtsModel[]>([]);
@@ -127,7 +127,9 @@ export function TtsEngineSettings() {
 		return () => {
 			cancelled = true;
 		};
-	}, [node, refreshModels]);
+		// `reloadNonce` is load-bearing: the "Retry" button only bumps it, so
+		// without it the button is dead.
+	}, [node, refreshModels, reloadNonce]);
 
 	const handleInstall = useCallback(
 		async (model: TtsModel) => {

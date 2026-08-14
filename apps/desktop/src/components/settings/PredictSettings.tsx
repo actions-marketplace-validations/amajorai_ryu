@@ -139,7 +139,7 @@ export function PredictSettings() {
 			<SettingsSection
 				caption={
 					<>
-						Inline ghost-text autocomplete in <strong>any</strong> text field —
+						Inline ghost-text autocomplete in <strong>any</strong> text field.
 						press <kbd className="rounded bg-muted px-1">Tab</kbd> to accept.
 						The companion reads the text before your cursor, asks the model
 						below for a continuation (through the Gateway, like every model

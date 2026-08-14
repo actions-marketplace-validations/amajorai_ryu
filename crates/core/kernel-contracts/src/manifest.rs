@@ -803,6 +803,28 @@ pub struct PluginManifest {
     )]
     pub icon_background: Option<String>,
 
+    /// Inset for the card's icon square (Ryu extension: `iconPadding`).
+    ///
+    /// A product LOGO that is edge-to-edge in its own art has no breathing room
+    /// inside the square and reads as a sticker rather than an icon. One of
+    /// `none` | `sm` | `md` | `lg`.
+    ///
+    /// Any value other than `none` ALSO letterboxes the art (`object-contain`)
+    /// instead of cropping it. That coupling is load-bearing, not a convenience:
+    /// a listing declaring a bare `iconUrl` (no `icon`) is not in the brand lane,
+    /// so it is painted `object-cover` — inset alone would be silently inert for
+    /// exactly the raw-logo case this field exists for.
+    ///
+    /// `Option<String>` rather than a Rust enum, for the same forward-compat
+    /// reason `icon_dither` is raw JSON: an unknown value must never fail the
+    /// manifest parse. The render layer validates and falls back.
+    #[serde(
+        default,
+        rename = "iconPadding",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub icon_padding: Option<String>,
+
     /// Primary brand accent color, hex (Ryu extension: `accentColor`).
     #[serde(
         default,
@@ -1754,6 +1776,24 @@ pub struct Contributes {
     #[serde(default)]
     pub sidebar_buttons: Vec<SidebarButtonContribution>,
 
+    /// App-registered sidebar **modes** — a named preset of the whole left sidebar:
+    /// which sections it offers as tabs, and which one it opens on.
+    ///
+    /// The third axis of the sidebar contract, after "what sections exist"
+    /// ([`Contributes::sidebar_sections`]) and "what nav rows exist"
+    /// ([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is
+    /// arranged**. The shell ships three modes of its own (every section stacked;
+    /// every section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and
+    /// before this member an app could add a section to that list but could not
+    /// propose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture
+    /// had to ask for a shell change. See [`SidebarModeContribution`].
+    ///
+    /// Self-contained (it names sections, not runnables), so it stays out of
+    /// [`Contributes::referenced_ids`]; served + tagged with the owning `plugin` id
+    /// at `GET /api/plugins/contributions`.
+    #[serde(default)]
+    pub sidebar_modes: Vec<SidebarModeContribution>,
+
     /// **Colour themes** the plugin ships — the seam that makes a theme an ordinary
     /// marketplace item instead of a hardcoded entry in the shell's preset table.
     ///
@@ -2543,6 +2583,65 @@ pub struct SidebarSectionContribution {
     /// the desktop renderer, never by Core. Absent = a header with no rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
+}
+
+/// One app-registered **sidebar mode** — a named arrangement of the whole left
+/// sidebar: the sections it offers as tabs, and the one it opens on.
+///
+/// The shape is deliberately thin, and every field it does NOT have is the point:
+///
+/// - **No renderer, no code.** A mode names existing sections. It cannot draw a row,
+///   which is why it needs no grants and cannot be a carriage channel — the worst a
+///   hostile mode can do is offer a tab list the user does not want, one menu row
+///   away from being switched off.
+/// - **No row style.** How a section's rows draw belongs to that SECTION
+///   (`SidebarSectionSpec.rowStyle` in `@ryu/app-host/views`), because it is a
+///   property of the feed, not of an arrangement: a roster of named bots wants
+///   avatars whether or not the user is in a mode that features it. Putting it here
+///   would also mean a mode reaching across into another contribution's rendering,
+///   which is the coupling this member exists to avoid.
+/// - **No `hidden` list.** A mode is a positive statement about what to show. The
+///   sections it does not name are simply not tabs in it.
+///
+/// Section ids are the shell's own keys (`agents`, `chats`, `spaces`, …) or another
+/// contributed section's namespaced key (`plugin:<pluginId>:<sectionId>`). A named
+/// section that does not resolve is dropped rather than failing the mode — an app
+/// may legitimately name a section from a sibling app the user has not installed,
+/// and losing one tab is a better answer than losing the mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SidebarModeContribution {
+    /// Stable id for this mode within the plugin (namespaced by the shell into the
+    /// stored mode key as `plugin:<pluginId>:<id>`, so two apps can both ship a
+    /// `bots` mode).
+    pub id: String,
+
+    /// Label shown in the sidebar's mode menu and the Appearance tab.
+    pub title: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Optional ordering hint among the modes on offer (lower = earlier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
+
+    /// One-line description shown under the title where the mode is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// The sections this mode offers as tabs, in display order. Empty = the mode is
+    /// inert and the shell ignores it; a mode with one entry is a legitimate
+    /// single-surface arrangement, not an error.
+    #[serde(default)]
+    pub sections: Vec<String>,
+
+    /// Which of `sections` the mode opens on. Absent (or naming a section not in
+    /// `sections`) = the first one. This is the field that makes a mode an opinion
+    /// rather than a filter: the shell's own Agent mode lists Sessions first but
+    /// opens on Agents, because the roster is what the mode is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_section: Option<String>,
 }
 
 /// One app-registered **marketplace tab** — a section in the Store's nav bar whose
@@ -4111,14 +4210,292 @@ pub struct ContributionId {
     pub title: Option<String>,
 }
 
-/// `engines` block — the required Ryu version, mirroring VS-Code's
-/// `engines.vscode`. `ryu` is a semver **requirement** string.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// `engines` block — the **host** version floors, mirroring VS-Code's
+/// `engines.vscode`. Every value is a semver **requirement** string.
+///
+/// `ryu` is the Core floor and is the only required key (every manifest written
+/// before per-surface floors existed carries just that one). The rest are optional
+/// per-[`Surface`] floors: a plugin that needs a Gateway API added in 0.1.5 and a
+/// desktop panel API added in 0.2.0 says so, instead of over-declaring one Core
+/// floor and hoping the release train kept them in step.
+///
+/// ## Why this is a flat struct and not a `BTreeMap<Surface, String>`
+///
+/// The [`PluginManifest::surfaces`] map would be the obvious home, but it is
+/// **absent from the SDK's zod mirror** (`packages/sdk/src/manifest.ts`), and zod
+/// strips unlisted keys — so a floor declared there would be silently dropped from
+/// every bundle `ryu pack` produces. `engines` is the block that already means
+/// "host floor", it is what a manifest author reaches for, and mirroring it costs
+/// one schema addition rather than a nested map.
+///
+/// ## Unknown ≠ unsatisfied
+///
+/// Core observes its own version and (via `/health`) the Gateway's. It does NOT
+/// know the desktop, island, mobile, extension or web version — those are separate
+/// installs that never report in. A floor against a surface whose version is
+/// unknown is therefore **advisory, never blocking**: see
+/// `HostVersions::evaluate`. Blocking on unknown would delist every plugin from
+/// every surface Core cannot see, which is most of them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct EnginesReq {
-    /// Semver requirement the running Core version must satisfy (e.g. `">=0.3.0"`,
-    /// `"^1.2"`). Parsed as a [`semver::VersionReq`]; an unparseable value or an
-    /// unsatisfied requirement causes the loader to reject the manifest.
+    /// Semver requirement the running **Core** version must satisfy (e.g.
+    /// `">=0.3.0"`, `"^1.2"`). Parsed as a [`semver::VersionReq`]; an unparseable
+    /// value causes the loader to reject the manifest, and an unsatisfied one moves
+    /// it to the incompatible lane (shown in the marketplace, refused at install).
+    ///
+    /// Named `ryu` rather than `core` for backwards compatibility: every manifest
+    /// in the wild spells it this way. [`EnginesReq::floor_for`] maps
+    /// [`Surface::Core`] onto it.
     pub ryu: String,
+
+    /// Floor for the **Gateway**. The one non-Core surface Core can actually
+    /// observe (it spawns the Gateway and reads `version` from its `/health`), so a
+    /// floor here is genuinely enforceable rather than advisory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+
+    /// Floor for the **desktop** app (Tauri shell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<String>,
+
+    /// Floor for the **island** (the always-on overlay surface).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub island: Option<String>,
+
+    /// Floor for the **mobile** app. The one surface with a genuinely independent
+    /// release train (App Store / Play review lag), so it is the floor most likely
+    /// to be unsatisfied in practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile: Option<String>,
+
+    /// Floor for the **terminal** (`cli`) surface — the TUI that dispatches
+    /// `ryu <app> <cmd>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
+
+    /// Floor for the **browser extension** surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+
+    /// Floor for the **web** surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<String>,
+}
+
+impl EnginesReq {
+    /// The declared floor for `surface`, if any.
+    ///
+    /// [`Surface::Core`] maps onto [`ryu`](EnginesReq::ryu) — the legacy spelling of
+    /// the same thing. [`Surface::Unknown`] never has a floor: a manifest written
+    /// against a newer Ryu may name a surface this build cannot resolve, and the
+    /// honest reading is "no floor I can evaluate" rather than a spurious refusal.
+    pub fn floor_for(&self, surface: Surface) -> Option<&str> {
+        match surface {
+            Surface::Core => Some(self.ryu.as_str()),
+            Surface::Gateway => self.gateway.as_deref(),
+            Surface::Desktop => self.desktop.as_deref(),
+            Surface::Island => self.island.as_deref(),
+            Surface::Mobile => self.mobile.as_deref(),
+            Surface::Cli => self.cli.as_deref(),
+            Surface::Extension => self.extension.as_deref(),
+            Surface::Web => self.web.as_deref(),
+            Surface::Unknown => None,
+        }
+    }
+
+    /// Every `(surface, requirement)` pair this block declares, Core first, then in
+    /// [`Surface`] declaration order. Used to build the marketplace's
+    /// "Requires" list and to drive the compatibility evaluation.
+    pub fn declared_floors(&self) -> Vec<(Surface, &str)> {
+        [
+            Surface::Core,
+            Surface::Gateway,
+            Surface::Desktop,
+            Surface::Island,
+            Surface::Mobile,
+            Surface::Cli,
+            Surface::Extension,
+            Surface::Web,
+        ]
+        .into_iter()
+        .filter_map(|s| self.floor_for(s).map(|r| (s, r)))
+        .collect()
+    }
+}
+
+/// Why one declared host floor is not satisfied.
+///
+/// Carries the surface, the requirement as written, and the version actually
+/// present, so a UI renders "Requires Gateway 0.2.0 or newer — you have 0.1.12"
+/// without string-parsing a message.
+/// Tagged on `code` (not `reason`) to match [`crate::manifest`]'s sibling
+/// `DependencyError` in Core, and because `reason` is already a field name here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum UnmetRequirement {
+    /// The surface's version is known and does NOT satisfy the floor. **Blocking.**
+    TooOld {
+        surface: Surface,
+        /// The requirement as written in the manifest.
+        required: String,
+        /// The version actually running.
+        present: String,
+    },
+
+    /// The surface's version is not known to whoever evaluated this — Core cannot
+    /// observe desktop / island / mobile / extension / web. **Advisory, never
+    /// blocking**: refusing on unknown would delist every plugin from every surface
+    /// Core cannot see. A client that DOES know its own version (the desktop reads
+    /// Tauri's `getVersion()`) re-evaluates locally and can upgrade this to
+    /// [`TooOld`].
+    Unknown { surface: Surface, required: String },
+
+    /// The requirement string is not parseable semver. **Blocking** — a gate that
+    /// cannot decide must refuse, not wave the plugin through. Normally unreachable
+    /// from the loader, which rejects such a manifest outright; kept because this
+    /// type is also evaluated against catalog data Core did not parse.
+    InvalidRequirement {
+        surface: Surface,
+        required: String,
+        reason: String,
+    },
+}
+
+impl UnmetRequirement {
+    /// The surface this concerns.
+    pub const fn surface(&self) -> Surface {
+        match self {
+            UnmetRequirement::TooOld { surface, .. }
+            | UnmetRequirement::Unknown { surface, .. }
+            | UnmetRequirement::InvalidRequirement { surface, .. } => *surface,
+        }
+    }
+
+    /// Whether this alone makes the plugin uninstallable. `false` for
+    /// [`Unknown`](UnmetRequirement::Unknown), which is advisory by design.
+    pub const fn is_blocking(&self) -> bool {
+        matches!(
+            self,
+            UnmetRequirement::TooOld { .. } | UnmetRequirement::InvalidRequirement { .. }
+        )
+    }
+}
+
+/// The result of checking a manifest's `engines` block against the running hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CompatibilityVerdict {
+    /// True when nothing BLOCKING is unmet. Advisory
+    /// [`Unknown`](UnmetRequirement::Unknown) entries do not clear this flag, so a
+    /// plugin whose only problem is an unobservable surface stays installable.
+    pub compatible: bool,
+
+    /// Every floor that is not satisfied, blocking and advisory alike, in
+    /// [`Surface`] order. Empty when the manifest declares no `engines` block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet: Vec<UnmetRequirement>,
+}
+
+impl CompatibilityVerdict {
+    /// A verdict with nothing to report — the shape for a manifest that declares no
+    /// `engines` block at all.
+    pub fn satisfied() -> Self {
+        Self {
+            compatible: true,
+            unmet: Vec::new(),
+        }
+    }
+
+    /// The blocking entries only — what an install refusal should name.
+    pub fn blocking(&self) -> impl Iterator<Item = &UnmetRequirement> {
+        self.unmet.iter().filter(|u| u.is_blocking())
+    }
+}
+
+/// The versions of the host surfaces currently running, as far as the evaluator
+/// knows them.
+///
+/// Deliberately sparse. Core populates `core` from its own crate version and
+/// `gateway` from the observed `/health` value; everything else is absent unless a
+/// surface self-reports. A client evaluating locally overlays its own entry (the
+/// desktop knows its Tauri version) before rendering.
+///
+/// An absent surface is **unknown, not old** — see [`UnmetRequirement::Unknown`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct HostVersions {
+    /// Surface → version string. A value that is not parseable semver is treated as
+    /// unknown rather than as a failure: it is the evaluator's own data, and a
+    /// malformed local version must not make every plugin look incompatible.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub versions: BTreeMap<Surface, String>,
+}
+
+impl HostVersions {
+    /// Record `surface` as running `version`.
+    pub fn with(mut self, surface: Surface, version: impl Into<String>) -> Self {
+        self.versions.insert(surface, version.into());
+        self
+    }
+
+    /// The known version for `surface`, if it parses as semver.
+    fn parsed(&self, surface: Surface) -> Option<semver::Version> {
+        self.versions
+            .get(&surface)
+            .and_then(|v| semver::Version::parse(v.trim_start_matches(['v', 'V'])).ok())
+    }
+
+    /// Check every floor `engines` declares against what is known to be running.
+    ///
+    /// `None` (no `engines` block) is [`CompatibilityVerdict::satisfied`] — the case
+    /// for every manifest predating host floors.
+    pub fn evaluate(&self, engines: Option<&EnginesReq>) -> CompatibilityVerdict {
+        let Some(engines) = engines else {
+            return CompatibilityVerdict::satisfied();
+        };
+
+        let mut unmet = Vec::new();
+        for (surface, required) in engines.declared_floors() {
+            let req = match semver::VersionReq::parse(required) {
+                Ok(r) => r,
+                Err(e) => {
+                    unmet.push(UnmetRequirement::InvalidRequirement {
+                        surface,
+                        required: required.to_owned(),
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            match self.parsed(surface) {
+                // A prerelease (`0.2.0-nightly.3`) does NOT match a plain `>=0.1.0`
+                // under semver's own rules, which would mark every nightly build
+                // incompatible with every plugin. Compare on the release triple so a
+                // channel suffix never decides compatibility.
+                Some(present) => {
+                    let release_only = semver::Version::new(
+                        present.major,
+                        present.minor,
+                        present.patch,
+                    );
+                    if !req.matches(&release_only) {
+                        unmet.push(UnmetRequirement::TooOld {
+                            surface,
+                            required: required.to_owned(),
+                            present: present.to_string(),
+                        });
+                    }
+                }
+                None => unmet.push(UnmetRequirement::Unknown {
+                    surface,
+                    required: required.to_owned(),
+                }),
+            }
+        }
+
+        CompatibilityVerdict {
+            compatible: !unmet.iter().any(UnmetRequirement::is_blocking),
+            unmet,
+        }
+    }
 }
 
 /// `requires` block — the plugin's **plugin-to-plugin** dependencies.
@@ -4686,6 +5063,20 @@ pub enum Surface {
 }
 
 impl Surface {
+    /// The key this surface's floor is written under inside a manifest's
+    /// [`EnginesReq`] block.
+    ///
+    /// Identical to [`Surface::as_str`] except for [`Surface::Core`], whose floor is
+    /// spelled `ryu` for backwards compatibility. Use this — never `as_str` — when
+    /// naming the offending key in a diagnostic, or the message points an author at
+    /// an `engines.core` key that does not exist.
+    pub const fn engines_key(self) -> &'static str {
+        match self {
+            Surface::Core => "ryu",
+            other => other.as_str(),
+        }
+    }
+
     /// Stable kebab-case identifier — the exact token used on the wire (in a
     /// manifest's `targets` and in the `x-ryu-surface` request header).
     pub const fn as_str(self) -> &'static str {
@@ -5173,6 +5564,183 @@ pub fn validate_route_permissions(
 mod tests {
     use super::*;
     use crate::runnable::RunnableKind;
+
+    // ── host version floors (engines) ──────────────────────────────────────────
+
+    fn engines(ryu: &str) -> EnginesReq {
+        EnginesReq {
+            ryu: ryu.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_engines_block_is_satisfied() {
+        let v = HostVersions::default().evaluate(None);
+        assert!(v.compatible);
+        assert!(v.unmet.is_empty());
+    }
+
+    #[test]
+    fn a_satisfied_core_floor_is_compatible() {
+        let hosts = HostVersions::default().with(Surface::Core, "0.1.12");
+        let v = hosts.evaluate(Some(&engines(">=0.1.0")));
+        assert!(v.compatible, "0.1.12 satisfies >=0.1.0");
+        assert!(v.unmet.is_empty());
+    }
+
+    #[test]
+    fn an_unsatisfied_core_floor_blocks_and_reports_both_versions() {
+        let hosts = HostVersions::default().with(Surface::Core, "0.1.12");
+        let v = hosts.evaluate(Some(&engines(">=0.2.0")));
+        assert!(!v.compatible);
+        assert_eq!(
+            v.unmet,
+            vec![UnmetRequirement::TooOld {
+                surface: Surface::Core,
+                required: ">=0.2.0".to_owned(),
+                present: "0.1.12".to_owned(),
+            }]
+        );
+        assert_eq!(v.blocking().count(), 1);
+    }
+
+    /// The whole point of the design: Core cannot observe desktop/island/mobile, and
+    /// refusing on that would delist every plugin from every surface it cannot see.
+    #[test]
+    fn an_unknown_surface_version_is_advisory_never_blocking() {
+        let hosts = HostVersions::default().with(Surface::Core, "0.1.12");
+        let req = EnginesReq {
+            ryu: ">=0.1.0".to_owned(),
+            mobile: Some(">=9.0.0".to_owned()),
+            ..Default::default()
+        };
+        let v = hosts.evaluate(Some(&req));
+        assert!(
+            v.compatible,
+            "an unobservable surface must not block the install"
+        );
+        assert_eq!(
+            v.unmet,
+            vec![UnmetRequirement::Unknown {
+                surface: Surface::Mobile,
+                required: ">=9.0.0".to_owned(),
+            }],
+            "but it must still be REPORTED so the UI can warn"
+        );
+        assert_eq!(v.blocking().count(), 0);
+    }
+
+    /// A client that DOES know its own version turns the advisory into a refusal.
+    #[test]
+    fn a_client_overlaying_its_own_version_upgrades_unknown_to_too_old() {
+        let req = EnginesReq {
+            ryu: ">=0.1.0".to_owned(),
+            desktop: Some(">=2.0.0".to_owned()),
+            ..Default::default()
+        };
+        let hosts = HostVersions::default()
+            .with(Surface::Core, "0.1.12")
+            .with(Surface::Desktop, "1.4.0");
+        let v = hosts.evaluate(Some(&req));
+        assert!(!v.compatible);
+        assert_eq!(v.unmet[0].surface(), Surface::Desktop);
+        assert!(v.unmet[0].is_blocking());
+    }
+
+    /// Regression guard: semver says a prerelease does NOT satisfy a plain `>=`
+    /// range, so comparing `0.1.12-nightly.3` against `>=0.1.0` verbatim would mark
+    /// EVERY plugin incompatible on EVERY nightly build.
+    #[test]
+    fn a_prerelease_host_still_satisfies_a_plain_floor() {
+        let hosts = HostVersions::default().with(Surface::Core, "0.1.12-nightly.20260728.932");
+        let v = hosts.evaluate(Some(&engines(">=0.1.0")));
+        assert!(
+            v.compatible,
+            "a nightly must not be incompatible with everything"
+        );
+    }
+
+    #[test]
+    fn a_v_prefixed_host_version_is_accepted() {
+        let hosts = HostVersions::default().with(Surface::Core, "v0.1.12");
+        assert!(hosts.evaluate(Some(&engines(">=0.1.0"))).compatible);
+    }
+
+    /// A gate that cannot decide must refuse.
+    #[test]
+    fn an_unparseable_requirement_blocks() {
+        let hosts = HostVersions::default().with(Surface::Core, "0.1.12");
+        let v = hosts.evaluate(Some(&engines("not-a-range")));
+        assert!(!v.compatible);
+        assert!(matches!(
+            v.unmet[0],
+            UnmetRequirement::InvalidRequirement { .. }
+        ));
+    }
+
+    /// A malformed LOCAL version is the evaluator's own data — it must degrade to
+    /// unknown (advisory), not make every plugin look incompatible.
+    #[test]
+    fn an_unparseable_host_version_degrades_to_unknown() {
+        let hosts = HostVersions::default().with(Surface::Core, "garbage");
+        let v = hosts.evaluate(Some(&engines(">=0.1.0")));
+        assert!(v.compatible);
+        assert!(matches!(v.unmet[0], UnmetRequirement::Unknown { .. }));
+    }
+
+    #[test]
+    fn floor_for_maps_core_onto_the_legacy_ryu_key() {
+        let req = engines(">=0.1.0");
+        assert_eq!(req.floor_for(Surface::Core), Some(">=0.1.0"));
+        assert_eq!(req.floor_for(Surface::Gateway), None);
+        assert_eq!(
+            req.floor_for(Surface::Unknown),
+            None,
+            "a surface this build cannot resolve has no evaluable floor"
+        );
+    }
+
+    #[test]
+    fn declared_floors_lists_every_declared_surface_core_first() {
+        let req = EnginesReq {
+            ryu: ">=0.1.0".to_owned(),
+            gateway: Some(">=0.1.5".to_owned()),
+            mobile: Some(">=1.0.0".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            req.declared_floors(),
+            vec![
+                (Surface::Core, ">=0.1.0"),
+                (Surface::Gateway, ">=0.1.5"),
+                (Surface::Mobile, ">=1.0.0"),
+            ]
+        );
+    }
+
+    /// Back-compat: a manifest carrying only `{"ryu": …}` must still deserialize,
+    /// and must not start serializing eight nulls.
+    #[test]
+    fn a_legacy_engines_block_round_trips_without_new_keys() {
+        let parsed: EnginesReq = serde_json::from_str(r#"{"ryu":">=0.1.0"}"#).unwrap();
+        assert_eq!(parsed.ryu, ">=0.1.0");
+        assert_eq!(parsed.gateway, None);
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            r#"{"ryu":">=0.1.0"}"#
+        );
+    }
+
+    #[test]
+    fn per_surface_floors_deserialize_from_their_kebab_names() {
+        let parsed: EnginesReq = serde_json::from_str(
+            r#"{"ryu":">=0.1.0","gateway":">=0.1.5","desktop":">=0.2.0","island":">=0.1.0",
+                "mobile":">=1.0.0","cli":">=0.1.0","extension":">=0.1.0","web":">=0.1.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.declared_floors().len(), 8);
+    }
 
     #[test]
     fn validate_plugin_id_accepts_bare_and_dotted_rejects_traversal() {

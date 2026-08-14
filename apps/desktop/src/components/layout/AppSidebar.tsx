@@ -18,11 +18,13 @@ import {
 	Folder03Icon,
 	FolderOpenIcon,
 	GridIcon,
+	Image01Icon,
 	ImageAdd01Icon,
 	Key01Icon,
 	LibraryIcon,
 	Mail01Icon,
 	MessageQuestionIcon,
+	Mic01Icon,
 	MoreHorizontalIcon,
 	Mortarboard01Icon,
 	PackageIcon,
@@ -30,12 +32,9 @@ import {
 	PencilEdit01Icon,
 	PinIcon,
 	PinOffIcon,
-	PuzzleIcon,
 	Search01Icon,
 	ServerStack01Icon,
 	SlidersHorizontalIcon,
-	Square01Icon,
-	Store01Icon,
 	Tick02Icon,
 	Upload01Icon,
 	UserGroupIcon,
@@ -49,6 +48,7 @@ import {
 	isCoreApiPath,
 	renderActionHttp,
 	renderTemplate,
+	type SourceItem,
 	sourceItemsFromResponse,
 	type ViewActionHttp,
 } from "@ryu/app-host/views";
@@ -95,6 +95,13 @@ import {
 	PopoverTrigger,
 } from "@ryu/ui/components/popover.tsx";
 import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select.tsx";
+import {
 	Sidebar,
 	SidebarContent,
 	SidebarFooter,
@@ -108,6 +115,7 @@ import {
 } from "@ryu/ui/components/sidebar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { StatusBadge } from "@ryu/ui/components/status-badge";
 import {
 	type IconComponent,
 	TabsSubtle,
@@ -140,12 +148,12 @@ import {
 } from "@/src/components/chat/ProjectPicker.tsx";
 import { AddIdentityDialog } from "@/src/components/identities/AddIdentityDialog.tsx";
 import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
-import { SplitPresetMenuItems } from "@/src/components/layout/SplitPresetMenu.tsx";
 import {
 	ProjectGlyph,
 	ProjectIconDialog,
 } from "@/src/components/layout/ProjectIconDialog.tsx";
 import { ProjectSettingsDialog } from "@/src/components/layout/ProjectSettingsDialog.tsx";
+import { SplitPresetMenuItems } from "@/src/components/layout/SplitPresetMenu.tsx";
 import { NodeSelector } from "@/src/components/shell/NodeSelector.tsx";
 import { AddToSpaceDialog } from "@/src/components/spaces/AddToSpaceDialog.tsx";
 import { CreateSpaceDialog } from "@/src/components/spaces/CreateSpaceDialog.tsx";
@@ -189,12 +197,19 @@ import {
 	usePluginContributions,
 } from "@/src/hooks/usePluginContributions.ts";
 import { useSchedules } from "@/src/hooks/useSchedules.ts";
-import { useSidebarMode } from "@/src/hooks/useSidebarMode.ts";
+import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
+import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
+import {
+	DEFAULT_SIDEBAR_MODE,
+	type SidebarMode,
+	useSidebarMode,
+} from "@/src/hooks/useSidebarMode.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useTimezoneRevision } from "@/src/hooks/useTimezone.ts";
 import { useUsageBarPrefs } from "@/src/hooks/useUsageBarPrefs.ts";
+import { useVoiceEngines } from "@/src/hooks/useVoiceEngines.ts";
 import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import {
 	AgentAvatar,
@@ -231,6 +246,14 @@ import {
 	persistHiddenSections,
 } from "@/src/lib/features.ts";
 import { dedupeFolders, folderKey } from "@/src/lib/folder-path.ts";
+import {
+	bucketByDate,
+	DATE_BUCKET_LABELS,
+	type DateBucket,
+	dateBucketKey,
+	rowStamp,
+	toEpoch,
+} from "@/src/lib/sidebar/date-buckets.ts";
 import { compactAge } from "@/src/lib/time.ts";
 import { formatDate, formatTime, startOfTodayMs } from "@/src/lib/timezone.ts";
 import {
@@ -273,8 +296,14 @@ import {
 	SURFACE_PLUGIN_OWNER,
 	saveSectionOrder,
 } from "./sidebar-sections.ts";
+import { resolveSidebarMode } from "./sidebar-modes.ts";
 import { TabGlyph, useTabBusy } from "./TitleBar.tsx";
-import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
+import {
+	type EntityRow,
+	EntityRowGlyph,
+	TabEntityMenuSection,
+	useContributedRowsFor,
+} from "./tab-entity-menu.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 
 // Re-exported so the sidebar stays the single import surface for its own types
@@ -618,6 +647,158 @@ const PAGE_SIZE_OPTIONS: { label: string; value: number }[] = [
 ];
 const DEFAULT_PAGE_SIZE = 10;
 
+// ---------------------------------------------------------------------------
+// Scope pickers (the "Projects & Spaces as pickers" model)
+// ---------------------------------------------------------------------------
+// A section with twenty projects or a dozen spaces spent twenty or a dozen rows
+// saying only which containers exist, before showing a single thing inside one. The
+// picker inverts that: one row of chrome names the scope, and the whole section body
+// is content. The default scope is deliberately "all" rather than the first
+// container — the aggregate view is the one that answers "what did I touch
+// recently", which is what a sidebar is scanned for.
+
+/** The picker's default option: every container's contents at once. */
+const ALL_SELECTION = "all";
+
+const PROJECT_SELECTION_KEY = "ryu:sidebar-project-selection";
+const SPACE_SELECTION_KEY = "ryu:sidebar-space-selection";
+
+/** One picker option. `value` is the container's stable id (a folder path, a space
+ *  id); {@link ALL_SELECTION} is reserved for the aggregate. */
+interface ScopeOption {
+	label: string;
+	value: string;
+}
+
+/**
+ * The picker's current selection, persisted per surface.
+ *
+ * Falls back to {@link ALL_SELECTION} whenever the stored value names a container
+ * that no longer exists — a removed project or a deleted space. Without that the
+ * section would render a correctly-empty list for something the user cannot see or
+ * change, which reads as the sidebar being broken. The fallback is computed rather
+ * than written back, so a container that reappears (a node reconnecting, a slow
+ * spaces fetch) restores the user's choice instead of having silently lost it.
+ */
+function usePickerSelection(
+	storageKey: string,
+	options: ScopeOption[]
+): [string, (value: string) => void] {
+	const [stored, setStored] = useState<string>(() => {
+		try {
+			return localStorage.getItem(storageKey) ?? ALL_SELECTION;
+		} catch {
+			return ALL_SELECTION;
+		}
+	});
+	const choose = useCallback(
+		(value: string) => {
+			setStored(value);
+			try {
+				localStorage.setItem(storageKey, value);
+			} catch {
+				// best-effort
+			}
+		},
+		[storageKey]
+	);
+	const known =
+		stored === ALL_SELECTION || options.some((o) => o.value === stored);
+	return [known ? stored : ALL_SELECTION, choose];
+}
+
+/** The picker itself: an "All …" default plus one option per container, sized and
+ *  pitched to sit inside a sidebar section body rather than a settings form. */
+export function SidebarScopePicker({
+	actions,
+	allLabel,
+	icon,
+	onValueChange,
+	options,
+	value,
+}: {
+	/**
+	 * Verbs for the CURRENT selection, rendered beside the trigger.
+	 *
+	 * Load-bearing rather than decoration: replacing a row per container with one
+	 * picker also removes the row each container's context menu hung off, and some
+	 * of those verbs have no other home in the sidebar (activating a project, which
+	 * is what the composer's cwd follows; uploading into a space). This slot is
+	 * where they land, scoped to whatever the picker currently names.
+	 */
+	actions?: ReactNode;
+	/** Copy for the aggregate option ("All projects" / "All spaces"). */
+	allLabel: string;
+	/** Usually the owning section's own glyph, so the picker reads as that
+	 *  section's control rather than a stray form field. */
+	icon?: IconSvgElement;
+	onValueChange: (value: string) => void;
+	options: ScopeOption[];
+	value: string;
+}) {
+	const items = useMemo(
+		() => [{ label: allLabel, value: ALL_SELECTION }, ...options],
+		[allLabel, options]
+	);
+	return (
+		<div className="mb-1 flex items-center gap-1 px-2">
+			<Select
+				items={items}
+				// Base UI's change handler can hand back `null` (a cleared select). This
+				// picker is never empty — clearing it means the aggregate view.
+				onValueChange={(next) => onValueChange(next ?? ALL_SELECTION)}
+				value={value}
+			>
+				<SelectTrigger className="h-7 min-w-0 flex-1 text-xs">
+					<span className="flex min-w-0 items-center gap-2">
+						{icon ? (
+							<HugeiconsIcon
+								className="size-3.5 shrink-0 text-muted-foreground"
+								icon={icon}
+							/>
+						) : null}
+						<SelectValue />
+					</span>
+				</SelectTrigger>
+				<SelectContent className="max-h-[50vh]">
+					{items.map((item) => (
+						<SelectItem key={item.value} value={item.value}>
+							{item.label}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			{actions}
+		</div>
+	);
+}
+
+/** The `⋯` beside a scope picker. Mirrors {@link SectionOverflowMenu}'s trigger so
+ *  it reads as the same affordance, but always visible rather than hover-revealed:
+ *  the verbs behind it are the only path to some of them, so they cannot depend on
+ *  the user discovering a hover target on a control they just used. */
+function ScopeMenu({
+	children,
+	label,
+}: {
+	children: ReactNode;
+	label: string;
+}) {
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				aria-label={label}
+				className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground data-[popup-open]:bg-accent"
+			>
+				<HugeiconsIcon icon={MoreHorizontalIcon} size={14} />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end" className="w-56" sideOffset={6}>
+				{children}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
 function loadPageSizes(): Partial<Record<SectionKey, number>> {
 	try {
 		const stored = localStorage.getItem(SECTION_PAGE_SIZE_KEY);
@@ -667,18 +848,6 @@ function isSortKey(value: string): value is SortKey {
 	return SORT_KEYS.has(value);
 }
 
-/** Normalize a timestamp (epoch ms, ISO string, or absent) to a comparable epoch. */
-function toEpoch(value: number | string | null | undefined): number {
-	if (value == null) {
-		return 0;
-	}
-	if (typeof value === "number") {
-		return value;
-	}
-	const parsed = Date.parse(value);
-	return Number.isNaN(parsed) ? 0 : parsed;
-}
-
 /** Accessors so one sorter serves every item type, whatever its field names. */
 interface SortAccessors<T> {
 	created: (item: T) => number | string | null | undefined;
@@ -725,6 +894,27 @@ const CONV_SORT_ACCESSORS: SortAccessors<Conversation> = {
 	created: (c) => c.createdAt,
 	name: (c) => c.title,
 	updated: (c) => c.updatedAt,
+};
+
+// Date-grouping accessors, at module scope so {@link DateGroupedRows} memoizes on a
+// stable identity instead of re-bucketing on every parent render.
+
+/** A chat is dated by last activity — the same stamp its rows already show. */
+const conversationStamp = (c: Conversation) => c.updatedAt;
+
+/** A space document is dated by CREATION, because `SpaceDocument` carries no
+ *  `updatedAt` (see `lib/api/spaces.ts`). For the Uploads space — the one that
+ *  accumulates every chat attachment and paste — creation IS the upload date, which
+ *  is the thing a user is scanning for. */
+const spaceDocumentStamp = (d: SpaceDocument) => d.createdAt;
+
+/** Sort space documents by title / creation. `updated` reuses `createdAt` for the
+ *  same reason {@link spaceDocumentStamp} does: it is the only stamp on the wire, so
+ *  the alternative is a Sort-by option that silently does nothing. */
+const SPACE_DOC_SORT_ACCESSORS: SortAccessors<SpaceDocument> = {
+	created: (d) => d.createdAt,
+	name: (d) => d.title,
+	updated: (d) => d.createdAt,
 };
 
 const NAMED_SORT_ACCESSORS: SortAccessors<{
@@ -2634,6 +2824,11 @@ function AgentsSection({
 	const { openCreateAgent } = useCreateAgentDialog();
 	const { openTab } = useTabsContext();
 	const { agents, loading } = useAgents();
+	// App-contributed rows anchored to `agent`. The sidebar is where agents are
+	// listed, so an app anchoring here previously had its row reachable only from
+	// an agent TAB's menu — the one surface you have to already be on the agent to
+	// see. Same factory the tab menu uses, so the two cannot drift.
+	const agentContributedRows = useContributedRowsFor("agent", "agent_id");
 	const usageBarPrefs = useUsageBarPrefs();
 	const rowStyle = useAgentRowStyle();
 	const messaging = rowStyle === "messaging";
@@ -2781,6 +2976,14 @@ function AgentsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						{agentContributedRows(agent.id).map((row) => (
+							<ContextMenuItem key={row.id} onClick={row.onSelect}>
+								<span className="mr-2 inline-flex">
+									<EntityRowGlyph row={row} />
+								</span>
+								{row.label}
+							</ContextMenuItem>
+						))}
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -3179,46 +3382,67 @@ function SectionLoadError({
 	);
 }
 
-/** Spaces list in the sidebar — mirrors Agents; rows open the Spaces tab.
- *  The "+" opens the create dialog inline (shared with the Spaces page via the
- *  SpacesProvider), so a new space appears here and in the page immediately. */
-/** Lazily-loaded list of a space's pages & databases, shown indented under its
- *  row (mirrors SidebarSideChats). Only mounted while the row is expanded, so
- *  collapsed rows never hit Core. Each entry opens its editor tab. */
-function SidebarSpaceDocs({
-	spaceId,
+/**
+ * The picker's document list: every space's pages, databases and files at once, or
+ * just the selected space's.
+ *
+ * "All spaces" is an AGGREGATE fetch — one `listDocuments` per space, in parallel —
+ * because Core has no cross-space document endpoint. Three things keep that from
+ * being reckless. It only mounts while the section is EXPANDED (`SidebarSection`
+ * does not render collapsed children), so a collapsed section still costs nothing.
+ * A per-space failure degrades to "no documents from that space" rather than
+ * failing the whole list. And the result is PAGED before it renders: the Uploads
+ * system space alone accumulates every chat attachment and editor paste ever made
+ * on this node, so an unpaged aggregate would put thousands of rows in the sidebar.
+ * That last point is also why paging wraps the date-bucketed path here, unlike the
+ * Chats section — there, the bucketed set is bounded by the chat list itself.
+ */
+export function SpacesPickerBody({
 	listDocuments,
 	onOpenDoc,
+	pageSize,
 	setDocumentIcon,
+	sort,
+	spaces,
 }: {
 	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
 	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	pageSize: number;
 	setDocumentIcon: (
 		spaceId: string,
 		documentId: string,
 		icon: GlyphValue
 	) => Promise<void>;
-	spaceId: string;
+	sort: SortKey;
+	/** The spaces in scope: one, or all of them. */
+	spaces: Space[];
 }) {
-	const { updateTabsIconWhere } = useTabsContext();
+	const [groupByDate] = useChatDateGrouping();
 	const [docs, setDocs] = useState<SpaceDocument[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [iconTarget, setIconTarget] = useState<SpaceDocument | null>(null);
 	const listRef = useRef(listDocuments);
 	listRef.current = listDocuments;
+	// `useSpaces` re-runs through `useCoreRefresh`, so the `spaces` ARRAY identity
+	// churns even when its contents did not. Depending on the joined ids instead
+	// keeps this from re-fetching every list on every refresh tick.
+	const spaceIds = spaces.map((s) => s.id).join(",");
 
 	useEffect(() => {
 		let cancelled = false;
+		const ids = spaceIds ? spaceIds.split(",") : [];
+		if (ids.length === 0) {
+			setDocs([]);
+			setLoading(false);
+			return;
+		}
 		setLoading(true);
-		listRef
-			.current(spaceId)
-			.then((list) => {
+		Promise.all(
+			ids.map((id) => listRef.current(id).catch(() => [] as SpaceDocument[]))
+		)
+			.then((lists) => {
 				if (!cancelled) {
-					setDocs(list);
+					setDocs(lists.flat());
 				}
-			})
-			.catch(() => {
-				/* treated as no documents */
 			})
 			.finally(() => {
 				if (!cancelled) {
@@ -3228,16 +3452,101 @@ function SidebarSpaceDocs({
 		return () => {
 			cancelled = true;
 		};
-	}, [spaceId]);
+	}, [spaceIds]);
+
+	// Newest-first across the union, so a mixed list reads chronologically rather
+	// than space-by-space; `sort` then re-orders it if the user picked an option.
+	const ordered = useMemo(
+		() => [...docs].sort((a, b) => toEpoch(b.createdAt) - toEpoch(a.createdAt)),
+		[docs]
+	);
+	const paged = usePaged(
+		sortItems(ordered, sort, SPACE_DOC_SORT_ACCESSORS),
+		pageSize
+	);
+
+	const applyIcon = (docId: string, icon: GlyphValue) =>
+		setDocs((prev) => prev.map((d) => (d.id === docId ? { ...d, icon } : d)));
+
+	const renderRows = (list: SpaceDocument[]) => (
+		<SpaceDocRows
+			docs={list}
+			onIconChanged={applyIcon}
+			onOpenDoc={onOpenDoc}
+			setDocumentIcon={setDocumentIcon}
+		/>
+	);
 
 	if (loading) {
-		return <p className="py-1 pl-8 text-muted-foreground text-xs">Loading…</p>;
+		return <p className="px-2 py-2 text-muted-foreground text-xs">Loading…</p>;
 	}
-	if (docs.length === 0) {
+	if (ordered.length === 0) {
 		return (
-			<p className="py-1 pl-8 text-muted-foreground text-xs">No pages yet</p>
+			<p className="px-2 py-2 text-muted-foreground text-xs">No pages yet</p>
 		);
 	}
+
+	return (
+		<>
+			{groupByDate ? (
+				<DateGroupedRows
+					className="ml-2 space-y-0.5"
+					collapsedKey={
+						dateBucketStorageKeys(`spaces-picker:${spaceIds}`).collapsedKey
+					}
+					items={paged.visible}
+					// Remount when the scope changes — see the same `key` on
+					// {@link SidebarChatList} for why.
+					key={spaceIds}
+					orderKey={dateBucketStorageKeys(`spaces-picker:${spaceIds}`).orderKey}
+					renderRows={renderRows}
+					stampOf={spaceDocumentStamp}
+				/>
+			) : (
+				renderRows(paged.visible)
+			)}
+			<SectionPagingControls
+				overflow={{
+					getSearchText: (d) => d.title ?? "",
+					items: paged.items,
+					label: "pages",
+					renderList: renderRows,
+				}}
+				paged={paged}
+			/>
+		</>
+	);
+}
+
+/** Spaces list in the sidebar — mirrors Agents; rows open the Spaces tab.
+ *  The "+" opens the create dialog inline (shared with the Spaces page via the
+ *  SpacesProvider), so a new space appears here and in the page immediately. */
+/**
+ * A run of space documents as sidebar rows.
+ *
+ * Space-AGNOSTIC on purpose: every row routes through its own `doc.spaceId` rather
+ * than a `spaceId` passed alongside, which is what lets the per-space list and the
+ * picker's "All spaces" list (documents from many spaces interleaved) render the
+ * identical row instead of growing a second copy that drifts.
+ */
+function SpaceDocRows({
+	docs,
+	onIconChanged,
+	onOpenDoc,
+	setDocumentIcon,
+}: {
+	docs: SpaceDocument[];
+	/** Let the owner of the list apply the new icon optimistically. */
+	onIconChanged: (docId: string, icon: GlyphValue) => void;
+	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	setDocumentIcon: (
+		spaceId: string,
+		documentId: string,
+		icon: GlyphValue
+	) => Promise<void>;
+}) {
+	const { updateTabsIconWhere } = useTabsContext();
+	const [iconTarget, setIconTarget] = useState<SpaceDocument | null>(null);
 	return (
 		<>
 			<SidebarMenu className="gap-0.5">
@@ -3301,9 +3610,8 @@ function SidebarSpaceDocs({
 					description={iconTarget.title}
 					onChange={(next) => {
 						const docId = iconTarget.id;
-						setDocs((prev) =>
-							prev.map((d) => (d.id === docId ? { ...d, icon: next } : d))
-						);
+						const spaceId = iconTarget.spaceId;
+						onIconChanged(docId, next);
 						updateTabsIconWhere(
 							(t) =>
 								t.path === `/spaces/${spaceId}/doc/${docId}` ||
@@ -3325,6 +3633,93 @@ function SidebarSpaceDocs({
 				/>
 			) : null}
 		</>
+	);
+}
+
+/** Lazily-loaded list of a space's pages & databases, shown indented under its
+ *  row (mirrors SidebarSideChats). Only mounted while the row is expanded, so
+ *  collapsed rows never hit Core. Each entry opens its editor tab. Date-bucketed
+ *  when the user's "Group lists by date" setting is on — which is how the Uploads
+ *  space, the one that accumulates every attachment, becomes scannable. */
+function SidebarSpaceDocs({
+	spaceId,
+	listDocuments,
+	onOpenDoc,
+	setDocumentIcon,
+}: {
+	listDocuments: (spaceId: string) => Promise<SpaceDocument[]>;
+	onOpenDoc: (doc: SpaceDocument, forceNew?: boolean) => void;
+	setDocumentIcon: (
+		spaceId: string,
+		documentId: string,
+		icon: GlyphValue
+	) => Promise<void>;
+	spaceId: string;
+}) {
+	const [groupByDate] = useChatDateGrouping();
+	const [docs, setDocs] = useState<SpaceDocument[]>([]);
+	const [loading, setLoading] = useState(true);
+	const listRef = useRef(listDocuments);
+	listRef.current = listDocuments;
+
+	useEffect(() => {
+		let cancelled = false;
+		setLoading(true);
+		listRef
+			.current(spaceId)
+			.then((list) => {
+				if (!cancelled) {
+					setDocs(list);
+				}
+			})
+			.catch(() => {
+				/* treated as no documents */
+			})
+			.finally(() => {
+				if (!cancelled) {
+					setLoading(false);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [spaceId]);
+
+	const applyIcon = (docId: string, icon: GlyphValue) =>
+		setDocs((prev) => prev.map((d) => (d.id === docId ? { ...d, icon } : d)));
+
+	const renderRows = (list: SpaceDocument[]) => (
+		<SpaceDocRows
+			docs={list}
+			onIconChanged={applyIcon}
+			onOpenDoc={onOpenDoc}
+			setDocumentIcon={setDocumentIcon}
+		/>
+	);
+
+	if (loading) {
+		return <p className="py-1 pl-8 text-muted-foreground text-xs">Loading…</p>;
+	}
+	if (docs.length === 0) {
+		return (
+			<p className="py-1 pl-8 text-muted-foreground text-xs">No pages yet</p>
+		);
+	}
+	if (!groupByDate) {
+		return renderRows(docs);
+	}
+	// `ml-6` rather than the Chats buckets' `ml-2`: these rows are already indented
+	// to `pl-8` under their space, so a bucket header at the section indent would
+	// float far to the left of what it introduces.
+	return (
+		<DateGroupedRows
+			className="ml-6 space-y-0.5"
+			collapsedKey={dateBucketStorageKeys(`space:${spaceId}`).collapsedKey}
+			items={docs}
+			orderKey={dateBucketStorageKeys(`space:${spaceId}`).orderKey}
+			renderRows={renderRows}
+			stampOf={spaceDocumentStamp}
+		/>
 	);
 }
 
@@ -3364,6 +3759,8 @@ function SpaceSidebarRow({
 	space: Space;
 }) {
 	const { updateTabsIconWhere } = useTabsContext();
+	// Contributed `space`-anchored rows — see the note in AgentsSection.
+	const spaceContributedRows = useContributedRowsFor("space", "space_id");
 	const [expanded, setExpanded] = useState(false);
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	const toggle = () => setExpanded((v) => !v);
@@ -3499,6 +3896,14 @@ function SpaceSidebarRow({
 							Delete space
 						</ContextMenuItem>
 					)}
+					{spaceContributedRows(space.id).map((row) => (
+						<ContextMenuItem key={row.id} onClick={row.onSelect}>
+							<span className="mr-2 inline-flex">
+								<EntityRowGlyph row={row} />
+							</span>
+							{row.label}
+						</ContextMenuItem>
+					))}
 				</ContextMenuContent>
 			</ContextMenu>
 			{expanded && (
@@ -3563,6 +3968,33 @@ function SpacesSection({
 	// The "Meetings" system space is shown here as its own space (per request) — no
 	// longer name-filtered out of the list.
 	const visibleSpaces = spaces;
+	const [groupedNav] = useSidebarGroupedNav();
+	// The picker model has no space ROW to hang app-contributed actions off, so the
+	// section resolves them itself and the scope menu renders them for the selection
+	// — same rows a space row's context menu shows, same anchor.
+	const spaceContributedRows = useContributedRowsFor("space", "space_id");
+	const spaceOptions = useMemo(
+		() => visibleSpaces.map((s) => ({ label: s.name, value: s.id })),
+		[visibleSpaces]
+	);
+	const [selection, setSelection] = usePickerSelection(
+		SPACE_SELECTION_KEY,
+		spaceOptions
+	);
+	const shownSpaces = useMemo(
+		() =>
+			selection === ALL_SELECTION
+				? visibleSpaces
+				: visibleSpaces.filter((s) => s.id === selection),
+		[visibleSpaces, selection]
+	);
+	// The one space the picker names, or null on the aggregate — the scope the
+	// picker's verbs (upload into, rename, delete) apply to. `null` on "all" is why
+	// those verbs are hidden there rather than acting on an arbitrary space.
+	const selectedSpace =
+		selection === ALL_SELECTION
+			? null
+			: (visibleSpaces.find((s) => s.id === selection) ?? null);
 	// Map an app companion's label → the icon id it registered, so a system space
 	// (Canvas/Whiteboard/Meetings/…) shows its owning app's icon, resolved through
 	// the shared <Icon> primitive. Data-driven off /api/plugins/contributions — no
@@ -3677,26 +4109,72 @@ function SpacesSection({
 						{emptyMessage}
 					</p>
 				)}
-				{visibleSpaces.length > 0 && (
-					<>
-						<SidebarMenu className="gap-0.5">
-							{renderSpaceRows(paged.visible)}
-						</SidebarMenu>
-						<SectionPagingControls
-							overflow={{
-								getSearchText: (space) => space.name ?? "",
-								items: paged.items,
-								label: "spaces",
-								renderList: (list) => (
-									<SidebarMenu className="gap-0.5">
-										{renderSpaceRows(list)}
-									</SidebarMenu>
-								),
-							}}
-							paged={paged}
-						/>
-					</>
-				)}
+				{visibleSpaces.length > 0 &&
+					(groupedNav ? (
+						// One picker instead of a row per space. The rows underneath are the
+						// space's CONTENTS (pages, databases, files) rather than the spaces
+						// themselves, which is the point: a space row only ever told you a
+						// space existed.
+						<>
+							<SidebarScopePicker
+								actions={
+									selectedSpace ? (
+										<SpaceScopeMenu
+											contributedRows={spaceContributedRows(selectedSpace.id)}
+											onAdd={() => {
+												setAddTargetId(selectedSpace.id);
+												setAddOpen(true);
+											}}
+											onOpen={() => openSpace(selectedSpace)}
+											onOpenInNewTab={() => openSpace(selectedSpace, true)}
+											onRequestDelete={() =>
+												setPendingDelete({
+													id: selectedSpace.id,
+													name: selectedSpace.name,
+												})
+											}
+											setSpaceIcon={setSpaceIcon}
+											space={selectedSpace}
+										/>
+									) : undefined
+								}
+								allLabel="All spaces"
+								icon={SECTION_ICONS.spaces}
+								onValueChange={setSelection}
+								options={spaceOptions}
+								value={selection}
+							/>
+							<SpacesPickerBody
+								listDocuments={listDocuments}
+								onOpenDoc={(doc, forceNew) =>
+									openDoc(doc.spaceId, doc, forceNew)
+								}
+								pageSize={pageSize}
+								setDocumentIcon={setDocumentIcon}
+								sort={sort}
+								spaces={shownSpaces}
+							/>
+						</>
+					) : (
+						<>
+							<SidebarMenu className="gap-0.5">
+								{renderSpaceRows(paged.visible)}
+							</SidebarMenu>
+							<SectionPagingControls
+								overflow={{
+									getSearchText: (space) => space.name ?? "",
+									items: paged.items,
+									label: "spaces",
+									renderList: (list) => (
+										<SidebarMenu className="gap-0.5">
+											{renderSpaceRows(list)}
+										</SidebarMenu>
+									),
+								}}
+								paged={paged}
+							/>
+						</>
+					))}
 			</SidebarSection>
 			<CreateSpaceDialog
 				onClose={() => setCreateOpen(false)}
@@ -3757,6 +4235,11 @@ function WorkflowsSection({
 }: SectionProps) {
 	const { openTab } = useTabsContext();
 	const { workflows, loading } = useWorkflows();
+	// Contributed `workflow`-anchored rows — see the note in AgentsSection.
+	const workflowContributedRows = useContributedRowsFor(
+		"workflow",
+		"workflow_id"
+	);
 	// Schedule jobs give the `every`-interval anchor (lastRunAt) for the next-run
 	// tooltip; the list is small and shared with the schedules page.
 	const { jobs } = useSchedules();
@@ -3820,6 +4303,14 @@ function WorkflowsSection({
 							/>
 							Open in new tab
 						</ContextMenuItem>
+						{workflowContributedRows(wf.id).map((row) => (
+							<ContextMenuItem key={row.id} onClick={row.onSelect}>
+								<span className="mr-2 inline-flex">
+									<EntityRowGlyph row={row} />
+								</span>
+								{row.label}
+							</ContextMenuItem>
+						))}
 					</ContextMenuContent>
 				</ContextMenu>
 			</SidebarMenuItem>
@@ -4796,8 +5287,14 @@ function PluginsSection({
 								className="min-w-0 flex-1 truncate text-sm"
 								text={app.name}
 							/>
-							{!app.enabled && (
-								<span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" />
+							{/* The SAME status glyphs the Store's catalog rows wear, so a
+							    plugin reads identically wherever you meet it. This row used to
+							    say "disabled" with a bare 1.5px grey dot: no tooltip, no
+							    accessible name, and nothing at all for built-in — a mark you
+							    could only learn by elimination. */}
+							{app.builtIn ? <StatusBadge kind="builtin" /> : null}
+							{app.enabled ? null : (
+								<StatusBadge kind="unavailable" label="Disabled" />
 							)}
 						</div>
 					</ContextMenuTrigger>
@@ -4970,6 +5467,14 @@ function AppsSection({
 											className="min-w-0 flex-1 truncate text-sm"
 											text={label}
 										/>
+										{/* Built-in is the only state this row can honestly report,
+										    and it comes from the OWNING plugin — a companion has no
+										    provenance of its own. There is deliberately no
+										    "disabled" glyph here: the companions feed is
+										    server-side filtered to enabled apps, so a disabled one
+										    never reaches this list and a glyph for it would be
+										    dead code pretending to be a signal. */}
+										{owner?.builtIn ? <StatusBadge kind="builtin" /> : null}
 									</div>
 								</ContextMenuTrigger>
 								<ContextMenuContent>
@@ -5082,6 +5587,21 @@ export function DynamicSidebarSection({
 		[queryClient, queryKey]
 	);
 
+	// An app-registered section honours "Group lists by date" like the shell's own
+	// lists do — the whole point of the preference being a sidebar primitive rather
+	// than a property of the Chats section. The stamp comes from the spec's declared
+	// `dateKey` when it has one, else from probing the stamp names Core already
+	// serves, so a section authored before this existed groups without a manifest
+	// edit. A row that resolves nothing lands in "Undated", never back-dated.
+	const [groupByDate] = useChatDateGrouping();
+	const contributedStamp = useCallback(
+		(row: SourceItem) => rowStamp(row.raw, spec?.dateKey),
+		[spec?.dateKey]
+	);
+	const contributedBucketKeys = dateBucketStorageKeys(
+		`contributed:${contribution.plugin}:${contribution.id}`
+	);
+
 	const openTarget = (
 		item: Record<string, unknown>,
 		title: string,
@@ -5174,6 +5694,214 @@ export function DynamicSidebarSection({
 	const sectionKey: SectionKey = `plugin:${contribution.plugin}:${contribution.id}`;
 	const itemActions = spec?.itemActions ?? [];
 
+	// "messaging" draws the avatar-led two-line row the shell's own Agents section
+	// draws (see MessagingAgentRowBody): a 36px round avatar, the title and a stamp
+	// on the first line, a preview below. A section that declares it keeps that
+	// shape for every row, including rows whose feed resolved no picture — a list
+	// whose height changed row by row would scan as two lists.
+	const messagingRows = spec?.rowStyle === "messaging";
+
+	// One row of the contributed feed, extracted so the flat list and each date
+	// bucket render the IDENTICAL row rather than a copy that drifts.
+	const renderContributedRows = (list: SourceItem[]) => (
+		<SidebarMenu className="gap-0.5">
+			{list.map((row) => {
+				const title = row.item.title;
+				// A row with supporting text (its project, say) is a TALLER two-line
+				// row; one without keeps the single-line height, so a section that
+				// mixes both still scans as one list.
+				const subtitle = row.item.subtitle;
+				const open = (forceNew = false) => openTarget(row.raw, title, forceNew);
+				return (
+					<SidebarMenuItem key={row.item.id}>
+						<ContextMenu>
+							<ContextMenuTrigger>
+								{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
+								<div
+									className={
+										messagingRows
+											? "group/row flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-muted"
+											: `group/row flex cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted ${
+													subtitle ? "h-11" : "h-8"
+												}`
+									}
+									onAuxClick={(e) => {
+										if (e.button === 1) {
+											e.preventDefault();
+											open(true);
+										}
+									}}
+									onClick={() => open()}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") {
+											open();
+										}
+									}}
+									role="button"
+									tabIndex={0}
+								>
+									{(() => {
+										// `row.item.icon` is the MAPPED glyph, which defaults to the
+										// raw row's `icon` key — the field this read directly before
+										// the map could name it. Unmapped feeds are unaffected.
+										const glyph = asGlyphValue(row.item.icon) ?? null;
+										const sectionGlyph = contribution.icon ? (
+											<Icon
+												className={
+													messagingRows
+														? "size-4 text-muted-foreground"
+														: "size-4 shrink-0 text-muted-foreground"
+												}
+												icon={contribution.icon}
+												size={16}
+											/>
+										) : null;
+										if (!messagingRows) {
+											return (
+												<GlyphDisplay
+													className="size-4 shrink-0 text-muted-foreground"
+													fallback={sectionGlyph}
+													size={16}
+													value={glyph}
+												/>
+											);
+										}
+										// The avatar-led lead: the row's own picture when the feed
+										// has one, else the same glyph in the circle the picture
+										// would have filled, so the column stays aligned.
+										return row.item.avatar ? (
+											<img
+												alt=""
+												className="size-9 shrink-0 rounded-full bg-muted object-cover"
+												src={row.item.avatar}
+											/>
+										) : (
+											<span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
+												<GlyphDisplay
+													className="size-4 text-muted-foreground"
+													fallback={sectionGlyph}
+													size={16}
+													value={glyph}
+												/>
+											</span>
+										);
+									})()}
+									<SidebarItemPreview
+										content={
+											<SidebarPreviewTitle
+												title={
+													spec?.itemPreview?.title
+														? renderTemplate(
+																spec.itemPreview.title,
+																{ item: row.raw },
+																{}
+															)
+														: title
+												}
+											>
+												{spec?.itemPreview?.description ? (
+													<p className="line-clamp-4 text-muted-foreground text-xs leading-relaxed">
+														{renderTemplate(
+															spec.itemPreview.description,
+															{ item: row.raw },
+															{}
+														)}
+													</p>
+												) : null}
+												{spec?.itemPreview?.meta?.map((meta) => (
+													<SidebarPreviewMeta
+														key={meta.label}
+														label={meta.label}
+														value={renderTemplate(
+															meta.value,
+															{ item: row.raw },
+															{}
+														)}
+													/>
+												))}
+											</SidebarPreviewTitle>
+										}
+									>
+										<span className="flex min-w-0 flex-1 flex-col justify-center overflow-hidden">
+											{messagingRows ? (
+												<span className="flex min-w-0 items-center gap-2">
+													<span className="min-w-0 flex-1 truncate text-sm leading-tight">
+														{title}
+													</span>
+													{/* The mapped `accessory` is the stamp on this shape —
+													    the same slot the shell's agent row gives the time
+													    of the last message. */}
+													{row.item.accessory ? (
+														<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+															{row.item.accessory}
+														</span>
+													) : null}
+												</span>
+											) : (
+												<span className="truncate text-sm leading-tight">
+													{title}
+												</span>
+											)}
+											{subtitle || messagingRows ? (
+												// A messaging row always draws its second line, muted
+												// when the feed had nothing to preview, so the list keeps
+												// one height.
+												<span
+													className={`truncate text-xs leading-tight ${
+														subtitle
+															? "text-muted-foreground"
+															: "text-muted-foreground/60 italic"
+													}`}
+												>
+													{subtitle ?? "No messages yet"}
+												</span>
+											) : null}
+										</span>
+									</SidebarItemPreview>
+								</div>
+							</ContextMenuTrigger>
+							<ContextMenuContent>
+								{spec?.itemTarget ? (
+									<ContextMenuItem onClick={() => open(true)}>
+										<HugeiconsIcon
+											className="mr-2 size-4"
+											icon={ArrowUpRight01Icon}
+										/>
+										Open in new tab
+									</ContextMenuItem>
+								) : null}
+								{itemActions.map((action) =>
+									action.http ? (
+										<ContextMenuItem
+											key={action.id}
+											onClick={() => {
+												if (action.http) {
+													void runAction(action.http, row.raw);
+												}
+											}}
+											variant={
+												action.style === "danger" ? "destructive" : undefined
+											}
+										>
+											{action.icon ? (
+												<Icon
+													className="mr-2 size-4"
+													icon={action.icon}
+													size={16}
+												/>
+											) : null}
+											{action.label}
+										</ContextMenuItem>
+									) : null
+								)}
+							</ContextMenuContent>
+						</ContextMenu>
+					</SidebarMenuItem>
+				);
+			})}
+		</SidebarMenu>
+	);
+
 	return (
 		<SidebarSection
 			action={
@@ -5193,172 +5921,116 @@ export function DynamicSidebarSection({
 			sectionKey={sectionKey}
 			sort={sort}
 		>
-			<SidebarMenu className="gap-0.5">
-				{rows.length === 0 && spec?.emptyState ? (
-					<div className="px-2 py-2">
-						<p className="text-muted-foreground text-xs">
-							{/* `null` is the queryFn's marker for a non-2xx answer (a route
+			{rows.length === 0 && spec?.emptyState ? (
+				<div className="px-2 py-2">
+					<p className="text-muted-foreground text-xs">
+						{/* `null` is the queryFn's marker for a non-2xx answer (a route
 							    gated behind a disabled app, a node that is down) — reporting
 							    that as "nothing here" states something the shell never
 							    learned. `undefined` is merely the in-flight first load. */}
-							{payload === null && spec.emptyState.unavailable
-								? spec.emptyState.unavailable
-								: spec.emptyState.title}
+						{payload === null && spec.emptyState.unavailable
+							? spec.emptyState.unavailable
+							: spec.emptyState.title}
+					</p>
+					{spec.emptyState.description && payload !== null ? (
+						<p className="mt-0.5 text-muted-foreground/70 text-xs">
+							{spec.emptyState.description}
 						</p>
-						{spec.emptyState.description && payload !== null ? (
-							<p className="mt-0.5 text-muted-foreground/70 text-xs">
-								{spec.emptyState.description}
-							</p>
-						) : null}
-					</div>
-				) : null}
-				{rows.map((row) => {
-					const title = row.item.title;
-					// A row with supporting text (its project, say) is a TALLER two-line
-					// row; one without keeps the single-line height, so a section that
-					// mixes both still scans as one list.
-					const subtitle = row.item.subtitle;
-					const open = (forceNew = false) =>
-						openTarget(row.raw, title, forceNew);
-					return (
-						<SidebarMenuItem key={row.item.id}>
-							<ContextMenu>
-								<ContextMenuTrigger>
-									{/* biome-ignore lint/a11y/useSemanticElements: sidebar row combines nested controls with drag/middle-click */}
-									<div
-										className={`group/row flex cursor-pointer items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted ${
-											subtitle ? "h-11" : "h-8"
-										}`}
-										onAuxClick={(e) => {
-											if (e.button === 1) {
-												e.preventDefault();
-												open(true);
-											}
-										}}
-										onClick={() => open()}
-										onKeyDown={(e) => {
-											if (e.key === "Enter") {
-												open();
-											}
-										}}
-										role="button"
-										tabIndex={0}
-									>
-										{(() => {
-											const glyph = asGlyphValue(row.raw.icon) ?? null;
-											return (
-												<GlyphDisplay
-													className="size-4 shrink-0 text-muted-foreground"
-													fallback={
-														contribution.icon ? (
-															<Icon
-																className="size-4 shrink-0 text-muted-foreground"
-																icon={contribution.icon}
-																size={16}
-															/>
-														) : null
-													}
-													size={16}
-													value={glyph}
-												/>
-											);
-										})()}
-										<SidebarItemPreview
-											content={
-												<SidebarPreviewTitle
-													title={
-														spec?.itemPreview?.title
-															? renderTemplate(
-																	spec.itemPreview.title,
-																	{ item: row.raw },
-																	{}
-																)
-															: title
-													}
-												>
-													{spec?.itemPreview?.description ? (
-														<p className="line-clamp-4 text-muted-foreground text-xs leading-relaxed">
-															{renderTemplate(
-																spec.itemPreview.description,
-																{ item: row.raw },
-																{}
-															)}
-														</p>
-													) : null}
-													{spec?.itemPreview?.meta?.map((meta) => (
-														<SidebarPreviewMeta
-															key={meta.label}
-															label={meta.label}
-															value={renderTemplate(
-																meta.value,
-																{ item: row.raw },
-																{}
-															)}
-														/>
-													))}
-												</SidebarPreviewTitle>
-											}
-										>
-											<span className="flex min-w-0 flex-1 flex-col justify-center overflow-hidden">
-												<span className="truncate text-sm leading-tight">
-													{title}
-												</span>
-												{subtitle ? (
-													<span className="truncate text-muted-foreground text-xs leading-tight">
-														{subtitle}
-													</span>
-												) : null}
-											</span>
-										</SidebarItemPreview>
-									</div>
-								</ContextMenuTrigger>
-								<ContextMenuContent>
-									{spec?.itemTarget ? (
-										<ContextMenuItem onClick={() => open(true)}>
-											<HugeiconsIcon
-												className="mr-2 size-4"
-												icon={ArrowUpRight01Icon}
-											/>
-											Open in new tab
-										</ContextMenuItem>
-									) : null}
-									{itemActions.map((action) =>
-										action.http ? (
-											<ContextMenuItem
-												key={action.id}
-												onClick={() => {
-													if (action.http) {
-														void runAction(action.http, row.raw);
-													}
-												}}
-												variant={
-													action.style === "danger" ? "destructive" : undefined
-												}
-											>
-												{action.icon ? (
-													<Icon
-														className="mr-2 size-4"
-														icon={action.icon}
-														size={16}
-													/>
-												) : null}
-												{action.label}
-											</ContextMenuItem>
-										) : null
-									)}
-								</ContextMenuContent>
-							</ContextMenu>
-						</SidebarMenuItem>
-					);
-				})}
-			</SidebarMenu>
+					) : null}
+				</div>
+			) : null}
+			{groupByDate ? (
+				<DateGroupedRows
+					className="ml-2 space-y-0.5"
+					collapsedKey={contributedBucketKeys.collapsedKey}
+					items={rows}
+					orderKey={contributedBucketKeys.orderKey}
+					renderRows={renderContributedRows}
+					stampOf={contributedStamp}
+				/>
+			) : (
+				renderContributedRows(rows)
+			)}
 		</SidebarSection>
 	);
 }
 
-/** Engines list in the sidebar — the local inference engines installed on this
- *  node. Rows and the "+" open the Engines store page. The resident engine shows
- *  a live dot. Hidden by default. */
+/**
+ * The run-alongside catalog categories this section lists beside the swappable
+ * chat engines. `provider` is deliberately absent: that is the mutually
+ * exclusive chat slot and it arrives via `useEngines`, which filters to it.
+ *
+ * Same pair as the Engines page's own `RUN_ALONGSIDE_CATEGORIES`
+ * (`store/EnginesCatalogSection.tsx`), and for the same reason — every row here
+ * opens that page, so the two must list the same engines.
+ */
+const SIDEBAR_RUN_ALONGSIDE_CATEGORIES = ["media", "voice"] as const;
+
+const ENGINE_SHELF_ORDER_KEY = "ryu:sidebar-engine-shelf-order";
+const ENGINE_SHELF_COLLAPSED_KEY = "ryu:sidebar-engine-shelf-collapsed";
+
+/**
+ * The shelves this section groups its rows into, in display order — the Engines
+ * page's own groups, by the page's own labels, because every row here opens that
+ * page. `shelf` matches the catalog category for the run-alongside kinds; `text`
+ * is the chat-provider slot, which the page also calls "Text and Embedding".
+ *
+ * That label is the destination page's heading, NOT a promise that an embedding
+ * engine can appear under it — none can. No embedding engine is a catalog entry
+ * (Core's registry is test-locked at `embedding.len() == 0`), and the two
+ * llama.cpp-derived retrieval engines the node dropdown does show come off
+ * `/api/sidecar/status`, not the catalog, so this section — which is catalog-fed
+ * and whose rows all open the Engines page — has nothing to put there. Renaming
+ * it to "Text" would only make the sidebar and the page it opens disagree.
+ */
+const ENGINE_SHELVES: { icon: IconSvgElement; key: string; label: string }[] = [
+	{ key: "text", label: "Text and Embedding", icon: CpuIcon },
+	{ key: "media", label: "Image", icon: Image01Icon },
+	{ key: "voice", label: "Speech", icon: Mic01Icon },
+];
+
+/** One engine row in the sidebar, flattened out of whichever hook produced it. */
+interface SidebarEngineRow {
+	displayName: string;
+	/** Resident (chat) or running (image/speech) — both mean "live" to a reader. */
+	live: boolean;
+	name: string;
+	/** Which {@link ENGINE_SHELVES} entry this row belongs under. */
+	shelf: string;
+}
+
+/**
+ * Engines list in the sidebar — every chat, image and speech engine installed on
+ * this node. Rows and the "+" open the Engines store page; the resident chat
+ * engine and any running speech/image sidecar show a live dot. Hidden by
+ * default.
+ *
+ * Not "every runtime": the embeddings server and the reranker are not catalog
+ * entries (see {@link ENGINE_SHELVES}), so they cannot be listed here, and the
+ * Engines page these rows open does not list them either.
+ *
+ * TWO data sources, not one. `useEngines` is the Engines *page*'s chat-slot hook
+ * and filters the catalog to `category === "provider"`, so on a normal install it
+ * yields llama.cpp and nothing else — which is why this section used to read as a
+ * pointless one-row list no matter how much was installed. The rest of what the
+ * node dropdown calls an engine (Whisper, Kokoro, an image model) lives in the
+ * catalog's `voice` and `media` categories, which `useVoiceEngines` serves with a
+ * real per-sidecar `running` flag.
+ *
+ * The fix is a second source rather than a wider filter: `useEngines().engines`
+ * also backs `store/EnginesCatalogSection.tsx` and `pages/PreflightPage.tsx`,
+ * where "engine" genuinely means the swappable chat runtime, and widening it
+ * there would put a TTS voice in the chat-engine picker.
+ *
+ * Shelved rather than listed flat once more than one kind is installed, and
+ * paged BEFORE it is shelved — the shape the Chats/Spaces date buckets already
+ * use (`DateGroupedRows` takes `paged.visible`, and one `SectionPagingControls`
+ * sits outside it). Paging each shelf on its own would let three shelves render
+ * 3 × `pageSize` rows in a section whose page size exists to keep it short.
+ * A single surviving shelf renders with no header at all: a lone "Text and
+ * Embedding" divider inside a section already titled "Engines" is a nesting
+ * level that names nothing new.
+ */
 function EnginesSection({
 	collapsed,
 	dnd,
@@ -5369,23 +6041,37 @@ function EnginesSection({
 }: SectionProps) {
 	const { openTab } = useTabsContext();
 	const { engines, loading, error, reload } = useEngines();
-	// The list is catalog+state merged, so keep only what's actually installed
-	// (plus the resident engine, which is installed by definition).
-	const installed = useMemo(
-		() => engines.filter((e) => e.active || e.installState === "installed"),
-		[engines]
+	const {
+		engines: runAlongside,
+		error: runAlongsideError,
+		loading: runAlongsideLoading,
+		reload: reloadRunAlongside,
+	} = useVoiceEngines(SIDEBAR_RUN_ALONGSIDE_CATEGORIES);
+
+	// Both hooks return catalog+state merged, so keep only what is actually
+	// installed (plus the resident engine, which is installed by definition).
+	const rows = useMemo<SidebarEngineRow[]>(
+		() => [
+			...engines
+				.filter((e) => e.active || e.installState === "installed")
+				.map((e) => ({
+					name: e.name,
+					displayName: e.displayName,
+					live: e.active,
+					shelf: "text",
+				})),
+			...runAlongside
+				.filter((e) => e.installState === "installed")
+				.map((e) => ({
+					name: e.name,
+					displayName: e.displayName,
+					live: e.running,
+					shelf: e.category,
+				})),
+		],
+		[engines, runAlongside]
 	);
-	// EngineEntry's display label is `displayName`; adapt to the shared sorter's
-	// `name` accessor without mutating the source rows.
-	const rows = useMemo(
-		() =>
-			installed.map((e) => ({
-				name: e.name,
-				displayName: e.displayName,
-				active: e.active,
-			})),
-		[installed]
-	);
+
 	const paged = usePaged(
 		sortItems(rows, sort, {
 			created: () => null,
@@ -5395,12 +6081,45 @@ function EnginesSection({
 		pageSize
 	);
 
+	// Shelves are derived from the VISIBLE slice, so "Show 3 more" can reveal a
+	// whole new shelf — same as a date bucket appearing on page two.
+	//
+	// `count` is deliberately taken from ALL rows, not the page. Unlike the date
+	// buckets this shape borrows from, the sort key (displayName) is orthogonal to
+	// the shelf, so one page boundary cuts through every shelf at once — a
+	// page-local count would tell someone with 3 speech engines installed that
+	// they have 2. Headers therefore report what is installed and the rows under
+	// them are the page; "Show N more" fills them in.
+	const shelves = useMemo(
+		() =>
+			ENGINE_SHELVES.map((shelf) => ({
+				...shelf,
+				count: rows.filter((r) => r.shelf === shelf.key).length,
+				rows: paged.visible.filter((r) => r.shelf === shelf.key),
+			})).filter((shelf) => shelf.rows.length > 0),
+		[paged.visible, rows]
+	);
+	const shelfKeys = useMemo(() => shelves.map((s) => s.key), [shelves]);
+	// Default EXPANDED: the point of this change is that these engines were
+	// invisible, so shipping them behind a closed shelf lands in the same place.
+	const nested = useNestedSections(
+		ENGINE_SHELF_ORDER_KEY,
+		ENGINE_SHELF_COLLAPSED_KEY,
+		shelfKeys,
+		false
+	);
+
 	const openEngines = (forceNew = false) =>
 		openTab("/engines", { title: "Engines", forceNew });
 
-	const emptyMessage = loading ? "Loading…" : "No engines installed";
+	const failed = error !== null || runAlongsideError !== null;
+	const emptyMessage =
+		loading || runAlongsideLoading ? "Loading…" : "No engines installed";
 
-	const renderEngineRows = (list: typeof rows) =>
+	const iconOf = (shelfKey: string) =>
+		ENGINE_SHELVES.find((s) => s.key === shelfKey)?.icon ?? CpuIcon;
+
+	const renderEngineRows = (list: SidebarEngineRow[]) =>
 		list.map((engine) => (
 			<SidebarMenuItem key={engine.name}>
 				<ContextMenu>
@@ -5425,14 +6144,14 @@ function EnginesSection({
 						>
 							<HugeiconsIcon
 								className="size-4 shrink-0 text-muted-foreground"
-								icon={CpuIcon}
+								icon={iconOf(engine.shelf)}
 							/>
 							<OverflowTooltip
 								className="min-w-0 flex-1 truncate text-sm"
 								text={engine.displayName}
 							/>
-							{/* The resident engine gets a live dot. */}
-							{engine.active && (
+							{/* Resident chat engine, or a running speech/image sidecar. */}
+							{engine.live && (
 								<span className="size-1.5 shrink-0 rounded-full bg-primary" />
 							)}
 						</div>
@@ -5464,24 +6183,52 @@ function EnginesSection({
 			sectionKey="engines"
 			sort={sort}
 		>
-			{error && installed.length === 0 && (
+			{/* Gated on "nothing loaded", not on "something failed": one of the two
+			    sources going down should still show what the other returned. */}
+			{failed && rows.length === 0 && (
 				<SectionLoadError
 					message="Couldn't load your engines."
 					onRetry={() => {
 						reload().catch(() => undefined);
+						reloadRunAlongside().catch(() => undefined);
 					}}
 				/>
 			)}
-			{!error && installed.length === 0 && (
+			{!failed && rows.length === 0 && (
 				<p className="px-2 py-2 text-muted-foreground text-xs">
 					{emptyMessage}
 				</p>
 			)}
-			{installed.length > 0 && (
+			{rows.length > 0 && (
 				<>
-					<SidebarMenu className="gap-0.5">
-						{renderEngineRows(paged.visible)}
-					</SidebarMenu>
+					{shelves.length > 1 ? (
+						nested.orderedKeys.map((key) => {
+							const shelf = shelves.find((s) => s.key === key);
+							if (!shelf) {
+								return null;
+							}
+							return (
+								<SubSection
+									collapsed={nested.isCollapsed(key)}
+									count={shelf.count}
+									dnd={nested.dnd}
+									icon={shelf.icon}
+									key={key}
+									label={shelf.label}
+									onToggleCollapsed={nested.toggle}
+									sectionKey={key}
+								>
+									<SidebarMenu className="gap-0.5">
+										{renderEngineRows(shelf.rows)}
+									</SidebarMenu>
+								</SubSection>
+							);
+						})
+					) : (
+						<SidebarMenu className="gap-0.5">
+							{renderEngineRows(paged.visible)}
+						</SidebarMenu>
+					)}
 					<SectionPagingControls
 						overflow={{
 							getSearchText: (engine) => engine.displayName ?? "",
@@ -5533,7 +6280,11 @@ function PinnedSection({
 			sectionKey="pinned"
 			sort={sort}
 		>
-			<ChatRowList conversations={paged.visible} handlers={handlers} />
+			<SidebarChatList
+				conversations={paged.visible}
+				handlers={handlers}
+				scope="pinned"
+			/>
 			<SectionPagingControls
 				overflow={{
 					getSearchText: (c) => c.title ?? "",
@@ -5588,73 +6339,9 @@ function saveOrder(key: string, order: string[]) {
 	}
 }
 
-/** The ChatGPT-style date buckets, in their natural (chronological) order. */
-const DATE_BUCKETS: { key: string; label: string }[] = [
-	{ key: "today", label: "Today" },
-	{ key: "yesterday", label: "Yesterday" },
-	{ key: "last-week", label: "Last week" },
-	{ key: "last-month", label: "Last month" },
-	{ key: "last-year", label: "Last year" },
-	{ key: "older", label: "Older" },
-];
-const DATE_BUCKET_LABELS: Record<string, string> = Object.fromEntries(
-	DATE_BUCKETS.map((b) => [b.key, b.label])
-);
-
-const DAY_MS = 86_400_000;
-
-/** Which date bucket a timestamp falls into, relative to the start of today. */
-function dateBucketKey(ts: number, startOfToday: number): string {
-	if (ts >= startOfToday) {
-		return "today";
-	}
-	if (ts >= startOfToday - DAY_MS) {
-		return "yesterday";
-	}
-	if (ts >= startOfToday - 7 * DAY_MS) {
-		return "last-week";
-	}
-	if (ts >= startOfToday - 30 * DAY_MS) {
-		return "last-month";
-	}
-	if (ts >= startOfToday - 365 * DAY_MS) {
-		return "last-year";
-	}
-	return "older";
-}
-
-interface DateBucket {
-	conversations: Conversation[];
-	key: string;
-	label: string;
-}
-
-/** Bucket loose chats by last-activity into the non-empty date buckets, each
- *  sorted most-recent-first, returned in chronological (Today → Older) order. */
-function bucketConversationsByDate(convs: Conversation[]): DateBucket[] {
-	// Midnight in the *display* zone, not the machine's — otherwise a chat that
-	// reads 09:00 in the chosen zone can land under "Yesterday".
-	const start = startOfTodayMs();
-	const byKey = new Map<string, Conversation[]>();
-	for (const conv of convs) {
-		const key = dateBucketKey(toEpoch(conv.updatedAt), start);
-		const existing = byKey.get(key);
-		if (existing) {
-			existing.push(conv);
-		} else {
-			byKey.set(key, [conv]);
-		}
-	}
-	const out: DateBucket[] = [];
-	for (const { key, label } of DATE_BUCKETS) {
-		const bucket = byKey.get(key);
-		if (bucket && bucket.length > 0) {
-			bucket.sort((a, b) => toEpoch(b.updatedAt) - toEpoch(a.updatedAt));
-			out.push({ conversations: bucket, key, label });
-		}
-	}
-	return out;
-}
+/** The date-bucketing primitive itself lives in `lib/sidebar/date-buckets.ts` —
+ *  generic over the row type, so every list below can use it rather than only
+ *  Chats. {@link DateGroupedRows} is the render half. */
 
 /** Drag-and-drop wiring for the nested sub-sections (mirrors SectionDnd, but
  *  string-keyed and self-contained rather than threaded from the top level). */
@@ -5845,9 +6532,7 @@ function SubSection({
 					<div className="relative flex items-center">
 						<button
 							className={`group/hdr flex min-w-0 flex-1 cursor-grab items-center gap-2 rounded-md px-2 text-foreground transition-colors active:cursor-grabbing ${
-								size === "md"
-									? "h-8 text-sm hover:bg-muted"
-									: "py-1 text-xs"
+								size === "md" ? "h-8 text-sm hover:bg-muted" : "py-1 text-xs"
 							}`}
 							draggable
 							onClick={() => onToggleCollapsed(sectionKey)}
@@ -5893,6 +6578,121 @@ function SubSection({
 				return wrapHeader ? wrapHeader(headerRow) : headerRow;
 			})()}
 			{!collapsed && <div className="mt-0.5">{children}</div>}
+		</div>
+	);
+}
+
+/**
+ * The two localStorage keys one date-bucketed list needs, namespaced by `scope`.
+ *
+ * Per-scope rather than global because collapse state is per-LIST: collapsing
+ * "Older" inside one project must not collapse it inside the next one, and the
+ * Chats section's buckets are a third independent surface. Chats itself keeps its
+ * ORIGINAL keys (passed explicitly) so nobody's existing collapse state resets when
+ * this generalization ships.
+ */
+function dateBucketStorageKeys(scope: string): {
+	collapsedKey: string;
+	orderKey: string;
+} {
+	return {
+		collapsedKey: `ryu:sidebar-collapsed-date-buckets:${scope}`,
+		orderKey: `ryu:sidebar-date-bucket-order:${scope}`,
+	};
+}
+
+/**
+ * Any list of rows, bucketed by date into collapsible/reorderable sub-sections.
+ *
+ * The render half of `lib/sidebar/date-buckets.ts` and the reason "group by date" is
+ * now a sidebar-wide primitive rather than a property of the Chats section: a caller
+ * supplies its rows, the accessor that dates one (`stampOf`), a storage scope, and
+ * how to draw a run of them (`renderRows`). Everything else — bucketing, the display
+ * zone, per-bucket collapse and drag order — is shared.
+ *
+ * Returns `null` when there is nothing to bucket, which is the signal for the caller
+ * to fall back to its flat body. Hooks run before that return, so the fallback is a
+ * render decision, not a conditional-hook hazard.
+ *
+ * `renderRows` receives one bucket's rows, so a caller keeps its own row component
+ * (a chat row, a space document row, a contributed row) unchanged.
+ */
+function DateGroupedRows<T>({
+	className = "space-y-0.5",
+	collapsedKey,
+	items,
+	orderKey,
+	renderRows,
+	stampOf,
+	wrapHeader,
+}: {
+	/**
+	 * Wrapper classes, which in practice means the bucket headers' INDENT. A bucket
+	 * is a divider that has to line up with the rows it introduces, and those rows
+	 * sit at different depths per surface: a chat row at the section's own indent, a
+	 * space document two steps in under its space. Defaults to no indent.
+	 */
+	className?: string;
+	collapsedKey: string;
+	items: T[];
+	orderKey: string;
+	renderRows: (rows: T[]) => ReactNode;
+	stampOf: (item: T) => number | string | null | undefined;
+	/** Optional wrapper for a bucket's header — e.g. a "Delete all chats" menu
+	 *  scoped to that bucket. */
+	wrapHeader?: (bucket: DateBucket<T>, header: ReactNode) => ReactNode;
+}) {
+	// Which bucket a row lands in depends on midnight in the DISPLAY zone, so the
+	// revision has to be a dependency — not just a subscription.
+	const timezoneRevision = useTimezoneRevision();
+	const buckets = useMemo(
+		() => bucketByDate(items, stampOf, startOfTodayMs()),
+		// biome-ignore lint/correctness/useExhaustiveDependencies: bucketing reads
+		// the display zone at call time; the revision is what invalidates it.
+		[items, stampOf, timezoneRevision]
+	);
+	// Keyed by plain string: `useNestedSections` speaks the same string-keyed
+	// vocabulary as every other reorderable surface, so the bucket key crosses that
+	// boundary widened rather than making the shared machinery generic.
+	const bucketByKey = useMemo(
+		() => new Map<string, DateBucket<T>>(buckets.map((b) => [b.key, b])),
+		[buckets]
+	);
+	const bucketKeys = useMemo<string[]>(
+		() => buckets.map((b) => b.key),
+		[buckets]
+	);
+	const nested = useNestedSections(orderKey, collapsedKey, bucketKeys, false);
+
+	if (buckets.length === 0) {
+		return null;
+	}
+
+	return (
+		<div className={className}>
+			{nested.orderedKeys.map((key) => {
+				const bucket = bucketByKey.get(key);
+				if (!bucket) {
+					return null;
+				}
+				const label = DATE_BUCKET_LABELS[key] ?? bucket.label;
+				return (
+					<SubSection
+						collapsed={nested.isCollapsed(key)}
+						count={bucket.items.length}
+						dnd={nested.dnd}
+						key={key}
+						label={label}
+						onToggleCollapsed={nested.toggle}
+						sectionKey={key}
+						wrapHeader={
+							wrapHeader ? (header) => wrapHeader(bucket, header) : undefined
+						}
+					>
+						{renderRows(bucket.items)}
+					</SubSection>
+				);
+			})}
 		</div>
 	);
 }
@@ -5996,71 +6796,34 @@ function ChatsSection({
 	onNew: () => void;
 }) {
 	const [groupByDate] = useChatDateGrouping();
-	// Which bucket a chat lands in depends on midnight in the display zone, so
-	// the revision has to be a dependency — not just a subscription.
-	const timezoneRevision = useTimezoneRevision();
 	const paged = usePaged(sortItems(loose, sort, CONV_SORT_ACCESSORS), pageSize);
-	// Hooks must run unconditionally, so compute the grouped view even when the
-	// flat list is shown — it's cheap and only rendered when the setting is on.
-	const dateBuckets = useMemo(
-		() => (groupByDate ? bucketConversationsByDate(loose) : []),
-		// biome-ignore lint/correctness/useExhaustiveDependencies: bucketing reads
-		// the display zone at call time; the revision is what invalidates it.
-		[groupByDate, loose, timezoneRevision]
-	);
-	const bucketByKey = useMemo(
-		() => new Map(dateBuckets.map((b) => [b.key, b])),
-		[dateBuckets]
-	);
-	const bucketKeys = useMemo(
-		() => dateBuckets.map((b) => b.key),
-		[dateBuckets]
-	);
-	const nested = useNestedSections(
-		CHAT_BUCKET_ORDER_KEY,
-		CHAT_BUCKET_COLLAPSED_KEY,
-		bucketKeys,
-		false
-	);
 
-	// ChatGPT-style date buckets, each its own collapsible/reorderable
-	// sub-section indented under the Chats heading.
-	const groupedBody = (
-		<div className="ml-2 space-y-0.5">
-			{nested.orderedKeys.map((key) => {
-				const bucket = bucketByKey.get(key);
-				if (!bucket) {
-					return null;
-				}
-				return (
-					<SubSection
-						collapsed={nested.isCollapsed(key)}
-						count={bucket.conversations.length}
-						dnd={nested.dnd}
-						key={key}
-						label={DATE_BUCKET_LABELS[key] ?? bucket.label}
-						onToggleCollapsed={nested.toggle}
-						sectionKey={key}
-						wrapHeader={(header) => (
-							<DeleteAllChatsMenu
-								conversationIds={bucket.conversations.map((c) => c.id)}
-								groupLabel={DATE_BUCKET_LABELS[key] ?? bucket.label}
-								onDelete={handlers.onDeleteConversation}
-								scope="group"
-							>
-								{header}
-							</DeleteAllChatsMenu>
-						)}
-					>
-						<ChatRowList
-							conversations={bucket.conversations}
-							handlers={handlers}
-						/>
-					</SubSection>
-				);
-			})}
-		</div>
-	);
+	// ChatGPT-style date buckets, each its own collapsible/reorderable sub-section
+	// indented under the Chats heading. Unlike the other bucketed lists this one
+	// buckets EVERY loose chat rather than the current page — the pre-existing
+	// behaviour, and safe here because the flat list is what paging is for.
+	const groupedBody = groupByDate ? (
+		<DateGroupedRows
+			className="ml-2 space-y-0.5"
+			collapsedKey={CHAT_BUCKET_COLLAPSED_KEY}
+			items={loose}
+			orderKey={CHAT_BUCKET_ORDER_KEY}
+			renderRows={(rows) => (
+				<ChatRowList conversations={rows} handlers={handlers} />
+			)}
+			stampOf={conversationStamp}
+			wrapHeader={(bucket, header) => (
+				<DeleteAllChatsMenu
+					conversationIds={bucket.items.map((c) => c.id)}
+					groupLabel={bucket.label}
+					onDelete={handlers.onDeleteConversation}
+					scope="group"
+				>
+					{header}
+				</DeleteAllChatsMenu>
+			)}
+		/>
+	) : null;
 
 	const flatBody = (
 		<>
@@ -6140,6 +6903,64 @@ const PROJECT_SORT_ACCESSORS: SortAccessors<ProjectBucket> = {
 		p.conversations.reduce((max, c) => Math.max(max, toEpoch(c.updatedAt)), 0),
 };
 
+/**
+ * Any run of chats in the sidebar, date-bucketed when the user's "Group lists by
+ * date" setting is on and flat otherwise.
+ *
+ * This is what makes the setting universal rather than Chats-only. Every chat list
+ * outside the Chats section itself goes through here — an expanded project row, the
+ * picker's "All projects" and single-project bodies, Pinned, Archived — so date
+ * grouping cannot be on in one place and quietly missing in another.
+ *
+ * `scope` namespaces the bucket collapse/order state: collapsing "Older" under one
+ * project must not collapse it under every other one, nor under Pinned.
+ */
+export function SidebarChatList({
+	conversations,
+	handlers,
+	scope,
+}: {
+	conversations: Conversation[];
+	handlers: ChatRowHandlers;
+	scope: string;
+}) {
+	const [groupByDate] = useChatDateGrouping();
+	const storage = dateBucketStorageKeys(`chats:${scope}`);
+	const renderRows = (list: Conversation[]) => (
+		<ChatRowList conversations={list} handlers={handlers} />
+	);
+	if (!groupByDate) {
+		return renderRows(conversations);
+	}
+	return (
+		<DateGroupedRows
+			className="ml-2 space-y-0.5"
+			collapsedKey={storage.collapsedKey}
+			items={conversations}
+			// REMOUNT on a scope change. `useNestedSections` loads both storage keys in
+			// `useState` initializers only, and this element keeps its tree position
+			// when the picker switches project — so without a changing key the buckets
+			// would carry the previous scope's collapse set and the next toggle would
+			// write it to the NEW scope's key, which is the exact cross-contamination
+			// the per-scope keys exist to prevent.
+			key={storage.orderKey}
+			orderKey={storage.orderKey}
+			renderRows={renderRows}
+			stampOf={conversationStamp}
+			wrapHeader={(bucket, header) => (
+				<DeleteAllChatsMenu
+					conversationIds={bucket.items.map((c) => c.id)}
+					groupLabel={bucket.label}
+					onDelete={handlers.onDeleteConversation}
+					scope="group"
+				>
+					{header}
+				</DeleteAllChatsMenu>
+			)}
+		/>
+	);
+}
+
 /** One nested folder inside the Projects section, rendered with the shared
  *  sub-section header (collapsible + drag-reorderable), expanding to its chats
  *  (or a "No chats" hint), with set-active / remove in the context menu. */
@@ -6206,9 +7027,10 @@ function ProjectRow({
 								No chats
 							</p>
 						) : (
-							<ChatRowList
+							<SidebarChatList
 								conversations={bucket.conversations}
 								handlers={handlers}
+								scope={bucket.path}
 							/>
 						)}
 					</SubSection>
@@ -6287,26 +7109,250 @@ function ProjectRow({
 	);
 }
 
-/** All workspace projects nested under one section. The list is the union of the
- *  composer's recent folders and the folders of existing conversations (minus any
- *  the user removed) — the same synced store the project picker reads, so importing
- *  or removing in either surface reflects in both. Folders with no chats still show
- *  (with a "No chats" hint) rather than disappearing. */
-function ProjectsSection({
-	collapsed,
-	dnd,
+/**
+ * The selected project's verbs, for the picker model.
+ *
+ * Every item here used to live on {@link ProjectRow}'s context menu. "Set as active
+ * project" in particular is not a convenience — it is what the composer's project
+ * picker and a run's cwd follow — so the picker model could not simply drop it and
+ * call itself a decluttering. Only rendered when a single project is selected: none
+ * of these verbs mean anything applied to "all".
+ */
+function ProjectScopeMenu({
+	label,
+	onNewChat,
+	onRemove,
+	onSetActive,
+	path,
+}: {
+	label: string;
+	onNewChat: (path: string) => void;
+	onRemove: (path: string) => void;
+	onSetActive: (path: string) => void;
+	path: string;
+}) {
+	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	return (
+		<>
+			<ScopeMenu label={`${label} options`}>
+				<DropdownMenuItem onClick={() => onNewChat(path)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={Add01Icon} />
+					New chat in this folder
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => onSetActive(path)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={FolderOpenIcon} />
+					Set as active project
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => setSettingsOpen(true)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={PencilEdit01Icon} />
+					Edit project…
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => setIconDialogOpen(true)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
+					Change icon…
+				</DropdownMenuItem>
+				<DropdownMenuSeparator />
+				<DropdownMenuItem onClick={() => onRemove(path)} variant="destructive">
+					<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
+					Remove from app
+				</DropdownMenuItem>
+			</ScopeMenu>
+			{/* Outside the menu so they survive it closing on select. */}
+			<ProjectSettingsDialog
+				onOpenChange={setSettingsOpen}
+				open={settingsOpen}
+				path={path}
+			/>
+			<ProjectIconDialog
+				name={label}
+				onOpenChange={setIconDialogOpen}
+				open={iconDialogOpen}
+				path={path}
+			/>
+		</>
+	);
+}
+
+/**
+ * The selected space's verbs, for the picker model — the {@link SpaceSidebarRow}
+ * context menu and its hover `+`, rehoused.
+ *
+ * "Add files" matters most: `AddToSpaceDialog` is the sidebar's only path for
+ * uploading into a space, and it needs a target, so without this the picker model
+ * would have removed the feature rather than tidied it. The system-space branch on
+ * delete is preserved verbatim in intent — Core refuses to delete one, so the item
+ * is disabled with the reason rather than hidden.
+ */
+function SpaceScopeMenu({
+	contributedRows,
+	onAdd,
+	onOpen,
+	onOpenInNewTab,
+	onRequestDelete,
+	setSpaceIcon,
+	space,
+}: {
+	contributedRows: EntityRow[];
+	onAdd: () => void;
+	onOpen: () => void;
+	onOpenInNewTab: () => void;
+	onRequestDelete: () => void;
+	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
+	space: Space;
+}) {
+	const { updateTabsIconWhere } = useTabsContext();
+	const [iconDialogOpen, setIconDialogOpen] = useState(false);
+	return (
+		<>
+			<ScopeMenu label={`${space.name} options`}>
+				<DropdownMenuItem onClick={onAdd}>
+					<HugeiconsIcon className="mr-2 size-4" icon={Add01Icon} />
+					Add files to this space…
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={onOpen}>
+					<HugeiconsIcon className="mr-2 size-4" icon={DeliverySecure01Icon} />
+					Open space page
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={onOpenInNewTab}>
+					<HugeiconsIcon className="mr-2 size-4" icon={ArrowUpRight01Icon} />
+					Open in new tab
+				</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => setIconDialogOpen(true)}>
+					<HugeiconsIcon className="mr-2 size-4" icon={ImageAdd01Icon} />
+					Change icon…
+				</DropdownMenuItem>
+				{contributedRows.map((row) => (
+					<DropdownMenuItem key={row.id} onClick={row.onSelect}>
+						<span className="mr-2 inline-flex">
+							<EntityRowGlyph row={row} />
+						</span>
+						{row.label}
+					</DropdownMenuItem>
+				))}
+				<DropdownMenuSeparator />
+				{space.system ? (
+					<Tooltip>
+						<TooltipTrigger render={<span className="block" />}>
+							<DropdownMenuItem disabled variant="destructive">
+								<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
+								Delete space
+							</DropdownMenuItem>
+						</TooltipTrigger>
+						<TooltipContent className="max-w-56">
+							System spaces can't be deleted — Ryu creates and maintains this
+							one.
+						</TooltipContent>
+					</Tooltip>
+				) : (
+					<DropdownMenuItem onClick={onRequestDelete} variant="destructive">
+						<HugeiconsIcon className="mr-2 size-4" icon={Delete01Icon} />
+						Delete space
+					</DropdownMenuItem>
+				)}
+			</ScopeMenu>
+			<EntityIconDialog
+				description={space.name}
+				onChange={(next) => {
+					updateTabsIconWhere((t) => t.path === `/spaces/${space.id}`, next);
+					void setSpaceIcon(space.id, next).catch(() => {
+						toast.error("Couldn't update space icon");
+					});
+				}}
+				onOpenChange={setIconDialogOpen}
+				open={iconDialogOpen}
+				title="Space icon"
+				value={space.icon}
+			/>
+		</>
+	);
+}
+
+/**
+ * A project's chats under the picker, paged.
+ *
+ * Unlike the Chats section — which buckets every loose chat and leaves paging to its
+ * flat body — the picker's "All projects" list is the union of EVERY project's chats,
+ * so it is paged in both models. Bucketing an unbounded union would put an unbounded
+ * number of rows in the sidebar the moment the setting is on.
+ */
+function ProjectsPickerBody({
 	handlers,
-	menu,
-	onToggleCollapsed,
+	pageSize,
+	projects,
+	scope,
+	sort,
+}: {
+	handlers: ChatRowHandlers;
+	pageSize: number;
+	/** The chats to show: one project's, or every project's. */
+	projects: ProjectBucket[];
+	/** Namespaces the date-bucket collapse state for this selection. */
+	scope: string;
+	sort: SortKey;
+}) {
+	// Newest-first across the union, so "All projects" reads chronologically rather
+	// than project-by-project. `sort` then re-orders it if the user picked one.
+	const conversations = useMemo(() => {
+		const all = projects.flatMap((p) => p.conversations);
+		return all.sort((a, b) => toEpoch(b.updatedAt) - toEpoch(a.updatedAt));
+	}, [projects]);
+	const paged = usePaged(
+		sortItems(conversations, sort, CONV_SORT_ACCESSORS),
+		pageSize
+	);
+
+	if (conversations.length === 0) {
+		return (
+			<p className="px-2 py-2 text-muted-foreground text-xs">
+				{scope === ALL_SELECTION
+					? "No chats in your projects yet"
+					: "No chats in this project yet"}
+			</p>
+		);
+	}
+
+	return (
+		<>
+			<SidebarChatList
+				conversations={paged.visible}
+				handlers={handlers}
+				scope={scope}
+			/>
+			<SectionPagingControls
+				overflow={{
+					getSearchText: (c) => c.title ?? "",
+					items: paged.items,
+					label: "chats",
+					renderList: (list) => (
+						<ChatRowList conversations={list} handlers={handlers} />
+					),
+				}}
+				paged={paged}
+			/>
+		</>
+	);
+}
+
+/** Every project as its own expandable row — the original model, kept behind the
+ *  "Projects & Spaces as pickers" setting. */
+function ProjectsListBody({
+	handlers,
+	onNewChat,
+	onRemove,
+	onSetActive,
 	pageSize,
 	projects,
 	sort,
-}: SectionProps & {
+}: {
 	handlers: ChatRowHandlers;
+	onNewChat: (path: string) => void;
+	onRemove: (path: string) => void;
+	onSetActive: (path: string) => void;
+	pageSize: number;
 	projects: ProjectBucket[];
+	sort: SortKey;
 }) {
-	const { setFolder, removeProject } = useWorkspaceStore();
-	const { openTab } = useTabsContext();
 	// Folders default collapsed; the section's Sort-by seeds their order, and the
 	// user can drag to override it (persisted per folder path).
 	const sortedProjects = sortItems(projects, sort, PROJECT_SORT_ACCESSORS);
@@ -6325,6 +7371,99 @@ function ProjectsSection({
 		true
 	);
 	const paged = usePaged(nested.orderedKeys, pageSize);
+
+	const renderProjectRows = (list: typeof nested.orderedKeys) =>
+		list.map((path) => {
+			const bucket = projectByPath.get(path);
+			if (!bucket) {
+				return null;
+			}
+			return (
+				<ProjectRow
+					bucket={bucket}
+					collapsed={nested.isCollapsed(path)}
+					dnd={nested.dnd}
+					handlers={handlers}
+					key={path}
+					onNewChat={onNewChat}
+					onRemove={onRemove}
+					onSetActive={onSetActive}
+					onToggleCollapsed={nested.toggle}
+				/>
+			);
+		});
+
+	// No `ml-2` here, unlike the Chats date buckets. Those buckets are dividers
+	// INSIDE a section, so the indent says "these belong to Chats"; a project folder
+	// is a top-level entity like a chat or a space, and indenting it left a gap on
+	// the left edge that nothing else in the sidebar has.
+	return (
+		<>
+			<div className="space-y-0.5">{renderProjectRows(paged.visible)}</div>
+			<SectionPagingControls
+				overflow={{
+					getSearchText: (path) => path,
+					items: paged.items,
+					label: "projects",
+					renderList: (list) => (
+						<div className="space-y-0.5">{renderProjectRows(list)}</div>
+					),
+				}}
+				paged={paged}
+			/>
+		</>
+	);
+}
+
+/** All workspace projects under one section. The list is the union of the composer's
+ *  recent folders and the folders of existing conversations (minus any the user
+ *  removed) — the same synced store the project picker reads, so importing or
+ *  removing in either surface reflects in both.
+ *
+ *  Two presentations, chosen by the "Projects & Spaces as pickers" setting: a picker
+ *  whose default option ("All projects") lists every chat across every project, or
+ *  the original row-per-project list where folders with no chats still show with a
+ *  "No chats" hint. */
+function ProjectsSection({
+	collapsed,
+	dnd,
+	handlers,
+	menu,
+	onToggleCollapsed,
+	pageSize,
+	projects,
+	sort,
+}: SectionProps & {
+	handlers: ChatRowHandlers;
+	projects: ProjectBucket[];
+}) {
+	const { setFolder, removeProject } = useWorkspaceStore();
+	const { openTab } = useTabsContext();
+	const [groupedNav] = useSidebarGroupedNav();
+	const projectNames = useWorkspaceStore((state) => state.projectNames);
+	const options = useMemo(
+		() =>
+			projects.map((p) => ({
+				label: projectNames[p.path]?.trim() || p.name,
+				value: p.path,
+			})),
+		[projects, projectNames]
+	);
+	const [selection, setSelection] = usePickerSelection(
+		PROJECT_SELECTION_KEY,
+		options
+	);
+	// What the picker is currently showing — the one selected project, or all of
+	// them. Also the scope of the header's "Delete all chats": a header action that
+	// reached past the visible list would be a destructive scope mismatch.
+	const shown = useMemo(
+		() =>
+			selection === ALL_SELECTION
+				? projects
+				: projects.filter((p) => p.path === selection),
+		[projects, selection]
+	);
+	const headerScope = groupedNav ? shown : projects;
 
 	// The `+` opens the SAME dropdown as the composer's folder picker — recent
 	// folders, "Open existing folder" (the node-aware NodeFolderBrowser), and
@@ -6359,27 +7498,6 @@ function ProjectsSection({
 		});
 		openTab("/chat", { forceNew: true });
 	};
-
-	const renderProjectRows = (list: typeof nested.orderedKeys) =>
-		list.map((path) => {
-			const bucket = projectByPath.get(path);
-			if (!bucket) {
-				return null;
-			}
-			return (
-				<ProjectRow
-					bucket={bucket}
-					collapsed={nested.isCollapsed(path)}
-					dnd={nested.dnd}
-					handlers={handlers}
-					key={path}
-					onNewChat={handleNewChatInFolder}
-					onRemove={removeProject}
-					onSetActive={handleSetActive}
-					onToggleCollapsed={nested.toggle}
-				/>
-			);
-		});
 
 	return (
 		<>
@@ -6429,7 +7547,7 @@ function ProjectsSection({
 				sort={sort}
 				wrapHeader={(header) => (
 					<DeleteAllChatsMenu
-						conversationIds={projects.flatMap((p) =>
+						conversationIds={headerScope.flatMap((p) =>
 							p.conversations.map((c) => c.id)
 						)}
 						groupLabel="Projects"
@@ -6444,28 +7562,47 @@ function ProjectsSection({
 					<p className="px-2 py-2 text-muted-foreground text-xs">
 						No projects yet. Click + to import a folder.
 					</p>
-				) : (
-					// No `ml-2` here, unlike the Chats date buckets. Those buckets are
-					// dividers INSIDE a section, so the indent says "these belong to
-					// Chats"; a project folder is a top-level entity like a chat or a
-					// space, and indenting it left a gap on the left edge that nothing
-					// else in the sidebar has.
+				) : groupedNav ? (
 					<>
-						<div className="space-y-0.5">
-							{renderProjectRows(paged.visible)}
-						</div>
-						<SectionPagingControls
-							overflow={{
-								getSearchText: (path) => path,
-								items: paged.items,
-								label: "projects",
-								renderList: (list) => (
-									<div className="space-y-0.5">{renderProjectRows(list)}</div>
-								),
-							}}
-							paged={paged}
+						<SidebarScopePicker
+							actions={
+								selection === ALL_SELECTION ? undefined : (
+									<ProjectScopeMenu
+										label={
+											options.find((o) => o.value === selection)?.label ??
+											selection
+										}
+										onNewChat={handleNewChatInFolder}
+										onRemove={removeProject}
+										onSetActive={handleSetActive}
+										path={selection}
+									/>
+								)
+							}
+							allLabel="All projects"
+							icon={SECTION_ICONS.projects}
+							onValueChange={setSelection}
+							options={options}
+							value={selection}
+						/>
+						<ProjectsPickerBody
+							handlers={handlers}
+							pageSize={pageSize}
+							projects={shown}
+							scope={selection}
+							sort={sort}
 						/>
 					</>
+				) : (
+					<ProjectsListBody
+						handlers={handlers}
+						onNewChat={handleNewChatInFolder}
+						onRemove={removeProject}
+						onSetActive={handleSetActive}
+						pageSize={pageSize}
+						projects={projects}
+						sort={sort}
+					/>
 				)}
 			</SidebarSection>
 			<CreateFolderDialog onOpenChange={setCreateOpen} open={createOpen} />
@@ -6511,7 +7648,11 @@ function ArchivedSection({
 			sectionKey="archived"
 			sort={sort}
 		>
-			<ChatRowList conversations={paged.visible} handlers={handlers} />
+			<SidebarChatList
+				conversations={paged.visible}
+				handlers={handlers}
+				scope="archived"
+			/>
 			<SectionPagingControls
 				overflow={{
 					getSearchText: (c) => c.title ?? "",
@@ -6930,14 +8071,23 @@ export function SidebarPanelContent({
 	// Drives whether the "Tabs" section renders (vertical layout) or is skipped
 	// (horizontal layout, where the title-bar strip owns the tabs).
 	const tabLayout = useTabLayout();
-	// "sections" (default): every section stacked. "tabbed": section labels become
-	// a button bar and only the selected section's list is shown below.
+	// The stored mode KEY; the arrangement it names is resolved below against the
+	// modes on offer (built-in + contributed) — see `layout/sidebar-modes.ts`.
 	const [sidebarMode, setSidebarMode] = useSidebarMode();
 	const [sidebarVariant, setSidebarVariant] = useSidebarVariant();
 	// Which section the tabbed bar currently reveals. Reconciled below against the
 	// visible keys so it never points at a hidden/missing section.
 	const [activeTabbedSection, setActiveTabbedSection] =
 		useState<SectionKey | null>(null);
+	// Changing mode drops the remembered tab. The reconciliation below only catches
+	// a selection the new mode does NOT offer, and "chats" is offered by both — so
+	// arriving in Agent mode from a Tabbed session parked on Chats would open on
+	// Sessions and quietly break the one thing that mode promises (land on the
+	// roster). Clearing lets each mode's own default win.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: reacting to the mode change itself, not to the setter.
+	useEffect(() => {
+		setActiveTabbedSection(null);
+	}, [sidebarMode]);
 
 	// Pin/archive/unread live in one module-level store (see
 	// `useConversationFlagsStore`) because the tab context menus offer the same
@@ -6961,6 +8111,10 @@ export function SidebarPanelContent({
 		sidebar_sections: contributedSections,
 		sidebar_buttons: contributedButtons,
 	} = usePluginContributions();
+	// The arrangements on offer, shared with the Appearance tab so the two surfaces
+	// cannot disagree about which contributed modes are real.
+	const { modes: sidebarModes, settled: contributionsSettled } =
+		useSidebarModes();
 	const dynamicSectionKeys = useMemo<SectionKey[]>(
 		() =>
 			[...contributedSections]
@@ -6972,6 +8126,20 @@ export function SidebarPanelContent({
 				.map((s) => `plugin:${s.plugin}:${s.id}` as SectionKey),
 		[contributedSections]
 	);
+	const { mode: activeMode, stale: modeIsStale } = resolveSidebarMode(
+		sidebarMode,
+		sidebarModes,
+		contributionsSettled
+	);
+	// A stored mode whose app is gone is cleared, not merely fallen back from —
+	// otherwise every render re-resolves a key that will never resolve again, and
+	// re-enabling the app silently teleports the user back into its mode weeks
+	// later. Only ever runs once per disappearance (the write changes `sidebarMode`).
+	useEffect(() => {
+		if (modeIsStale) {
+			setSidebarMode(DEFAULT_SIDEBAR_MODE);
+		}
+	}, [modeIsStale, setSidebarMode]);
 	const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
 		() => {
 			// Default the Archived section to collapsed on first run, so it stays out
@@ -7541,37 +8709,17 @@ export function SidebarPanelContent({
 						path="/store"
 					/>
 				);
-			case "marketplace":
-				return (
-					<NavTabButton
-						chromeKey="marketplace"
-						icon={Store01Icon}
-						label="Marketplace"
-						menu={chromeMenu}
-						path="/marketplace"
-					/>
-				);
-			case "apps":
-				return (
-					<NavTabButton
-						chromeKey="apps"
-						icon={Square01Icon}
-						label="Apps"
-						menu={chromeMenu}
-						path="/apps"
-					/>
-				);
-			case "extensions":
-				return (
-					<NavTabButton
-						chromeKey="extensions"
-						icon={PuzzleIcon}
-						label="Extensions"
-						menu={chromeMenu}
-						path="/extensions"
-					/>
-				);
-			// Tasks/Timeline/Activity/Calendar deliberately have NO case here: they are
+			// "marketplace"/"apps"/"extensions" deliberately have NO case here, for the
+			// reason given above CHROME_ORDER: all three folded into the Customize
+			// (Store) shell as sections and no longer get their own sidebar button.
+			// They kept unreachable cases for a while, which was worse than nothing —
+			// `CHROME_ORDER` excludes the keys, so the cases could never run, and the
+			// dead "marketplace" branch still rendered a storefront glyph while the
+			// live Store button renders `PackageIcon`. A glyph that only exists on a
+			// nothing reaches is a glyph nobody keeps in sync. The keys themselves stay
+			// in BuiltinChromeKey/CHROME_LABELS so a stale persisted layout is filtered
+			// gracefully; `default` returns null for them.
+			// Tasks/Timeline/Activity/Calendar have no case here either: they are
 			// Ryu Apps, listed by `AppsSection` from the enabled-companion feed. See
 			// the note above CHROME_ORDER.
 			default: {
@@ -7715,26 +8863,56 @@ export function SidebarPanelContent({
 
 	// The section keys offered by the tabbed bar: every visible section, minus the
 	// Tabs section when it would render nothing (horizontal tab layout owns tabs).
-	const tabbedKeys = effectiveOrder.filter(
+	const visibleTabbedKeys = effectiveOrder.filter(
 		(key) =>
 			!(hiddenSections.has(key) || (key === "tabs" && tabLayout !== "vertical"))
 	);
-	// Keep the active tab pointed at a real, visible section (default: the first).
+	// A mode that NAMES sections narrows the strip to exactly those, in the user's
+	// own section order (so someone who dragged Chats above Agents keeps that
+	// reading order). `hiddenSections` is deliberately NOT applied to them: picking
+	// a mode is a more specific instruction than a section hidden back when the
+	// sidebar listed fifteen of them, and a two-tab toggle missing one of its halves
+	// is just the previous mode with fewer rows.
+	const tabbedKeys = activeMode.sections
+		? [...activeMode.sections].sort((a, b) => {
+				const ai = effectiveOrder.indexOf(a);
+				const bi = effectiveOrder.indexOf(b);
+				return (
+					(ai === -1 ? Number.MAX_SAFE_INTEGER : ai) -
+					(bi === -1 ? Number.MAX_SAFE_INTEGER : bi)
+				);
+			})
+		: visibleTabbedKeys;
+	// Keep the active tab pointed at a real, visible section. A mode's declared
+	// `defaultSection` wins over "the first tab" — that is what makes Agent mode open
+	// on the roster rather than on the chat list it lists first.
+	const defaultTabbedKey =
+		activeMode.defaultSection && tabbedKeys.includes(activeMode.defaultSection)
+			? activeMode.defaultSection
+			: (tabbedKeys[0] ?? null);
 	const activeTabbedKey =
 		activeTabbedSection && tabbedKeys.includes(activeTabbedSection)
 			? activeTabbedSection
-			: (tabbedKeys[0] ?? null);
+			: defaultTabbedKey;
 
-	// The peek jump-list only makes sense in "sections" mode, where every visible
-	// section is rendered (and thus has a scroll anchor). In tabbed mode only one
+	// In Agent mode the chat list is the "Sessions" half of the toggle — the
+	// vocabulary Grok/Hermes bot mode uses, and the word that reads correctly
+	// opposite "Agents". A label the user renamed in Customize wins over both.
+	const stripLabels =
+		activeMode.key === "agent" && sectionLabels.chats === SECTION_LABELS.chats
+			? { ...sectionLabels, chats: "Sessions" }
+			: sectionLabels;
+
+	// The peek jump-list only makes sense in a stacked mode, where every visible
+	// section is rendered (and thus has a scroll anchor). Under a tab strip only one
 	// section exists at a time, so there's nothing to jump between.
 	const sectionNavItems =
-		sidebarMode === "tabbed"
-			? []
-			: tabbedKeys.map((key) => ({
+		activeMode.layout === "stacked"
+			? visibleTabbedKeys.map((key) => ({
 					key,
 					label: sectionLabels[key] ?? key,
-				}));
+				}))
+			: [];
 
 	return (
 		<>
@@ -7777,14 +8955,16 @@ export function SidebarPanelContent({
 							</ChromeButtonShell>
 						))}
 				</SidebarMenu>
-				{/* In tabbed mode the section selectors sit below the header button
-				    stack as a horizontal tab strip (not menu rows); the chosen
-				    section's list shows in the scrollable content below. */}
-				{sidebarMode === "tabbed" && (
+				{/* Every mode but the stacked one puts the section selectors below the
+				    header button stack as a horizontal tab strip (not menu rows); the
+				    chosen section's list shows in the scrollable content below. Which
+				    sections are on the strip is the mode's business — see
+				    `layout/sidebar-modes.ts`. */}
+				{activeMode.layout === "strip" && (
 					<TabbedSectionNav
 						activeKey={activeTabbedKey}
 						keys={tabbedKeys}
-						labels={sectionLabels}
+						labels={stripLabels}
 						onSelect={setActiveTabbedSection}
 					/>
 				)}
@@ -7796,24 +8976,23 @@ export function SidebarPanelContent({
 				<ContextMenuTrigger
 					render={<SidebarContent className="scroll-fade-effect-y pt-2" />}
 				>
-					{sidebarMode === "tabbed"
-						? activeTabbedKey && renderSection(activeTabbedKey, true)
-						: effectiveOrder.map((key) => renderSection(key))}
+					{activeMode.layout === "stacked"
+						? effectiveOrder.map((key) => renderSection(key))
+						: activeTabbedKey && renderSection(activeTabbedKey, true)}
 				</ContextMenuTrigger>
 				<ContextMenuContent>
 					<ContextMenuSectionHeading>Sidebar mode</ContextMenuSectionHeading>
-					<CheckedContextMenuItem
-						checked={sidebarMode === "sections"}
-						onClick={() => setSidebarMode("sections")}
-					>
-						Sections
-					</CheckedContextMenuItem>
-					<CheckedContextMenuItem
-						checked={sidebarMode === "tabbed"}
-						onClick={() => setSidebarMode("tabbed")}
-					>
-						Tabbed sidebar
-					</CheckedContextMenuItem>
+					{/* One row per mode on offer, built-in and contributed alike — the
+					    menu has no idea which is which, which is the point. */}
+					{sidebarModes.map((mode) => (
+						<CheckedContextMenuItem
+							checked={activeMode.key === mode.key}
+							key={mode.key}
+							onClick={() => setSidebarMode(mode.key as SidebarMode)}
+						>
+							{mode.title}
+						</CheckedContextMenuItem>
+					))}
 					<ContextMenuSeparator />
 					<ContextMenuSectionHeading>Sidebar style</ContextMenuSectionHeading>
 					<CheckedContextMenuItem

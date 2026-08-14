@@ -22,6 +22,24 @@ export interface Node {
 	 */
 	managed?: boolean;
 	name: string;
+	/**
+	 * The org this managed node belongs to. Carried only for managed nodes; a
+	 * local, LAN or mesh node has no org.
+	 */
+	orgId?: string | null;
+	/**
+	 * The managed-server row this node runs on, when it has one.
+	 *
+	 * Carried so the desktop can address `/api/servers/orgs/:orgId/servers/
+	 * :serverId/...` — the resize and quiet-hour-zone surfaces. It is NOT the same
+	 * id the control plane calls `id` (that one is the node's GatewayCredential),
+	 * and it cannot be derived from anything else on this object, which is why it
+	 * has to be carried rather than looked up locally.
+	 *
+	 * Null/absent for adopted and resumed nodes, which are never linked to a
+	 * server row. A surface that needs it must hide itself rather than guess.
+	 */
+	serverId?: string | null;
 	token: string | null;
 	url: string;
 }
@@ -191,7 +209,19 @@ function decorateLocal(local: Node[], cloud: Node[]): Node[] {
 		}
 		// Keep the stored token when the control plane minted none (an older server,
 		// or a signed-out fetch): a stale credential still beats no credential.
-		return { ...n, managed: true, token: match.token ?? n.token };
+		//
+		// `orgId`/`serverId` come from the CLOUD record and must be carried across.
+		// The local record is whatever Tauri persisted in `nodes.json` — name, url,
+		// token — so spreading it alone silently drops both ids, and every surface
+		// that needs them (the quiet-hour picker) reads `undefined` and hides
+		// itself. That is a feature that looks shipped and does nothing.
+		return {
+			...n,
+			managed: true,
+			token: match.token ?? n.token,
+			orgId: match.orgId ?? null,
+			serverId: match.serverId ?? null,
+		};
 	});
 }
 
@@ -538,6 +568,11 @@ export const useNodeStore = create<NodeState>((set, get) => ({
 				url: m.url,
 				token: m.token ?? null,
 				managed: true,
+				// Carried, not dropped: these two are the only way any desktop surface
+				// can address this node's server row (resize, quiet-hour zone). They
+				// are also the only fields here that are ids rather than transport.
+				orgId: m.orgId ?? null,
+				serverId: m.serverId ?? null,
 			}));
 		set((s) => ({
 			cloudNodes: cloud,

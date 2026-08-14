@@ -1,0 +1,480 @@
+import { describe, expect, it } from "bun:test";
+import {
+	baseNodeCountForPlan,
+	baseNodeTypeForPlan,
+	TEAMS_NODE_TIERS,
+} from "./base-node.ts";
+import {
+	CURRENT_PLAN_VERSION,
+	DEPOSIT_FEE_BPS,
+	DEPOSIT_FEE_BPS_BY_PLAN,
+	DEPOSIT_FEE_FIXED_MICRO_USD,
+	depositFee,
+	INCLUDED_CREDIT_FRACTION_MAX,
+	PLAN_IDS,
+	PLAN_VERSIONS,
+	PLANS,
+	type PlanId,
+	planVersionFor,
+	topupBreakEvenUsd,
+	usdToMicro,
+} from "./plans.ts";
+
+/**
+ * THE ECONOMICS GUARD for the plan catalog.
+ *
+ * `plans.test.ts` checks that the catalog resolves — the right product id maps
+ * to the right plan, seats multiply, entitlements come out. This file checks
+ * something it never did: that the numbers in the catalog MAKE MONEY.
+ *
+ * It exists because they did not. Before 2026-08-14 the catalog priced Max at
+ * $200 with a $150 pool, which is a LOSS on the annual plan at full list price,
+ * and set the deposit fee at 10% base / 5% for subscribers when break-even is
+ * ~10.3% — so every top-up lost money and the "premium perk" lost the most. Both
+ * were invisible because the one cost that makes them losses is not in this
+ * repo: OpenRouter charges 5.5% to buy the credits we grant at cost.
+ *
+ * Every constant that cost model depends on is named here rather than imported,
+ * because they are EXTERNAL rates. When one moves, this file is the place the
+ * move is felt — a test failure naming the plan that no longer works, instead of
+ * a slow bleed nobody reads.
+ */
+
+/** OpenRouter's fee to BUY the credits we then meter at cost (5.5%, verified). */
+const OPENROUTER_CREDIT_FEE = 0.055;
+/** Polar merchant-of-record, Early Member (grandfathered pre-2026-05-27). */
+const POLAR_RATE_ONE_TIME = 0.04;
+/** Polar adds 0.5% on top for SUBSCRIPTION transactions. */
+const POLAR_RATE_SUBSCRIPTION = 0.045;
+const POLAR_FIXED_USD = 0.4;
+/**
+ * Live Hetzner monthly USD by server type (EUR net × 1.08 fx).
+ *
+ * NOT one number any more. The free node is sized by PLAN, and for Teams by SEAT
+ * COUNT — Max runs a `cx33`, and Teams climbs `cx23` → `cx33` → `cpx32` → 2 ×
+ * `cpx32` as the org grows. Charging every plan a flat `cx23` (which this file
+ * did until the seat ladder shipped) understates the node cost by up to 13× at
+ * the top band, so the margin guard would have passed a band that lost money.
+ *
+ * `nodeUsdPerMonth` resolves through the SAME `baseNodeTypeForPlan` /
+ * `baseNodeCountForPlan` the provisioner uses, so a new band cannot be added to
+ * the ladder without this guard re-pricing it.
+ */
+const NODE_USD_PER_MONTH: Readonly<Record<string, number>> = {
+	cx23: 5.93,
+	cx33: 9.17,
+	cpx32: 38.33,
+};
+/** Annual terms bill 10 months and serve 12 ("two months free"). */
+const YEARLY_MONTHS_BILLED = 10;
+const YEARLY_MONTHS_SERVED = 12;
+
+const usd = (micro: number): number => micro / 1_000_000;
+
+/** Plans with a recurring price — the only ones this model describes. */
+const RECURRING: PlanId[] = PLAN_IDS.filter(
+	(id) => PLANS[id].monthlyPriceMicroUsd > 0
+);
+
+describe("included credit pool", () => {
+	// The cap is the structural property that keeps ANNUAL solvent: a yearly term
+	// bills 10 months and grants 12 pools, so a pool that looks affordable
+	// monthly can still sink the year. Capping the fraction is what removes the
+	// need for a per-plan yearly override — and it is exactly what Max's old 75%
+	// grant violated.
+	for (const id of RECURRING) {
+		it(`${id} grants no more than ${INCLUDED_CREDIT_FRACTION_MAX * 100}% of its price`, () => {
+			const plan = PLANS[id];
+			const fraction =
+				plan.monthlyCreditPoolMicroUsd / plan.monthlyPriceMicroUsd;
+			expect(fraction).toBeLessThanOrEqual(INCLUDED_CREDIT_FRACTION_MAX);
+		});
+	}
+});
+
+/**
+ * What the free node(s) for `plan` at `seats` cost Ryu per month.
+ *
+ * Resolves through the shipped ladder rather than restating it, so the guard
+ * cannot drift from the provisioner. An unpriced type is a hard failure, not a
+ * zero: silently costing a band $0 is precisely how an unprofitable tier would
+ * slip through.
+ */
+function nodeUsdPerMonth(id: PlanId, seats: number): number {
+	const type = baseNodeTypeForPlan(id, seats);
+	if (!type) {
+		return 0;
+	}
+	const unit = NODE_USD_PER_MONTH[type];
+	if (unit === undefined) {
+		throw new Error(
+			`no monthly cost known for Hetzner type "${type}" — add it to NODE_USD_PER_MONTH before shipping a plan that provisions it`
+		);
+	}
+	return unit * baseNodeCountForPlan(id, seats);
+}
+
+/**
+ * Margin on one billing period, in USD, with every real cost subtracted.
+ *
+ * Worst case by construction: it assumes the subscriber spends 100% of the
+ * pool. The subscription bucket is RESET each period and never rolls over, so
+ * unspent credit only ever makes the true figure better — which is what makes a
+ * pass here a floor rather than an average.
+ */
+function periodMarginUsd(id: PlanId, yearly: boolean, seats: number): number {
+	const plan = PLANS[id];
+	const monthsBilled = yearly ? YEARLY_MONTHS_BILLED : 1;
+	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
+
+	const revenue = usd(plan.monthlyPriceMicroUsd) * monthsBilled * seats;
+	const credits =
+		usd(plan.monthlyCreditPoolMicroUsd) *
+		monthsServed *
+		seats *
+		(1 + OPENROUTER_CREDIT_FEE);
+	const node = nodeUsdPerMonth(id, seats) * monthsServed;
+	const fee = revenue * POLAR_RATE_SUBSCRIPTION + POLAR_FIXED_USD;
+
+	return revenue - credits - node - fee;
+}
+
+describe("plan margin (worst case: the whole pool is spent)", () => {
+	for (const id of RECURRING) {
+		const minSeats =
+			PLANS[id].seatModel.kind === "per_seat"
+				? PLANS[id].seatModel.minSeats
+				: 1;
+
+		it(`${id} monthly is profitable at its minimum seat count`, () => {
+			expect(periodMarginUsd(id, false, minSeats)).toBeGreaterThan(0);
+		});
+
+		// The one that used to fail. A yearly term serves 12 pools against 10
+		// months of revenue, so it is always the binding case — never assume a
+		// healthy monthly margin implies a healthy annual one.
+		it(`${id} yearly is profitable at its minimum seat count`, () => {
+			expect(periodMarginUsd(id, true, minSeats)).toBeGreaterThan(0);
+		});
+	}
+
+	// EVERY BAND OF THE TEAMS LADDER, not just the minimum. The node is the only
+	// cost that steps rather than scaling with revenue, so the binding case is
+	// always the seat count just past a band boundary — where the org has paid for
+	// one more seat and Ryu has just bought a whole extra tier of hardware. A test
+	// at `minSeats` alone would never have seen the 50-seat band double the node.
+	for (const tier of TEAMS_NODE_TIERS) {
+		for (const yearly of [false, true]) {
+			const term = yearly ? "yearly" : "monthly";
+			it(`teams ${term} is profitable at the ${tier.minSeats}-seat band (${tier.count}x ${tier.type})`, () => {
+				const margin = periodMarginUsd("teams", yearly, tier.minSeats);
+				expect(margin).toBeGreaterThan(0);
+			});
+		}
+	}
+
+	it("prices every node type the ladder can provision", () => {
+		// `nodeUsdPerMonth` throws on an unpriced type. Adding a band with a type
+		// nobody costed must fail HERE, naming the type, rather than quietly
+		// costing that band $0 and passing every margin test above.
+		for (const tier of TEAMS_NODE_TIERS) {
+			expect(() => nodeUsdPerMonth("teams", tier.minSeats)).not.toThrow();
+		}
+		for (const id of RECURRING) {
+			expect(() => nodeUsdPerMonth(id, 1)).not.toThrow();
+		}
+	});
+
+	it("max yearly is comfortably profitable, not marginal", () => {
+		// Named explicitly because this is the plan that was NEGATIVE. A bare
+		// "> 0" would have passed at $71.60 on $2000 (3.6%) too, which is not a
+		// business — it is a rounding error waiting for a discount to erase it.
+		const margin = periodMarginUsd("max", true, 1);
+		const revenue = usd(PLANS.max.monthlyPriceMicroUsd) * YEARLY_MONTHS_BILLED;
+		expect(margin / revenue).toBeGreaterThan(0.2);
+	});
+});
+
+/**
+ * Margin on a top-up: the buyer is charged `face + fee` and the wallet is
+ * credited `face` (`computeTopupQuote`), so Ryu receives the fee and pays to
+ * fund the face.
+ */
+function topupMarginUsd(faceUsd: number, plan: PlanId | null): number {
+	const fee = usd(depositFee(usdToMicro(faceUsd), plan));
+	const charged = faceUsd + fee;
+	return (
+		charged -
+		faceUsd * (1 + OPENROUTER_CREDIT_FEE) -
+		(charged * POLAR_RATE_ONE_TIME + POLAR_FIXED_USD)
+	);
+}
+
+describe("deposit fee", () => {
+	// A top-up must not lose money at ANY plausible size.
+	//
+	// $12.50 and $15 are here because their ABSENCE hid a real hole. The list was
+	// [5, 10, 20, 50, 100, 500] — six values that straddled a loss band without
+	// landing in it, so the suite passed while Pro lost money on every deposit
+	// between $10.95 and $13.42 and Max/Teams on everything up to $19.80. At $20
+	// on Max it passed by $0.004.
+	//
+	// Sampled sizes cannot be the real guard, which is why the structural no-gap
+	// assertion below exists. These stay as a cheap, readable canary.
+	const SIZES = [5, 10, 12.5, 15, 20, 50, 100, 500];
+
+	/**
+	 * The largest face value at which the FIXED floor still covers its own costs.
+	 *
+	 * A flat fee `F` nets `F − 0.055·face − (face + F)·0.04 − 0.40`, so it goes
+	 * negative once `face > (0.96·F − 0.40) / 0.095`. Derived rather than written
+	 * down so it tracks the constant.
+	 */
+	const floorProfitableToUsd = (): number => {
+		const floor = usd(DEPOSIT_FEE_FIXED_MICRO_USD);
+		return (
+			(floor * (1 - POLAR_RATE_ONE_TIME) - POLAR_FIXED_USD) /
+			(OPENROUTER_CREDIT_FEE + POLAR_RATE_ONE_TIME)
+		);
+	};
+
+	it("the base rate clears break-even", () => {
+		// Break-even is ~10.3%; the old base was 10%, i.e. under water.
+		expect(DEPOSIT_FEE_BPS).toBeGreaterThan(1030);
+	});
+
+	for (const plan of [null, ...PLAN_IDS] as (PlanId | null)[]) {
+		const label = plan ?? "no plan";
+		it(`${label} top-ups are profitable at every size`, () => {
+			for (const face of SIZES) {
+				expect(topupMarginUsd(face, plan)).toBeGreaterThan(0);
+			}
+		});
+	}
+
+	// THE STRUCTURAL GUARD. Every plan's fee curve has two regimes — the floor
+	// below the crossover, the percentage above it — and profitability has to be
+	// continuous ACROSS the join. The floor must therefore stay profitable at
+	// least as far as the point where the percentage takes over AND starts
+	// clearing break-even on its own.
+	//
+	// This is the assertion the sampled sizes could not make. It fails
+	// automatically if anyone lowers a plan rate (pushing its break-even out) or
+	// lowers the floor (pulling its coverage in), without needing someone to guess
+	// which deposit sizes to add to a list.
+	it("no plan has a gap between the floor and its own break-even", () => {
+		const coveredTo = floorProfitableToUsd();
+		for (const plan of [null, ...PLAN_IDS] as (PlanId | null)[]) {
+			const rate = plan ? DEPOSIT_FEE_BPS_BY_PLAN[plan] : DEPOSIT_FEE_BPS;
+			const breakEven = topupBreakEvenUsd(rate);
+			expect(coveredTo).toBeGreaterThanOrEqual(breakEven);
+		}
+	});
+
+	// And the same property proved the blunt way, so a mistake in the algebra
+	// above cannot make the guard vacuous: walk every cent from $1 to $600 and
+	// assert not one of them loses money on any plan.
+	it("loses money at no whole-cent size on any plan", () => {
+		for (const plan of [null, ...PLAN_IDS] as (PlanId | null)[]) {
+			for (let cents = 100; cents <= 60_000; cents++) {
+				const face = cents / 100;
+				if (topupMarginUsd(face, plan) < 0) {
+					throw new Error(
+						`${plan ?? "no plan"} loses money on a $${face.toFixed(2)} top-up`
+					);
+				}
+			}
+		}
+	});
+
+	it("only plans with managed inference can actually top up", () => {
+		// The rates above are a total map over PlanId, but the ROUTE refuses any
+		// entitlement without managed inference — so `desktop-license` has a rate
+		// it can never use. Asserted because the docs advertised a Lifetime
+		// deposit rate for months, which promised a purchase the API rejects.
+		expect(PLANS["desktop-license"].managedInference).toBe(false);
+		for (const id of ["pro", "max", "teams"] as PlanId[]) {
+			expect(PLANS[id].managedInference).toBe(true);
+		}
+	});
+
+	it("every plan rate is above the point where the fee stops covering costs", () => {
+		// `topupBreakEvenUsd` returns the smallest profitable top-up for a rate.
+		// Requiring it to stay under $20 is what stops a "generous" subscriber
+		// discount from quietly becoming a subsidy — at 10% it was $400, meaning
+		// nearly every real top-up lost money.
+		for (const id of PLAN_IDS) {
+			expect(topupBreakEvenUsd(DEPOSIT_FEE_BPS_BY_PLAN[id])).toBeLessThan(20);
+		}
+	});
+
+	it("subscribers pay less than the base rate (the discount is real)", () => {
+		for (const id of PLAN_IDS) {
+			expect(DEPOSIT_FEE_BPS_BY_PLAN[id]).toBeLessThanOrEqual(DEPOSIT_FEE_BPS);
+		}
+		expect(DEPOSIT_FEE_BPS_BY_PLAN.max).toBeLessThan(
+			DEPOSIT_FEE_BPS_BY_PLAN.pro
+		);
+	});
+});
+
+describe("the ladder is coherent", () => {
+	// THE DOMINANCE TEST — the bug that made Max unsellable, encoded.
+	//
+	// Max used to cost +$161/seat over Teams for +$130.50 of credits that a
+	// top-up delivered for $143.55, so the upgrade was $17.45 WORSE than staying
+	// put. Any tier whose premium is priced above what the same credits cost à la
+	// carte is dominated, and no amount of marketing fixes that.
+	it("no tier's premium is beaten by simply buying the credits", () => {
+		const proPrice = usd(PLANS.pro.monthlyPriceMicroUsd);
+		const maxPrice = usd(PLANS.max.monthlyPriceMicroUsd);
+		const poolGain =
+			usd(PLANS.max.monthlyCreditPoolMicroUsd) -
+			usd(PLANS.pro.monthlyCreditPoolMicroUsd);
+
+		const premium = maxPrice - proPrice;
+		const creditsViaTopup =
+			poolGain + usd(depositFee(usdToMicro(poolGain), "pro"));
+
+		// Max's premium legitimately exceeds the credit value — it buys a bigger
+		// node, more mail and a lower deposit rate. What must NOT happen is the
+		// reverse of the old bug: the tier must not be sold as a credit deal.
+		// This asserts the gap is a CAPABILITY premium, i.e. the credits alone do
+		// not justify it, so the pricing page has to name the real reasons.
+		expect(premium).toBeGreaterThan(creditsViaTopup);
+	});
+
+	it("a team seat costs more than an individual seat", () => {
+		// Priced AT Pro, Teams was invisible: same price, smaller pool, and forced
+		// on any org with 2+ members. A team seat buys governance and must cost
+		// more, which is also what the market does.
+		expect(PLANS.teams.monthlyPriceMicroUsd).toBeGreaterThan(
+			PLANS.pro.monthlyPriceMicroUsd
+		);
+	});
+
+	it("Max is single-seat so it cannot compete with Teams", () => {
+		expect(PLANS.max.seatModel.kind).toBe("single");
+	});
+});
+
+/**
+ * Margin for one HISTORICAL version — its own price, its own pool, but TODAY's
+ * node cost.
+ *
+ * Charging every version the current node is deliberate and conservative. Node
+ * type is not versioned (`BASE_NODE_TYPE_BY_PLAN` is keyed by plan), so
+ * upgrading a plan's machine upgrades it for grandfathered subscribers too. That
+ * is a benefit we choose to give away, and modelling it this way can only ever
+ * understate a version's margin, never overstate it.
+ */
+function versionMarginUsd(
+	id: PlanId,
+	version: number,
+	yearly: boolean,
+	seats: number
+): number {
+	const row = planVersionFor(id, version);
+	const monthsBilled = yearly ? YEARLY_MONTHS_BILLED : 1;
+	const monthsServed = yearly ? YEARLY_MONTHS_SERVED : 1;
+
+	const revenue = usd(row.monthlyPriceMicroUsd) * monthsBilled * seats;
+	const credits =
+		usd(row.monthlyCreditPoolMicroUsd) *
+		monthsServed *
+		seats *
+		(1 + OPENROUTER_CREDIT_FEE);
+	// Today's node, at the seat count being modelled — so a grandfathered Teams
+	// org is charged the same ladder a new one is. Node type and COUNT are not
+	// versioned, which means a seat-band upgrade reaches old subscribers too.
+	const node = nodeUsdPerMonth(id, seats) * monthsServed;
+	const fee = revenue * POLAR_RATE_SUBSCRIPTION + POLAR_FIXED_USD;
+
+	return revenue - credits - node - fee;
+}
+
+describe("grandfathering", () => {
+	// THE INVARIANT THAT MAKES A PRICE RISE SAFE.
+	//
+	// Not "the current catalog is profitable" — that was already asserted above,
+	// and it is not the question. The question is whether a customer who bought
+	// two versions ago is still profitable on the terms they bought, because a
+	// pool increase aimed at NEW buyers used to reach them: `resolveEntitlement`
+	// read the pool off the live catalog, so raising it to $25 put a $39 Pro
+	// subscriber at -$15.61 on the annual plan.
+	//
+	// Every row, every interval, forever. A version is append-only, so this loop
+	// grows and never shrinks.
+	for (const id of PLAN_IDS) {
+		for (const row of PLAN_VERSIONS[id]) {
+			if (row.monthlyPriceMicroUsd <= 0) {
+				continue;
+			}
+			const minSeats =
+				PLANS[id].seatModel.kind === "per_seat"
+					? PLANS[id].seatModel.minSeats
+					: 1;
+
+			it(`${id} v${row.version} is still profitable monthly`, () => {
+				expect(
+					versionMarginUsd(id, row.version, false, minSeats)
+				).toBeGreaterThan(0);
+			});
+
+			it(`${id} v${row.version} is still profitable yearly`, () => {
+				expect(
+					versionMarginUsd(id, row.version, true, minSeats)
+				).toBeGreaterThan(0);
+			});
+
+			it(`${id} v${row.version} respects the pool cap`, () => {
+				expect(
+					row.monthlyCreditPoolMicroUsd / row.monthlyPriceMicroUsd
+				).toBeLessThanOrEqual(INCLUDED_CREDIT_FRACTION_MAX);
+			});
+		}
+	}
+
+	it("versions are unique and ascending, and v1 exists", () => {
+		for (const id of PLAN_IDS) {
+			const nums = PLAN_VERSIONS[id].map((r) => r.version);
+			expect(nums[0]).toBe(1);
+			expect(new Set(nums).size).toBe(nums.length);
+			expect([...nums].sort((a, b) => a - b)).toEqual(nums);
+		}
+	});
+
+	it("an unknown or missing version resolves to v1, never to the newest", () => {
+		// The asymmetry is load-bearing: subscriptions created before the stamp
+		// existed carry no version, and they are the OLDEST customers on the
+		// OLDEST prices. Resolving them forward would hand them a pool their
+		// price never funded.
+		for (const id of PLAN_IDS) {
+			expect(planVersionFor(id, undefined).version).toBe(1);
+			expect(planVersionFor(id, null).version).toBe(1);
+			expect(planVersionFor(id, 9999).version).toBe(1);
+			expect(planVersionFor(id, "nonsense").version).toBe(1);
+		}
+	});
+
+	it("the current version exists for every plan", () => {
+		for (const id of PLAN_IDS) {
+			expect(planVersionFor(id, CURRENT_PLAN_VERSION).version).toBe(
+				CURRENT_PLAN_VERSION
+			);
+		}
+	});
+
+	it("the live catalog agrees with its current version row", () => {
+		// The catalog and the version table are two statements of the same price.
+		// If they drift, one of them is lying to somebody: the page renders the
+		// catalog and the wallet is granted from the version.
+		for (const id of PLAN_IDS) {
+			const row = planVersionFor(id, CURRENT_PLAN_VERSION);
+			expect(PLANS[id].monthlyPriceMicroUsd).toBe(row.monthlyPriceMicroUsd);
+			expect(PLANS[id].monthlyCreditPoolMicroUsd).toBe(
+				row.monthlyCreditPoolMicroUsd
+			);
+		}
+	});
+});

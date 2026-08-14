@@ -142,7 +142,7 @@ function UploadCeilingSection() {
 					description={
 						reported > 0
 							? "Reported by this node. Chat attachments, files added to a Space and images pasted into a page all go through the same upload route, and the document parser accepts the same size, so one number governs all of them."
-							: "This node did not report its limit, so this is the desktop's built-in default — the real ceiling may differ."
+							: "This node did not report its limit, so this is the desktop's built-in default; the real ceiling may differ."
 					}
 					title="Maximum file you can upload"
 				/>
@@ -491,7 +491,7 @@ export function StorageSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Give another profile a copy of this one's data \u2014 e.g. hand canary your stable chats, spaces and agents so you can test against real state instead of rebuilding it by hand. Both profiles stay usable; nothing here changes where THIS profile reads from."
+				caption="Give another profile a copy of this one's data. For example, hand canary your stable chats, spaces and agents so you can test against real state instead of rebuilding it by hand. Both profiles stay usable; nothing here changes where THIS profile reads from."
 				title="Copy to another profile"
 			>
 				<SettingsGroup>
@@ -516,7 +516,7 @@ export function StorageSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app. The backup does NOT contain your encryption key \u2014 it can only be restored on this machine, signed in as this user."
+				caption="Export a zip backup of the whole data folder, or restore from one. Restoring overwrites the current data and restarts the app. The backup does NOT contain your encryption key, so it can only be restored on this machine, signed in as this user."
 				title="Backup &amp; restore"
 			>
 				<SettingsGroup>
@@ -581,7 +581,7 @@ export function StorageSettings() {
 						    explicit exclusion or refusal in `data_path::copy_profile`. */}
 						<AlertDialogDescription>
 							Not copied: this node&apos;s identity and sign-in, its saved node
-							list, and the downloaded binaries — so {pendingProfileCopy} runs
+							list, and the downloaded binaries, so {pendingProfileCopy} runs
 							its own build rather than adopting this one&apos;s. If that
 							profile already has data, the copy is refused rather than merged.
 						</AlertDialogDescription>
@@ -614,8 +614,8 @@ export function StorageSettings() {
 					<AlertDialogHeader>
 						<AlertDialogTitle>Restore from this backup?</AlertDialogTitle>
 						<AlertDialogDescription>
-							This replaces all of your current data — chats, spaces, memory,
-							models and downloaded engines — with the contents of the backup,
+							This replaces all of your current data (chats, spaces, memory,
+							models and downloaded engines) with the contents of the backup,
 							then restarts the app. This cannot be undone.
 						</AlertDialogDescription>
 						{/* The encryption key lives in the OS keychain, never in the zip.

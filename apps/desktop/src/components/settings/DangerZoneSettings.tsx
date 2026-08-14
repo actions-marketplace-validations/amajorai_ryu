@@ -245,12 +245,12 @@ function resetFailureReason(e: unknown): string {
 		return "Could not reach this node. Check that Core is running and try again.";
 	}
 	if (e.status === 404) {
-		return "This node's Core is too old to support resetting — it has no /api/node/reset route. Update Core on this node, then try again.";
+		return "This node's Core is too old to support resetting. It has no /api/node/reset route. Update Core on this node, then try again.";
 	}
 	if (e.status === 403) {
 		return (
 			e.serverMessage ??
-			"Resetting is not allowed on a shared (org-bound) node — it would wipe every user's data."
+			"Resetting is not allowed on a shared (org-bound) node, because it would wipe every user's data."
 		);
 	}
 	if (e.status === 400) {
@@ -424,7 +424,7 @@ export function DangerZoneSettings() {
 	return (
 		<div className="flex flex-col gap-6">
 			<SettingsSection
-				caption="Permanently delete data Ryu stores on this node. These actions cannot be undone — export a backup from Storage first if you might want it back."
+				caption="Permanently delete data Ryu stores on this node. These actions cannot be undone. Export a backup from Storage first if you might want it back."
 				title="Danger zone"
 			>
 				{isError ? (
@@ -499,7 +499,7 @@ export function DangerZoneSettings() {
 			</SettingsSection>
 
 			<SettingsSection
-				caption="Reset node clears this node's data folder — and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
+				caption="Reset node clears this node's data folder and nothing else. Shadow captures, ghost state and the gateway config live OUTSIDE it and survive, which is why a 'reset' node can still be several gigabytes. This removes those too."
 				title="Deep clean"
 			>
 				{/* One button, and every option behind it. The scope controls used to sit
@@ -604,7 +604,7 @@ export function DangerZoneSettings() {
 									Also clear shadow + ghost
 								</span>
 								<span className="text-muted-foreground text-xs">
-									~/.shadow and ~/.ghost are NOT per-profile — clearing them
+									~/.shadow and ~/.ghost are NOT per-profile, so clearing them
 									affects every profile on this machine
 								</span>
 							</span>
@@ -668,7 +668,7 @@ export function DangerZoneSettings() {
 						    click clears stable's captures with it. */}
 						<AlertDialogDescription className="text-warning">
 							{cleanShared
-								? "Shadow and ghost are shared by every profile on this machine, not just the one selected — clearing them here clears them everywhere. "
+								? "Shadow and ghost are shared by every profile on this machine, so clearing them here clears them everywhere. "
 								: null}
 							{cleanDepth === "none"
 								? "Chats, spaces and memory live in the data folder and are NOT touched at this setting."
@@ -704,8 +704,8 @@ export function DangerZoneSettings() {
 						<AlertDialogTitle>Reset this node?</AlertDialogTitle>
 						<AlertDialogDescription>
 							This permanently deletes ALL data on{" "}
-							<span className="font-medium text-foreground">{nodeName}</span> —
-							every chat, space, memory, session, download, and setting — then
+							<span className="font-medium text-foreground">{nodeName}</span>{" "}
+							(every chat, space, memory, session, download, and setting), then
 							restarts it to a fresh, just-installed state. This cannot be
 							undone.
 						</AlertDialogDescription>

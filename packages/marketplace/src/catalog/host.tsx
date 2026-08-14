@@ -22,19 +22,39 @@ import {
 	createContext,
 	type ReactNode,
 	useContext,
+	useMemo,
 } from "react";
+import { describeIncompatibility } from "./surface-labels.ts";
 import type {
 	AppsCatalogState,
 	CatalogChannel,
+	CatalogEntry,
 	InstalledModelEntry,
 	LlmFitEstimate,
 	ModelCatalogState,
 	SkillsCatalogState,
+	Surface,
 	VersionSnapshot,
 } from "./types.ts";
+import { evaluateCompatibility } from "./types.ts";
 
 /** Which realm an affordance target belongs to (drives the web deep-link page). */
 export type CatalogRealm = "app" | "model" | "skill";
+
+/** The host surface's UI-density ladder.
+ *
+ *  Structurally identical to `InterfaceLevel` in
+ *  `apps/desktop/src/lib/interface-level.ts`, which is the source of truth —
+ *  duplicated rather than imported because this package must not depend on the
+ *  app. The DRIFT GUARD is the binding site: the desktop host assigns its own
+ *  `useInterfaceLevel` into {@link CatalogHost}, so a fifth level added there
+ *  stops `() => InterfaceLevel` being assignable here and that file fails to
+ *  compile. Do not weaken this to `string` — that is the whole guard. */
+export type CatalogInterfaceLevel =
+	| "advanced"
+	| "expert"
+	| "simple"
+	| "standard";
 
 /** Minimal identity of the item an affordance is rendered for. */
 export interface CatalogAffordanceTarget {
@@ -102,6 +122,20 @@ const NO_INSTALLING = () => false;
  *  call site can pick one or the other and still make exactly one hook call. */
 export function useNoInstallingLookup(): (id: string) => boolean {
 	return NO_INSTALLING;
+}
+
+/** Fallback for a host with no interface-level notion — the web marketplace.
+ *
+ *  `"expert"`, i.e. the FULL surface. A surface that cannot ask the user how much
+ *  they want to see must not silently decide to show them less; the failure mode
+ *  of guessing "simple" is a store where four tabs of a listing simply do not
+ *  exist and nobody can find out why. */
+const NO_INTERFACE_LEVEL = (): CatalogInterfaceLevel => "expert";
+
+/** Fallback for {@link CatalogHost.useInterfaceLevel}, a hook by shape so a call
+ *  site can pick one or the other and still make exactly one hook call. */
+export function useNoInterfaceLevel(): CatalogInterfaceLevel {
+	return NO_INTERFACE_LEVEL();
 }
 
 /** Resolves a plugin id to a "reveal its settings" action, or `null` when that
@@ -176,6 +210,19 @@ export interface CatalogHost {
 	) => Promise<VersionSnapshot | null>;
 	/** Tailwind classes + dot color for a device-fit verdict. */
 	fitStyle: (fit: string) => { className: string; dot: string };
+	/** Versions of the host surfaces THIS client knows, keyed by surface.
+	 *
+	 *  Core computes a compatibility verdict for every listing, but it can only
+	 *  observe its own version and the Gateway's — it reports a desktop, island,
+	 *  mobile, terminal, extension or web floor as an advisory `unknown` because it
+	 *  has no way to see those. This is where a surface supplies what it does know:
+	 *  the desktop passes its own version (Tauri's `getVersion()`), and the
+	 *  per-surface floor becomes enforceable instead of merely declared.
+	 *
+	 *  Omitted (or `{}`) on a surface that knows nothing extra — the web store,
+	 *  which is read-only anyway. Core's verdict is then used as-is, which is the
+	 *  previous behaviour. */
+	hostVersions?: Partial<Record<Surface, string>>;
 	/** The install layer, or `null` on read-only surfaces (web). When null the
 	 *  sections hide every install/enable/lifecycle/source affordance and render
 	 *  {@link renderAffordance} in the primary-action slot instead. */
@@ -211,6 +258,13 @@ export interface CatalogHost {
 	) => AppsCatalogState;
 	/** Installed models by stem (drives the "Your fine-tuned versions" list). */
 	useInstalledModels: () => InstalledModelEntry[];
+	/** How much of the surface this host's user has asked to see.
+	 *
+	 *  Optional — omitted ⇒ {@link useNoInterfaceLevel}, i.e. everything. Called
+	 *  ONCE per section and threaded down as a narrow boolean (`showTechnical`),
+	 *  never as the raw level: a detail panel must not learn the ladder, or every
+	 *  new level becomes an edit in twenty components. */
+	useInterfaceLevel?: () => CatalogInterfaceLevel;
 	/** The surface's Models catalog hook (called at component top level). */
 	useModelCatalog: (initialQuery: string) => ModelCatalogState;
 	/** A persisted boolean toggle synced across consumers (e.g. "Show tags"). */
@@ -258,4 +312,28 @@ export function useCatalogHost(): CatalogHost {
 		);
 	}
 	return host;
+}
+
+/** The user-facing reason a listing cannot be installed here, or `null`.
+ *
+ *  Re-evaluates the listing's declared floors with {@link CatalogHost.hostVersions}
+ *  overlaid on Core's verdict. That overlay is the whole point: Core reports a
+ *  desktop/island/mobile/terminal floor as advisory `unknown` because it cannot
+ *  observe those surfaces, so reading `entry.compatibility` alone leaves every
+ *  per-surface floor inert on the one client that DOES know its own version.
+ *
+ *  Falls back to Core's verdict for anything the client cannot decide, so this
+ *  only ever hardens an advisory into a refusal — never the reverse. */
+export function useEntryIncompatibility(
+	entry: Pick<CatalogEntry, "compatibility" | "engines">
+): string | null {
+	const { hostVersions } = useCatalogHost();
+	const { compatibility, engines } = entry;
+	return useMemo(
+		() =>
+			describeIncompatibility(
+				evaluateCompatibility(engines, hostVersions ?? {}, compatibility)
+			),
+		[engines, compatibility, hostVersions]
+	);
 }

@@ -27,6 +27,7 @@ import { ApiError, type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 // import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
 import { setFeatureEnabled, TOGGLEABLE_FEATURES } from "@/src/lib/features.ts";
+import { setOnboardingActive } from "@/src/lib/onboarding-active.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
 import {
@@ -527,14 +528,14 @@ function nodeNameForUrl(url: string, taken: readonly string[]): string {
 
 // The curated set of third-party agents worth surfacing on first run. Anything
 // detectable but not on this list is too niche for onboarding and is hidden.
-// Ids are matched against the live catalog, so entries that don't exist yet
-// (e.g. a future Cursor agent) simply don't render until Core ships them.
-//
-// The names/registry ids here are ONLY used when the catalog is unreachable
-// (see `fallbackSuggestedAgents`): the live catalog wins whenever it answers.
-// They exist because this list is static curation — it never needed a network
-// call to be shown, and letting one delete the whole step is what made "Add
-// your agents" disappear.
+// Ids are matched against the live catalog and the live row wins whenever there
+// is one — it carries the description, icon and `detected`/`added` flags. But a
+// curated agent the catalog does NOT mention still renders, from the static row
+// below (see the union in `loadOnboardingAgents`). This list is curation, and the
+// catalog is a remote-registry fetch that can come back partial or not at all;
+// letting that decide what onboarding offers is what made "Add your agents" show
+// up empty on a machine with no agents installed — exactly the machine that needs
+// the suggestions most.
 const SUGGESTED_AGENTS: readonly {
 	id: string;
 	name: string;
@@ -550,6 +551,11 @@ const SUGGESTED_AGENTS: readonly {
 		name: "GitHub Copilot CLI",
 		registryId: "github-copilot-cli",
 	},
+	{ id: "acp:grok", name: "Grok CLI", registryId: "grok-build" },
+	{ id: "acp:droid", name: "Factory Droid", registryId: "factory-droid" },
+	{ id: "acp:qwen", name: "Qwen Code", registryId: "qwen-code" },
+	{ id: "acp:goose", name: "Goose", registryId: "goose" },
+	{ id: "acp:cline", name: "Cline", registryId: "cline" },
 	{ id: "hermes", name: "Hermes", registryId: null },
 	{ id: "openclaw", name: "OpenClaw", registryId: null },
 ];
@@ -561,7 +567,18 @@ const SUGGESTED_AGENTS: readonly {
  * statically, so these rows look identical to the live ones.
  */
 function fallbackSuggestedAgents(): AgentCatalogEntry[] {
-	return SUGGESTED_AGENTS.map((a) => ({
+	return SUGGESTED_AGENTS.map(staticSuggestedAgent);
+}
+
+/** One curated agent as a catalog row, with the live flags Core would have filled
+ *  in left blank. Split out of {@link fallbackSuggestedAgents} because the merge in
+ *  {@link loadOnboardingAgents} needs a single row, not the whole list. */
+function staticSuggestedAgent(a: {
+	id: string;
+	name: string;
+	registryId: string | null;
+}): AgentCatalogEntry {
+	return {
 		added: false,
 		available: true,
 		bridgeVersionStatus: null,
@@ -581,7 +598,7 @@ function fallbackSuggestedAgents(): AgentCatalogEntry[] {
 		registryId: a.registryId,
 		transport: null,
 		versionStatus: null,
-	}));
+	};
 }
 
 interface OnboardingAgents {
@@ -625,11 +642,30 @@ async function loadOnboardingAgents(
 		);
 		const installable = agents.filter((a) => a.id !== "ryu" && !a.added);
 		const found = installable.filter((a) => a.detected === true);
-		const suggested = SUGGESTED_AGENTS.map(({ id }) =>
-			installable.find((a) => a.id === id)
-		).filter(
-			(a): a is AgentCatalogEntry => a !== undefined && a.detected !== true
-		);
+		// Curation UNION catalog, not curation filtered BY it. The catalog's agent
+		// list is fetched from the remote ACP registry and cached; when that fetch
+		// fails or times out on a cold start Core says so and serves a partial list
+		// (see `ensure_registry_cached`). Intersecting against it therefore deleted
+		// well-known agents from the step for a reason that has nothing to do with
+		// this machine — and on a system where nothing is detected, that left the
+		// user staring at "Add your agents" with nothing to add.
+		//
+		// A live row always wins (it carries `detected`/`added`/description/icon);
+		// a curated agent the catalog does not mention falls back to its static row
+		// so the offer is at least present. Installing one of those may fail, which
+		// is fine: `finish` adds agents with `allSettled` precisely because an add is
+		// best-effort, and a row that fails to install beats a row that never appears.
+		const suggested = SUGGESTED_AGENTS.map((curated) => {
+			const live = installable.find((a) => a.id === curated.id);
+			if (live) {
+				return live.detected === true ? undefined : live;
+			}
+			// Absent from `installable` because it is already added, or because the
+			// catalog never listed it. Only the second case earns a fallback row.
+			return agents.some((a) => a.id === curated.id)
+				? undefined
+				: staticSuggestedAgent(curated);
+		}).filter((a): a is AgentCatalogEntry => a !== undefined);
 		return { found, ok: true, suggested };
 	} catch (err) {
 		// Never silent: this exact swallow is how a 401 turned into a missing step.
@@ -735,6 +771,15 @@ export default function OnboardingPage() {
 		() => ({ done: reportDone, status: reportLocalStatus }),
 		[reportDone, reportLocalStatus]
 	);
+
+	// Claim the install-progress events for the duration of the wizard. App.tsx
+	// listens to the same two events and toasts them; here they already drive the
+	// progress bar and the status line below it, so the toast was the same download
+	// reported a second time, stacked over the screen reporting it.
+	useEffect(() => {
+		setOnboardingActive(true);
+		return () => setOnboardingActive(false);
+	}, []);
 
 	// Mirror the installers' progress events. BOTH binaries report here — the
 	// gateway is 40 MB of the ~160 MB a local pick downloads and nothing ever said

@@ -117,7 +117,33 @@ export interface PluginManifest {
 	 */
 	backend_sha256?: string | null;
 	/**
-	 * Detail-page hero banner spec ({colors,style,seed}); opaque passthrough (Ryu ext).
+	 * Detail-page hero banner spec; opaque passthrough (Ryu ext).
+	 *
+	 * The banner is the listing's OWN background, not its icon enlarged. Declared
+	 * or not, the hero always paints something: with no `banner` the detail page
+	 * derives its wash from `icon_dither`, so an app that never thinks about this
+	 * key still opens on its own colour rather than a grey slab. Declaring one is
+	 * how an author says "my hero is not just my icon, bigger".
+	 *
+	 * Accepted keys, all optional — the render layer picks the first that paints
+	 * and falls back down the list, so an unknown or malformed value degrades to
+	 * the derived wash rather than failing:
+	 *
+	 * - `background` — a flat CSS background (a colour, a `linear-gradient(…)`).
+	 * - `imageUrl` — a raster banner, painted `object-cover`. http(s) only.
+	 * - `colors: [String]` — two or more stops, ramped 135°.
+	 * - `style: "gradient" | "dither" | "flat" | "image"` — how to treat the
+	 *   above; `dither` adds the noise overlay, `flat`/`image` select `background`
+	 *   / `imageUrl` explicitly.
+	 * - `seed: Number` — the dither noise seed, so two apps sharing a palette do
+	 *   not share a texture.
+	 *
+	 * Kept as raw JSON like `icon_dither`, for the same reason: this is
+	 * PUBLISHER-supplied and reaches a CSS background, so it must never fail the
+	 * manifest parse, and the client validates before painting (`safeHttpUrl` for
+	 * `imageUrl`; the flat string is trusted exactly as far as `icon_background`
+	 * already is). Core does not read any of these keys — it copies the whole
+	 * value onto the catalog entry — so a new one needs no Core release.
 	 */
 	banner?: {
 		[k: string]: unknown;
@@ -214,6 +240,24 @@ export interface PluginManifest {
 	iconDither?: {
 		[k: string]: unknown;
 	};
+	/**
+	 * Inset for the card's icon square (Ryu extension: `iconPadding`).
+	 *
+	 * A product LOGO that is edge-to-edge in its own art has no breathing room
+	 * inside the square and reads as a sticker rather than an icon. One of
+	 * `none` | `sm` | `md` | `lg`.
+	 *
+	 * Any value other than `none` ALSO letterboxes the art (`object-contain`)
+	 * instead of cropping it. That coupling is load-bearing, not a convenience:
+	 * a listing declaring a bare `iconUrl` (no `icon`) is not in the brand lane,
+	 * so it is painted `object-cover` — inset alone would be silently inert for
+	 * exactly the raw-logo case this field exists for.
+	 *
+	 * `Option<String>` rather than a Rust enum, for the same forward-compat
+	 * reason `icon_dither` is raw JSON: an unknown value must never fail the
+	 * manifest parse. The render layer validates and falls back.
+	 */
+	iconPadding?: string | null;
 	/**
 	 * Logo URL (contract key `iconUrl`; Ryu extension).
 	 */
@@ -596,6 +640,22 @@ export interface Contributes {
 	 */
 	context_menu_items?: ContextMenuContribution[];
 	/**
+	 * "New X" rows the app contributes to the shell's create menu (the sidebar
+	 * footer "+"). See [`CreateActionContribution`].
+	 *
+	 * This exists because the create menu's only app seam used to be
+	 * `sidebar_sections[].spec.create` — section-scoped, so an app that
+	 * contributes no sidebar section could not put a row there at all. The shell
+	 * therefore hardcoded rows for apps it happened to know about, and those rows
+	 * stayed in the menu when the app was not installed, leading straight to an
+	 * error page. A create action is its own contribution precisely so the row
+	 * appears and disappears with the app.
+	 *
+	 * **Stored raw, validated at the chokepoint** — same rule as
+	 * [`Contributes::context_menu_items`].
+	 */
+	create_actions?: CreateActionContribution[];
+	/**
 	 * **Deletable data categories** the app owns — one "Delete all X" row in
 	 * Settings → Danger Zone (see [`DataCategoryContribution`]).
 	 *
@@ -848,6 +908,24 @@ export interface Contributes {
 	 */
 	sidebar_buttons?: SidebarButtonContribution[];
 	/**
+	 * App-registered sidebar **modes** — a named preset of the whole left sidebar:
+	 * which sections it offers as tabs, and which one it opens on.
+	 *
+	 * The third axis of the sidebar contract, after "what sections exist"
+	 * ([`Contributes::sidebar_sections`]) and "what nav rows exist"
+	 * ([`Contributes::sidebar_buttons`]): **how the sidebar as a whole is
+	 * arranged**. The shell ships three modes of its own (every section stacked;
+	 * every section as a tab; Agent mode, which is the pair Sessions ⇄ Agents), and
+	 * before this member an app could add a section to that list but could not
+	 * propose an arrangement — so a plugin wanting the Grok/Hermes bot-mode posture
+	 * had to ask for a shell change. See [`SidebarModeContribution`].
+	 *
+	 * Self-contained (it names sections, not runnables), so it stays out of
+	 * [`Contributes::referenced_ids`]; served + tagged with the owning `plugin` id
+	 * at `GET /api/plugins/contributions`.
+	 */
+	sidebar_modes?: SidebarModeContribution[];
+	/**
 	 * App-registered sidebar **sections** — a header plus a live list of rows the
 	 * shell fetches from a declared Core `/api/` path. Lets an app own its sidebar
 	 * section (Canvas/Whiteboard/Meetings recent-doc lists) instead of the shell
@@ -1030,6 +1108,47 @@ export interface ContextMenuContribution {
 	 * Sort position among contributed rows (ascending).
 	 */
 	order?: number | null;
+}
+/**
+ * One "New X" row a plugin contributes to the shell's create menu (see
+ * [`Contributes::create_actions`]).
+ */
+export interface CreateActionContribution {
+	args?: unknown;
+	/**
+	 * Granted capability to invoke instead of navigating, plus static `args` —
+	 * for a create that is an action rather than a destination. Dispatched
+	 * through the same host seam as a context-menu row.
+	 */
+	capability?: string | null;
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive. The desktop's
+	 * create menu draws no icons today (its rows are label-only by design), so
+	 * this is read and ignored there — it exists for shells that do.
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this row within the plugin.
+	 */
+	id: string;
+	/**
+	 * Row label, written as the user reads it — "New workflow", not "Workflow".
+	 */
+	label: string;
+	/**
+	 * Sort position among contributed rows (ascending).
+	 */
+	order?: number | null;
+	/**
+	 * In-app route the shell opens, e.g. `/workflows/new`. Must be a path, not a
+	 * URL: this is a navigation inside the shell, and accepting a scheme here
+	 * would turn a create row into an arbitrary-link affordance.
+	 */
+	target?: string | null;
+	/**
+	 * Title for the tab `target` opens. Falls back to `label`.
+	 */
+	title?: string | null;
 }
 /**
  * One **deletable data category** an app owns (see [`Contributes::data_categories`]).
@@ -1599,6 +1718,68 @@ export interface SidebarButtonContribution {
 	title: string;
 }
 /**
+ * One app-registered **sidebar mode** — a named arrangement of the whole left
+ * sidebar: the sections it offers as tabs, and the one it opens on.
+ *
+ * The shape is deliberately thin, and every field it does NOT have is the point:
+ *
+ * - **No renderer, no code.** A mode names existing sections. It cannot draw a row,
+ *   which is why it needs no grants and cannot be a carriage channel — the worst a
+ *   hostile mode can do is offer a tab list the user does not want, one menu row
+ *   away from being switched off.
+ * - **No row style.** How a section's rows draw belongs to that SECTION
+ *   (`SidebarSectionSpec.rowStyle` in `@ryu/app-host/views`), because it is a
+ *   property of the feed, not of an arrangement: a roster of named bots wants
+ *   avatars whether or not the user is in a mode that features it. Putting it here
+ *   would also mean a mode reaching across into another contribution's rendering,
+ *   which is the coupling this member exists to avoid.
+ * - **No `hidden` list.** A mode is a positive statement about what to show. The
+ *   sections it does not name are simply not tabs in it.
+ *
+ * Section ids are the shell's own keys (`agents`, `chats`, `spaces`, …) or another
+ * contributed section's namespaced key (`plugin:<pluginId>:<sectionId>`). A named
+ * section that does not resolve is dropped rather than failing the mode — an app
+ * may legitimately name a section from a sibling app the user has not installed,
+ * and losing one tab is a better answer than losing the mode.
+ */
+export interface SidebarModeContribution {
+	/**
+	 * Which of `sections` the mode opens on. Absent (or naming a section not in
+	 * `sections`) = the first one. This is the field that makes a mode an opinion
+	 * rather than a filter: the shell's own Agent mode lists Sessions first but
+	 * opens on Agents, because the roster is what the mode is for.
+	 */
+	default_section?: string | null;
+	/**
+	 * One-line description shown under the title where the mode is offered.
+	 */
+	description?: string | null;
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this mode within the plugin (namespaced by the shell into the
+	 * stored mode key as `plugin:<pluginId>:<id>`, so two apps can both ship a
+	 * `bots` mode).
+	 */
+	id: string;
+	/**
+	 * Optional ordering hint among the modes on offer (lower = earlier).
+	 */
+	order?: number | null;
+	/**
+	 * The sections this mode offers as tabs, in display order. Empty = the mode is
+	 * inert and the shell ignores it; a mode with one entry is a legitimate
+	 * single-surface arrangement, not an error.
+	 */
+	sections?: string[];
+	/**
+	 * Label shown in the sidebar's mode menu and the Appearance tab.
+	 */
+	title: string;
+}
+/**
  * One app-registered **sidebar section** — a header plus a live list of rows the
  * desktop's compact sidebar renderer draws (the app-owned replacement for the
  * hardcoded Canvas/Whiteboard/Meetings sections). A typed envelope around an opaque
@@ -1914,16 +2095,78 @@ export interface WidgetContribution {
 	uri: string;
 }
 /**
- * `engines` block — the required Ryu version, mirroring VS-Code's
- * `engines.vscode`. `ryu` is a semver **requirement** string.
+ * `engines` block — the **host** version floors, mirroring VS-Code's
+ * `engines.vscode`. Every value is a semver **requirement** string.
+ *
+ * `ryu` is the Core floor and is the only required key (every manifest written
+ * before per-surface floors existed carries just that one). The rest are optional
+ * per-[`Surface`] floors: a plugin that needs a Gateway API added in 0.1.5 and a
+ * desktop panel API added in 0.2.0 says so, instead of over-declaring one Core
+ * floor and hoping the release train kept them in step.
+ *
+ * ## Why this is a flat struct and not a `BTreeMap<Surface, String>`
+ *
+ * The [`PluginManifest::surfaces`] map would be the obvious home, but it is
+ * **absent from the SDK's zod mirror** (`packages/sdk/src/manifest.ts`), and zod
+ * strips unlisted keys — so a floor declared there would be silently dropped from
+ * every bundle `ryu pack` produces. `engines` is the block that already means
+ * "host floor", it is what a manifest author reaches for, and mirroring it costs
+ * one schema addition rather than a nested map.
+ *
+ * ## Unknown ≠ unsatisfied
+ *
+ * Core observes its own version and (via `/health`) the Gateway's. It does NOT
+ * know the desktop, island, mobile, extension or web version — those are separate
+ * installs that never report in. A floor against a surface whose version is
+ * unknown is therefore **advisory, never blocking**: see
+ * `HostVersions::evaluate`. Blocking on unknown would delist every plugin from
+ * every surface Core cannot see, which is most of them.
  */
 export interface EnginesReq {
 	/**
-	 * Semver requirement the running Core version must satisfy (e.g. `">=0.3.0"`,
-	 * `"^1.2"`). Parsed as a [`semver::VersionReq`]; an unparseable value or an
-	 * unsatisfied requirement causes the loader to reject the manifest.
+	 * Floor for the **terminal** (`cli`) surface — the TUI that dispatches
+	 * `ryu <app> <cmd>`.
+	 */
+	cli?: string | null;
+	/**
+	 * Floor for the **desktop** app (Tauri shell).
+	 */
+	desktop?: string | null;
+	/**
+	 * Floor for the **browser extension** surface.
+	 */
+	extension?: string | null;
+	/**
+	 * Floor for the **Gateway**. The one non-Core surface Core can actually
+	 * observe (it spawns the Gateway and reads `version` from its `/health`), so a
+	 * floor here is genuinely enforceable rather than advisory.
+	 */
+	gateway?: string | null;
+	/**
+	 * Floor for the **island** (the always-on overlay surface).
+	 */
+	island?: string | null;
+	/**
+	 * Floor for the **mobile** app. The one surface with a genuinely independent
+	 * release train (App Store / Play review lag), so it is the floor most likely
+	 * to be unsatisfied in practice.
+	 */
+	mobile?: string | null;
+	/**
+	 * Semver requirement the running **Core** version must satisfy (e.g.
+	 * `">=0.3.0"`, `"^1.2"`). Parsed as a [`semver::VersionReq`]; an unparseable
+	 * value causes the loader to reject the manifest, and an unsatisfied one moves
+	 * it to the incompatible lane (shown in the marketplace, refused at install).
+	 *
+	 * Named `ryu` rather than `core` for backwards compatibility: every manifest
+	 * in the wild spells it this way. [`EnginesReq::floor_for`] maps
+	 * [`Surface::Core`] onto it.
 	 */
 	ryu: string;
+	/**
+	 * Floor for the **web** surface.
+	 */
+	web?: string | null;
 }
 /**
  * One declarative **stdio MCP server** a plugin registers (see

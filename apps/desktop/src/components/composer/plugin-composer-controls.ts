@@ -135,6 +135,30 @@ export function partitionComposerControls(
 	};
 }
 
+/**
+ * Key prefix for the `ComposerSettingsSection` a menu-placed `select` becomes.
+ *
+ * It is a real discriminator, not cosmetic: the composer's trigger summary is
+ * derived from the same section list that feeds the picker body, and a section
+ * carrying this prefix is deliberately EXCLUDED from that summary — an app's mode
+ * picker belongs in the popover, not spelled out as a permanent extra segment on
+ * every composer. Both halves read it from here so they cannot drift.
+ */
+export const COMPOSER_PLUGIN_SECTION_PREFIX = "plugin:";
+
+/** The settings-menu section key for one contributed control. */
+export function composerPluginSectionKey(control: {
+	id: string;
+	plugin: string;
+}): string {
+	return `${COMPOSER_PLUGIN_SECTION_PREFIX}${control.plugin}:${control.id}`;
+}
+
+/** True when a settings-menu section came from a plugin's `composer_controls`. */
+export function isComposerPluginSectionKey(key: string): boolean {
+	return key.startsWith(COMPOSER_PLUGIN_SECTION_PREFIX);
+}
+
 /** A `select`'s renderable options, dropping malformed entries (an option with
  *  no `value` cannot be chosen; one with no `label` cannot be read). */
 export function composerSelectOptions(

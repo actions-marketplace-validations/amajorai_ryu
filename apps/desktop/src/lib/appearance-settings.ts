@@ -35,6 +35,10 @@ import {
 	setSeasonalThemeSetting,
 } from "@/src/hooks/useSeasonalEffects.ts";
 import {
+	DEFAULT_SIDEBAR_GROUPED_NAV,
+	setSidebarGroupedNav,
+} from "@/src/hooks/useSidebarGroupedNav.ts";
+import {
 	DEFAULT_SIDEBAR_MODE,
 	setSidebarMode,
 } from "@/src/hooks/useSidebarMode.ts";
@@ -119,6 +123,7 @@ export const APPEARANCE_DEFAULTS = {
 	agentRowStyle: DEFAULT_AGENT_ROW_STYLE,
 	interfaceLevel: DEFAULT_INTERFACE_LEVEL,
 	groupChatsByDate: DEFAULT_CHAT_DATE_GROUPING,
+	sidebarGroupedNav: DEFAULT_SIDEBAR_GROUPED_NAV,
 	sidebarOverflowPopover: false,
 	groupToolUses: true,
 	// Detail level "None". OFF as the SHIPPED default — must stay in step with
@@ -336,11 +341,23 @@ function registerAppearanceSettings(): void {
 			}),
 	});
 
+	// The id stays `group-chats-by-date` although the preference now buckets every
+	// sidebar list (a project's chats, a space's pages, an app's feed), not just
+	// Chats. It is the settings-search anchor and the sync-manifest key
+	// (`ryu:sidebar-group-chats-by-date`), so renaming it would orphan both for the
+	// sake of cosmetics. Only the label moved.
 	registerSetting({
 		id: "appearance.group-chats-by-date",
 		category: "appearance",
-		label: "Group chats by date",
+		label: "Group lists by date",
 		reset: () => setChatDateGrouping(APPEARANCE_DEFAULTS.groupChatsByDate),
+	});
+
+	registerSetting({
+		id: "appearance.sidebar-grouped-nav",
+		category: "appearance",
+		label: "Projects & Spaces as pickers",
+		reset: () => setSidebarGroupedNav(APPEARANCE_DEFAULTS.sidebarGroupedNav),
 	});
 
 	registerSetting({

@@ -125,11 +125,20 @@ export function DataGrid<TData>({
 				}}
 				tabIndex={0}
 			>
+				{/* `minWidth` is load-bearing, not cosmetic. The scroll container is a
+				    `grid`, so a rowgroup with no explicit width resolves against the
+				    container's CONTENT box rather than its scroll width — the header and
+				    the body then size themselves independently, and once the columns
+				    total wider than the viewport the two stop agreeing on where each
+				    column starts. That is the header/row misalignment. The add-row below
+				    already pinned `table.getTotalSize()` for exactly this reason; the
+				    header and body were simply never given the same treatment. */}
 				<div
 					className="sticky top-0 z-10 grid border-b bg-background"
 					data-slot="grid-header"
 					ref={headerRef}
 					role="rowgroup"
+					style={{ minWidth: table.getTotalSize() }}
 				>
 					{table.getHeaderGroups().map((headerGroup, rowIndex) => (
 						<div
@@ -209,6 +218,8 @@ export function DataGrid<TData>({
 					role="rowgroup"
 					style={{
 						height: `${virtualTotalSize}px`,
+						// Same total as the header above — see the note there.
+						minWidth: table.getTotalSize(),
 						contain: adjustLayout ? "layout paint" : "strict",
 					}}
 				>
