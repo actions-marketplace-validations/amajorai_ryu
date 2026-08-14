@@ -534,6 +534,22 @@ pub(crate) fn normalize_media_output(output: &Value) -> Value {
     serde_json::json!({ "data": data, "raw": output.clone() })
 }
 
+/// The per-provider field names carrying billable compute seconds, in the order
+/// they are tried.
+///
+/// Both providers nest theirs under `metrics`, and both mean the same thing —
+/// time the model actually ran, excluding queue wait — but they disagree on the
+/// leaf name:
+///
+///  - **Replicate** `metrics.predict_time`: "the amount of CPU or GPU time, in
+///    seconds, that the prediction used while running". Present only on a
+///    terminated prediction.
+///  - **fal** `metrics.inference_time`: "seconds the runner spent processing",
+///    present only when the request is `COMPLETED`. fal bills on exactly this —
+///    queue time before a runner picks the job up is free — so it is the right
+///    number to charge from, not merely the closest one available.
+const COMPUTE_SECOND_KEYS: [&str; 2] = ["predict_time", "inference_time"];
+
 /// Attach a provider's own usage report to a normalized media response.
 ///
 /// METERING NEEDS THE TRANSACTION, NOT AN AVERAGE. A flat per-call media rate
@@ -547,11 +563,13 @@ pub(crate) fn normalize_media_output(output: &Value) -> Value {
 /// providers that report nothing stay unchanged and simply omit the key; the
 /// debit path treats a missing `usage` as "fall back to the flat rate".
 pub(crate) fn with_media_usage(mut normalized: Value, usage: &Value) -> Value {
-    if let Some(seconds) = usage
-        .get("predict_time")
-        .and_then(serde_json::Value::as_f64)
-        .filter(|s| *s > 0.0)
-    {
+    let seconds = COMPUTE_SECOND_KEYS.iter().find_map(|key| {
+        usage
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|s| *s > 0.0)
+    });
+    if let Some(seconds) = seconds {
         normalized["usage"] = serde_json::json!({ "compute_seconds": seconds });
     }
     normalized
@@ -1091,5 +1109,50 @@ mod media_output_tests {
             &json!({ "video": { "url": "https://x/v.mp4" }, "url": "https://x/v.mp4" }),
         );
         assert_eq!(out["data"].as_array().unwrap().len(), 1);
+    }
+
+    /// Both providers' compute-second fields, pinned by NAME.
+    ///
+    /// The names are the whole contract with an external API, and getting one
+    /// wrong is silent: `with_media_usage` simply attaches nothing, the debit
+    /// finds no `usage.compute_seconds`, and the call bills the flat nominal rate
+    /// instead — which is what fal did for every image and video until its key
+    /// was added here. A rename upstream fails this test rather than quietly
+    /// reverting media billing to an estimate.
+    ///
+    /// Field sources, both primary:
+    ///  - Replicate HTTP API reference: `metrics.predict_time` is "the amount of
+    ///    CPU or GPU time, in seconds, that the prediction used while running",
+    ///    present only on a terminated prediction.
+    ///  - fal queue docs: `metrics.inference_time` is "seconds the runner spent
+    ///    processing (only when COMPLETED)", and fal bills on exactly that —
+    ///    queue wait is free.
+    #[test]
+    fn media_usage_reads_both_replicate_and_fal_timing_fields() {
+        let normalized = || json!({ "data": [{ "url": "https://x/a.png" }] });
+
+        let replicate = with_media_usage(
+            normalized(),
+            &json!({ "predict_time": 2.5, "total_time": 9.0 }),
+        );
+        assert_eq!(replicate["usage"]["compute_seconds"], json!(2.5));
+
+        let fal = with_media_usage(normalized(), &json!({ "inference_time": 3.42 }));
+        assert_eq!(fal["usage"]["compute_seconds"], json!(3.42));
+
+        // `total_time` is NOT billable — it includes queue and upload time that
+        // neither provider charges for. Reading it would over-bill every call.
+        let total_only = with_media_usage(normalized(), &json!({ "total_time": 9.0 }));
+        assert!(total_only.get("usage").is_none());
+
+        // A provider that reports nothing, or reports a zero/absent duration,
+        // must leave `usage` off entirely so the debit falls back to the flat
+        // rate rather than billing zero seconds.
+        for empty in [json!({}), json!(null), json!({ "inference_time": 0.0 })] {
+            assert!(
+                with_media_usage(normalized(), &empty).get("usage").is_none(),
+                "no usage key for {empty:?}"
+            );
+        }
     }
 }

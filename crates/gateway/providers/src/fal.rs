@@ -63,13 +63,15 @@ impl FalProvider {
         )
     }
 
-    /// Submit a request and return `(response_url, status)`. `response_url` is the
-    /// job's `provider_ref`; append `/status` for the status endpoint.
+    /// Submit a request and return `(response_url, status, metrics)`.
+    /// `response_url` is the job's `provider_ref`; append `/status` for the
+    /// status endpoint. `metrics` is fal's own timing envelope, `Null` when the
+    /// response carries none (the normal case for a job that is still queued).
     async fn submit(
         &self,
         model: &str,
         body: &Value,
-    ) -> Result<(String, JobStatus), ProviderError> {
+    ) -> Result<(String, JobStatus, Value), ProviderError> {
         let input = build_input(body);
         let url = self.submit_url(model);
         debug!(provider = "fal", model, %url, "submitting request");
@@ -90,11 +92,20 @@ impl FalProvider {
             .ok_or_else(|| {
                 ProviderError::Provider("fal submit returned no response_url".to_string())
             })?;
-        Ok((response_url, fal_status(&json)))
+        Ok((response_url, fal_status(&json), json["metrics"].clone()))
     }
 
-    /// Fetch a job's current status via `{response_url}/status`.
-    async fn status(&self, response_url: &str) -> Result<JobStatus, ProviderError> {
+    /// Fetch a job's current status via `{response_url}/status`, returning both
+    /// the status and fal's `metrics` envelope.
+    ///
+    /// THE METRICS ARE ONLY HERE. fal reports `metrics.inference_time` on the
+    /// STATUS response and not on the result body, so a poll loop that discards
+    /// the status payload — which this one did, keeping only the enum — throws
+    /// away the single number the debit can bill from. Every fal image and video
+    /// call therefore fell back to the flat per-call rate, which is a nominal
+    /// duration rather than a measured one. Returned alongside the status so the
+    /// caller can hand it to `with_media_usage` when it fetches the result.
+    async fn status(&self, response_url: &str) -> Result<(JobStatus, Value), ProviderError> {
         let url = format!("{}/status", response_url.trim_end_matches('/'));
         let resp = self
             .client
@@ -104,7 +115,7 @@ impl FalProvider {
             .await
             .map_err(|e| ProviderError::Provider(format!("fal status failed: {e}")))?;
         let json = parse_json(resp, "fal status").await?;
-        Ok(fal_status(&json))
+        Ok((fal_status(&json), json["metrics"].clone()))
     }
 
     /// Fetch a completed job's result and normalize it.
@@ -122,7 +133,7 @@ impl FalProvider {
 
     /// Submit and block-and-poll to completion, returning the normalized output.
     async fn run_inline(&self, model: &str, body: &Value) -> Result<Value, ProviderError> {
-        let (response_url, mut status) = self.submit(model, body).await?;
+        let (response_url, mut status, mut metrics) = self.submit(model, body).await?;
         let deadline = Instant::now() + self.poll_timeout;
         while !status.is_terminal() {
             if Instant::now() >= deadline {
@@ -131,12 +142,20 @@ impl FalProvider {
                 ));
             }
             tokio::time::sleep(self.poll_interval).await;
-            status = self.status(&response_url).await?;
+            // Keep the LAST status payload's metrics: `inference_time` only
+            // appears once the request is COMPLETED, so the terminal poll is the
+            // one that carries it and every earlier one is `Null`.
+            let (next_status, next_metrics) = self.status(&response_url).await?;
+            status = next_status;
+            metrics = next_metrics;
         }
         if status == JobStatus::Failed {
             return Err(ProviderError::Provider("fal request failed".to_string()));
         }
-        self.result(&response_url).await
+        Ok(super::with_media_usage(
+            self.result(&response_url).await?,
+            &metrics,
+        ))
     }
 }
 
@@ -198,12 +217,15 @@ impl Provider for FalProvider {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<VideoJob, ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let (response_url, status) = self.submit(model, body).await?;
+            let (response_url, status, metrics) = self.submit(model, body).await?;
             // If Fal reports the job already COMPLETED at submit time, fetch the
             // result now so a subsequent terminal poll returns the media rather
             // than an empty envelope.
             let output = if status == JobStatus::Succeeded {
-                self.result(&response_url).await.ok()
+                self.result(&response_url)
+                    .await
+                    .ok()
+                    .map(|out| super::with_media_usage(out, &metrics))
             } else {
                 None
             };
@@ -222,9 +244,15 @@ impl Provider for FalProvider {
     ) -> Pin<Box<dyn std::future::Future<Output = Result<VideoJob, ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let status = self.status(provider_ref).await?;
+            let (status, metrics) = self.status(provider_ref).await?;
             let (output, error) = match status {
-                JobStatus::Succeeded => (Some(self.result(provider_ref).await?), None),
+                JobStatus::Succeeded => (
+                    Some(super::with_media_usage(
+                        self.result(provider_ref).await?,
+                        &metrics,
+                    )),
+                    None,
+                ),
                 JobStatus::Failed => (None, Some("fal request failed".to_string())),
                 _ => (None, None),
             };
