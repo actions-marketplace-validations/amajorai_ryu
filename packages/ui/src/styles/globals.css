@@ -1200,3 +1200,201 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 @media (prefers-reduced-motion: reduce) {
   .t-like-icon, .t-like-particles i { animation: none !important; }
 }
+
+/* ==========================================================================
+   Accessibility preferences & material weight
+   --------------------------------------------------------------------------
+   Three INDEPENDENT signals, not one "accessibility mode". A reader can ask for
+   less motion while keeping translucency, or the reverse, so each gets its own
+   block. Everything above this line handles the first signal per named class;
+   these blocks are the defaults that catch whatever the named lists miss.
+   ========================================================================== */
+
+/* --- Reduced motion: the catch-all ---------------------------------------
+   The named blocks above are hand-maintained lists, so any animation added
+   later is uncovered until someone remembers to extend them. This is the
+   backstop for everything else.
+
+   0.01ms, NEVER `animation: none`. `none` means `transitionend`/`animationend`
+   never fire, and this codebase waits on completion — `springs.ts` ships
+   `exitFallbackMs` precisely because deferred-unmount timers guard exit
+   animations. Collapsing the duration keeps the events firing, so portals still
+   unmount; killing the animation outright can strand them mounted.
+
+   A universal selector is specificity 0,0,0, so every `.t-*` rule above still
+   wins on its own elements regardless of source order. That is deliberate:
+   those blocks encode a RESTING STATE (a drawn checkmark, a visible stagger
+   line), which is a gentler substitute than a collapse, and must not be
+   overridden by this. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* Parallax and view transitions are vestibular triggers even at zero
+	   duration, because the element still traverses the viewport. */
+	::view-transition-old(*),
+	::view-transition-new(*),
+	::view-transition-group(*) {
+		animation-duration: 0.01ms !important;
+		animation-delay: 0s !important;
+	}
+}
+
+/* --- Reduced transparency -------------------------------------------------
+   55 source files reach for `backdrop-blur`, and until now none of them asked
+   whether the reader wants it. Blur is the costly, legibility-reducing half of
+   a translucent material, so it goes first; the surfaces we own by name then
+   go fully opaque.
+
+   `[class*="backdrop-blur"]` is an attribute match on the Tailwind class rather
+   than a list of the 55 sites — a new blurred surface is covered the day it is
+   written, which is the failure mode the reduced-motion lists have. */
+@media (prefers-reduced-transparency: reduce) {
+	[class*="backdrop-blur"],
+	[class*="backdrop-saturate"] {
+		backdrop-filter: none !important;
+		-webkit-backdrop-filter: none !important;
+	}
+
+	/* Named chrome goes solid. Same slots the `data-dialog-overlay-blur` toggle
+	   near the top of this file drives, so the two mechanisms stay in step. */
+	[data-slot="dialog-content"],
+	[data-slot="alert-dialog-content"],
+	[data-slot="sheet-content"],
+	[data-slot="drawer-content"],
+	[data-slot="popover-content"],
+	[data-slot="dropdown-menu-content"],
+	[data-slot="tooltip-content"] {
+		background-color: var(--popover) !important;
+	}
+
+	.ryu-dialog-overlay {
+		backdrop-filter: none !important;
+		-webkit-backdrop-filter: none !important;
+	}
+}
+
+/* --- Increased contrast ---------------------------------------------------
+   Near-solid surfaces with a defined edge. Translucent chrome relies on blur to
+   separate itself from what scrolls underneath; with contrast raised, the edge
+   has to do that job instead. */
+@media (prefers-contrast: more) {
+	[class*="backdrop-blur"],
+	[class*="backdrop-saturate"] {
+		backdrop-filter: none !important;
+		-webkit-backdrop-filter: none !important;
+	}
+
+	[data-slot="dialog-content"],
+	[data-slot="alert-dialog-content"],
+	[data-slot="sheet-content"],
+	[data-slot="drawer-content"],
+	[data-slot="popover-content"],
+	[data-slot="dropdown-menu-content"],
+	[data-slot="tooltip-content"] {
+		background-color: var(--popover) !important;
+		border: 1px solid var(--foreground) !important;
+	}
+
+	:root {
+		--border: color-mix(in oklch, var(--foreground) 55%, transparent);
+	}
+}
+
+/* --- Scroll edge effect ---------------------------------------------------
+   Apple's alternative to a 1px divider under floating chrome: fade the content
+   out where it passes beneath, rather than drawing a hard line across it. Put
+   this on the SCROLL CONTAINER, not the header.
+
+     <div class="ryu-scroll-edge overflow-y-auto">…</div>
+
+   `--ryu-scroll-edge-size` is how tall the fade is; set it per surface to match
+   the chrome that overlaps. Only worth using where floating UI actually
+   overlaps content — a solid opaque header needs no fade.
+
+   RELATIVES, so this does not become a fourth hand-rolled fade:
+     - `components/edge-scroller.tsx` is the HORIZONTAL strip equivalent, with
+       chevron affordances. Different axis, different job.
+     - `TrayPopover` measures scroll position and fades only the edges that
+       actually have more content. That is strictly better and is what to reach
+       for when a list can be shorter than its box; these classes are the static
+       version for a container that always overflows.
+   Living in this file rather than an app stylesheet is load-bearing: both
+   `apps/web/src/index.css` and `apps/desktop/src/index.css` import it, and a
+   class defined in only one of them silently no-ops in the other (the exact trap
+   documented on `edge-scroller.tsx`). */
+.ryu-scroll-edge {
+	--ryu-scroll-edge-size: 1.5rem;
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--ryu-scroll-edge-size),
+		#000 calc(100% - var(--ryu-scroll-edge-size)),
+		transparent 100%
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--ryu-scroll-edge-size),
+		#000 calc(100% - var(--ryu-scroll-edge-size)),
+		transparent 100%
+	);
+}
+
+/* Top-only variant, for a list that sits under a header but ends on a solid
+   footer (or nothing) — a bottom fade there just clips the last row. */
+.ryu-scroll-edge-top {
+	--ryu-scroll-edge-size: 1.5rem;
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--ryu-scroll-edge-size)
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		#000 var(--ryu-scroll-edge-size)
+	);
+}
+
+/* --- Typography -----------------------------------------------------------
+   Optical sizing lets a variable font redraw its letterforms for the size it is
+   rendered at, instead of scaling one master outline. Free correctness for any
+   variable face; inert for the rest.
+
+   The size-coupled TRACKING half of this rule is deliberately not applied
+   retroactively — 137 existing `tracking-*` call sites were chosen by eye, and
+   rewriting them would be a visual redesign nobody asked for. The tokens below
+   are for new display type: pair them with the size rather than reaching for a
+   `tracking-*` bucket.
+
+   Large text needs NEGATIVE tracking (letters read too far apart as they grow);
+   small text needs slightly positive tracking to stay legible. One fixed value
+   across a scale is wrong at one end or the other. */
+:root {
+	--tracking-display: -0.022em; /* text-5xl and up */
+	--tracking-title: -0.014em; /* text-2xl … text-4xl */
+	--tracking-body: 0em; /* text-sm … text-lg */
+	--tracking-caption: 0.01em; /* text-xs and below */
+}
+
+html {
+	font-optical-sizing: auto;
+}
+
+/* Opt-in helpers so display type can take its tracking from the scale. */
+.ryu-tracking-display {
+	letter-spacing: var(--tracking-display);
+}
+.ryu-tracking-title {
+	letter-spacing: var(--tracking-title);
+}
+.ryu-tracking-caption {
+	letter-spacing: var(--tracking-caption);
+}

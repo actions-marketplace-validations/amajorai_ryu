@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
-use crate::sidecar::mcp::client::{extract_mcp_json, McpSession, McpStdioCommand};
+use crate::sidecar::mcp::client::{extract_mcp_json, McpSession, McpStdioCommand, McpTarget};
 
 /// A live recording session: the ghost subprocess (holding the input tap) plus
 /// the metadata the desktop shows while recording.
@@ -51,14 +51,17 @@ fn recording() -> &'static Mutex<Option<Recording>> {
 
 /// The command that launches the ghost MCP server (`<bin> mcp`). Mirrors the
 /// built-in registered in [`crate::sidecar::mcp`].
-fn ghost_command() -> McpStdioCommand {
-    McpStdioCommand {
+/// Ghost is always a local stdio child (an `~/.ryu/bin` binary), so this is the
+/// one construction site that names [`McpTarget::Stdio`] directly rather than
+/// going through the registry's config lowering.
+fn ghost_command() -> McpTarget {
+    McpTarget::Stdio(McpStdioCommand {
         command: crate::sidecar::tools::ghost::ghost_bin_path()
             .to_string_lossy()
             .into_owned(),
         args: vec!["mcp".to_string()],
         env: Vec::new(),
-    }
+    })
 }
 
 // ── Wire bodies ───────────────────────────────────────────────────────────────

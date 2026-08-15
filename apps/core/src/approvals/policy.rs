@@ -189,6 +189,37 @@ pub fn should_require_approval_local(
         tags.push("core-api-mutation".to_owned());
         return Some(tags);
     }
+    // Layer B′ (continued) — DERIVED app-API mutations. A derived tool
+    // (`ryu_ext__…`, generated from an app sidecar's OpenAPI document) reaches an
+    // endpoint nobody hand-picked: a single installed app can contribute hundreds
+    // of them, so a non-GET one is the same "the model is writing to real state"
+    // shape as the CoreApi rule, over a far wider surface.
+    //
+    // It needs its own arm because neither existing layer covers it.
+    // `self_api::is_mutating` keys on the `ryu_api__` prefix and returns false
+    // for these, and `RISKY_PATTERNS` carries no `put`/`patch` entry — so a
+    // derived PUT or PATCH was gated by *nothing*, on a node whose operator had
+    // explicitly chosen `approval-mode=smart`. (`post` and `delete` do happen to
+    // hit the verb heuristic, but that is coincidence, not coverage: the
+    // heuristic is matching the English word, not the HTTP method, so it would
+    // also miss them under a different id spelling and it tags them as something
+    // other than a mutation.)
+    //
+    // The grammar has exactly ONE definition, [`crate::ext_api::is_mutating`],
+    // which reads the method from a fixed position (the first token after the last
+    // `__`) rather than scanning for a verb word anywhere in the id. That is not a
+    // refactor of the same rule: a scan classifies `…__get_blog_post` as a WRITE
+    // because the slug contains `post`, and gating plain reads is how operators
+    // learn to click through prompts — which is how the real writes stop being
+    // read either.
+    //
+    // Same escape-hatch semantics as the CoreApi rule, and for the same reason:
+    // gate on unset / `smart` / `manual`, and let ONLY an explicit `off` through.
+    if !core_api_opted_out && crate::ext_api::is_mutating(tool_id) {
+        let mut tags = classify_risk(tool_id);
+        tags.push("ext-api-mutation".to_owned());
+        return Some(tags);
+    }
     // Layer B′ (continued) — governance mutations. Same escape-hatch semantics
     // as the CoreApi rule: an agent must never silently loosen its own
     // damage-limiting controls unless the operator explicitly opted out.
@@ -244,6 +275,101 @@ mod tests {
             should_require_approval_local(&[], t, ApprovalMode::Manual, Some("manual")).is_some()
         );
         assert!(should_require_approval_local(&[], t, ApprovalMode::Off, Some("off")).is_none());
+    }
+
+    /// The headline gate: a derived non-GET tool must gate under `smart`.
+    ///
+    /// The ids here are chosen so the test cannot pass for the wrong reason. `put`
+    /// and `patch` are absent from `RISKY_PATTERNS` and the ids are not
+    /// `ryu_api__*`, so *nothing else in this module* gates them — asserted
+    /// explicitly, because a POST/DELETE id would have been caught by the verb
+    /// heuristic and this test would have been green with the new arm deleted.
+    #[test]
+    fn non_get_derived_tool_requires_approval_under_smart() {
+        let put = "ryu_ext__ryu_crm__put_contacts_id";
+        assert!(
+            classify_risk(put).is_empty(),
+            "the verb heuristic must NOT be what gates this, or the derived rule is untested"
+        );
+        assert!(
+            !crate::self_api::is_mutating(put),
+            "the CoreApi rule must NOT be what gates this either"
+        );
+        let tags = should_require_approval_local(&[], put, ApprovalMode::Smart, Some("smart"))
+            .expect("a derived PUT must gate under smart");
+        assert!(tags.iter().any(|t| t == "ext-api-mutation"));
+
+        // PATCH is the other verb the heuristic misses entirely.
+        let patch = "ryu_ext__ryu_crm__patch_contacts_id";
+        assert!(classify_risk(patch).is_empty());
+        let tags = should_require_approval_local(&[], patch, ApprovalMode::Smart, Some("smart"))
+            .expect("a derived PATCH must gate under smart");
+        assert!(tags.iter().any(|t| t == "ext-api-mutation"));
+
+        // POST/DELETE gate through the same arm (and so carry the same tag), even
+        // though the verb heuristic would also have flagged them.
+        for id in [
+            "ryu_ext__ryu_crm__post_contacts",
+            "ryu_ext__ryu_crm__delete_contacts_id",
+        ] {
+            let tags = should_require_approval_local(&[], id, ApprovalMode::Smart, Some("smart"))
+                .expect("a derived write must gate under smart");
+            assert!(tags.iter().any(|t| t == "ext-api-mutation"), "{id}");
+        }
+
+        // The id grammar puts the method at a FIXED position (the first token after
+        // the last `__`), so a slug that merely contains a verb word no longer
+        // over-gates: `get_blog_post` is a read. That precision is the point — an
+        // earlier draft scanned every token, which read `post` out of the slug and
+        // gated plain reads, and an operator who is prompted on reads stops reading
+        // the prompts that guard the writes.
+        assert!(!crate::ext_api::is_mutating(
+            "ryu_ext__ryu_news__get_blog_post"
+        ));
+    }
+
+    /// The read path stays free. Derived GETs are the bulk of any OpenAPI surface,
+    /// and gating them would train operators to click through prompts — which is
+    /// how the writes above stop being read either.
+    #[test]
+    fn get_derived_tool_does_not_require_approval() {
+        let get = "ryu_ext__ryu_crm__get_contacts";
+        assert!(
+            should_require_approval_local(&[], get, ApprovalMode::Smart, Some("smart")).is_none()
+        );
+        assert!(should_require_approval_local(&[], get, ApprovalMode::Off, None).is_none());
+        // `manual` still gates everything; the derived rule grants no exemption.
+        assert!(
+            should_require_approval_local(&[], get, ApprovalMode::Manual, Some("manual")).is_some()
+        );
+        // An id that is not on the derived plane is not this rule's business, even
+        // when its action segment looks identical.
+        assert!(!crate::ext_api::is_mutating("crm__put_contacts_id"));
+        // An id that carries the derived PREFIX but not the grammar has no method
+        // token to read, so it gates. That is the deliberate fail-safe direction:
+        // an unparseable derived id costs one extra prompt, whereas guessing "read"
+        // on a shape we do not understand is the expensive way to be wrong.
+        assert!(crate::ext_api::is_mutating("ryu_ext__crm_contacts"));
+    }
+
+    /// Same escape-hatch semantics as the CoreApi rule: the operator has to say
+    /// `off` out loud. Unset and empty are "never chose", not "chose off".
+    #[test]
+    fn derived_mutation_gate_is_disabled_only_by_explicit_off() {
+        let put = "ryu_ext__ryu_crm__put_contacts_id";
+        assert!(should_require_approval_local(&[], put, ApprovalMode::Off, None).is_some());
+        assert!(should_require_approval_local(&[], put, ApprovalMode::Off, Some("")).is_some());
+        assert!(
+            should_require_approval_local(&[], put, ApprovalMode::Smart, Some("smart")).is_some()
+        );
+        assert!(
+            should_require_approval_local(&[], put, ApprovalMode::Manual, Some("manual")).is_some()
+        );
+        // The ONE opt-out, tolerant of case/whitespace like the CoreApi rule.
+        assert!(should_require_approval_local(&[], put, ApprovalMode::Off, Some("off")).is_none());
+        assert!(
+            should_require_approval_local(&[], put, ApprovalMode::Off, Some(" OFF ")).is_none()
+        );
     }
 
     #[test]

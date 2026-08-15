@@ -480,6 +480,163 @@ fn missing_sidecar_binary_reason(name: &str) -> Option<String> {
         .and_then(|m| m.get(name).map(|r| r.reason.clone()))
 }
 
+// ── Registration failures (the OTHER invisible failure) ───────────────────────
+//
+// Sibling of the missing-binary record above, and it exists for the same reason: a
+// failure that is otherwise invisible to every surface. When `claim_port` refuses —
+// some unrelated process on this host already holds the sidecar's declared port — the
+// name never enters the manager's `dynamic` registry, so it does not merely read as
+// "failed" on `/api/sidecar/status`, it is ABSENT. The app simply looks broken, with
+// the only signal a `tracing::warn!` nobody reads. The ext-proxy's 503 body names the
+// condition per-request; this record is the durable half, readable with no request in
+// flight, and is what `SidecarManager::statuses` synthesizes an entry from.
+
+/// Process-global record of every manifest sidecar whose REGISTRATION failed, keyed by
+/// namespaced name, holding `claim_port`'s own error string verbatim (re-wording it
+/// would lose the port number and the OS error, which are the two things the operator
+/// needs). Written by the manager's register path, cleared the moment registration
+/// succeeds or the sidecar is deregistered.
+fn registration_failure_record() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>>
+{
+    static RECORD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    RECORD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record that `name` could not be registered, and why. Idempotent (overwrites).
+/// Logged at `error`, like the missing-binary sibling: an app the user just enabled
+/// cannot run at all, and — unlike a crash — nothing will retry it.
+pub(crate) fn record_registration_failure(name: &str, reason: &str) {
+    tracing::error!(sidecar = %name, "app sidecar failed to register: {reason}");
+    if let Ok(mut record) = registration_failure_record().lock() {
+        record.insert(name.to_owned(), reason.to_owned());
+    }
+}
+
+/// Clear `name`'s registration-failure record — called on a later successful
+/// registration and on deregister, so a freed port or a disabled app never leaves a
+/// stale reason on the status plane.
+pub(crate) fn clear_registration_failure(name: &str) {
+    if let Ok(mut record) = registration_failure_record().lock() {
+        record.remove(name);
+    }
+}
+
+/// The recorded registration-failure reason for one namespaced sidecar, if any.
+pub(crate) fn registration_failure_reason(name: &str) -> Option<String> {
+    registration_failure_record()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(name).cloned())
+}
+
+/// Every `(name, reason)` currently recorded as failed-to-register. Read by
+/// [`crate::sidecar::SidecarManager::statuses`], which synthesizes a status row per
+/// entry — the ONLY way these sidecars appear on the status plane at all, since a
+/// failed registration means there is no `Arc<dyn Sidecar>` to report on.
+pub(crate) fn registration_failures() -> Vec<(String, String)> {
+    registration_failure_record()
+        .lock()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
+/// Whether `spec` must be STARTED at enable rather than merely registered.
+///
+/// `!spec.lazy` is the declared answer; the `provides_provider` clause is a deliberate
+/// coercion, and it exists because `lazy: true` + `provides_provider` is not a
+/// configuration Core can honor — the two declarations are mutually exclusive by
+/// construction:
+///
+/// - A lazy sidecar's ONLY wake trigger is a proxy or capability-broker hit
+///   (`SidecarManager::wake_sidecar` is reachable from nowhere else).
+/// - A `provides_provider` sidecar's only client is Pi, which dials the registered
+///   `baseUrl` **directly** and never traverses the ext proxy.
+///
+/// So nothing can ever wake it. That was survivable while the provider entry persisted
+/// in `models.json` across restarts; it stopped being survivable once `purge_sidecar_providers`
+/// began dropping sidecar-owned entries at boot to clear the stale ones an unclean exit
+/// leaves behind. For an auth bridge whose entire purpose is serving `/v1`, one unclean
+/// exit would otherwise kill the provider permanently: the entry is purged, and the only
+/// thing that could rewrite it is the Healthy edge of a health monitor that is never
+/// spawned because the process is never started.
+///
+/// Starting it eagerly makes the purge safe exactly as its own doc comment claims: the
+/// monitor runs, and the first Healthy edge re-registers the provider through
+/// `register_provider_once`. In the window between the two, the provider id is simply
+/// ABSENT from Pi's model list — a missing row, never a row pointing at a dead (or
+/// squatted) port with the ext token as its `apiKey`. That is the correct degradation,
+/// and it is the reason the alternative fix — registering at registration time instead —
+/// was rejected.
+///
+/// Extracted as a named predicate so the coercion is unit-testable without a process.
+pub fn starts_eagerly(spec: &SidecarSpec) -> bool {
+    !spec.lazy || spec.provides_provider.is_some()
+}
+
+/// Whether `spec` may be scaled to zero on an idle timer.
+///
+/// The same argument as [`starts_eagerly`], one step further: idle-stop is only safe
+/// for something that can be woken again. `ManifestSidecar::stop` does call
+/// `deregister_provider` first, so an idle-stop leaves no entry pointing at a dead port
+/// — but it makes the provider *vanish from Pi's model list* every idle window and
+/// reappear on the next wake that may never come. A model that blinks in and out of the
+/// picker for reasons no user can see is a worse bug than the memory the scale-to-zero
+/// saves.
+pub fn may_idle_stop(spec: &SidecarSpec) -> bool {
+    spec.provides_provider.is_none()
+}
+
+// ── Crash reasons (the THIRD invisible failure) ───────────────────────────────
+//
+// Third sibling of the two records above, and the one that covered the gap the
+// liveness fix opened up. Before `ProcessHandle::is_running` polled the child, a
+// sidecar whose process OOMed or was `kill -9`ed reported `running: true,
+// failure_reason: None` on `/api/sidecar/status` — the status plane's single most
+// misleading state, since the app was dead and the surface said it was fine. Now
+// that liveness is truthful the row flips to `running: false`, and this record is
+// what supplies the WHY so it does not read as an ordinary scaled-to-zero sidecar.
+
+/// Process-global record of every manifest sidecar whose process exited without a
+/// stop being requested, keyed by namespaced name. Written by the manager's health
+/// monitor on the tick that observes `has_exited()`; cleared on the next successful
+/// `start()` and on deregister.
+fn crash_record() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static RECORD: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    RECORD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record that `name`'s process died on its own, and why. Idempotent (overwrites).
+pub(crate) fn record_crash_reason(name: &str, reason: &str) {
+    tracing::error!(sidecar = %name, "app sidecar process exited unexpectedly: {reason}");
+    if let Ok(mut record) = crash_record().lock() {
+        record.insert(name.to_owned(), reason.to_owned());
+    }
+}
+
+/// Clear `name`'s crash record — called on every successful `start()` (the process
+/// is demonstrably back) and on deregister, so a recovered or disabled app never
+/// carries a stale "crashed" reason on the status plane.
+pub(crate) fn clear_crash_reason(name: &str) {
+    if let Ok(mut record) = crash_record().lock() {
+        record.remove(name);
+    }
+}
+
+/// The recorded crash reason for one namespaced sidecar, if any. Read by
+/// [`crate::sidecar::SidecarManager::statuses`] as the second link in the
+/// `failure_reason` chain, behind the registration failure (which is the more
+/// fundamental condition: a sidecar that never registered cannot have crashed).
+pub(crate) fn crash_reason(name: &str) -> Option<String> {
+    crash_record()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(name).cloned())
+}
+
 /// Record that `name`'s binary is missing, with the reason, and log it at `error`
 /// (not `warn`): an app the user just enabled cannot run at all, which is the loudest
 /// class of failure this path has. Idempotent (overwrites the prior entry).
@@ -546,6 +703,116 @@ pub struct McpRegistration {
     pub approved_grants: Vec<String>,
 }
 
+/// Everything the **ext-API fetch hook** needs to lower this sidecar's own OpenAPI
+/// document into derived agent tools, once it is actually serving.
+///
+/// Handed to [`ManifestSidecar::with_openapi_import`] by the one production
+/// construction site (`apply_sidecars`), which is the only place already holding the
+/// manifest, the tier, the grants and `state.mcp` at once. Injected rather than read
+/// from a process global for the same reason [`McpRegistration`] is: the hook is then
+/// reachable end-to-end from a test with a real registry and no `OnceLock` race.
+///
+/// ## Why this is armed PER SIDECAR, not per manifest
+///
+/// [`crate::ext_api::lower`] pairs ONE sidecar's `http.mount` with THAT sidecar's
+/// declared `http.routes`. A manifest may carry several sidecars, each nesting at its
+/// own mount; pairing sidecar A's mount with sidecar B's routes yields sub-paths that
+/// fail the intersection and are dropped — safe, but it would report the drop against
+/// the wrong manifest block and leave the app author hunting a route that was never
+/// the problem. So `mount`/`declared_paths` are read for the spec this sidecar owns.
+///
+/// Per-sidecar arming is why [`sidecar_key`](Self::sidecar_key), not `plugin_id`, is
+/// the registry key and the re-wake latch — see
+/// [`McpRegistry::set_ext_api_routes_for_sidecar`] for what keying by plugin broke.
+///
+/// [`McpRegistry::set_ext_api_routes_for_sidecar`]: crate::sidecar::mcp::McpRegistry::set_ext_api_routes_for_sidecar
+#[derive(Clone)]
+pub struct OpenApiImport {
+    /// The live registry the derived routes are stored in.
+    pub registry: Arc<crate::sidecar::mcp::McpRegistry>,
+    /// The owning plugin's real id (`@ryu/crm`) — the id namespace, the `/api/ext/<id>`
+    /// proxy segment, and the audit/env-read principal at dispatch.
+    pub plugin_id: String,
+    /// This sidecar's LOCAL name (`spec.name`), used to find its block again in the
+    /// live manifest. Local rather than namespaced because that is what a manifest's
+    /// `sidecars[].name` actually holds.
+    pub sidecar_name: String,
+    /// The manager/registry key for this sidecar — [`namespaced_name`] of the two
+    /// fields above. Carried rather than recomputed so the key stored in the registry
+    /// is byte-identical to the one the manager, the proxy and the idle reaper use.
+    pub sidecar_key: String,
+    /// The live manifest store (`ServerState::app_manifests`), read at IMPORT time to
+    /// resolve `upstream_mount` + `declared_paths` for this sidecar.
+    ///
+    /// A live read rather than the arm-time snapshot below because an in-place app
+    /// update rewrites the manifest **without** re-running `apply_sidecars`: it calls
+    /// `reload_manifests_inner` (which replaces the contents of exactly this store)
+    /// and then `clear_ext_api_routes`, leaving the next Healthy edge to re-lower. With
+    /// a snapshot that re-lowering would intersect the NEW spec against the OLD
+    /// manifest's declared routes and strip the OLD mount — deriving tools for paths
+    /// the update withdrew (which then 404 at the proxy) while dropping ones it added.
+    /// The store write happens *before* the clear, so by the time anything re-lowers
+    /// the new manifest is already visible here.
+    ///
+    /// `None` in contexts with no manifest store wired (tests, CLI), which falls back
+    /// to the snapshot.
+    pub manifests: Option<Arc<tokio::sync::RwLock<Vec<crate::plugin_manifest::PluginManifest>>>>,
+    /// Arm-time snapshot of this sidecar's `http.mount`, normalised the same way the
+    /// proxy normalises it. Stripped from every spec path, because the ext-proxy
+    /// re-adds it. Used only when the live lookup above is unavailable.
+    pub upstream_mount: String,
+    /// Arm-time snapshot of this sidecar's declared `http.routes[].path` patterns. The
+    /// proxy 404s anything outside them, so an operation that matches none is
+    /// unreachable and must not become a tool. Used only when the live lookup is
+    /// unavailable.
+    pub declared_paths: Vec<String>,
+    /// Shared client for the one-shot spec fetch. Reused rather than built per call so
+    /// the hook does not stand up a fresh connection pool on every sidecar.
+    pub client: reqwest::Client,
+}
+
+impl OpenApiImport {
+    /// The mount + declared paths to lower against, read from the LIVE manifest when
+    /// one is reachable and falling back to the arm-time snapshot otherwise.
+    ///
+    /// The read guard is dropped before returning, deliberately: the caller goes on to
+    /// do a network fetch bounded at [`OPENAPI_FETCH_TIMEOUT`] (10s), and holding a
+    /// `tokio::sync::RwLock` read across that would block `reload_manifests_inner`'s
+    /// writer — i.e. stall the very update path this live read exists to serve — for
+    /// the whole fetch. `tokio`'s lock will not warn about that.
+    ///
+    /// The mount is normalised here exactly as the arming site normalises it
+    /// (`trim_end_matches('/')`). If the two normalisations disagreed, the prefix
+    /// stripped at lowering would stop matching the one the proxy re-adds, and the
+    /// mismatch would appear only *after* an update — the same window this fixes.
+    async fn lowering_inputs(&self) -> (String, Vec<String>) {
+        let fallback = || (self.upstream_mount.clone(), self.declared_paths.clone());
+        let Some(store) = self.manifests.as_ref() else {
+            return fallback();
+        };
+        let guard = store.read().await;
+        let resolved = guard
+            .iter()
+            .find(|m| m.id == self.plugin_id)
+            .and_then(|m| m.sidecars.iter().find(|s| s.name == self.sidecar_name))
+            .and_then(|spec| spec.http.as_ref())
+            .map(|http| {
+                (
+                    http.mount
+                        .as_deref()
+                        .map(|m| m.trim_end_matches('/').to_owned())
+                        .unwrap_or_default(),
+                    http.routes.iter().map(|r| r.path.clone()).collect(),
+                )
+            });
+        drop(guard);
+        // A miss means the manifest or the sidecar block is gone (uninstalled
+        // mid-fetch, renamed by an update). The snapshot is then the best available
+        // description of the process that is actually answering on this port.
+        resolved.unwrap_or_else(fallback)
+    }
+}
+
 /// A [`Sidecar`] whose lifecycle is driven by a manifest [`SidecarSpec`].
 pub struct ManifestSidecar {
     /// Namespaced manager key (`<plugin_id>/<spec.name>`).
@@ -564,6 +831,26 @@ pub struct ManifestSidecar {
     /// resolution. `None` leaves the notifier off entirely (every existing caller and
     /// every non-MCP plugin).
     mcp: Option<McpRegistration>,
+    /// Set by [`ManifestSidecar::with_openapi_import`] for a compiled-in app whose
+    /// sidecar serves an HTTP surface; drives [`import_openapi_once`] on the Healthy
+    /// edge. `None` leaves the ext-API derivation off entirely (every third-party app
+    /// and every sidecar with no `http` block).
+    openapi: Option<OpenApiImport>,
+    /// Whether an ext-API lowering for this sidecar is currently IN FLIGHT — a
+    /// concurrency claim, deliberately **not** an "already done" latch.
+    ///
+    /// The done-latch is the registry ([`McpRegistry::has_ext_api_routes`]), and that
+    /// distinction is load-bearing: `clear_ext_api_routes` (deactivate, app update) has
+    /// to be able to re-arm the lowering without rebuilding this object, which a local
+    /// done-flag would silently prevent. See [`import_openapi_once`] for the full
+    /// argument and for how a zero-tool result is still recorded so the poll terminates.
+    ///
+    /// Health is polled every 30s and a `lazy` sidecar re-enters the Healthy edge on
+    /// every wake, so overlapping attempts are a real possibility rather than a
+    /// theoretical one; the claim is what makes the second one free.
+    ///
+    /// [`McpRegistry::has_ext_api_routes`]: crate::sidecar::mcp::McpRegistry::has_ext_api_routes
+    openapi_imported: Arc<AtomicBool>,
 }
 
 impl ManifestSidecar {
@@ -584,6 +871,8 @@ impl ManifestSidecar {
             handle: ProcessHandle::new(),
             provider_registered: Arc::new(AtomicBool::new(false)),
             mcp: None,
+            openapi: None,
+            openapi_imported: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -593,6 +882,21 @@ impl ManifestSidecar {
     #[must_use]
     pub fn with_mcp_registration(mut self, registration: McpRegistration) -> Self {
         self.mcp = Some(registration);
+        self
+    }
+
+    /// Arm the ext-API fetch hook for this sidecar (see [`OpenApiImport`] and
+    /// [`import_openapi_once`]). Opt-in: a caller that does not set it keeps the
+    /// pre-existing behavior exactly, and the derived-tool plane stays empty.
+    ///
+    /// **The trust gate is the caller's.** `apply_sidecars` arms this only for
+    /// `crate::plugins::builtins::is_compiled_in_manifest`. A third-party spec is
+    /// attacker-controlled text that would land in front of the model with no human
+    /// in the loop — and `may_read_env_secret` would refuse its `env:RYU_TOKEN` read
+    /// anyway, so its derived tools would look real and 401 forever.
+    #[must_use]
+    pub fn with_openapi_import(mut self, spec: OpenApiImport) -> Self {
+        self.openapi = Some(spec);
         self
     }
 
@@ -1278,6 +1582,446 @@ fn notify_managed_binary_ready(registration: &McpRegistration) -> Vec<String> {
     registered
 }
 
+/// How long the one-shot OpenAPI fetch may take. Explicit, because nothing in the
+/// health lane bounds an arbitrary `reqwest` call for you: the probe's own client
+/// carries [`HEALTH_TIMEOUT`] (2s) and this is a different, larger document served by
+/// a process that has only just reported healthy. 10s is generous enough for a cold
+/// FastAPI/utoipa spec render and short enough that a wedged sidecar cannot leave a
+/// task parked for the life of the node.
+const OPENAPI_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Filename both generators we ship against (FastAPI, utoipa) publish the document
+/// under. Where it is *rooted* is the interesting part — see [`openapi_doc_urls`].
+const OPENAPI_DOC_FILE: &str = "/openapi.json";
+
+/// Ceiling on how many operations the fetch hook RETAINS out of a spec.
+///
+/// Deliberately not the exposure cap (`mcp::EXT_API_PER_PLUGIN_CAP`, 60), and much
+/// larger than it. The two numbers do different jobs and applying either in the
+/// other's place is a silent bug:
+///
+/// - This one bounds the *retained* operation set handed to `ext_api::lower`, so a
+///   sidecar serving a 50k-operation spec cannot put 50k `ImportedTool`s in front of
+///   the intersection and the caps behind it.
+/// - The exposure cap bounds what the model is offered, and must be applied AFTER
+///   `ext_api::lower` has dropped the operations the manifest does not declare. Cap
+///   at 60 here instead and the budget gets spent on operations that are then thrown
+///   away — a declared operation truncated off the end while an undeclared one held
+///   its slot, with nothing in the logs to show for it, because from the importer's
+///   point of view it capped correctly.
+///
+/// **It does not bound construction, and must not be described as if it did.**
+/// `openapi_import::spec_to_api_with_base` builds an `ImportedTool` for *every*
+/// operation in the parsed document and truncates to this ceiling afterwards, so peak
+/// memory during an import is a function of the document, not of this number. Bounding
+/// construction would mean pushing a limit down into `spec_to_api_with_base`, which is
+/// shared with the hand-driven `/api/tools/import/openapi` route and would change that
+/// caller's behavior too. What actually bounds the pathological case at this seam is
+/// [`EXT_API_SPEC_MAX_BYTES`]: a document has to be transferred before it can be
+/// parsed, and nothing over a few MB gets that far.
+const EXT_API_SPEC_OP_CEILING: usize = 500;
+
+/// Hard cap on the bytes read from a sidecar's OpenAPI document.
+///
+/// Without it the only bound on this fetch is [`OPENAPI_FETCH_TIMEOUT`] (10s), and 10
+/// seconds of *loopback* is measured in gigabytes — a sidecar that streams forever
+/// (buggy generator, wrong handler, hostile third-party app once the trust gate widens)
+/// would have Core buffer the lot into a `Vec` and then hand it to a JSON parser. Both
+/// halves are unbounded consumption; this is the one number that stops them.
+///
+/// 4 MB against real documents: the largest first-party spec we ship is well under
+/// 1 MB, and a 500-operation document (the parse ceiling above) with verbose schemas
+/// lands around 2 MB. So a document over this is either not a spec or is far past the
+/// point where the exposure caps would keep 60 of its operations anyway.
+const EXT_API_SPEC_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The three outcomes of reading a spec body, kept apart because they classify
+/// DIFFERENTLY at the call site — which is the whole point of the type.
+enum SpecBody {
+    /// The document, complete and under the cap.
+    Body(Vec<u8>),
+    /// The document is over [`EXT_API_SPEC_MAX_BYTES`]. **Definitive**: the bytes will
+    /// be just as oversized on the next health poll.
+    TooLarge,
+    /// The stream broke mid-body. **Transient**: this says nothing about the document.
+    Transport(String),
+}
+
+/// Read a response body with a hard byte cap, modelled on `server::read_capped_body`
+/// (content-length pre-check, then a `chunk()` loop with a running total).
+///
+/// Deliberately a local twin rather than a call into that one: the catalog helper is
+/// reached only through the SSRF-guarded, https-only `guarded_get*` family — which
+/// would reject `http://127.0.0.1:<port>`, the only address this hook ever talks to —
+/// and it collapses every failure into one `anyhow::Error`, losing exactly the
+/// over-cap/transport distinction the caller has to make.
+///
+/// The content-length check is an early-out, not the bound: a lying or absent header
+/// changes nothing, because the streaming total below is what actually stops the read.
+async fn read_capped_spec_body(mut resp: reqwest::Response, url: &str) -> SpecBody {
+    if resp.content_length().is_some_and(|len| len > EXT_API_SPEC_MAX_BYTES) {
+        return SpecBody::TooLarge;
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len() as u64 + chunk.len() as u64 > EXT_API_SPEC_MAX_BYTES {
+                    return SpecBody::TooLarge;
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => return SpecBody::Body(buf),
+            Err(e) => return SpecBody::Transport(format!("reading {url}: {e}")),
+        }
+    }
+}
+
+/// Statuses that mean "ask again", as opposed to "this is the app's answer".
+///
+/// 5xx is the sidecar failing, not refusing. 408 and 429 are explicit retry-later
+/// signals. Everything else in the non-2xx range (401, 403, 404, …) describes a stable
+/// property of what the app serves at this URL and is treated as definitive, so the
+/// ~40 apps that publish no document stop being re-probed twice a minute forever.
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// The URLs to try, in order, for a sidecar's OpenAPI document.
+///
+/// **The root is tried first, and that ordering is the whole function.** `http.mount`
+/// says where the sidecar nests its *routes*, not where its server is rooted — the
+/// spec's own `paths` already carry the mount (which is precisely why
+/// `ext_api::lower` has to strip it), so an app nesting at `/api/crm` still serves
+/// its schema from `/openapi.json`. Building the doc URL under the mount would 404 on
+/// every app that has one, and — because a 404 is classified DEFINITIVE — would latch
+/// that app at zero derived tools for the life of the process, logging nothing above
+/// debug. That failure reads exactly like "shipped and green".
+///
+/// The mount-prefixed form is still tried second, because a framework *can* nest its
+/// docs along with its router (FastAPI's `root_path`, a utoipa route registered
+/// inside the nest). Two requests, once, only when the first 404s, in a spawned task.
+fn openapi_doc_urls(base: &str, mount: &str) -> Vec<String> {
+    let mount = mount.trim_end_matches('/');
+    let mut urls = vec![format!("{base}{OPENAPI_DOC_FILE}")];
+    if !mount.is_empty() {
+        urls.push(format!("{base}{mount}{OPENAPI_DOC_FILE}"));
+    }
+    urls
+}
+
+/// The **ext-API fetch hook**: lower this sidecar's own OpenAPI document into derived
+/// agent tools, once, the first time it reports healthy.
+///
+/// # Why the HEALTHY edge and not plugin-enable
+///
+/// This is the decisive constraint, not a preference. [`crate::plugins::seed`]'s
+/// `seed_default_on` runs from `main.rs` *before* `ServerState` exists and writes
+/// `store.insert` / `set_enabled` directly — so for every default-on built-in (which
+/// is every app that matters here) `activate_plugin` NEVER runs. An enable-time hook
+/// would therefore give the highest-value apps zero derived tools permanently, and
+/// would do it silently: nothing errors, the tools simply are not there.
+///
+/// Even where `activate_plugin` does run, it is too early. `apply_sidecars` has at
+/// that point only `tokio::spawn`ed the start, so the process is not listening; and a
+/// `lazy` sidecar has no process at all until its first proxy hit. Healthy is the
+/// first moment a spec can actually be fetched.
+///
+/// # Why it is spawned, never awaited inline
+///
+/// `health_check` is polled every 30s by `spawn_health_monitor` and its own client
+/// carries a 2s timeout. Doing a 10s fetch + parse inline would stall the health lane
+/// for every sidecar behind it and could make the monitor's own cadence slip.
+///
+/// # The latch is the REGISTRY, not the local flag
+///
+/// [`has_ext_api_routes_for_sidecar`] is the only thing that decides "already lowered",
+/// and the local [`ManifestSidecar::openapi_imported`] flag is a *concurrency claim* —
+/// it stops two overlapping health polls both fetching, and is released after each
+/// attempt.
+///
+/// That split is load-bearing rather than stylistic. If the local flag were the latch,
+/// [`McpRegistry::clear_ext_api_routes`] would stop re-arming anything: the update path
+/// clears the registry without rebuilding the sidecar object, so a flag that stayed
+/// `true` would leave the app with zero derived tools until the next process restart.
+/// Making the registry authoritative means every clear — deactivate, update — is a real
+/// re-arm.
+///
+/// The consequence is that a lowering which produces NO tools must still be *recorded*
+/// in the registry, or the Healthy edge would refetch forever. It is: a definitive
+/// answer (any HTTP response, including a 404 from an app that serves no spec, and any
+/// parse/lower failure) stores an EMPTY route set, which
+/// `has_ext_api_routes_for_sidecar` reads as done. Only a transport-level failure —
+/// connection refused, timeout, a truncated body, or a 5xx/408/429 from a sidecar that
+/// is still coming up — stores nothing and is retried on the next poll, because that is
+/// the one class of failure that plausibly resolves itself.
+///
+/// [`has_ext_api_routes_for_sidecar`]: crate::sidecar::mcp::McpRegistry::has_ext_api_routes_for_sidecar
+/// [`McpRegistry::clear_ext_api_routes`]: crate::sidecar::mcp::McpRegistry::clear_ext_api_routes
+async fn import_openapi_once(spec: OpenApiImport, port: u16, latch: Arc<AtomicBool>) {
+    // Asked per SIDECAR, not per plugin. The plugin-scoped `has_ext_api_routes` would
+    // answer `true` as soon as the app's first HTTP sidecar had lowered, so a second
+    // one would skip its own fetch for the life of the process — see
+    // `McpRegistry::set_ext_api_routes_for_sidecar`. The clear that re-arms this is
+    // plugin-scoped, which is correct: deactivate/update retire every sidecar at once.
+    if spec
+        .registry
+        .has_ext_api_routes_for_sidecar(&spec.sidecar_key)
+    {
+        return;
+    }
+    // Claim the work. A `lazy` sidecar can cross Healthy again while the first fetch is
+    // still in flight (the poll is 30s, the fetch is bounded at 10s but a wake can also
+    // come from a proxy hit), and two concurrent lowerings of the same document would
+    // be pure waste — the second would overwrite the first with the same rows.
+    if latch
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    // Hold the claim in a guard rather than releasing it with a bare store at the end
+    // of the function. The work below parses and lowers an app-authored document, and
+    // an unwind anywhere in there would skip a trailing store and strand the claim at
+    // `true` forever. That failure is invisible and permanent: a panic also means
+    // nothing was stored, so `has_ext_api_routes` stays false, every later Healthy edge
+    // spawns a task that loses the CAS and returns immediately, and the app derives zero
+    // tools for the life of the process with nothing in the log to explain it. The only
+    // other writer of the flag is `stop()`, which an eager (non-lazy) sidecar may never
+    // reach.
+    let _claim = ClaimGuard(Arc::clone(&latch));
+    let outcome = import_openapi(&spec, port).await;
+    match outcome {
+        // Definitive: record it (possibly as zero routes) so the Healthy edge stops
+        // asking. `set_ext_api_routes` stores an empty vec rather than skipping, which
+        // is exactly what makes the "app serves no spec" case terminate.
+        // The claim must STILL be held. A fetch takes up to 10s, and a deactivate in
+        // that window stops the sidecar (which releases the claim) after clearing the
+        // registry — so storing unconditionally would resurrect a disabled app's
+        // derived tools and leave them until the next restart, defeating the clear
+        // that just ran. Re-reading the claim is the cheapest way to notice, and it
+        // reads false in exactly that case and no other.
+        Some(_) if !latch.load(Ordering::SeqCst) => {
+            tracing::info!(
+                plugin = %spec.plugin_id,
+                "ext_api: discarding a lowering whose sidecar was torn down mid-fetch"
+            );
+        }
+        Some(routes) => {
+            let derived = routes.len();
+            spec.registry.set_ext_api_routes_for_sidecar(
+                &spec.plugin_id,
+                &spec.sidecar_key,
+                routes,
+            );
+            if derived > 0 {
+                tracing::info!(
+                    plugin = %spec.plugin_id,
+                    derived,
+                    "ext_api: derived searchable tools from the app's own OpenAPI document"
+                );
+            }
+        }
+        // Transient: leave the registry untouched so the next Healthy edge retries.
+        None => {}
+    }
+    // `_claim` releases here. On the definitive path the registry check at the top is
+    // what suppresses the next poll; on the transient path releasing is what allows the
+    // retry at all.
+}
+
+/// Releases [`import_openapi_once`]'s in-flight claim on the way out, including on an
+/// unwind. See the comment at the claim site for why a bare store is not enough.
+struct ClaimGuard(Arc<AtomicBool>);
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Fetch + parse + lower this sidecar's OpenAPI document.
+///
+/// `Some(routes)` is a **definitive** answer, including `Some(vec![])` for an app that
+/// serves no spec or serves one nothing can be derived from — the caller records it and
+/// stops asking. `None` is a **transient** transport failure the caller should retry.
+/// Split out of [`import_openapi_once`] so that classification is the whole content of
+/// this function and cannot be lost in the latch bookkeeping around it.
+async fn import_openapi(
+    spec: &OpenApiImport,
+    port: u16,
+) -> Option<Vec<crate::ext_api::ExtApiRoute>> {
+    // The bearer is computed HERE, at fetch time, not captured when the hook was
+    // armed. `RYU_TOKEN` can rotate while Core runs, and `ext_token` is derived from
+    // it — the health probe recomputes per call for exactly this reason, and a hook
+    // armed at enable would present a stale secret to a sidecar that had already been
+    // handed the new one.
+    let token = crate::sidecar::ext_proxy::ext_token(
+        crate::sidecar::ext_proxy::node_token().as_deref(),
+        &spec.plugin_id,
+    );
+    // The sidecar's OWN address, not the ext-proxy: this is Core reading the app's
+    // document, not an agent calling the app. (The routes the document lowers to do
+    // go back through the proxy — see `ext_api::lower`.)
+    let base = format!("http://127.0.0.1:{port}");
+
+    // The lowering inputs, read LIVE (see `OpenApiImport::lowering_inputs`) so a
+    // re-lowering after an in-place update intersects the new spec against the new
+    // manifest, not the one this hook was armed with. Resolved before the fetch so the
+    // read guard is long gone by the time anything blocks on the network.
+    let (upstream_mount, declared_paths) = spec.lowering_inputs().await;
+
+    // Try the candidates in order, keeping the FIRST 2xx. A 4xx moves on to the next
+    // candidate; a 5xx/408/429 and any transport failure abort immediately and are
+    // reported as transient, because "the sidecar is not answering properly" is not
+    // evidence about where it publishes its schema.
+    let candidates = openapi_doc_urls(&base, &upstream_mount);
+    let mut found: Option<(String, Vec<u8>)> = None;
+    let mut last_status: Option<reqwest::StatusCode> = None;
+    for url in &candidates {
+        match spec
+            .client
+            .get(url)
+            .bearer_auth(&token)
+            .timeout(OPENAPI_FETCH_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match read_capped_spec_body(resp, url).await {
+                SpecBody::Body(b) => {
+                    found = Some((url.clone(), b));
+                    break;
+                }
+                // DEFINITIVE. An over-cap body is a property of the document the app
+                // publishes, not a hiccup: retrying re-downloads the same oversized
+                // bytes on every 30s health poll forever, which is the amplification
+                // the cap exists to prevent. Recording zero routes stops the loop.
+                SpecBody::TooLarge => {
+                    tracing::warn!(
+                        plugin = %spec.plugin_id,
+                        "ext_api: {url} exceeds the {EXT_API_SPEC_MAX_BYTES}-byte spec cap; \
+                         deriving no tools for this sidecar. Narrow the document, or the \
+                         manifest's `http.routes`, rather than expecting a retry."
+                    );
+                    return Some(Vec::new());
+                }
+                // A truncated body is a transport failure, not an answer about the app.
+                SpecBody::Transport(e) => {
+                    tracing::debug!(plugin = %spec.plugin_id, "ext_api: reading {url} failed: {e}");
+                    return None;
+                }
+            },
+            // TRANSIENT by status. The Healthy edge fires the instant the health route
+            // first answers, which is exactly when a sidecar still warming up (workers
+            // forking, a router mounted after the health probe, a rate limiter shedding
+            // load) answers 503/429 on everything else. Treating that as an answer
+            // recorded "this app serves no OpenAPI document" for the life of the
+            // process — permanently, silently, and only on slow boots.
+            //
+            // Returning instead of trying the next candidate: a 503 at the root says
+            // nothing about the mount, and a second request only adds load to a sidecar
+            // that is already telling us it cannot serve.
+            Ok(resp) if is_transient_status(resp.status()) => {
+                tracing::debug!(
+                    plugin = %spec.plugin_id,
+                    "ext_api: {url} returned {} — retrying on the next Healthy edge",
+                    resp.status()
+                );
+                return None;
+            }
+            // 4xx (in practice 404) is the app's real answer about this URL: try the
+            // next candidate, and if none answers the caller records "no spec".
+            Ok(resp) => {
+                last_status = Some(resp.status());
+                tracing::debug!(
+                    plugin = %spec.plugin_id,
+                    "ext_api: {url} returned {}",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::debug!(plugin = %spec.plugin_id, "ext_api: fetching {url} failed: {e}");
+                return None;
+            }
+        }
+    }
+
+    // Every candidate answered, none with a document. A sidecar that serves no
+    // OpenAPI schema is a perfectly valid app — it simply contributes no derived
+    // tools. DEFINITIVE: a 404 now is a 404 in 30 seconds, and re-asking on every
+    // health poll would make every app that does not use this feature pay for it.
+    //
+    // Logged at INFO, not debug, because "this app derived nothing" is the single
+    // outcome an app author needs to be able to see, and it is otherwise the only
+    // outcome that leaves no trace at all. The last status is carried into the line for
+    // the same reason: this is the one branch that latches an app at zero tools, and
+    // "404" (no such document) versus "401" (the bearer was rejected) are completely
+    // different bugs that would otherwise look identical from the log.
+    let Some((url, body)) = found else {
+        tracing::info!(
+            plugin = %spec.plugin_id,
+            tried = ?candidates,
+            status = last_status.map(|s| s.as_u16()),
+            "ext_api: no OpenAPI document served — this app contributes no derived tools"
+        );
+        return Some(Vec::new());
+    };
+
+    // Definitive from here down: the app answered, and a document that does not parse
+    // (or does not lower) will not start parsing without a restart — which clears the
+    // claim and re-reads the spec anyway.
+    let doc = match crate::openapi_import::parse_spec(&body) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(plugin = %spec.plugin_id, "ext_api: {url} is not a parseable spec: {e}");
+            return Some(Vec::new());
+        }
+    };
+    // The base override MUST be absolute: `spec_to_api_with_base` derives the egress
+    // domain through `host_of`, which returns `None` for a relative path and makes the
+    // whole import a hard error. Capped at the PARSE ceiling, not the exposure cap —
+    // see `EXT_API_SPEC_OP_CEILING` for why capping here would truncate declared
+    // operations in favour of undeclared ones.
+    let api = match crate::openapi_import::spec_to_api_with_base(
+        &doc,
+        EXT_API_SPEC_OP_CEILING,
+        Some(&base),
+    ) {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::warn!(plugin = %spec.plugin_id, "ext_api: {url} could not be lowered: {e}");
+            return Some(Vec::new());
+        }
+    };
+
+    let (routes, dropped_undeclared) = crate::ext_api::lower(
+        &spec.plugin_id,
+        &api,
+        &upstream_mount,
+        &declared_paths,
+    );
+    // The two drop counters are reported SEPARATELY on purpose. `api.dropped` is the
+    // importer's cap truncation ("your spec is bigger than we will expose"); the other
+    // is a manifest-declaration gap ("the proxy would 404 this path"). Different
+    // causes, different fixes — summing them into one "N dropped" tells the app author
+    // neither, and sends them to the wrong file.
+    if api.dropped > 0 || dropped_undeclared > 0 {
+        tracing::info!(
+            plugin = %spec.plugin_id,
+            source = %url,
+            derived = routes.len(),
+            dropped_over_ceiling = api.dropped,
+            dropped_undeclared,
+            "ext_api: some operations were not derived — `dropped_over_ceiling` means the \
+             spec exceeded the parse ceiling, `dropped_undeclared` means the manifest's \
+             `http.routes` does not declare the path (the proxy would 404 it)"
+        );
+    }
+    Some(routes)
+}
+
 /// Remove the `~/.ryu/bin` binaries of a manifest's `Local`-kind sidecars — the
 /// uninstall counterpart to [`ensure_local_sidecar_present`]. Called only from the
 /// **uninstall** path (never plain disable, which keeps the bin so a re-enable is
@@ -1384,6 +2128,11 @@ impl Sidecar for ManifestSidecar {
             // the process comes up, so the status surface reflects intent even if the
             // spawn later fails.
             record_native_permissions(&name, &plugin_id);
+            // A start is the one event that makes a prior crash record untrue. Cleared
+            // BEFORE the spawn rather than after: if this attempt itself fails, the
+            // caller surfaces the start error, and leaving the *previous* death's
+            // reason on the status plane would attribute the wrong cause to it.
+            clear_crash_reason(&name);
             match &spec.process {
                 SidecarProcess::Binary(bin) => {
                     let exe = ensure_binary(&plugin_id, bin, &plugin_dir, &downloads).await?;
@@ -1559,8 +2308,47 @@ impl Sidecar for ManifestSidecar {
         // Drop the provider entry BEFORE the process goes away, so there is no window
         // where a selectable provider points at a port nothing is listening on.
         self.deregister_provider();
+        // Release any in-flight ext-API import claim, in the same spirit as
+        // `deregister_provider` above: a spawned fetch whose sidecar is going away has
+        // nothing left to talk to, and leaving the claim set would make the next start
+        // skip its first Healthy edge.
+        //
+        // The registry rows are deliberately NOT cleared here. A stop is routine —
+        // scale-to-zero idles a healthy app every few minutes — and dropping its tools
+        // on each idle would make them flicker in and out of search for reasons no user
+        // can see, while the next wake would refetch a document that has not changed.
+        // Deactivate and update are the events that clear (see `deactivate_plugin` /
+        // `update_app_handler`), because those are the ones after which the old rows
+        // might actually be wrong.
+        self.openapi_imported.store(false, Ordering::SeqCst);
         let handle = self.handle.clone();
         Box::pin(async move { handle.stop().await })
+    }
+
+    /// The crash path's half of `stop`'s provider teardown.
+    ///
+    /// `stop()` above is the ONLY other caller of [`Self::deregister_provider`], and a
+    /// crash never runs it: the child dies on its own and nothing tears anything down.
+    /// So without this the entry in `models.json` — a selectable provider whose
+    /// `baseUrl` is `http://127.0.0.1:<port>/v1` and whose `apiKey` is this plugin's
+    /// minted ext token — outlives the process that justified it, and stays until the
+    /// next Core boot's [`crate::pi_config::purge_sidecar_providers`] sweep. Pi dials
+    /// that `baseUrl` **directly**, so neither the ext proxy's registration gate nor
+    /// the manager's `forward_target` refusal is in the path: the first local process
+    /// to bind the now-free port is handed the token and the request bodies.
+    ///
+    /// Symmetric to the `stop` ordering note: there, deregistration happens *before*
+    /// the process goes away; here the process is already gone, so the whole point is
+    /// to shrink that window to the health monitor's detection latency instead of "the
+    /// rest of this Core's lifetime".
+    ///
+    /// Cheap and non-panicking, as the trait requires: it is one `swap` on an
+    /// [`std::sync::atomic::AtomicBool`] for the sidecars that never registered
+    /// anything, and for the ones that did it is a small synchronous `models.json`
+    /// rewrite whose every failure mode `deregister_provider` already logs rather than
+    /// propagates — the same call `stop()` makes from the same async context.
+    fn on_crash_detected(&self) {
+        self.deregister_provider();
     }
 
     fn health_check(&self) -> BoxFuture<HealthStatus> {
@@ -1581,6 +2369,9 @@ impl Sidecar for ManifestSidecar {
         let plugin_id = self.plugin_id.clone();
         let port = self.effective_port();
         let registered = Arc::clone(&self.provider_registered);
+        // Same owned-clone treatment as `provider` above, for the ext-API fetch hook.
+        let openapi = self.openapi.clone();
+        let openapi_latch = Arc::clone(&self.openapi_imported);
         Box::pin(async move {
             if !running {
                 // Say WHICH kind of "not running" this is. `binary not installed:` is
@@ -1607,6 +2398,19 @@ impl Sidecar for ManifestSidecar {
                         // provider's apiKey when it calls the sidecar directly.
                         register_provider_once(&plugin_id, spec, port, &token, &registered);
                     }
+                    // …and the first moment its OpenAPI document can be fetched.
+                    // SPAWNED, never awaited here: this lane is polled every 30s and
+                    // its client carries a 2s timeout, whereas the fetch is bounded at
+                    // `OPENAPI_FETCH_TIMEOUT` (10s) — awaiting it would stall the
+                    // monitor. Latched inside `import_openapi_once`, so the repeated
+                    // Healthy edges a lazy sidecar produces cost one atomic load each.
+                    if let Some(import) = openapi {
+                        tokio::spawn(import_openapi_once(
+                            import,
+                            port,
+                            Arc::clone(&openapi_latch),
+                        ));
+                    }
                     HealthStatus::Healthy
                 }
                 Ok(resp) => HealthStatus::Degraded(format!("health returned {}", resp.status())),
@@ -1617,6 +2421,13 @@ impl Sidecar for ManifestSidecar {
 
     fn is_running(&self) -> bool {
         self.handle.is_running()
+    }
+
+    /// Delegates to the handle: a manifest sidecar always owns the child it spawned,
+    /// so it is one of the few `Sidecar` impls that can answer this at all. See
+    /// [`ProcessHandle::has_exited`] for why it is not `!is_running()`.
+    fn has_exited(&self) -> bool {
+        self.handle.has_exited()
     }
 
     fn pid(&self) -> Option<u32> {
@@ -1849,6 +2660,192 @@ mod tests {
         let sc = ManifestSidecar::new("com.acme.voice".to_owned(), spec, downloads);
         assert_eq!(sc.name(), "com.acme.voice/tts");
         assert_eq!(sc.health_url(), "http://127.0.0.1:8085/health");
+    }
+
+    /// **Defect 3.** `lazy: true` + `provides_provider` is an unsatisfiable pair, so
+    /// the provider declaration wins and the sidecar starts eagerly.
+    ///
+    /// Without the coercion, the boot purge of stale sidecar-owned `models.json`
+    /// entries is permanently fatal to such a sidecar: the entry is dropped, nothing
+    /// starts the process (Pi dials `baseUrl` directly and never traverses the proxy
+    /// that is a lazy sidecar's only wake trigger), so the Healthy edge that would
+    /// re-register the provider never happens.
+    #[test]
+    fn provider_declaring_sidecar_starts_eagerly_even_when_lazy() {
+        let provider = ProviderRegistrationSpec {
+            id: "acme-bridge".to_owned(),
+            label: Some("Acme Bridge".to_owned()),
+            api: None,
+            base_path: None,
+            models: vec!["acme-1".to_owned()],
+        };
+
+        // Plain lazy sidecar: still lazy. The coercion must be narrow.
+        let mut spec = binary_spec();
+        spec.lazy = true;
+        assert!(
+            !starts_eagerly(&spec),
+            "a lazy sidecar with no provider keeps wake-on-demand"
+        );
+        assert!(may_idle_stop(&spec));
+
+        // The documented third-party auth-bridge shape — coerced to eager.
+        spec.provides_provider = Some(provider.clone());
+        assert!(
+            starts_eagerly(&spec),
+            "provides_provider must force an eager start; nothing can ever wake it"
+        );
+        assert!(
+            !may_idle_stop(&spec),
+            "and it must not be scaled to zero either — the model would vanish from \
+             Pi's picker until a wake that never comes"
+        );
+
+        // An eager provider sidecar is unaffected (it was already eager).
+        spec.lazy = false;
+        assert!(starts_eagerly(&spec));
+
+        // No provider, not lazy: eager, and idle-stop stays available.
+        let plain = binary_spec();
+        assert!(starts_eagerly(&plain));
+        assert!(may_idle_stop(&plain));
+    }
+
+    /// **Defect 3's wiring**, as opposed to its predicate. The test above proves
+    /// `starts_eagerly` computes the right answer; it says nothing about whether the
+    /// enable path ever asks. The whole regression is one token wide — flipping
+    /// `apply_sidecars`' gate from `!starts_eagerly(spec)` back to `spec.lazy` restores
+    /// defect 3 in full and leaves every other test in this crate green, because they
+    /// all call the predicate directly.
+    ///
+    /// The call site is asserted against the source text rather than by calling
+    /// `apply_sidecars`, which takes a whole `ServerState` (a SQLite plugin store, an
+    /// MCP registry, an ACP agent registry, …) that no unit test can stand up. The
+    /// comparison is whitespace-insensitive so rustfmt rewrapping cannot fail it, and
+    /// it pins the branch STRUCTURE — gate first, then the register-only arm, then the
+    /// eager `register_and_start` — so a gate that merely mentions `starts_eagerly`
+    /// somewhere decorative while still branching on `spec.lazy` does not pass.
+    #[test]
+    fn apply_sidecars_gates_the_register_only_branch_on_starts_eagerly() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/mod.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let squished: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let gate = squished
+            .find("if!crate::sidecar::manifest_sidecar::starts_eagerly(spec){")
+            .expect(
+                "apply_sidecars must gate the register-only (lazy) arm on \
+                 `starts_eagerly(spec)`, not on `spec.lazy`: a sidecar that declares \
+                 `provides_provider` can never be woken (Pi dials its baseUrl directly, \
+                 never the ext proxy), so leaving it lazy means the boot purge drops its \
+                 provider row and nothing ever re-registers it",
+            );
+        // Deliberately matched on the call NAME only, not its argument list: the arms
+        // themselves are ordinary code other work rewrites, and this test must fail for
+        // the gate flipping and nothing else.
+        let rest = &squished[gate..];
+        let register_only = rest
+            .find("manager.register(")
+            .expect("the register-only arm still registers without starting");
+        let eager = rest
+            .find("manager.register_and_start(")
+            .expect("the eager arm still starts");
+        assert!(
+            register_only < eager,
+            "the register-only arm must be the one the `starts_eagerly` gate guards; a \
+             gate that falls through to `register_and_start` first is not the branch \
+             defect 3 is about"
+        );
+    }
+
+    /// The `models.json` row for `id`, read straight off disk — the persisted form Pi
+    /// actually loads, not an in-memory projection of it.
+    fn provider_row(id: &str) -> Option<serde_json::Value> {
+        let raw = std::fs::read_to_string(crate::pi_config::config_dir().join("models.json")).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        json.get("providers")?.get(id).cloned()
+    }
+
+    /// **The crash lane.** `deregister_provider` had exactly one caller —
+    /// [`ManifestSidecar::stop`] — and a crashed child runs no teardown at all, so the
+    /// provider row outlived the process that justified it: a selectable model whose
+    /// `baseUrl` is the loopback port the crash just freed and whose `apiKey` is this
+    /// plugin's minted ext token. Pi dials that `baseUrl` DIRECTLY, so the ext proxy's
+    /// registration gate and the manager's `forward_target` refusal are both out of the
+    /// path — the first local process to bind the vacated port is handed the credential
+    /// and every inference request body, and nothing takes the row away until the next
+    /// boot's `purge_sidecar_providers`.
+    ///
+    /// Reverting `on_crash_detected` (here or its call in
+    /// `SidecarManager::note_crash_if_exited`) fails this.
+    #[tokio::test]
+    async fn crash_teardown_drops_the_provider_row_and_its_credential() {
+        let _guard = crate::pi_config::lock_pi_config_test_env();
+        let dir = std::env::temp_dir().join(format!("ryu-crash-provider-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("RYU_PI_AGENT_DIR", &dir);
+
+        let provider = ProviderRegistrationSpec {
+            id: "acme-crash-bridge".to_owned(),
+            label: Some("Acme Crash Bridge".to_owned()),
+            api: None,
+            base_path: None,
+            models: vec!["acme-1".to_owned()],
+        };
+        let mut spec = binary_spec();
+        spec.provides_provider = Some(provider.clone());
+        let sc = ManifestSidecar::new(
+            "com.acme.crashbridge".to_owned(),
+            spec,
+            crate::downloads::DownloadCenter::with_default_client(),
+        );
+
+        // The Healthy edge that publishes it — exactly what the health monitor does.
+        register_provider_once(
+            &sc.plugin_id,
+            &provider,
+            sc.effective_port(),
+            "ext-tok-crash",
+            &sc.provider_registered,
+        );
+        let row = provider_row(&provider.id).expect("a healthy sidecar publishes its provider");
+        assert_eq!(
+            row["apiKey"], "ext-tok-crash",
+            "the row carries the plugin's minted ext token — that is the credential at \
+             stake, not just a dangling URL"
+        );
+
+        // The child dies on its own. `stop()` is never called on this path; this hook
+        // is the only teardown a crash gets.
+        sc.on_crash_detected();
+
+        assert!(
+            provider_row(&provider.id).is_none(),
+            "a crashed sidecar's provider row must be gone: it points Pi at a port this \
+             process no longer holds, with the plugin's ext token as the apiKey"
+        );
+        // Idempotent and panic-free: the monitor may see the same corpse again, and a
+        // later stop() runs the same teardown.
+        sc.on_crash_detected();
+        sc.stop().await.unwrap();
+        assert!(provider_row(&provider.id).is_none());
+
+        std::env::remove_var("RYU_PI_AGENT_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar that declares no provider has nothing to release, and the crash hook
+    /// must stay a cheap no-op for it — the monitor calls this on every detected exit.
+    #[test]
+    fn crash_teardown_is_a_noop_without_a_declared_provider() {
+        let sc = ManifestSidecar::new(
+            "com.acme.plain".to_owned(),
+            binary_spec(),
+            crate::downloads::DownloadCenter::with_default_client(),
+        );
+        // No pi-config lock, no temp dir, no models.json: if this touched disk at all it
+        // would be reaching into the developer's real config from a unit test.
+        sc.on_crash_detected();
     }
 
     #[test]
@@ -2153,12 +3150,13 @@ mod tests {
         mcp_servers.insert(
             server.to_owned(),
             crate::plugin_manifest::McpServerDecl {
-                command: command.to_owned(),
+                command: Some(command.to_owned()),
                 command_env: None,
                 args: vec![],
                 env: BTreeMap::new(),
                 description: None,
                 enabled: true,
+                ..Default::default()
             },
         );
         crate::plugin_manifest::PluginManifest {
@@ -2424,5 +3422,602 @@ mod tests {
         assert!(msg.contains("not published for this platform"), "{msg}");
 
         clear_missing_sidecar_binary(&name);
+    }
+
+    // ── The ext-API fetch hook ────────────────────────────────────────────────
+
+    /// A one-shot loopback server that counts connections and answers every request
+    /// with a bare 404 — the shape of a real sidecar that serves no OpenAPI document,
+    /// which is the case the latch has to terminate on. Returns its port plus the
+    /// live hit counter.
+    ///
+    /// A real socket rather than a mock because the thing under test is precisely
+    /// whether a SECOND fetch happens: a fake that records calls to a trait would be
+    /// asserting about the fake's own bookkeeping, not about the hook's behaviour.
+    fn spawn_counting_probe() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_probe(ProbeReply::Status(404))
+    }
+
+    /// What a [`spawn_probe`] listener answers with. Each variant is a classification
+    /// the fetch hook has to get right, and each one is a different code path out of
+    /// `import_openapi` — which is why they share one listener instead of three.
+    #[derive(Clone, Copy)]
+    enum ProbeReply {
+        /// A bare status with an empty body (404 ⇒ definitive, 503 ⇒ transient).
+        Status(u16),
+        /// A 200 whose body is `bytes` long — used to cross
+        /// [`EXT_API_SPEC_MAX_BYTES`]. The declared `content-length` is deliberately a
+        /// LIE (it claims a small body), so passing this test proves the *streaming*
+        /// total is what bounds the read, not the header pre-check a hostile or buggy
+        /// server controls.
+        OversizedBody { bytes: usize },
+    }
+
+    /// A loopback server that counts connections and answers every request the same
+    /// way. Returns its port plus the live hit counter.
+    fn spawn_probe(reply: ProbeReply) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        listener.set_nonblocking(true).expect("nonblocking");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        if let ProbeReply::OversizedBody { bytes } = reply {
+            tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).expect("into tokio");
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        return;
+                    };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    // Chunked, so the client cannot pre-empt on `content-length` — the
+                    // read has to be stopped by the running total or not at all.
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                              transfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                        )
+                        .await;
+                    // 64 KB of filler per chunk; the JSON is never valid, which is fine
+                    // — the cap must trip long before anything tries to parse it.
+                    let chunk = vec![b'x'; 64 * 1024];
+                    let header = format!("{:x}\r\n", chunk.len());
+                    let mut sent = 0usize;
+                    while sent < bytes {
+                        if sock.write_all(header.as_bytes()).await.is_err()
+                            || sock.write_all(&chunk).await.is_err()
+                            || sock.write_all(b"\r\n").await.is_err()
+                        {
+                            break;
+                        }
+                        sent += chunk.len();
+                    }
+                    let _ = sock.write_all(b"0\r\n\r\n").await;
+                    let _ = sock.shutdown().await;
+                }
+            });
+            return (port, hits);
+        }
+        let ProbeReply::Status(status) = reply else {
+            unreachable!("the oversized arm returned above");
+        };
+        tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("into tokio");
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Drain the request line/headers first: answering into an unread
+                // socket makes some clients report a connection reset instead of the
+                // status, which would misclassify a definitive 404 as transient.
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status} Status\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (port, hits)
+    }
+
+    /// The default hook fixture: plugin `@ryu/probe`, its `worker` sidecar, no live
+    /// manifest store (so [`OpenApiImport::lowering_inputs`] falls back to the
+    /// snapshot, which is the shape every pre-existing test asserts against).
+    fn probe_import(registry: &Arc<crate::sidecar::mcp::McpRegistry>) -> OpenApiImport {
+        probe_import_named(registry, "@ryu/probe", "worker")
+    }
+
+    fn probe_import_named(
+        registry: &Arc<crate::sidecar::mcp::McpRegistry>,
+        plugin_id: &str,
+        sidecar: &str,
+    ) -> OpenApiImport {
+        OpenApiImport {
+            registry: Arc::clone(registry),
+            plugin_id: plugin_id.to_owned(),
+            sidecar_name: sidecar.to_owned(),
+            sidecar_key: namespaced_name(plugin_id, sidecar),
+            manifests: None,
+            upstream_mount: "/api".to_owned(),
+            declared_paths: Vec::new(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// A stranded claim is permanent and silent: the flag stays `true`, nothing was
+    /// stored so `has_ext_api_routes` stays `false`, and every later Healthy edge
+    /// spawns a task that loses the CAS and returns. The app then derives zero tools
+    /// for the life of the process with nothing in the log to say why. Releasing from
+    /// `Drop` rather than a trailing store is what makes an unwind survivable.
+    #[test]
+    fn claim_guard_releases_on_unwind() {
+        let latch = Arc::new(AtomicBool::new(true));
+        let escaped = std::panic::catch_unwind({
+            let latch = Arc::clone(&latch);
+            move || {
+                let _claim = ClaimGuard(latch);
+                panic!("lowering blew up");
+            }
+        });
+        assert!(escaped.is_err(), "the panic must actually have unwound");
+        assert!(
+            !latch.load(Ordering::SeqCst),
+            "an unwind must still release the claim, or the app never derives again"
+        );
+    }
+
+    /// The re-wake guard. A `lazy` sidecar with `idle_stop_secs` crosses the Healthy
+    /// edge on every wake, so an unlatched hook would refetch and reparse the same
+    /// document for the life of the node.
+    ///
+    /// This also pins the half that makes termination possible at all: a definitive
+    /// "no spec here" answer is RECORDED (as zero routes), not merely skipped. If it
+    /// were skipped, `has_ext_api_routes` would stay false and every one of the ~40
+    /// apps that serve no OpenAPI document would be re-probed twice a minute forever.
+    #[tokio::test]
+    async fn import_is_latched_and_does_not_refetch_on_rewake() {
+        let (port, hits) = spawn_counting_probe();
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+
+        import_openapi_once(probe_import(&registry), port, Arc::clone(&latch)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "the first Healthy edge tries the root, then the mount-prefixed form"
+        );
+        assert!(
+            registry.has_ext_api_routes("@ryu/probe"),
+            "a definitive answer must be recorded even when it derives nothing"
+        );
+
+        import_openapi_once(probe_import(&registry), port, Arc::clone(&latch)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "a re-wake must not refetch"
+        );
+    }
+
+    /// The ROOT is tried first. `http.mount` says where the sidecar nests its routes,
+    /// not where its server is rooted — the spec's own paths already carry the mount
+    /// (which is why `ext_api::lower` strips it), so an app nesting at `/api/crm`
+    /// still publishes its schema at `/openapi.json`. Getting this backwards 404s
+    /// every app that has a mount, and — because a 404 is definitive — latches it at
+    /// zero derived tools for the life of the process.
+    #[test]
+    fn openapi_is_probed_at_the_root_before_the_mount() {
+        assert_eq!(
+            openapi_doc_urls("http://127.0.0.1:8009", "/api/crm"),
+            vec![
+                "http://127.0.0.1:8009/openapi.json".to_owned(),
+                "http://127.0.0.1:8009/api/crm/openapi.json".to_owned(),
+            ]
+        );
+        // No mount ⇒ one candidate, not a duplicate of the same URL.
+        assert_eq!(
+            openapi_doc_urls("http://127.0.0.1:8009", ""),
+            vec!["http://127.0.0.1:8009/openapi.json".to_owned()]
+        );
+    }
+
+    /// …and the latch is re-armable, which is the whole reason it lives in the
+    /// REGISTRY rather than in this struct. `deactivate_plugin` and
+    /// `update_app_handler` both clear the rows without rebuilding the sidecar object;
+    /// a local done-flag would make those clears permanent (zero derived tools until
+    /// the next process restart) instead of a re-lower request.
+    #[tokio::test]
+    async fn clearing_the_registry_re_arms_the_import() {
+        let (port, hits) = spawn_counting_probe();
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+
+        import_openapi_once(probe_import(&registry), port, Arc::clone(&latch)).await;
+        let after_first = hits.load(Ordering::SeqCst);
+        assert!(after_first > 0);
+
+        registry.clear_ext_api_routes("@ryu/probe");
+        import_openapi_once(probe_import(&registry), port, latch).await;
+        assert!(
+            hits.load(Ordering::SeqCst) > after_first,
+            "clearing the registry must let the next Healthy edge re-lower"
+        );
+    }
+
+    /// A 404 is the app's real answer about this URL, so it stays DEFINITIVE: the ~40
+    /// shipped apps that publish no OpenAPI document must be recorded as "nothing to
+    /// derive" and never probed again, or every one of them pays two requests per
+    /// health poll for the life of the node.
+    ///
+    /// The counterpart to `server_error_status_is_transient_and_retries` below — the
+    /// two together are the whole content of the status split, and asserting only one
+    /// of them would pass under a classifier that treats everything the same way.
+    #[tokio::test]
+    async fn not_found_is_definitive() {
+        let (port, hits) = spawn_probe(ProbeReply::Status(404));
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+        let import = probe_import(&registry);
+        let key = import.sidecar_key.clone();
+
+        import_openapi_once(import, port, Arc::clone(&latch)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "a 4xx at the root must still try the mount-prefixed candidate"
+        );
+        assert!(
+            registry.has_ext_api_routes_for_sidecar(&key),
+            "a 404 from every candidate is an answer, and must be recorded"
+        );
+
+        import_openapi_once(probe_import(&registry), port, latch).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "and it must never be re-asked"
+        );
+    }
+
+    /// 401/403 stay DEFINITIVE, and that is a deliberate call rather than a gap in the
+    /// list. "The bearer was rejected" is a stable property of how the sidecar is
+    /// configured, not a hiccup — treating it as transient would put every
+    /// auth-misconfigured app into a permanent two-requests-per-30s loop that nothing
+    /// ever breaks, since the token Core presents does not change by being re-sent.
+    ///
+    /// Pinned separately because it is the plausible wrong edit: "the token must have
+    /// rotated, so retry" reads reasonable and would leave the suite green. The INFO
+    /// line on the definitive branch carries the status precisely so an operator can
+    /// tell this case apart from a 404 without a retry loop to make it obvious.
+    #[tokio::test]
+    async fn unauthorized_is_definitive_not_a_retry_loop() {
+        let (port, hits) = spawn_probe(ProbeReply::Status(401));
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+        let import = probe_import(&registry);
+        let key = import.sidecar_key.clone();
+
+        import_openapi_once(import, port, Arc::clone(&latch)).await;
+        assert!(
+            registry.has_ext_api_routes_for_sidecar(&key),
+            "a rejected bearer is an answer about the app, not a transport hiccup"
+        );
+        let after_first = hits.load(Ordering::SeqCst);
+
+        import_openapi_once(probe_import(&registry), port, latch).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            after_first,
+            "…so it must never be re-asked"
+        );
+    }
+
+    /// A 5xx is the sidecar failing, not answering — and the Healthy edge fires at
+    /// exactly the moment a sidecar is most likely to be mid-boot (health route up,
+    /// the rest of the router not yet mounted, workers still forking). Recording that
+    /// as "this app serves no OpenAPI document" would latch the app at zero derived
+    /// tools for the life of the process, on nothing but a slow start.
+    ///
+    /// Also pins the no-second-candidate rule: a 503 at the root says nothing about
+    /// the mount, so retrying the mount would only add load to a sidecar that is
+    /// already shedding it. One hit per attempt, not two.
+    #[tokio::test]
+    async fn server_error_status_is_transient_and_retries() {
+        let (port, hits) = spawn_probe(ProbeReply::Status(503));
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+        let import = probe_import(&registry);
+        let key = import.sidecar_key.clone();
+
+        import_openapi_once(import, port, Arc::clone(&latch)).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a transient status must abort the candidate walk, not double the load"
+        );
+        assert!(
+            !registry.has_ext_api_routes_for_sidecar(&key),
+            "a 503 must store NOTHING, or the retry can never happen"
+        );
+
+        // The next Healthy edge (30s later in production; immediately here) re-asks.
+        import_openapi_once(probe_import(&registry), port, latch).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "the sidecar that was briefly 503 must get another chance"
+        );
+    }
+
+    /// Unbounded consumption: the only bound on this fetch used to be the 10s timeout,
+    /// and 10 seconds of loopback is gigabytes — buffered into a `Vec` and then handed
+    /// to a JSON parser.
+    ///
+    /// Two properties in one test, because either alone is a false pass:
+    ///
+    /// 1. The read is *stopped* — the probe streams far more than
+    ///    [`EXT_API_SPEC_MAX_BYTES`] under a chunked encoding with no honest
+    ///    `content-length`, so only the running total can stop it.
+    /// 2. The refusal is *definitive*. A transient classification here would be worse
+    ///    than no cap at all: every 30s health poll would re-download the same
+    ///    oversized document forever, turning a one-shot memory spike into a permanent
+    ///    bandwidth loop.
+    #[tokio::test]
+    async fn oversized_spec_body_is_refused_and_not_retried() {
+        let over = (EXT_API_SPEC_MAX_BYTES as usize) + 512 * 1024;
+        let (port, hits) = spawn_probe(ProbeReply::OversizedBody { bytes: over });
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let latch = Arc::new(AtomicBool::new(false));
+        let import = probe_import(&registry);
+        let key = import.sidecar_key.clone();
+
+        import_openapi_once(import, port, Arc::clone(&latch)).await;
+        let after_first = hits.load(Ordering::SeqCst);
+        assert_eq!(
+            after_first, 1,
+            "the first candidate answered 200, so the walk stops there"
+        );
+        assert!(
+            registry.has_ext_api_routes_for_sidecar(&key),
+            "an over-cap body must be recorded as a definitive zero-tool result"
+        );
+
+        import_openapi_once(probe_import(&registry), port, latch).await;
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            after_first,
+            "…and must NOT be re-downloaded on the next Healthy edge"
+        );
+    }
+
+    /// The direct unit on the cap, so a regression is attributed to the reader rather
+    /// than to the hook around it — and so the `content-length` pre-check is pinned
+    /// independently of the streaming total the test above exercises.
+    #[tokio::test]
+    async fn a_lying_content_length_cannot_bypass_the_spec_cap() {
+        // A server may under-declare (or omit) `content-length`; the pre-check is an
+        // early-out, never the bound.
+        let over = (EXT_API_SPEC_MAX_BYTES as usize) + 512 * 1024;
+        let (port, _hits) = spawn_probe(ProbeReply::OversizedBody { bytes: over });
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/openapi.json"))
+            .send()
+            .await
+            .expect("the probe answers");
+        assert!(
+            resp.content_length().is_none_or(|l| l <= EXT_API_SPEC_MAX_BYTES),
+            "precondition: the header must not be what trips the cap"
+        );
+        assert!(
+            matches!(
+                read_capped_spec_body(resp, "probe").await,
+                SpecBody::TooLarge
+            ),
+            "the streaming total is the bound"
+        );
+    }
+
+    /// One derived row, shaped enough to be stored and counted. The registry never
+    /// inspects anything but `id`/`plugin_id` on the paths under test here.
+    fn derived_row(id: &str, plugin: &str) -> crate::ext_api::ExtApiRoute {
+        crate::ext_api::ExtApiRoute {
+            id: id.to_owned(),
+            plugin_id: plugin.to_owned(),
+            method: "GET".to_owned(),
+            url: format!("core:/api/ext/{plugin}/thing"),
+            name: "Do the thing".to_owned(),
+            description: None,
+            header_params: vec![],
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    /// **FIX 3.** The hook is armed per SIDECAR while the store used to be keyed per
+    /// PLUGIN, so a manifest with two `http` sidecars had its second lowering silently
+    /// overwrite the first — and, worse, the plugin-scoped latch then answered "already
+    /// lowered" for the second sidecar before it ever ran, making the winner a function
+    /// of health-poll ordering.
+    ///
+    /// Both halves are asserted, because they fail independently:
+    ///
+    /// - the LATCH half, end-to-end through `import_openapi_once`: sidecar B must
+    ///   actually go and fetch after sidecar A has finished;
+    /// - the STORE half: A's rows must still be there once B has stored its own.
+    ///
+    /// Latent today only because exactly one shipped manifest (`finetune`) declares two
+    /// sidecars and its second happens to carry no `http` block. That is a coincidence,
+    /// not a guarantee, and the failure it would produce is invisible.
+    #[tokio::test]
+    async fn two_http_sidecars_on_one_plugin_do_not_overwrite_each_other() {
+        let (port, hits) = spawn_counting_probe();
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+
+        let alpha = probe_import_named(&registry, "@ryu/twin", "alpha");
+        let beta = probe_import_named(&registry, "@ryu/twin", "beta");
+        let (alpha_key, beta_key) = (alpha.sidecar_key.clone(), beta.sidecar_key.clone());
+        assert_ne!(alpha_key, beta_key, "the two sidecars must key differently");
+
+        import_openapi_once(alpha, port, Arc::new(AtomicBool::new(false))).await;
+        let after_alpha = hits.load(Ordering::SeqCst);
+        assert!(after_alpha > 0, "the first sidecar fetched");
+
+        import_openapi_once(beta, port, Arc::new(AtomicBool::new(false))).await;
+        assert!(
+            hits.load(Ordering::SeqCst) > after_alpha,
+            "the SECOND sidecar of the same plugin must still fetch its own document — \
+             a plugin-scoped latch would have skipped it forever"
+        );
+        assert!(registry.has_ext_api_routes_for_sidecar(&alpha_key));
+        assert!(registry.has_ext_api_routes_for_sidecar(&beta_key));
+
+        // The store half: two sidecars' rows coexist instead of the later replacing
+        // the earlier.
+        registry.set_ext_api_routes_for_sidecar(
+            "@ryu/twin",
+            &alpha_key,
+            vec![derived_row("ryu_ext__ryu_twin__get_alpha", "@ryu/twin")],
+        );
+        registry.set_ext_api_routes_for_sidecar(
+            "@ryu/twin",
+            &beta_key,
+            vec![derived_row("ryu_ext__ryu_twin__get_beta", "@ryu/twin")],
+        );
+        assert!(
+            registry.describe("ryu_ext__ryu_twin__get_alpha").await.is_some(),
+            "the first sidecar's rows must survive the second's lowering"
+        );
+        assert!(
+            registry.describe("ryu_ext__ryu_twin__get_beta").await.is_some()
+        );
+    }
+
+    /// …and the plugin-scoped clear must reach BOTH of them. `deactivate_plugin` and
+    /// `update_app_handler` know only the plugin id, so a sidecar-keyed store with a
+    /// `map.remove(plugin_id)` clear would leave the second sidecar's rows searchable
+    /// and callable for an app the user just disabled — tools that the ext-proxy then
+    /// refuses at the hop, i.e. tools that can only fail.
+    ///
+    /// The look-alike plugin is the other half of the keying invariant: ownership
+    /// requires a `/` boundary, so disabling `@ryu/twin` must not strip `@ryu/twin-x`.
+    #[tokio::test]
+    async fn deactivate_clears_every_sidecar_for_the_plugin() {
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+        let alpha = namespaced_name("@ryu/twin", "alpha");
+        let beta = namespaced_name("@ryu/twin", "beta");
+        let neighbour = namespaced_name("@ryu/twin-x", "alpha");
+
+        registry.set_ext_api_routes_for_sidecar(
+            "@ryu/twin",
+            &alpha,
+            vec![derived_row("ryu_ext__ryu_twin__get_alpha", "@ryu/twin")],
+        );
+        // A zero-route entry is still an entry — it is what makes the latch terminate,
+        // so a clear that only removed non-empty ones would re-arm nothing.
+        registry.set_ext_api_routes_for_sidecar("@ryu/twin", &beta, vec![]);
+        registry.set_ext_api_routes_for_sidecar(
+            "@ryu/twin-x",
+            &neighbour,
+            vec![derived_row("ryu_ext__ryu_twin_x__get_alpha", "@ryu/twin-x")],
+        );
+
+        registry.clear_ext_api_routes("@ryu/twin");
+
+        assert!(
+            !registry.has_ext_api_routes_for_sidecar(&alpha),
+            "the clear must reach the first sidecar"
+        );
+        assert!(
+            !registry.has_ext_api_routes_for_sidecar(&beta),
+            "…and the second, including one that lowered to zero rows"
+        );
+        assert!(
+            !registry.has_ext_api_routes("@ryu/twin"),
+            "the plugin-scoped read model must agree, so a re-enable re-lowers"
+        );
+        assert!(
+            registry.has_ext_api_routes_for_sidecar(&neighbour),
+            "a plugin whose id merely PREFIXES the cleared one must be untouched"
+        );
+        assert!(
+            registry
+                .describe("ryu_ext__ryu_twin_x__get_alpha")
+                .await
+                .is_some(),
+            "…and its rows must still dispatch"
+        );
+    }
+
+    /// **FIX 4.** An in-place app update rewrites the manifest without re-running
+    /// `apply_sidecars`: it reloads `state.app_manifests` and clears the derived rows,
+    /// leaving the next Healthy edge to re-lower. If the lowering inputs were the
+    /// arm-time snapshot, that re-lowering would intersect the NEW spec against the OLD
+    /// declared routes and strip the OLD mount — deriving tools for paths the update
+    /// withdrew (which then 404 at the proxy) while silently dropping the ones it added.
+    ///
+    /// So the inputs are a live read, with the snapshot as the fallback. All three
+    /// branches are pinned here, because each fails differently: no store at all (test
+    /// and CLI contexts), a store that does not know this sidecar (uninstalled or
+    /// renamed mid-fetch), and the hit that is the whole point.
+    #[tokio::test]
+    async fn lowering_inputs_are_read_live_from_the_updated_manifest() {
+        let registry = Arc::new(crate::sidecar::mcp::McpRegistry::empty());
+
+        // No store wired ⇒ the arm-time snapshot, unchanged.
+        let bare = probe_import_named(&registry, "@ryu/updated", "worker");
+        assert_eq!(
+            bare.lowering_inputs().await,
+            ("/api".to_owned(), Vec::new()),
+            "with no manifest store the snapshot must still be used"
+        );
+
+        // The manifest as it looks AFTER an update: a different mount, different routes.
+        let mut spec = binary_spec();
+        spec.name = "worker".to_owned();
+        spec.http = Some(
+            serde_json::from_value(serde_json::json!({
+                "mount": "/api/new/",
+                "routes": [{ "path": "/added" }],
+            }))
+            .expect("the http fixture must match HttpProxySpec"),
+        );
+        let manifest = crate::plugin_manifest::PluginManifest {
+            id: "@ryu/updated".to_owned(),
+            name: "Updated".to_owned(),
+            version: "2.0.0".to_owned(),
+            sidecars: vec![spec],
+            ..Default::default()
+        };
+        let store = Arc::new(tokio::sync::RwLock::new(vec![manifest]));
+
+        let live = OpenApiImport {
+            manifests: Some(Arc::clone(&store)),
+            ..probe_import_named(&registry, "@ryu/updated", "worker")
+        };
+        assert_eq!(
+            live.lowering_inputs().await,
+            ("/api/new".to_owned(), vec!["/added".to_owned()]),
+            "the live manifest wins over the arm-time snapshot — and the mount is \
+             normalised the same way the arming site normalises it (no trailing slash), \
+             or the prefix stripped at lowering stops matching the one the proxy re-adds"
+        );
+
+        // A sidecar the live manifest does not describe (renamed, or the app was
+        // uninstalled mid-fetch) falls back rather than lowering against nothing.
+        let renamed = OpenApiImport {
+            manifests: Some(store),
+            ..probe_import_named(&registry, "@ryu/updated", "gone")
+        };
+        assert_eq!(
+            renamed.lowering_inputs().await,
+            ("/api".to_owned(), Vec::new()),
+            "a miss must fall back to the snapshot, not to an empty declaration set"
+        );
     }
 }

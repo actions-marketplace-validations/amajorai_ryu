@@ -63,6 +63,11 @@ pub enum ToolKind {
     Command,
     /// An Agent Skill: instruction text, loaded with `skills__load`, never called.
     Skill,
+    /// A tool derived from an app sidecar's OpenAPI document (one row per
+    /// operation), as opposed to [`ToolKind::App`]'s hand-declared runnables.
+    /// Hyphenated on the wire like `core-api`, so it needs an explicit rename.
+    #[serde(rename = "ext-api")]
+    ExtApi,
     /// Any kind Core adds after this mirror was written.
     #[serde(other)]
     Unknown,
@@ -85,6 +90,7 @@ impl ToolKind {
             ToolKind::CoreApi => "core-api",
             ToolKind::Command => "command",
             ToolKind::Skill => "skill",
+            ToolKind::ExtApi => "ext-api",
             ToolKind::Unknown => "unknown",
         }
     }

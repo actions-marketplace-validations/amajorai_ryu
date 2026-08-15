@@ -3130,6 +3130,42 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
     // Healing `/api/healing/*` is now served OUT-OF-PROCESS by the `ryu-healing`
     // sidecar via the manifest `public_mount` — no in-process route merge. See
     // `@ryu/healing` in `plugin_manifest` and `healing_client`.
+    // ── The network MCP surface ──────────────────────────────────────────────
+    // Registered on the PROTECTED chain, before the `.layer(...)` stack below, so
+    // it inherits `require_auth` (bearer with constant-time compare + the
+    // paired-device carve-out) exactly like every `.merge(...)` above. Never on
+    // `public`: this dispatches registry tools.
+    //
+    // It then adds ONE rule of its own that no other route has — it refuses when
+    // the node has no token configured, instead of inheriting `require_auth`'s
+    // no-token pass-through. See [`mcp_admission`] for why a general tool
+    // dispatcher cannot take that carve-out.
+    //
+    // The bare `/mcp` exists only to turn a base-URL misconfiguration into an
+    // actionable 400; matchit will not match it against `/mcp/:agent_id`.
+    //
+    // The body limit is DECLARED per route (on the `MethodRouter`, never on the
+    // `protected` Router — a Router-level layer would re-cap the upload routes that
+    // declare their own, larger ceilings). It equals axum's implicit default, so it
+    // changes no behaviour today; it exists so this route's ceiling is a stated
+    // property that survives a future layer edit rather than an inherited accident.
+    //
+    // CORS is deliberately NOT narrowed here. The process layer admits a fixed
+    // origin list with `allow_private_network(true)` — but it sets no
+    // `allow_credentials`, so a browser attaches no ambient credential, and this
+    // route additionally requires a node bearer the page would have to already
+    // possess. A second `CorsLayer` on the route would emit duplicate
+    // `Access-Control-Allow-Origin` headers, which browsers reject outright.
+    let protected = protected
+        .route(
+            "/mcp",
+            post(mcp_http_no_agent).layer(axum::extract::DefaultBodyLimit::max(MCP_MAX_BODY_BYTES)),
+        )
+        .route(
+            "/mcp/:agent_id",
+            post(mcp_http).layer(axum::extract::DefaultBodyLimit::max(MCP_MAX_BODY_BYTES)),
+        );
+
     let protected = protected
         // Verified user identity (Phase 0): the innermost layer, so it runs AFTER
         // require_auth admits the node and just before the handler. It attaches an
@@ -14111,19 +14147,94 @@ async fn apply_sidecars(
             if let Some(registration) = mcp_registration.clone() {
                 built = built.with_mcp_registration(registration);
             }
+            // The ext-API fetch hook: derive searchable agent tools from THIS
+            // sidecar's own OpenAPI document once it reports healthy
+            // (`import_openapi_once` explains why the Healthy edge and not here).
+            //
+            // Armed here because this is the one place already holding the manifest,
+            // the tier, the grants and `state.mcp` at the same time — and armed
+            // per-SPEC, not per-manifest, because `ext_api::lower` pairs one sidecar's
+            // mount with that same sidecar's declared routes (see `OpenApiImport`).
+            //
+            // TRUST GATE, v1: compiled-in (first-party) apps only. A third-party spec
+            // is attacker-controlled text that would land in front of the model with
+            // no human in the loop; and `may_read_env_secret` gates `env:` reads by
+            // provenance, so a disk-installed app's `env:RYU_TOKEN` resolves Absent
+            // and its auth header is dropped SILENTLY — derived tools that look real
+            // and 401 forever. Widening this is a product decision with a review step,
+            // not a config flag.
+            if crate::plugins::builtins::is_compiled_in_manifest(&manifest.id) {
+                if let Some(http) = spec.http.as_ref() {
+                    built = built.with_openapi_import(
+                        crate::sidecar::manifest_sidecar::OpenApiImport {
+                            registry: state.mcp.clone(),
+                            plugin_id: manifest.id.clone(),
+                            sidecar_name: spec.name.clone(),
+                            // The registry key and the re-wake latch. The SIDECAR, not
+                            // the plugin: a manifest with two `http` sidecars would
+                            // otherwise have the second lowering overwrite the first's
+                            // rows, with the winner decided by health-poll order.
+                            sidecar_key:
+                                crate::sidecar::manifest_sidecar::namespaced_name(
+                                    &manifest.id,
+                                    &spec.name,
+                                ),
+                            // The live manifest store, so a re-lowering after an
+                            // in-place update reads the NEW mount + declared routes
+                            // (this handler is not re-run by the update path — see
+                            // `OpenApiImport::manifests`). The two fields below stay as
+                            // the fallback for contexts with no store.
+                            manifests: Some(state.app_manifests.clone()),
+                            // Normalised the same way the proxy normalises it, so the
+                            // prefix stripped at lowering is byte-identical to the one
+                            // the proxy re-adds at the hop.
+                            upstream_mount: http
+                                .mount
+                                .as_deref()
+                                .map(|m| m.trim_end_matches('/').to_owned())
+                                .unwrap_or_default(),
+                            declared_paths: http
+                                .routes
+                                .iter()
+                                .map(|r| r.path.clone())
+                                .collect(),
+                            client: state.client.clone(),
+                        },
+                    );
+                }
+            }
             let sidecar = std::sync::Arc::new(built);
             // Per-app idle-stop timeout (scale-to-zero) declared on the spec, applied
             // BEFORE start so the reaper knows the window as soon as the sidecar is up.
+            // A provider-declaring sidecar opts out for the same reason it cannot be
+            // lazy — see `may_idle_stop`.
             if let Some(secs) = spec.idle_stop_secs {
                 let name =
                     crate::sidecar::manifest_sidecar::namespaced_name(&manifest.id, &spec.name);
-                manager.set_idle_override(&name, secs);
+                if crate::sidecar::manifest_sidecar::may_idle_stop(spec) {
+                    manager.set_idle_override(&name, secs);
+                } else {
+                    tracing::info!(
+                        "plugin '{}': sidecar '{}' declares both 'idle_stop_secs' and \
+                         'provides_provider'; ignoring the idle timeout — Pi dials the \
+                         provider's baseUrl directly and can never wake it, so a \
+                         scale-to-zero would drop the model out of the picker for good",
+                        manifest.id,
+                        spec.name
+                    );
+                }
             }
             // Lazy sidecars are REGISTER-ONLY here (claim port + appear in status as
             // stopped); the first proxy/broker hit wakes the process on demand. Eager
             // sidecars start now, as before. The grant gate above still ran, so wake
             // never re-runs the tier/grant check — no bypass.
-            if spec.lazy {
+            //
+            // `starts_eagerly` and not `!spec.lazy`: a spec that declares
+            // `provides_provider` is coerced to eager whatever it asked for, because
+            // nothing can ever wake it (Pi bypasses the proxy) and the boot purge would
+            // then leave the provider permanently dead. The coercion is logged rather
+            // than rejected — refusing the manifest would break existing ones.
+            if !crate::sidecar::manifest_sidecar::starts_eagerly(spec) {
                 if let Err(e) = manager.register(sidecar) {
                     tracing::warn!(
                         "plugin '{}': lazy manifest sidecar '{}' failed to register: {e}",
@@ -14132,6 +14243,16 @@ async fn apply_sidecars(
                     );
                 }
                 continue;
+            }
+            if spec.lazy {
+                tracing::info!(
+                    "plugin '{}': sidecar '{}' declares 'lazy' together with \
+                     'provides_provider'; starting it eagerly instead — Pi dials the \
+                     provider's baseUrl directly, so no proxy hit can ever wake it and \
+                     the boot purge would leave the provider dead until a restart",
+                    manifest.id,
+                    spec.name
+                );
             }
             let plugin_id = manifest.id.clone();
             let spec_name = spec.name.clone();
@@ -14821,6 +14942,14 @@ async fn deactivate_plugin(
     state: &ServerState,
     manifest: &crate::plugin_manifest::PluginManifest,
 ) -> PolicyApplyOutcome {
+    // Derived ext-API tools, dropped OUTSIDE the per-kind loop below because that loop
+    // iterates `manifest.runnables` and a derived tool has no runnable entry — it was
+    // lowered from the sidecar's OpenAPI document, not declared. Without this line a
+    // disabled app's tools stay searchable and callable; the ext-proxy would refuse
+    // them at the hop (the enabled-gate), but the model would keep being offered tools
+    // that can only fail. Clearing also re-arms `has_ext_api_routes`, so a re-enable
+    // lowers the app's *current* spec instead of serving the one from last boot.
+    state.mcp.clear_ext_api_routes(&manifest.id);
     for entry in &manifest.runnables {
         match entry.kind {
             crate::runnable::RunnableKind::Tool => {
@@ -15191,6 +15320,37 @@ async fn update_app_handler(
                 Ok(None) | Err(_) => updated,
             };
             reload_manifests_inner(&state).await;
+            // Derived ext-API tools go STALE across an update and nothing else here
+            // would notice: this handler reloads manifests but never re-runs
+            // `activate_plugin`, so the rows lowered from the OLD spec would keep
+            // being served against the NEW manifest's declared routes — tools whose
+            // paths the update may have renamed or withdrawn, i.e. tools that pass
+            // search and describe and then 404 at the proxy.
+            //
+            // CLEAR, not clear-and-re-lower. Re-arming in place is not available from
+            // here: the `OpenApiImport` is built in `apply_sidecars`, which this path
+            // does not run, so re-lowering would mean duplicating that arming block
+            // and its trust gate — a second door onto the same plane. Clearing instead
+            // re-arms the per-sidecar latch, and the NEXT Healthy edge re-lowers:
+            // immediately when the update restarts the process, otherwise within one
+            // 30s health poll. Serving zero derived tools for that window is strictly
+            // better than serving tools built from a spec the app no longer implements.
+            //
+            // What the re-lowering reads is BOTH halves new, and that took work to be
+            // true. The *document* comes from the sidecar that is actually running, but
+            // the mount and declared routes it is intersected against are manifest
+            // facts, and the armed `OpenApiImport` snapshotted the OLD ones — so a
+            // re-lowering used to pair the new spec with the withdrawn manifest. It no
+            // longer does: `OpenApiImport` holds `state.app_manifests` and re-reads
+            // them at import time, and `reload_manifests_inner` above has already
+            // replaced their contents by the time this clear runs. That ordering
+            // (reload, THEN clear) is load-bearing — reversed, a Healthy edge landing
+            // in between would re-lower against the pre-update manifest and latch it.
+            //
+            // The clear is plugin-scoped while the store is sidecar-keyed, which is
+            // what makes it sweep every one of the app's sidecars rather than the
+            // arbitrary one whose key happens to equal the plugin id.
+            state.mcp.clear_ext_api_routes(&id);
             // Live contributions refresh — same lossy `system:plugins` nudge as
             // the enable/disable handlers, so an updated plugin's new contributions
             // reach subscribed shells immediately.
@@ -19263,8 +19423,23 @@ async fn list_mcp_servers(State(state): State<ServerState>) -> Json<serde_json::
 struct CreateMcpServerBody {
     /// The key used to register the server (unique, no `__` separator).
     name: String,
-    /// Executable to spawn (e.g. `npx`, `/usr/local/bin/my-mcp`).
-    command: String,
+    /// Executable to spawn (e.g. `npx`, `/usr/local/bin/my-mcp`). Omit for a
+    /// remote server and send `url` instead.
+    #[serde(default)]
+    command: Option<String>,
+    /// Transport: `stdio`, `http`, `streamable-http`, or `sse`. Optional — the
+    /// transport is inferred from `command` vs `url` when omitted. Accepted (and
+    /// named `type`) so a body copied out of a Cursor / Claude Desktop
+    /// `mcp.json` entry posts unchanged.
+    #[serde(default, rename = "type")]
+    transport: Option<String>,
+    /// Endpoint URL for a remote server.
+    #[serde(default)]
+    url: Option<String>,
+    /// Request headers sent with every call to a remote server — this is where a
+    /// pasted `"Authorization": "Bearer …"` belongs.
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
     /// Arguments forwarded to the command.
     #[serde(default)]
     args: Vec<String>,
@@ -19317,9 +19492,47 @@ async fn create_mcp_server(
         );
     }
 
-    let command = body.command.trim().to_string();
-    if command.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "command is required".to_owned());
+    // command XOR url: a stdio server needs something to spawn, a remote server
+    // needs somewhere to POST, and an entry naming both is ambiguous rather than
+    // clever — refuse it here rather than silently picking one at connect time.
+    let command = body
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_owned);
+    let url = body
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_owned);
+    match (&command, &url) {
+        (None, None) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "either `command` (stdio) or `url` (http) is required".to_owned(),
+            )
+        }
+        (Some(_), Some(_)) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "`command` and `url` are mutually exclusive — a server is either stdio or http"
+                    .to_owned(),
+            )
+        }
+        _ => {}
+    }
+    // Reject a remote URL Core could never reach before it is written to disk, so
+    // the failure surfaces at add-time with the URL in hand rather than as an
+    // opaque tool error on first use. This is the SAME screen the transport
+    // applies per request (`guarded_post_json` → `screen_agent_egress_url`), not
+    // a second policy: the guard at the fetch seam remains authoritative, since a
+    // hand-edited `mcp.json` never passes through here at all.
+    if let Some(url) = &url {
+        if let Err(e) = screen_agent_egress_url(url).await {
+            return json_error(StatusCode::BAD_REQUEST, format!("{e}"));
+        }
     }
 
     // Reject duplicates — check both the in-memory registry (built-ins) and the
@@ -19340,6 +19553,9 @@ async fn create_mcp_server(
         let cfg_path = cfg_path.clone();
         let new_cfg = McpServerConfig {
             command: command.clone(),
+            transport: body.transport.clone(),
+            url: url.clone(),
+            headers: body.headers.clone(),
             args: body.args.clone(),
             env: body.env.clone(),
             description: body.description.clone(),
@@ -19714,11 +19930,24 @@ async fn mcp_catalog_install(
 
     match write_mcp_entry(
         &plan.server_name,
-        &command,
-        &args,
-        plan.description.as_deref(),
-        plan.version.as_deref(),
-        Some(plan.catalog_id.as_str()),
+        crate::sidecar::mcp::McpServerConfig {
+            command: Some(command.clone()),
+            args: args.clone(),
+            // The bridge writes a stdio entry (`npx -y mcp-remote <url>`), so it
+            // stays stdio-shaped on disk — see the comment above. `url` here is
+            // only carried for the response/telemetry below, not for transport.
+            transport: None,
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            env: std::collections::BTreeMap::new(),
+            description: plan.description.clone(),
+            // Overwritten to false by `write_mcp_entry`; stated for clarity.
+            enabled: false,
+            // Catalog provenance — lets the update check compare against the
+            // registry's current version later.
+            version: plan.version.clone(),
+            catalog_id: Some(plan.catalog_id.clone()),
+        },
         body.force,
     )
     .await
@@ -20357,13 +20586,22 @@ async fn persist_mcp_plugin_record(state: &ServerState, plan: &crate::mcp_catalo
 /// read-modify-write with an atomic tmp + rename. Shared shape with
 /// [`create_mcp_server`] but forces `enabled: false` so a catalog install never
 /// auto-launches a registry-supplied command.
+///
+/// Takes an **assembled `McpServerConfig`** rather than the six positional
+/// `&str`/`Option<&str>` params it used to. That was already at the edge of safe
+/// — `description`, `version` and `catalog_id` are three adjacent, mutually
+/// swappable `Option<&str>`s that the compiler cannot tell apart — and adding the
+/// remote transport would have pushed it past ten, with `url` and `transport`
+/// joining the same interchangeable run. A caller that transposes two of those
+/// writes a config that parses fine and is simply wrong, which is the worst kind
+/// of bug to find later. One struct argument makes every field named at the call
+/// site.
+///
+/// `enabled` is still forced to `false` here, not trusted from the caller, so the
+/// "an install never auto-launches" guarantee survives the signature change.
 async fn write_mcp_entry(
     name: &str,
-    command: &str,
-    args: &[String],
-    description: Option<&str>,
-    version: Option<&str>,
-    catalog_id: Option<&str>,
+    mut new_cfg: crate::sidecar::mcp::McpServerConfig,
     // When true, overwrite an existing entry (used by the update flow) instead of
     // refusing on a name collision — preserving its `enabled` + `env`.
     force: bool,
@@ -20372,18 +20610,8 @@ async fn write_mcp_entry(
 
     let cfg_path = crate::sidecar::mcp::McpRegistry::config_path();
     let name = name.to_string();
-    let mut new_cfg = McpServerConfig {
-        command: command.to_string(),
-        args: args.to_vec(),
-        env: std::collections::BTreeMap::new(),
-        description: description.map(str::to_string),
-        // Installed disabled — never auto-launch on install.
-        enabled: false,
-        // Catalog provenance — lets the update check compare against the
-        // registry's current version later.
-        version: version.map(str::to_string),
-        catalog_id: catalog_id.map(str::to_string),
-    };
+    // Installed disabled — never auto-launch on install, whatever the caller set.
+    new_cfg.enabled = false;
 
     let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
         if let Some(parent) = cfg_path.parent() {
@@ -20755,6 +20983,487 @@ async fn call_mcp_tool(
     }
 }
 
+// ── The network MCP surface (`POST /mcp/:agent_id`) ──────────────────────────
+//
+// Core's live `McpRegistry`, spoken as MCP over a stateless JSON-RPC POST, so an
+// external MCP client (Claude Desktop, Cursor, another node) reaches the SAME
+// tools an in-process ACP agent does — app tools registered at runtime and the
+// operations derived from installed apps' OpenAPI documents included. The
+// protocol lives in `sidecar::adapters::mcp_bridge::serve_http_jsonrpc`; this is
+// the mount, the principal, and the one auth rule that differs from every other
+// route.
+//
+// Note the tool listing an external client sees is SHORT on purpose — the agent's
+// granted tools plus `tool_search`/`describe`. Composio and the derived ext-API
+// plane are searchable-not-listed. See the `mcp_bridge` module docs; it is the
+// design, and it is filed as a bug about once per reader.
+
+/// Wire ceiling on a `POST /mcp*` body.
+///
+/// 2 MiB — the same figure axum applies implicitly when a route declares nothing.
+/// Stated rather than inherited: an implicit limit is invisible to a reader and to
+/// a future edit of the layer stack, and this is the one route on the protected
+/// chain whose body is a general-purpose tool-call envelope arriving from the
+/// network. A `tools/call` carrying a document's text is the case that sets the
+/// floor, so it is not tightened below the implicit default without a measurement.
+const MCP_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Why `agent_id` is required with no default, and why a missing node token is
+/// refused HERE when `require_auth` would have waved it through.
+///
+/// Returns `Some((status, message))` to refuse, `None` to proceed.
+///
+/// # 1. No node token ⇒ 401, and this route is the ONLY one that says so
+///
+/// [`require_auth`] short-circuits to `next.run(req)` when the auth-token
+/// extension is `None` — i.e. on a node with no `RYU_TOKEN` configured, every
+/// protected route is open. That is a deliberate, long-standing posture for a
+/// loopback dev node: the surfaces behind it are the desktop's own, and requiring
+/// a token nobody minted would brick a fresh checkout.
+///
+/// It is the wrong posture for *this* route. `/mcp` is a general-purpose tool
+/// dispatcher: it executes registry tools — shell-adjacent app tools, credentialed
+/// ext-API calls, the Identity Vault consult — for whoever can POST to it. Core
+/// binds beyond loopback (`RYU_BIND`, the mesh), and the process CORS layer
+/// deliberately admits `https://app.ryuhq.com` and the Tauri origins with
+/// `allow_private_network(true)` so a hosted page can talk to a local Core. An
+/// unauthenticated tool-dispatch endpoint on a bindable port is not a dev
+/// convenience; it is remote code execution waiting for a network change or a
+/// malicious page on an allowed origin. So this route refuses rather than
+/// inheriting the carve-out, and the message says how to fix it.
+///
+/// # 2. The agent principal is required, must be EXACT, and has no default
+///
+/// The bearer authenticates the NODE. It does not say which agent is asking, and
+/// this route has no conversation to infer one from. Requiring a resolvable id is
+/// not primarily about narrowing the tool set — on a stock node
+/// [`crate::sidecar::adapters::acp::AcpAgentRegistry::allowlist_for`] returns
+/// `None` (no `RYU_MCP_ALLOWLIST*` is set), so a known agent is unrestricted too.
+/// It is about pinning the call to ONE agent's posture: its tool allowlist, its
+/// orchestrator/agent-creation capabilities, its `approval_tools` policy, its
+/// skill scoping, its Identity Vault bindings. A caller that may invent a
+/// principal is authorized as nobody, and "nobody" is exactly the value that means
+/// *unrestricted* on the paths downstream.
+///
+/// "Resolvable" here means **exactly equal** to a registry entry id or to a stored
+/// agent record's id — see [`mcp_principal_resolves`]. It deliberately does NOT
+/// use [`crate::sidecar::adapters::acp::AcpAgentRegistry::find_by_prefix`], whose
+/// rule is `agent_id == e.id || agent_id.starts_with(&e.id)`: prefix matching is a
+/// convenience for humans typing an id at a CLI, and it cannot be an authorization
+/// primitive. Under it a caller who POSTs `ryu-anything` is admitted by the `ryu`
+/// entry, i.e. the caller picks which principal it is scored against by choosing a
+/// string — which is the *forgeable* principal this section claims is impossible.
+/// The exact rule is why the claim above is true.
+///
+/// This is deliberately **stricter than [`call_mcp_tool`]**, which still admits on
+/// a prefix. Tightening here costs nothing: this route is new, so no client has
+/// ever been admitted by a prefix on it, and an MCP client configures its endpoint
+/// URL once from a copied id rather than typing it.
+fn mcp_admission(
+    token_configured: bool,
+    agent_id: &str,
+    agent_known: bool,
+) -> Option<(StatusCode, String)> {
+    if !token_configured {
+        return Some((
+            StatusCode::UNAUTHORIZED,
+            "the MCP endpoint requires a node token; set RYU_TOKEN (or pair a device) and \
+             present it as `Authorization: Bearer <token>`"
+                .to_owned(),
+        ));
+    }
+    if agent_id.is_empty() {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            "POST /mcp/<agent_id>: the MCP endpoint is scoped to one agent, which must be \
+             named in the path"
+                .to_owned(),
+        ));
+    }
+    if !agent_known {
+        return Some((
+            StatusCode::FORBIDDEN,
+            // Echoed back so a misconfigured client sees WHICH id it sent — but
+            // bounded and stripped first: this is unauthenticated-caller input on
+            // its way into the log line and the response body, and a megabyte of
+            // control characters is not a diagnostic.
+            format!("unknown agent '{}'", echoable_principal(agent_id)),
+        ));
+    }
+    None
+}
+
+/// The longest client-supplied agent id worth echoing in a refusal. Real ids are
+/// short (`ryu`, `claude`, a uuid at worst); anything longer is not a typo being
+/// reported back to its author.
+const MAX_ECHOED_PRINCIPAL_CHARS: usize = 64;
+
+/// Bound and sanitize a client-supplied principal for inclusion in an error string.
+///
+/// Control characters (newlines above all) are dropped rather than escaped: the
+/// refusal is formatted into a `tracing` line as well as a JSON body, and a
+/// newline in caller-controlled text is how a log gets forged extra rows.
+fn echoable_principal(agent_id: &str) -> String {
+    let cleaned: String = agent_id
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_ECHOED_PRINCIPAL_CHARS)
+        .collect();
+    if agent_id.chars().filter(|c| !c.is_control()).count() > MAX_ECHOED_PRINCIPAL_CHARS {
+        format!("{cleaned}…")
+    } else {
+        cleaned
+    }
+}
+
+/// Does `agent_id` name an EXISTING agent, exactly?
+///
+/// The whole authorization value of the principal on `POST /mcp/:agent_id` is that
+/// the caller cannot choose which agent's posture it is evaluated against. That
+/// requires equality, not containment: with prefix matching a caller who has never
+/// heard of any agent can send `r` and be admitted as `ryu`.
+///
+/// Two sources, both exact, because an agent may exist in either:
+/// - `registry_ids` — the built-in/ACP registry entries (`AcpAgentRegistry::entries`);
+/// - `record_exists` — a row in the agent store (user-created agents).
+///
+/// Pure so the rule itself is testable; `ServerState` is not constructible in a
+/// unit test (~40 fields of live stores and sidecar managers).
+fn mcp_principal_resolves<'a>(
+    agent_id: &str,
+    record_exists: bool,
+    mut registry_ids: impl Iterator<Item = &'a str>,
+) -> bool {
+    if agent_id.is_empty() {
+        return false;
+    }
+    record_exists || registry_ids.any(|id| id == agent_id)
+}
+
+/// The JSON-RPC refusal for a top-level array, or `None` for a single message.
+///
+/// Batching is **not supported**, deliberately. The endpoint advertises protocol
+/// revision `2025-06-18`, which REMOVED JSON-RPC batching from MCP, so refusing it
+/// is spec-conformant rather than a limitation. It also closes an amplification
+/// lever: a batch is one authenticated request that fans out into N registry tool
+/// dispatches, and bounding that would need an element cap *and* a whole-batch
+/// deadline *and* a per-handler timeout — three knobs to maintain for a feature the
+/// current revision does not have. One request, one message, one dispatch.
+///
+/// The refusal is a JSON-RPC error object (not an HTTP 4xx) because a JSON-RPC
+/// client can read it; `id` is `null` since a batch has no single id to answer to.
+fn mcp_batch_refusal(parsed: &serde_json::Value) -> Option<serde_json::Value> {
+    parsed.is_array().then(|| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": serde_json::Value::Null,
+            "error": {
+                "code": -32_600,
+                "message": "JSON-RPC batching is not supported — MCP revision 2025-06-18 removed \
+                            it. Send one request per POST.",
+            },
+        })
+    })
+}
+
+/// `POST /mcp` — no agent named.
+///
+/// Registered only so a client configured with the bare base URL gets an
+/// actionable 400 instead of a bare 404 from the router (matchit will not match
+/// `/mcp` or `/mcp/` against `/mcp/:agent_id`). It shares one code path with the
+/// real route by passing an empty id straight into [`mcp_admission`].
+async fn mcp_http_no_agent(
+    State(state): State<ServerState>,
+    axum::Extension(auth_token): axum::Extension<Option<String>>,
+    body: String,
+) -> axum::response::Response {
+    mcp_http_inner(state, auth_token, String::new(), body).await
+}
+
+/// `POST /mcp/:agent_id` — MCP over stateless JSON-RPC, scoped to one agent.
+#[utoipa::path(
+    post,
+    path = "/mcp/{agent_id}",
+    tag = "MCP",
+    summary = "Model Context Protocol endpoint (JSON-RPC), scoped to one agent",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "JSON-RPC response", body = serde_json::Value),
+        (status = 202, description = "Notification accepted; no response body"),
+        (status = 401, description = "This node has no token configured"),
+        (status = 403, description = "Unknown agent"),
+    )
+)]
+async fn mcp_http(
+    State(state): State<ServerState>,
+    axum::Extension(auth_token): axum::Extension<Option<String>>,
+    Path(agent_id): Path<String>,
+    body: String,
+) -> axum::response::Response {
+    mcp_http_inner(state, auth_token, agent_id, body).await
+}
+
+async fn mcp_http_inner(
+    state: ServerState,
+    auth_token: Option<String>,
+    agent_id: String,
+    body: String,
+) -> axum::response::Response {
+    // An empty token is not a configured token — it would compare equal to a
+    // client sending `Bearer `, which is to say to no credential at all.
+    let token_configured = auth_token.is_some_and(|t| !t.is_empty());
+    // The principal must be EXACT — an id equal to a registry entry or to a stored
+    // agent record. NOT `find_by_prefix`, whose rule (`agent_id == e.id ||
+    // agent_id.starts_with(&e.id)`) lets the caller pick which agent's posture it
+    // is judged against by choosing a string: `ryu-whatever` is admitted by `ryu`.
+    // See [`mcp_admission`] §2. The supplied id also stays the principal verbatim
+    // (nothing is canonicalized to a matched entry), so every downstream lookup —
+    // `allowlist_for`, `agent_capabilities`, the vault bindings below — resolves
+    // the record the caller actually named.
+    //
+    // The store read is gated on the two cheap checks so an unauthenticated or
+    // empty-principal request never costs a DB round-trip, and it is the SAME read
+    // that supplies `identity_profile_ids` below — one lookup, not two.
+    let may_resolve = token_configured && !agent_id.is_empty();
+    let record = if may_resolve {
+        state.agent_store.get(&agent_id).await.ok().flatten()
+    } else {
+        None
+    };
+    let agent_known = may_resolve
+        && mcp_principal_resolves(
+            &agent_id,
+            record.is_some(),
+            state.agents.entries.iter().map(|e| e.id.as_str()),
+        );
+    if let Some((status, message)) = mcp_admission(token_configured, &agent_id, agent_known) {
+        return (status, Json(json!({ "ok": false, "error": message }))).into_response();
+    }
+
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
+        // JSON-RPC parse error, in the envelope — not an axum 400 body, which a
+        // JSON-RPC client cannot read.
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": serde_json::Value::Null,
+            "error": { "code": -32_700, "message": "invalid JSON" },
+        }))
+        .into_response();
+    };
+
+    // A top-level array is a batch, and this endpoint does not serve one. Refused
+    // BEFORE any registry work, so the array never becomes N dispatches — see
+    // [`mcp_batch_refusal`] for why refusing is the spec-conformant answer at the
+    // revision this server advertises.
+    if let Some(refusal) = mcp_batch_refusal(&parsed) {
+        return Json(refusal).into_response();
+    }
+
+    let allowlist = state.agents.allowlist_for(&agent_id);
+    // Per-agent Identity Vault binding (epic #517), read off the SAME record the
+    // admission check resolved — otherwise a tool call over this transport silently
+    // loses the agent's credential bindings and fails in a way that looks like a
+    // broken tool rather than a missing principal.
+    let identity_profile_ids = record
+        .map(|rec| rec.identity_profile_ids)
+        .unwrap_or_default();
+
+    // One message in, at most one response out: a notification (no `id`) is
+    // answered with nothing at all, which on HTTP is `202 Accepted` and an empty
+    // body. A request is answered with a single JSON object — never a 1-element
+    // array, which is what a host that sent an object expects back.
+    match crate::sidecar::adapters::mcp_bridge::serve_http_jsonrpc(
+        Arc::clone(&state.mcp),
+        agent_id,
+        allowlist,
+        identity_profile_ids,
+        &parsed,
+    )
+    .await
+    {
+        Some(response) => Json(response).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod mcp_endpoint_admission_tests {
+    use super::{mcp_admission, mcp_batch_refusal, mcp_principal_resolves};
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    /// The full `ServerState` (~40 fields, real stores, real sidecar managers) is
+    /// not constructible in a unit test, so the admission decision lives in a pure
+    /// function and is tested there. These assert the DECISION, not the routing:
+    /// `mcp_http_inner` is three lines of plumbing over this function, and the
+    /// route registration is asserted by the compiler.
+
+    /// The agent principal is required and must resolve. `agent_id` is the only
+    /// thing that pins a call to one agent's allowlist, capabilities,
+    /// `approval_tools`, skill scoping and vault bindings; a caller free to invent
+    /// one is authorized as nobody, which is the value that means *unrestricted*
+    /// downstream.
+    #[test]
+    fn mcp_endpoint_requires_a_known_agent_id() {
+        // Empty (a client that POSTed the bare base URL) → 400, not 403: nothing
+        // was claimed, so nothing was rejected — the request is malformed.
+        let (status, message) = mcp_admission(true, "", false).expect("empty id is refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            message.contains("/mcp/<agent_id>"),
+            "the 400 must show the shape that works: {message}"
+        );
+
+        // Named but unknown → 403. The node bearer was valid; the principal was not.
+        let (status, message) =
+            mcp_admission(true, "ghost-agent", false).expect("unknown id is refused");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("ghost-agent"), "{message}");
+
+        // Known → admitted.
+        assert!(
+            mcp_admission(true, "ryu", true).is_none(),
+            "a resolvable agent on a tokened node proceeds"
+        );
+    }
+
+    /// THE route-specific rule. `require_auth` short-circuits to `next.run(req)`
+    /// when no node token is configured, so on a stock loopback dev node every
+    /// protected route is open — and `/mcp` must not be, because it dispatches
+    /// registry tools for whoever can POST to it. This is the one route that
+    /// refuses where the shared middleware would admit.
+    #[test]
+    fn mcp_endpoint_refuses_when_no_node_token_is_configured() {
+        // Refused even with a perfectly good agent id: the missing token is
+        // checked FIRST, so no principal can buy past it.
+        let (status, message) =
+            mcp_admission(false, "ryu", true).expect("a tokenless node refuses /mcp");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            message.contains("RYU_TOKEN"),
+            "the refusal must say how to configure the node: {message}"
+        );
+
+        // And with no agent either — still 401, never the 400. The order matters:
+        // reporting "name an agent" on an unauthenticated node would tell an
+        // anonymous caller the endpoint exists and what to send next.
+        let (status, _) = mcp_admission(false, "", false).expect("refused");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // The same request on a tokened node is admitted — proving the refusal is
+        // the token check and not something else in the guard.
+        assert!(mcp_admission(true, "ryu", true).is_none());
+    }
+
+    /// The principal must be EXACT. `AcpAgentRegistry::find_by_prefix` — the
+    /// resolver this route deliberately does not use — matches when
+    /// `agent_id.starts_with(&entry.id)`, so under it a caller chooses which
+    /// agent's allowlist, capabilities, `approval_tools` and vault bindings it is
+    /// judged against simply by picking a string. That is a forged principal, and
+    /// it makes the route's own security claim false.
+    #[test]
+    fn mcp_endpoint_refuses_a_prefix_of_a_known_agent_id() {
+        const REGISTRY: [&str; 2] = ["claude", "ryu"];
+
+        // Exact ids resolve.
+        for id in REGISTRY {
+            assert!(
+                mcp_principal_resolves(id, false, REGISTRY.into_iter()),
+                "{id} is a registry entry and must resolve"
+            );
+        }
+
+        // A PREFIX of a known id does not — this is the finding.
+        for forged in ["c", "cl", "clau", "r", "ry"] {
+            assert!(
+                !mcp_principal_resolves(forged, false, REGISTRY.into_iter()),
+                "{forged:?} is a prefix of a known agent, not an agent"
+            );
+            let (status, _) = mcp_admission(true, forged, false)
+                .expect("a prefix must be refused, not admitted as what it matched");
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        // Nor does an EXTENSION of a known id, which is the direction
+        // `find_by_prefix` actually matches in: `ryu-anything` starts with `ryu`,
+        // so that resolver would admit it as the flagship agent.
+        assert!(
+            !mcp_principal_resolves("ryu-anything", false, REGISTRY.into_iter()),
+            "an id that merely starts with a known id is a different id"
+        );
+
+        // A user-created agent resolves through the store instead, still exactly.
+        assert!(mcp_principal_resolves(
+            "my-own-agent",
+            true,
+            REGISTRY.into_iter()
+        ));
+        // …and an empty id resolves through neither, whatever the store says.
+        assert!(!mcp_principal_resolves("", true, REGISTRY.into_iter()));
+    }
+
+    /// The endpoint advertises MCP revision `2025-06-18`, which REMOVED JSON-RPC
+    /// batching — so an array is refused rather than served. That is both spec
+    /// conformance and the fix for an amplification lever: one authenticated
+    /// request must fan out into one tool dispatch, not N with no element cap and
+    /// no whole-batch deadline.
+    #[test]
+    fn mcp_endpoint_refuses_a_json_rpc_batch() {
+        let batch = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+            { "jsonrpc": "2.0", "id": 2, "method": "tools/list" },
+        ]);
+        let refusal = mcp_batch_refusal(&batch).expect("an array must be refused");
+        // A JSON-RPC error object, not an HTTP 4xx body: the client speaks JSON-RPC.
+        assert_eq!(refusal["jsonrpc"], "2.0");
+        assert!(
+            refusal["id"].is_null(),
+            "a batch has no single id to answer"
+        );
+        assert_eq!(refusal["error"]["code"], -32_600);
+        let message = refusal["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("2025-06-18"),
+            "the refusal must say which revision removed batching: {message}"
+        );
+
+        // An empty array is still an array — refusing only non-empty ones would
+        // leave the loop reachable.
+        assert!(mcp_batch_refusal(&json!([])).is_some());
+
+        // A single message is untouched.
+        assert!(
+            mcp_batch_refusal(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+                .is_none()
+        );
+    }
+
+    /// Caller-supplied text on its way into a log line and a response body is
+    /// bounded and stripped of control characters. Unauthenticated input becomes a
+    /// forged log row otherwise, and a megabyte-long "id" is not a diagnostic.
+    #[test]
+    fn an_unknown_principal_is_echoed_bounded_and_sanitized() {
+        let (_, message) = mcp_admission(true, "ghost\nagent", false).expect("refused");
+        assert!(
+            !message.contains('\n'),
+            "a newline in caller input must not reach the log line: {message:?}"
+        );
+        assert!(message.contains("ghostagent"), "{message}");
+
+        let long = "a".repeat(500);
+        let (_, message) = mcp_admission(true, &long, false).expect("refused");
+        assert!(
+            message.len() < 200,
+            "the echoed principal must be bounded: {} chars",
+            message.len()
+        );
+        assert!(
+            message.contains('…'),
+            "truncation must be visible: {message}"
+        );
+    }
+}
+
 // ── Command-approval scan for agents Core cannot gate at the ACP seam ────────
 
 /// The `backend` tag sent to the gateway scanner for this route.
@@ -21109,7 +21818,9 @@ mod tool_search_scope_tests {
 
 /// `GET /api/tools/search?q=&kind=&limit=&agent=` — search the unified tool
 /// catalog (MCP + built-ins + Composio + plugin tools + Core self-API). `kind` ∈
-/// `mcp|builtin|composio|app|core-api|any` (default `any`). `agent` narrows
+/// `mcp|builtin|composio|app|core-api|command|skill|ext-api|any` (default
+/// `any`) — the accepted set is `ToolKind::parse_filter`'s, never a list
+/// maintained here. `agent` narrows
 /// results to the agent's allowlist. Returns
 /// `{ "object":"list", "data":[ToolDescriptor] }`.
 ///
@@ -21155,7 +21866,7 @@ mod tool_search_scope_tests {
     summary = "Search the unified tool catalog",
     params(
         ("q" = Option<String>, Query, description = "Natural-language capability query"),
-        ("kind" = Option<String>, Query, description = "mcp|builtin|composio|app|command|core-api|any"),
+        ("kind" = Option<String>, Query, description = "mcp|builtin|composio|app|command|core-api|skill|ext-api|any"),
         ("limit" = Option<usize>, Query, description = "Max results (default 8)"),
         ("agent" = Option<String>, Query, description = "Narrow to this agent's allowlist"),
     ),
@@ -25503,9 +26214,70 @@ pub(crate) async fn resolve_guarded_host(
 /// non-disable value keeps the screen active. Set to `0`/`false`/`off`/`no`
 /// (case-insensitive) to disable.
 const ENV_AGENT_EGRESS_SSRF_GUARD: &str = "RYU_AGENT_EGRESS_SSRF_GUARD";
-/// Env var holding a comma-separated host allowlist that bypasses the egress
+/// Env var holding a comma-separated allowlist of targets that bypass the egress
 /// screen (case-insensitive, whitespace-trimmed, empty entries ignored).
+///
+/// Entries are `host:port` (narrow — that one port only) or bare `host` (wide —
+/// every port on that host). Prefer the narrow form: see [`host_is_allowlisted_in`]
+/// for why the difference is a security boundary and not a formatting preference.
 const ENV_AGENT_EGRESS_ALLOW_HOSTS: &str = "RYU_AGENT_EGRESS_ALLOW_HOSTS";
+
+/// A URL rewritten so it can be put in an error string, a log line, or an API
+/// response without carrying a credential with it.
+///
+/// Two removals, both of which are places hosted MCP providers really do put
+/// secrets:
+/// - **userinfo** — `https://user:token@host/…` (the `headers` map is not the only
+///   way an operator can authenticate a remote server, and a pasted URL is the
+///   easiest);
+/// - **the query string**, replaced wholesale with `?<redacted>` — Smithery and
+///   friends authenticate with `?api_key=…` / `?token=…`, and a per-parameter
+///   denylist would be a guessing game against every provider's naming.
+///
+/// The host and path survive, because the whole reason these strings exist is to
+/// tell an operator WHICH server failed, and a message that names neither is not
+/// worth printing.
+///
+/// **Residual, deliberately accepted:** a secret in the PATH still shows (some
+/// providers mint per-user endpoints like `/api/mcp/s/<token>/mcp`). Redacting the
+/// path would destroy the diagnostic value that justifies logging the URL at all,
+/// and unlike userinfo and the query there is no syntactic marker to redact by.
+///
+/// Operates on the raw string rather than a parsed [`url::Url`], because it is used
+/// on inputs that FAILED to parse — which is exactly when the caller is least able
+/// to reason about what the string contains.
+pub(crate) fn redact_url_for_display(url: &str) -> String {
+    let trimmed = url.trim();
+    let (head, had_query) = match trimmed.find(['?', '#']) {
+        Some(i) => (&trimmed[..i], true),
+        None => (trimmed, false),
+    };
+    let mut out = String::with_capacity(head.len() + 16);
+    // The authority is what follows `://` up to the next `/`. Without a scheme
+    // separator the whole head is treated as authority-then-path, so a malformed
+    // `user:pw@host/x` is redacted too.
+    let (prefix, rest) = match head.find("://") {
+        Some(i) => head.split_at(i + 3),
+        None => ("", head),
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    out.push_str(prefix);
+    // `rfind`: an `@` may legally appear inside the userinfo itself, and the LAST
+    // one is the delimiter.
+    match authority.rfind('@') {
+        Some(at) => {
+            out.push_str("<redacted>@");
+            out.push_str(&authority[at + 1..]);
+        }
+        None => out.push_str(authority),
+    }
+    out.push_str(path);
+    if had_query {
+        out.push_str("?<redacted>");
+    }
+    out
+}
 
 /// Pure: is the egress guard enabled for this env value? Default-on — only an
 /// explicit disable token (`0`/`false`/`off`/`no`, case-insensitive, trimmed)
@@ -25521,16 +26293,44 @@ fn agent_egress_guard_enabled_from(val: Option<&str>) -> bool {
     }
 }
 
-/// Pure: is `host` present in the comma-separated allowlist `list`? Case- and
-/// whitespace-insensitive; empty entries are ignored. Unit-testable without env.
-fn host_is_allowlisted_in(host: &str, list: Option<&str>) -> bool {
+/// Pure: does the comma-separated allowlist `list` exempt `host` on `port`?
+///
+/// An entry matches if it equals the host (wide: every port) **or** the exact
+/// `host:port` pair (narrow: that port only). Case- and whitespace-insensitive;
+/// empty entries are ignored. Unit-testable without env.
+///
+/// # Why the narrow form exists, and why the docs push people to it
+///
+/// This one env var is read by TWO consumers with very different threat models:
+///
+/// 1. this file's [`guarded_post_json`], where the URL is an MCP endpoint an
+///    operator configured by hand, and
+/// 2. `tool_exec` (`tool_exec/mod.rs`, the `egress_url_arg` screen), where the URL
+///    is a **model-supplied tool argument**.
+///
+/// Consumer 2 is the reason host granularity is too coarse. The blocked-egress
+/// message tells a developer to allowlist `127.0.0.1` so their local MCP server on
+/// :3000 is reachable; a bare `127.0.0.1` entry then also hands every model-chosen
+/// URL the whole loopback interface — Core's own admin surface on :7980 and every
+/// other sidecar port included. `127.0.0.1:3000` grants the one port the developer
+/// actually meant, and nothing else.
+///
+/// Bare-host entries still work, deliberately: they are the pre-existing format and
+/// silently narrowing them would break running configurations. The refusal message
+/// recommends the narrow form so new entries start scoped.
+///
+/// The comparison is textual against both candidate spellings rather than a parse
+/// of the entry, so an IPv6 literal needs no bracket-handling special case — the
+/// operator writes the host exactly as it appears in the URL.
+fn host_is_allowlisted_in(host: &str, port: u16, list: Option<&str>) -> bool {
     let Some(list) = list else {
         return false;
     };
+    let host_and_port = format!("{host}:{port}");
     list.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .any(|entry| entry.eq_ignore_ascii_case(host))
+        .any(|entry| entry.eq_ignore_ascii_case(host) || entry.eq_ignore_ascii_case(&host_and_port))
 }
 
 /// Runtime wrapper: read [`ENV_AGENT_EGRESS_SSRF_GUARD`] and classify.
@@ -25538,10 +26338,18 @@ fn agent_egress_guard_enabled() -> bool {
     agent_egress_guard_enabled_from(std::env::var(ENV_AGENT_EGRESS_SSRF_GUARD).ok().as_deref())
 }
 
-/// Runtime wrapper: is `host` in [`ENV_AGENT_EGRESS_ALLOW_HOSTS`]?
-fn host_is_allowlisted(host: &str) -> bool {
+/// Runtime wrapper: is `host:port` exempted by [`ENV_AGENT_EGRESS_ALLOW_HOSTS`]?
+///
+/// Retained (and `allow`ed) as the named runtime counterpart to
+/// [`host_is_allowlisted_in`]: [`screen_egress_url_with`] now takes the allowlist
+/// as a parameter so it is testable without touching process env, so this has no
+/// in-crate caller. Kept rather than deleted because it is the one place the
+/// env-var → decision binding is spelled out for a future caller to reuse.
+#[allow(dead_code)]
+fn host_is_allowlisted(host: &str, port: u16) -> bool {
     host_is_allowlisted_in(
         host,
+        port,
         std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
     )
 }
@@ -25561,31 +26369,119 @@ fn host_is_allowlisted(host: &str) -> bool {
 /// resolve and the crawler's resolve. Best achievable for a shell-out crawler;
 /// closing it fully requires fetching in-process.
 pub(crate) async fn screen_agent_egress_url(url: &str) -> anyhow::Result<url::Url> {
+    screen_egress_url_with(
+        url,
+        agent_egress_guard_enabled(),
+        std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
+    )
+    .await
+}
+
+/// The env-free core of [`screen_agent_egress_url`]: the whole decision, with the
+/// two env-derived inputs passed in.
+///
+/// Split out so the screen can be asserted without `std::env::set_var`. Core's
+/// tests all run in ONE bin-target process, so a test that mutates process env
+/// races every other test in the binary — it passes alone and flakes in the
+/// suite. The sibling pure helpers ([`agent_egress_guard_enabled_from`],
+/// [`host_is_allowlisted_in`]) exist for the same reason; this completes the
+/// pattern for the part that actually resolves.
+pub(crate) async fn screen_egress_url_with(
+    url: &str,
+    guard_enabled: bool,
+    allow_hosts: Option<&str>,
+) -> anyhow::Result<url::Url> {
+    screen_egress_url_pinned(url, guard_enabled, allow_hosts)
+        .await
+        .map(|(parsed, _)| parsed)
+}
+
+/// What the screen learned about where a URL actually points.
+///
+/// The distinction exists because "the screen passed" has two very different
+/// meanings, and an in-process fetcher must not conflate them.
+pub(crate) enum ScreenedEgress {
+    /// The guard resolved the host and validated every address. Pin the client to
+    /// EXACTLY these — re-resolving would reopen the rebinding window this closes.
+    Pinned(Vec<std::net::SocketAddr>),
+    /// The screen passed WITHOUT resolving: the guard is disabled, or the operator
+    /// put this host in the allowlist (which is the loopback development case,
+    /// where resolution would refuse by design). There is nothing to pin to, and
+    /// overriding the exemption would break the case it exists for.
+    Exempt,
+}
+
+/// [`screen_egress_url_with`], but it also hands back the addresses it validated.
+///
+/// ## Why the caller must not re-resolve
+///
+/// The obvious shape — screen the URL, then call [`resolve_guarded_host`] again to
+/// build the pin — is unsafe in a way that looks like hardening. It performs TWO
+/// independent resolutions and pins to the second, so nothing guarantees the
+/// addresses it pins to are the addresses it validated. Worse, if that second
+/// resolve is treated as "this must have been exempted" and the failure swallowed,
+/// an attacker who controls DNS gets a fail-open: answer with a public address on
+/// the screen's lookup (passes), a private one on the pin's lookup (fails, so no
+/// pin is applied), and the request then connects to whatever DNS returns at
+/// connect time. That is exactly the SSRF the guard exists to stop, reached
+/// through the guard.
+///
+/// Exemption is therefore reported explicitly by [`ScreenedEgress::Exempt`] rather
+/// than inferred from a second call's failure, and the validated addresses are
+/// threaded out so the pin and the check can never disagree.
+pub(crate) async fn screen_egress_url_pinned(
+    url: &str,
+    guard_enabled: bool,
+    allow_hosts: Option<&str>,
+) -> anyhow::Result<(url::Url, ScreenedEgress)> {
     let trimmed = url.trim();
-    let parsed =
-        url::Url::parse(trimmed).map_err(|e| anyhow::anyhow!("invalid URL '{trimmed}': {e}"))?;
+    // Redacted in the message even here: a URL that fails to PARSE is still a URL
+    // the operator pasted a credential into. See [`redact_url_for_display`].
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|e| anyhow::anyhow!("invalid URL '{}': {e}", redact_url_for_display(trimmed)))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         anyhow::bail!(
             "URL scheme '{}' is not allowed — only http and https are accepted",
             parsed.scheme()
         );
     }
-    if !agent_egress_guard_enabled() {
-        return Ok(parsed);
+    if !guard_enabled {
+        return Ok((parsed, ScreenedEgress::Exempt));
     }
     let host = parsed
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL has no host: {trimmed}"))?
+        .ok_or_else(|| anyhow::anyhow!("URL has no host: {}", redact_url_for_display(trimmed)))?
         .to_owned();
-    if host_is_allowlisted(&host) {
-        return Ok(parsed);
-    }
+    // Resolved BEFORE the allowlist check, because the allowlist is port-scoped:
+    // `127.0.0.1:3000` must exempt exactly that port. A bare `127.0.0.1` entry
+    // still matches whatever port is passed (the compatibility form).
     let default_port = if parsed.scheme() == "https" { 443 } else { 80 };
     let port = parsed.port_or_known_default().unwrap_or(default_port);
-    resolve_guarded_host(&host, port)
-        .await
-        .map_err(|e| anyhow::anyhow!("blocked egress to {host}: {e}"))?;
-    Ok(parsed)
+    if host_is_allowlisted_in(&host, port, allow_hosts) {
+        return Ok((parsed, ScreenedEgress::Exempt));
+    }
+    let resolved = resolve_guarded_host(&host, port).await.map_err(|e| {
+        // Name the escape hatch in the message. The single most common remote-MCP
+        // development target is `http://127.0.0.1:3000/mcp`, and it is blocked by
+        // design (loopback is exactly what SSRF reaches for). A developer who
+        // hits this and is told only "private/loopback host is not allowed"
+        // concludes the feature is broken; told the variable, they unblock
+        // themselves in one line.
+        //
+        // The message recommends the NARROW `host:port` form, because this same
+        // variable also governs model-supplied URLs in `tool_exec` — a bare host
+        // entry added to reach one dev server opens every port on that host to
+        // whatever URL a model puts in a tool argument. See
+        // [`host_is_allowlisted_in`].
+        anyhow::anyhow!(
+            "blocked egress to {host}:{port}: {e}. If this is an intentional local or \
+             internal target, add `{host}:{port}` to {ENV_AGENT_EGRESS_ALLOW_HOSTS} \
+             (comma-separated) — that is the supported escape hatch. A bare `{host}` \
+             entry also works but grants EVERY port on that host, including to \
+             model-supplied tool URLs; prefer the host:port form"
+        )
+    })?;
+    Ok((parsed, ScreenedEgress::Pinned(resolved)))
 }
 
 /// SSRF-guarded HTTPS GET, shared by the catalog fetch paths so they all get the
@@ -25595,6 +26491,184 @@ pub(crate) async fn screen_agent_egress_url(url: &str) -> anyhow::Result<url::Ur
 /// check). Returns the response on success.
 pub(crate) async fn guarded_get(url: &str) -> anyhow::Result<reqwest::Response> {
     guarded_get_with_bearer(url, None).await
+}
+
+/// The resolve → screen → **pin** client builder every first-party guarded fetch
+/// shares: parse, require `https`, [`resolve_guarded_host`] (rejects `localhost`
+/// and any host resolving to a loopback / RFC1918 / link-local / ULA / CGNAT
+/// address), pin the client to exactly those addresses so it never re-resolves
+/// (defeating DNS rebinding), and refuse redirects so a remote cannot bounce us
+/// inward after the check.
+///
+/// One copy, four callers. It used to be four byte-identical copies inline in
+/// [`guarded_get_with_bearer`], [`guarded_get_with_headers`],
+/// [`guarded_fetch_text_with_headers`], and (now) [`guarded_post_json`]; every
+/// copy was a place a future edit could drop the pin or the redirect policy in
+/// one path only, which is a silent SSRF regression rather than a visible bug.
+///
+/// The pin is **host-specific**, which is exactly why this returns a freshly
+/// built client rather than reusing a shared one: `resolve_to_addrs` binds a
+/// client to one hostname's validated IPs, so a process-wide
+/// `reqwest::Client` physically cannot carry it.
+///
+/// Returns the client plus the parsed URL (callers that need the host/path).
+/// `https`-only on purpose — this is the first-party catalog/model/skill fetch
+/// path. The http-tolerant variant is [`guarded_post_json`], which routes its
+/// scheme decision through [`screen_agent_egress_url`] instead.
+pub(crate) async fn guarded_client(url: &str) -> Result<(reqwest::Client, url::Url), String> {
+    let trimmed = url.trim();
+    let parsed = url::Url::parse(trimmed).map_err(|e| format!("invalid URL {trimmed}: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!("remote URL must use https: {trimmed}"));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("URL has no host: {trimmed}"))?
+        .to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let resolved = resolve_guarded_host(&host, port).await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(&host, &resolved)
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    Ok((client, parsed))
+}
+
+/// How long a single MCP HTTP round-trip may take. Matches the client's
+/// `RPC_TIMEOUT` so the transport is never the thing that gives up first —
+/// the driver's own deadline stays the one that reports the failure.
+const MCP_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// SSRF-guarded `POST` of a JSON body, returning `(status, response headers,
+/// body text)`. This is the egress seam for Core's **MCP HTTP client transport**.
+///
+/// # Why this is not `guarded_client`
+///
+/// Two deliberate differences from the first-party family above:
+///
+/// 1. **`http` is allowed.** The guarded-`get` family is `https`-only and
+///    rejects `localhost` outright, which would block `http://127.0.0.1:3000/mcp`
+///    — the single most common remote-MCP development target, and the first thing
+///    anyone tries. Rejecting it makes the whole feature look broken.
+/// 2. **The screen is [`screen_agent_egress_url`]**, not a bare
+///    `resolve_guarded_host`. That is the same default-on screen the agent
+///    browsing tools use, so `RYU_AGENT_EGRESS_ALLOW_HOSTS` is the ONE documented
+///    escape hatch for reaching a loopback or internal MCP endpoint, rather than
+///    this path inventing a second, undocumented one.
+///
+/// This is not a relaxation of the SSRF posture — it is the *same* posture with a
+/// documented, opt-in override. The screen still refuses `http://169.254.169.254/`
+/// (cloud metadata), RFC1918, link-local, ULA and CGNAT by default.
+///
+/// # Why not `McpRegistry.http`
+///
+/// The registry holds a bare `reqwest::Client::new()` with no address pin and
+/// default redirect-follow. Reusing it here would silently drop both halves of the
+/// guard, and the pin *cannot* be moved onto a shared client because
+/// `resolve_to_addrs` is per-hostname. So the client is built per request against
+/// the screened host, exactly like [`guarded_client`].
+///
+/// The body is read streamed and capped at `max_body` so a hostile endpoint cannot
+/// OOM Core with a multi-GB "SSE stream". A non-2xx status is **returned, not
+/// raised**: the MCP transport needs the status and body to report a useful error
+/// (a `401` from a bad `Authorization` header must not read as a network failure).
+/// Invalid header names are skipped and **header values are never logged** — they
+/// routinely carry the user's API token. For the same reason the URL is never
+/// formatted raw into an error: it is passed through [`redact_url_for_display`]
+/// first, because a hosted MCP endpoint's credential is as likely to be in the URL
+/// (userinfo, `?api_key=`) as in a header, and these errors reach logs and API
+/// responses. Callers that build their own message about this endpoint must do the
+/// same — see `sidecar::mcp::client`.
+pub(crate) async fn guarded_post_json(
+    url: &str,
+    headers: &[(String, String)],
+    body: String,
+    max_body: u64,
+) -> anyhow::Result<(reqwest::StatusCode, reqwest::header::HeaderMap, String)> {
+    // Pin to the addresses the screen ACTUALLY VALIDATED, threaded out of the
+    // screen rather than obtained from a second lookup. Re-resolving here would
+    // pin to addresses nobody checked, and swallowing a failed re-resolve as
+    // "must have been exempt" would hand an attacker who controls DNS a fail-open:
+    // a public answer passes the screen, a private answer fails the pin, and the
+    // unpinned request then connects to whatever DNS serves at connect time.
+    // `ScreenedEgress::Exempt` is the ONLY thing that legitimately means "do not
+    // pin", and it is reported explicitly, never inferred.
+    let (parsed, screened) = screen_egress_url_pinned(
+        url,
+        agent_egress_guard_enabled(),
+        std::env::var(ENV_AGENT_EGRESS_ALLOW_HOSTS).ok().as_deref(),
+    )
+    .await?;
+    // EVERY message out of this function names the endpoint through this, never
+    // `url` itself: a remote MCP endpoint's URL routinely carries the operator's
+    // credential (userinfo, or Smithery-style `?api_key=`), and these strings reach
+    // logs, the model, and API responses. Redacting the `headers` map while
+    // printing the URL verbatim would leak the same secret through the other door.
+    let shown = redact_url_for_display(url);
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL has no host: {shown}"))?
+        .to_owned();
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(MCP_HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
+    match screened {
+        ScreenedEgress::Pinned(addrs) => {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
+        // Guard off, or an operator-allowlisted host (the loopback dev target).
+        // There is nothing validated to pin to; the operator opted in by name.
+        ScreenedEgress::Exempt => {}
+    }
+    let client = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
+
+    let mut req = client
+        .post(parsed.as_str())
+        .header("User-Agent", crate::skills_catalog::USER_AGENT)
+        .body(body);
+    for (name, value) in headers {
+        match (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(n), Ok(v)) => req = req.header(n, v),
+            // Skip a malformed header name; the VALUE is never logged (secret).
+            _ => tracing::warn!("guarded POST: skipping invalid header name '{name}'"),
+        }
+    }
+
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("requesting {shown}: {e}"))?;
+    let status = resp.status();
+    let resp_headers = resp.headers().clone();
+    if let Some(len) = resp.content_length() {
+        if len > max_body {
+            anyhow::bail!("{shown} response too large ({len} bytes; cap {max_body})");
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| anyhow::anyhow!("reading {shown}: {e}"))?
+    {
+        if buf.len() as u64 + chunk.len() as u64 > max_body {
+            anyhow::bail!("{shown} exceeded the {max_body}-byte body cap");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok((
+        status,
+        resp_headers,
+        String::from_utf8_lossy(&buf).into_owned(),
+    ))
 }
 
 /// SSRF-guarded HTTPS GET that optionally attaches an `Authorization: Bearer
@@ -25609,25 +26683,9 @@ pub(crate) async fn guarded_get_with_bearer(
     bearer: Option<&str>,
 ) -> anyhow::Result<reqwest::Response> {
     let trimmed = url.trim();
-    let parsed =
-        url::Url::parse(trimmed).map_err(|e| anyhow::anyhow!("invalid URL {trimmed}: {e}"))?;
-    if parsed.scheme() != "https" {
-        anyhow::bail!("remote catalog URL must use https: {trimmed}");
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL has no host: {trimmed}"))?
-        .to_owned();
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let resolved = resolve_guarded_host(&host, port)
+    let (client, _) = guarded_client(trimmed)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
     let mut req = client
         .get(trimmed)
         .header("User-Agent", crate::skills_catalog::USER_AGENT);
@@ -25671,25 +26729,9 @@ pub(crate) async fn guarded_get_with_headers(
     headers: &[(String, String)],
 ) -> anyhow::Result<reqwest::Response> {
     let trimmed = url.trim();
-    let parsed =
-        url::Url::parse(trimmed).map_err(|e| anyhow::anyhow!("invalid URL {trimmed}: {e}"))?;
-    if parsed.scheme() != "https" {
-        anyhow::bail!("remote catalog URL must use https: {trimmed}");
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL has no host: {trimmed}"))?
-        .to_owned();
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let resolved = resolve_guarded_host(&host, port)
+    let (client, _) = guarded_client(trimmed)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
     let mut req = client
         .get(trimmed)
         .header("User-Agent", crate::skills_catalog::USER_AGENT);
@@ -25738,25 +26780,9 @@ pub(crate) async fn guarded_fetch_text_with_headers(
     headers: &[(String, String)],
 ) -> anyhow::Result<(u16, String)> {
     let trimmed = url.trim();
-    let parsed =
-        url::Url::parse(trimmed).map_err(|e| anyhow::anyhow!("invalid URL {trimmed}: {e}"))?;
-    if parsed.scheme() != "https" {
-        anyhow::bail!("web_fetch URL must use https: {trimmed}");
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL has no host: {trimmed}"))?
-        .to_owned();
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let resolved = resolve_guarded_host(&host, port)
+    let (client, _) = guarded_client(trimmed)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(&host, &resolved)
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
     let mut req = client
         .get(trimmed)
         .header("User-Agent", crate::skills_catalog::USER_AGENT);
@@ -32140,7 +33166,7 @@ mod ssrf_host_guard_tests {
 mod agent_egress_screen_tests {
     use super::{
         agent_egress_guard_enabled_from, host_is_allowlisted_in, is_blocked_ip,
-        screen_agent_egress_url,
+        screen_agent_egress_url, screen_egress_url_pinned, ScreenedEgress,
     };
 
     #[test]
@@ -32167,17 +33193,172 @@ mod agent_egress_screen_tests {
     fn allowlist_parsing_is_case_and_whitespace_insensitive() {
         assert!(host_is_allowlisted_in(
             "169.254.169.254",
+            80,
             Some("169.254.169.254")
         ));
         // Whitespace around entries is trimmed; case is ignored.
         assert!(host_is_allowlisted_in(
             "internal.example.com",
+            443,
             Some(" a.com , Internal.Example.COM ,b.com")
         ));
         // Empty entries are ignored and non-members are rejected.
-        assert!(!host_is_allowlisted_in("evil.com", Some("a.com,,b.com")));
-        assert!(!host_is_allowlisted_in("evil.com", Some("")));
-        assert!(!host_is_allowlisted_in("evil.com", None));
+        let evil = |list| host_is_allowlisted_in("evil.com", 443, list);
+        assert!(!evil(Some("a.com,,b.com")));
+        assert!(!evil(Some("")));
+        assert!(!evil(None));
+    }
+
+    /// A `host:port` entry grants THAT port and nothing else.
+    ///
+    /// This variable is shared with `tool_exec`, where the URL being screened comes
+    /// from a model-supplied tool argument. So the developer who allowlists their
+    /// local MCP server must not thereby hand every model-chosen URL the whole
+    /// loopback interface — Core's own admin port included. Host-only entries stay
+    /// wide on purpose (they are the pre-existing format); the narrow form is the
+    /// one the refusal message recommends.
+    #[test]
+    fn allowlist_entry_with_a_port_does_not_grant_other_ports() {
+        // One narrow entry, asked about several targets.
+        let narrow = |host, port| host_is_allowlisted_in(host, port, Some("127.0.0.1:3000"));
+        // The port that was named is granted…
+        assert!(narrow("127.0.0.1", 3000));
+        // …and every other port on the same host is NOT. 7980 is Core's own
+        // surface, which is precisely what a bare-host entry would expose.
+        assert!(!narrow("127.0.0.1", 7980));
+        assert!(!narrow("127.0.0.1", 80));
+        // A port entry does not leak to another host either.
+        assert!(!narrow("10.0.0.1", 3000));
+
+        // Backwards compatibility: a bare host still matches any port.
+        let wide = |port| host_is_allowlisted_in("127.0.0.1", port, Some("127.0.0.1"));
+        assert!(wide(3000));
+        assert!(wide(7980));
+
+        // Mixed lists resolve per entry, and case/whitespace still do not matter.
+        let list = Some(" Internal.Example.COM:8443 , 127.0.0.1 ");
+        assert!(host_is_allowlisted_in("internal.example.com", 8443, list));
+        assert!(!host_is_allowlisted_in("internal.example.com", 443, list));
+        assert!(host_is_allowlisted_in("127.0.0.1", 9999, list));
+
+        // IPv6: the entry is written exactly as the host appears in the URL, so
+        // the bracketed literal is what an operator copies. Both forms behave.
+        let v6 = |port, list| host_is_allowlisted_in("[fc00::1]", port, Some(list));
+        assert!(v6(3000, "[fc00::1]:3000"));
+        assert!(!v6(3001, "[fc00::1]:3000"));
+        assert!(v6(3001, "[fc00::1]"));
+    }
+
+    /// The port-scoped entry has to work through the REAL screen, not just the
+    /// parser — which means the port must be computed before the allowlist check.
+    /// If that ordering ever inverts, this fails while the pure test above passes.
+    #[tokio::test]
+    async fn the_screen_honours_a_port_scoped_allowlist_entry() {
+        let (_, exempt) =
+            screen_egress_url_pinned("http://127.0.0.1:3000/mcp", true, Some("127.0.0.1:3000"))
+                .await
+                .expect("the named port is the supported escape hatch");
+        assert!(
+            matches!(exempt, ScreenedEgress::Exempt),
+            "an allowlisted host:port must report Exempt"
+        );
+
+        // The same entry must NOT unblock Core's own port on the same host.
+        assert!(
+            screen_egress_url_pinned(
+                "http://127.0.0.1:7980/api/health",
+                true,
+                Some("127.0.0.1:3000")
+            )
+            .await
+            .is_err(),
+            "a port-scoped entry must not open the rest of loopback"
+        );
+
+        // The default port is what an entry must name when the URL omits one.
+        assert!(
+            screen_egress_url_pinned("http://127.0.0.1/mcp", true, Some("127.0.0.1:80"))
+                .await
+                .is_ok(),
+            "an omitted port screens as the scheme default"
+        );
+
+        // IPv6, MEASURED not assumed: the entry an operator writes must match what
+        // `Url::host_str` produces, and this pins which spelling that is. If the
+        // bracket handling ever changes, this fails instead of the narrow form
+        // silently degrading to "no entry matches".
+        let (_, v6) =
+            screen_egress_url_pinned("http://[fc00::1]:3000/mcp", true, Some("[fc00::1]:3000"))
+                .await
+                .expect("a bracketed IPv6 literal is written the same way in the allowlist");
+        assert!(matches!(v6, ScreenedEgress::Exempt));
+        assert!(
+            screen_egress_url_pinned("http://[fc00::1]:3001/mcp", true, Some("[fc00::1]:3000"))
+                .await
+                .is_err(),
+            "the port scoping holds for IPv6 too"
+        );
+    }
+
+    /// A credential in the URL must never reach an error string — the `headers`
+    /// map is deliberately never logged, and leaking the same secret through the
+    /// URL instead would make that care pointless.
+    #[test]
+    fn guarded_post_error_redacts_url_credentials() {
+        let dirty = "https://alice:s3cr3t@mcp.example.com/v1/mcp?api_key=AKIAsecret&x=1";
+        let shown = super::redact_url_for_display(dirty);
+        for secret in ["s3cr3t", "AKIAsecret", "alice:", "api_key"] {
+            assert!(
+                !shown.contains(secret),
+                "redacted form still carries {secret:?}: {shown}"
+            );
+        }
+        // …while staying diagnostic: which server, and which path.
+        assert_eq!(
+            shown,
+            "https://<redacted>@mcp.example.com/v1/mcp?<redacted>"
+        );
+
+        // A fragment is treated like a query (it is equally caller-authored text).
+        assert_eq!(
+            super::redact_url_for_display("http://host/p#tok=abc"),
+            "http://host/p?<redacted>"
+        );
+        // No credentials, no query: unchanged, so the common case reads normally.
+        assert_eq!(
+            super::redact_url_for_display("http://127.0.0.1:3000/mcp"),
+            "http://127.0.0.1:3000/mcp"
+        );
+        // Unparseable input is redacted too — that is exactly when the caller
+        // cannot reason about what the string holds.
+        assert!(!super::redact_url_for_display("user:pw@ho st/x?k=v").contains("pw"));
+    }
+
+    /// The same, asserted on a real error message rather than on the helper: a
+    /// blocked endpoint whose URL carries a credential must not print it.
+    #[tokio::test]
+    async fn a_blocked_credentialed_url_is_refused_without_echoing_the_credential() {
+        // Matched rather than `expect_err`: the success type carries a
+        // `ScreenedEgress`, which is deliberately not `Debug` (its addresses are
+        // not error text).
+        let msg = match screen_egress_url_pinned(
+            "http://alice:s3cr3t@169.254.169.254/mcp?api_key=AKIAsecret",
+            true,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("the metadata address must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            !msg.contains("s3cr3t") && !msg.contains("AKIAsecret"),
+            "the refusal leaked a credential: {msg}"
+        );
+        assert!(
+            msg.contains("169.254.169.254"),
+            "the refusal must still name the host it blocked: {msg}"
+        );
     }
 
     #[test]
@@ -32221,6 +33402,69 @@ mod agent_egress_screen_tests {
             assert!(
                 screen_agent_egress_url(url).await.is_err(),
                 "{url} must be blocked by the egress screen"
+            );
+        }
+    }
+
+    /// The screen must hand back the addresses it validated, so an in-process
+    /// fetcher pins to exactly those. A caller that instead re-resolves pins to
+    /// addresses nobody checked; a caller that additionally swallows a failed
+    /// re-resolve as "must have been exempt" is fail-open, and an attacker who
+    /// controls DNS walks straight through it — public answer passes the screen,
+    /// private answer fails the pin, request proceeds unpinned.
+    #[tokio::test]
+    async fn a_screened_host_yields_the_addresses_to_pin_to() {
+        // IP literal: screened directly, no DNS needed, and public so it passes.
+        let (url, screened) = screen_egress_url_pinned("http://93.184.216.34:8080/mcp", true, None)
+            .await
+            .expect("a public IP literal must pass the screen");
+        assert_eq!(url.host_str(), Some("93.184.216.34"));
+        match screened {
+            ScreenedEgress::Pinned(addrs) => {
+                assert!(!addrs.is_empty(), "a validated host must yield addresses");
+                assert!(
+                    addrs.iter().all(|a| a.port() == 8080),
+                    "the pin must carry the URL's port, not a default"
+                );
+            }
+            ScreenedEgress::Exempt => {
+                panic!("a resolved, non-allowlisted host must be Pinned, never Exempt")
+            }
+        }
+    }
+
+    /// Exemption is reported, never inferred. These two are the ONLY ways a caller
+    /// may legitimately skip the pin.
+    #[tokio::test]
+    async fn exemption_is_explicit_for_both_of_its_causes() {
+        let (_, guard_off) = screen_egress_url_pinned("http://127.0.0.1:3000/mcp", false, None)
+            .await
+            .expect("a disabled guard passes everything");
+        assert!(
+            matches!(guard_off, ScreenedEgress::Exempt),
+            "a disabled guard must report Exempt"
+        );
+
+        // The loopback development target, allowlisted by the operator. Resolution
+        // would refuse it by design, so it must short-circuit BEFORE resolving.
+        let (_, allowlisted) =
+            screen_egress_url_pinned("http://127.0.0.1:3000/mcp", true, Some("127.0.0.1"))
+                .await
+                .expect("an allowlisted host is the supported escape hatch");
+        assert!(
+            matches!(allowlisted, ScreenedEgress::Exempt),
+            "an allowlisted host must report Exempt"
+        );
+    }
+
+    /// A blocked host must ERROR, not return `Exempt`. Collapsing refusal into
+    /// exemption is the same fail-open by another route.
+    #[tokio::test]
+    async fn a_blocked_host_errors_rather_than_reporting_exempt() {
+        for url in ["http://169.254.169.254/mcp", "http://10.0.0.1/mcp"] {
+            assert!(
+                screen_egress_url_pinned(url, true, None).await.is_err(),
+                "{url} must be refused outright, never reported as exempt"
             );
         }
     }

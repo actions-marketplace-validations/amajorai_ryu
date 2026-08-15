@@ -86,7 +86,7 @@ pub fn tool_search_def() -> Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural-language description of the capability you need (e.g. 'send a slack message')." },
-                    "kind":  { "type": "string", "enum": ["mcp","builtin","composio","app","core-api","command","skill","any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'any' (default) searches all.", "default": "any" },
+                    "kind":  { "type": "string", "enum": ["mcp","builtin","composio","app","core-api","command","skill","ext-api","any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'ext-api' returns only tools derived from an installed app's OpenAPI document. 'any' (default) searches all.", "default": "any" },
                     "limit": { "type": "integer", "description": "Max results.", "default": 8, "minimum": 1, "maximum": 25 }
                 },
                 "required": ["query"]

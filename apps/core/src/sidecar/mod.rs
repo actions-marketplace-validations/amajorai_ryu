@@ -62,6 +62,51 @@ pub trait Sidecar: Send + Sync {
     fn health_check(&self) -> BoxFuture<HealthStatus>;
     fn is_running(&self) -> bool;
 
+    /// Whether a child this sidecar spawned is held **and** has already exited —
+    /// i.e. the process died on its own rather than being stopped.
+    ///
+    /// Default `false`, which reads as "I hold no child, so I cannot tell" — the
+    /// honest answer for every sidecar that runs in-process, shells out per request,
+    /// or adopted an external server. Only implementations backed by a
+    /// [`process::ProcessHandle`] can answer, and they delegate to it.
+    ///
+    /// The health monitor uses this (not `!is_running()`) to decide a sidecar
+    /// crashed: [`process::ProcessHandle::stop`] takes the child, so a deliberate
+    /// stop — plugin disable, idle scale-to-zero — leaves this `false` and is never
+    /// recorded as a failure. It is also what cancels the monitor, which matters
+    /// because the probe presents the plugin's `RYU_EXT_TOKEN` to whoever holds the
+    /// port every 30s; against a crashed sidecar's vacated port that is a credential
+    /// handed to a stranger with no request from anyone.
+    fn has_exited(&self) -> bool {
+        false
+    }
+
+    /// Release everything that only makes sense while this sidecar's process is
+    /// alive, after the health monitor has positively detected that it **crashed**
+    /// (see [`has_exited`]). Default: nothing to release.
+    ///
+    /// This is the crash-path counterpart of [`Sidecar::stop`]. A clean stop runs
+    /// `stop()` and can tear its own state down there; a crash runs *nothing* — the
+    /// child is simply gone — so any state whose validity is tied to a live process
+    /// would otherwise survive until the next Core boot. For
+    /// [`manifest_sidecar::ManifestSidecar`] that state is the registered model
+    /// provider: `models.json` keeps
+    /// `{ baseUrl: "http://127.0.0.1:<port>/v1", apiKey: "<the plugin's ext token>" }`,
+    /// and Pi dials that `baseUrl` **directly** — never through the ext proxy, so the
+    /// proxy's registration gate cannot help. The moment the crashed child's port is
+    /// free, any other local process that binds it is handed the plugin's minted token
+    /// and every inference request body. The boot-time
+    /// [`crate::pi_config::purge_sidecar_providers`] sweep closes the same lane only
+    /// for an unclean *Core* exit; a crashed child under a healthy Core never reaches
+    /// it.
+    ///
+    /// Contract for implementors, because the caller is the health-monitor loop:
+    /// **must not panic and must not block for long.** Do small, synchronous,
+    /// best-effort cleanup and log failures rather than propagating them.
+    ///
+    /// [`has_exited`]: Sidecar::has_exited
+    fn on_crash_detected(&self) {}
+
     /// OS process id of this sidecar's resident child, when Core spawned and
     /// still owns one. Default `None` — overridden only by sidecars that hold a
     /// child process whose memory/CPU the resource sampler can attribute.
@@ -158,4 +203,15 @@ pub struct SidecarStatus {
     /// [`Self::memory_bytes`]; reads 0 until the second sample lands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<f32>,
+    /// Why this manifest sidecar could not be REGISTERED, when that is what happened
+    /// (e.g. `port 8003 is already in use on the host (bind probe failed: ...)`).
+    ///
+    /// Distinct from `running: false`, which means "registered, process down" — a
+    /// normal state for a lazy sidecar. A registration failure means Core never took
+    /// ownership of the port at all, so the row is SYNTHESIZED: without it the sidecar
+    /// would be missing from this list entirely (there is no `Sidecar` to report on),
+    /// which is exactly how the condition used to be invisible while the app merely
+    /// looked broken. Omitted on every healthy sidecar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }

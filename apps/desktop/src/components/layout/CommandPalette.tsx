@@ -76,6 +76,7 @@ type SettingsSection =
 	| "authorized-apps"
 	| "billing"
 	| "credits"
+	| "usage"
 	| "hardware"
 	| "memory";
 
@@ -637,6 +638,18 @@ export function CommandPalette() {
 			value: "navigate credits wallet balance billing top up",
 			icon: DollarCircleIcon,
 			onSelect: () => handleOpenSettings("credits"),
+		});
+
+		items.push({
+			id: "nav-usage",
+			group: "Navigation",
+			title: "Usage",
+			// The words someone actually types when a charge surprises them, which
+			// are rarely the word "usage".
+			value:
+				"navigate usage statement spend history transactions what did i spend charges cost",
+			icon: DollarCircleIcon,
+			onSelect: () => handleOpenSettings("usage"),
 		});
 
 		items.push(

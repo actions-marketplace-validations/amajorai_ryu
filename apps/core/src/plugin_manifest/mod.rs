@@ -2098,6 +2098,106 @@ mod tests {
         }
     }
 
+    /// Every compiled-in Core-tier `http` tool must already hold the egress grant its
+    /// own URL demands, or it can only ever refuse.
+    ///
+    /// `tool_exec::run_http_tool` runs the egress-grant check FIRST — before the SSRF
+    /// guard, before the gateway, before any socket — and refuses deterministically
+    /// when the owning plugin's grant set lacks `tool:http-egress:<host>`. For a
+    /// Core-tier plugin that grant set IS this manifest's `permission_grants`
+    /// (`sidecar::mcp::effective_tool_grants`), so a manifest that ships an `http`
+    /// runnable without the matching grant ships a tool that has never worked and
+    /// never will. `@ryu/crm` shipped exactly that: eight `core:`-scheme tools behind
+    /// a lone `crm:crud` grant, all eight refusing before the first request.
+    ///
+    /// # Why Core tier only
+    ///
+    /// Community-tier plugins are enforced against the RECORD's Gateway-approved
+    /// grants, not the manifest's self-declaration — a manifest-only test cannot see
+    /// those, and asserting on `permission_grants` there would be asserting on a field
+    /// the enforcement path deliberately ignores. Skipping them keeps this guard
+    /// aligned with what actually gates the call.
+    ///
+    /// # Why the grant is DERIVED, not spelled out
+    ///
+    /// The expected string is computed with the same two production functions the
+    /// enforcement site uses (`resolve_core_url` then `http_egress_domain`, prefixed
+    /// with `GRANT_HTTP_EGRESS_PREFIX`). A literal `tool:http-egress:127.0.0.1` here
+    /// would go stale the moment `core:` expansion or the prefix changes, and would
+    /// quietly assert the wrong thing; deriving it means the test follows the code.
+    /// It is also port-insensitive by construction — `http_egress_domain` keeps only
+    /// the host — so it holds on every profile's shifted Core port.
+    #[test]
+    fn http_backed_runnables_hold_the_grant_their_url_requires() {
+        use crate::tool_exec::{http_egress_domain, resolve_core_url, GRANT_HTTP_EGRESS_PREFIX};
+
+        let wildcard = format!("{GRANT_HTTP_EGRESS_PREFIX}*");
+        let mut checked = 0_usize;
+        let mut core_scheme_seen = 0_usize;
+
+        for manifest in PluginManifestLoader::load_builtins() {
+            if crate::plugins::builtins::tier_for(&manifest.id) != PluginTier::Core {
+                continue;
+            }
+            for entry in manifest.runnables() {
+                if entry.kind != RunnableKind::Tool {
+                    continue;
+                }
+                let Some(config) = entry.config.as_ref() else {
+                    continue;
+                };
+                if config.get("backend").and_then(serde_json::Value::as_str) != Some("http") {
+                    continue;
+                }
+                let Some(url) = config.get("url").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if url.starts_with(crate::tool_exec::CORE_URL_SCHEME) {
+                    core_scheme_seen += 1;
+                }
+                // Resolve exactly as dispatch does: `core:` becomes this profile's
+                // loopback origin, everything else passes through untouched.
+                let resolved = resolve_core_url(url);
+                let domain = http_egress_domain(&resolved).unwrap_or_else(|| {
+                    panic!(
+                        "{}: runnable '{}' has url '{url}' with no parseable host — \
+                         `run_http_tool` refuses it outright",
+                        manifest.id, entry.id
+                    )
+                });
+                let needed = format!("{GRANT_HTTP_EGRESS_PREFIX}{domain}");
+                assert!(
+                    manifest.permission_grants.contains(&needed)
+                        || manifest.permission_grants.contains(&wildcard),
+                    "{}: runnable '{}' calls '{url}' but the manifest does not declare \
+                     '{needed}'. A Core-tier plugin is enforced against its own \
+                     `permission_grants`, so this tool refuses before it makes a request. \
+                     Declared: {:?}",
+                    manifest.id,
+                    entry.id,
+                    manifest.permission_grants
+                );
+                checked += 1;
+            }
+        }
+
+        // Non-vacuity. `load_builtins` drops unparseable manifests silently, and the
+        // whole filter above is string matching on `backend`/`url` — a rename would
+        // leave this test green over zero runnables forever. Both floors are 1 rather
+        // than a hardcoded total so adding or removing a tool does not require
+        // touching a count, which is the maintenance trap this repo keeps hitting.
+        assert!(
+            checked > 0,
+            "no compiled-in Core-tier http tool was examined — the `backend`/`url` \
+             config keys must have been renamed, or the manifests stopped parsing"
+        );
+        assert!(
+            core_scheme_seen > 0,
+            "no `core:`-scheme http tool was examined, so the loopback-grant case this \
+             guard exists for went unchecked"
+        );
+    }
+
     /// Walk `plugins-store` and `apps-store`, returning `(plugin id, ROOT-qualified
     /// package dir, code_file)` for every sandboxed-JS file a package manifest
     /// references.
@@ -3734,7 +3834,7 @@ mod tests {
             imported
                 .mcp_servers
                 .get("sum")
-                .map(|s| s.command.as_str()),
+                .and_then(|s| s.command.as_deref()),
             Some("npx"),
             "the spec mcp.json server should survive translation"
         );
@@ -3839,15 +3939,20 @@ mod tests {
             BUILTIN_MANIFESTS.len()
         );
 
-        // A declared MCP server whose `command` is blank clears no gate and spawns
-        // nothing: `mcp_command_is_present` rejects empty, so the declaration is
-        // dead weight that looks live in the manifest. Generic over all built-ins —
-        // no app is named here.
+        // A declared MCP server that names NEITHER a spawnable command nor a remote
+        // url clears no gate and reaches nothing: `mcp_server_is_present` rejects
+        // both blanks, so the declaration is dead weight that looks live in the
+        // manifest. Asserted through that one probe rather than re-deriving the
+        // rule here, so the manifest invariant and the registration gate can never
+        // disagree about what "declared but unreachable" means. Generic over all
+        // built-ins — no app is named here.
         for m in &manifests {
             for (name, decl) in &m.mcp_servers {
+                let lowered = crate::sidecar::mcp::mcp_server_config_from_decl(decl);
                 assert!(
-                    !decl.command.trim().is_empty(),
-                    "built-in '{}' declares MCP server '{name}' with a blank command",
+                    lowered.command.is_some() || lowered.url.is_some(),
+                    "built-in '{}' declares MCP server '{name}' with neither a command \
+                     nor a url",
                     m.id
                 );
             }

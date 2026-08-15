@@ -9,9 +9,12 @@ import {
 	Dollar01Icon,
 	EyeIcon,
 	GitBranchIcon,
+	GridIcon,
 	Key01Icon,
 	PencilEdit01Icon,
+	PuzzleIcon,
 	Refresh01Icon,
+	Settings01Icon,
 	Share08Icon,
 	Shield01Icon,
 	SparklesIcon,
@@ -25,6 +28,10 @@ import {
 	EvaluatorCatalog,
 	type EvaluatorCatalogItem,
 } from "@ryu/blocks/desktop/evaluator-catalog.tsx";
+import {
+	SettingsIconTile,
+	type SettingsTint,
+} from "@ryu/blocks/desktop/settings-nav.tsx";
 import { Badge } from "@ryu/ui/components/badge.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
@@ -5520,7 +5527,11 @@ function AuditPanel({ target }: { target: ApiTarget }) {
 // ── Run-evals panel (M4 / #180) ──────────────────────────────────────────────
 //
 // v1 scorers: latency / token_efficiency / policy_pass / optional substring_match.
-// LLM-judge scorers and custom dataset upload are explicitly deferred to a follow-up.
+// LLM-judge scorers have since shipped, but not on this panel: it posts
+// `dataset: []`, so every run replays the gateway's built-in 3-case set, and
+// those cases carry no assertions — there is nothing here for a judge to score.
+// Authoring cases with an `llm_judge` rubric, and picking the judge model, is
+// Prompt Studio's surface; this panel still has no dataset import of its own.
 
 function AuditBody({
 	loading,
@@ -5731,7 +5742,7 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
 
 	return (
 		<SettingsSection
-			caption="Replay the built-in 3-case dataset through the gateway pipeline and get a scorecard. v1 scorers: latency, token efficiency, policy pass, and optional substring match. LLM-judge scorers are deferred to a follow-up."
+			caption="Replay the built-in 3-case dataset through the gateway pipeline and get a scorecard: latency, token efficiency, policy pass, and optional substring match. LLM-judge scoring needs a per-case rubric; it lives in Prompt Studio."
 			title="Run evals"
 		>
 			<div className="flex flex-col gap-4 px-3">
@@ -6227,6 +6238,42 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	{ title: "Danger", items: ["danger"] },
 ];
 
+/**
+ * Tile colour per section, kept as one map rather than a field on each of the
+ * nineteen entries so the palette can be read — and kept sane — in one glance.
+ *
+ * The colour carries meaning by GROUP, the way iOS/macOS Settings does it:
+ * money is green, anything destructive or blocking is red, keys and access are
+ * yellow/orange, the model stack is purple, connectivity is blue/teal, reports
+ * are grey. A section with no entry falls back to grey, which is correct for
+ * "infrastructure" and wrong for nothing.
+ */
+const SECTION_TINTS: Partial<Record<GatewaySection, SettingsTint>> = {
+	overview: "blue",
+	workspace: "indigo",
+	permissions: "orange",
+	defaults: "purple",
+	providers: "purple",
+	keys: "yellow",
+	routing: "teal",
+	budgets: "green",
+	guardrails: "red",
+	network: "blue",
+	integrations: "indigo",
+	connections: "teal",
+	"email-alerts": "orange",
+	usage: "green",
+	audit: "gray",
+	evals: "pink",
+	privacy: "blue",
+	access: "orange",
+	storage: "gray",
+	encryption: "indigo",
+	updates: "teal",
+	health: "green",
+	danger: "red",
+};
+
 /** Case-insensitive match of a query against a section's label, hint, keywords. */
 function sectionMatches(
 	section: (typeof GATEWAY_SECTIONS)[number],
@@ -6345,10 +6392,17 @@ export function GatewayDialog({
 		};
 		const toGroup = (group: (typeof GATEWAY_NAV_GROUPS)[number]) => ({
 			title: group.title,
-			items: group.items.filter(visible).map((value) => ({
-				value: value as string,
-				label: GATEWAY_SECTIONS.find((s) => s.value === value)?.label ?? value,
-			})),
+			items: group.items.filter(visible).map((value) => {
+				const meta = GATEWAY_SECTIONS.find((s) => s.value === value);
+				return {
+					value: value as string,
+					label: meta?.label ?? value,
+					// The tile is a landmark, not information: every row still says what
+					// it is in words, so a section with no tint just renders grey.
+					icon: meta?.icon,
+					tint: SECTION_TINTS[value],
+				};
+			}),
 		});
 		const nodeIdx = GATEWAY_NAV_GROUPS.findIndex(
 			(g) => g.title === "This computer"
@@ -6356,16 +6410,25 @@ export function GatewayDialog({
 		const before = GATEWAY_NAV_GROUPS.slice(0, nodeIdx).map(toGroup);
 		const nodeAndAfter = GATEWAY_NAV_GROUPS.slice(nodeIdx).map(toGroup);
 		// App/plugin tabs are matched on their own labels when searching.
-		const entities = query
-			? entityGroups
-					.map((group) => ({
-						title: group.title,
-						items: group.items.filter((item) =>
-							item.label.toLowerCase().includes(query.toLowerCase())
-						),
-					}))
-					.filter((group) => group.items.length > 0)
-			: entityGroups;
+		// They carry no icon of their own — a manifest declares a settings tab, not
+		// a glyph — so both headers get one stand-in tile each, in grey, which reads
+		// as "contributed" rather than pretending to identify the app.
+		const withEntityIcon = (group: (typeof entityGroups)[number]) => ({
+			title: group.title,
+			items: group.items
+				.filter(
+					(item) =>
+						!query || item.label.toLowerCase().includes(query.toLowerCase())
+				)
+				.map((item) => ({
+					...item,
+					icon: group.title === "Apps" ? GridIcon : PuzzleIcon,
+					tint: "gray" as SettingsTint,
+				})),
+		});
+		const entities = entityGroups
+			.map(withEntityIcon)
+			.filter((group) => group.items.length > 0);
 		return [...before, ...entities, ...nodeAndAfter].filter(
 			(group) => group.items.length > 0
 		);
@@ -6600,7 +6663,14 @@ export function GatewayDialog({
 													isActive={section === item.value}
 													onClick={() => setSection(item.value)}
 												>
-													{item.label}
+													{item.icon ? (
+														<SettingsIconTile
+															icon={item.icon}
+															size="sm"
+															tint={item.tint}
+														/>
+													) : null}
+													<span className="truncate">{item.label}</span>
 												</SidebarMenuButton>
 											</SidebarMenuItem>
 										))}
@@ -6623,7 +6693,12 @@ export function GatewayDialog({
 								<SidebarMenu>
 									<SidebarMenuItem>
 										<SidebarMenuButton onClick={handleOpenSettings}>
-											App settings
+											<SettingsIconTile
+												icon={Settings01Icon}
+												size="sm"
+												tint="gray"
+											/>
+											<span className="truncate">App settings</span>
 										</SidebarMenuButton>
 									</SidebarMenuItem>
 								</SidebarMenu>

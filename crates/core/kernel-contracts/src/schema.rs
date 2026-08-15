@@ -898,9 +898,16 @@ pub struct SidecarSpec {
     pub process: SidecarProcess,
 
     /// TCP port the process's HTTP server binds to, used to build the health-check
-    /// URL. The plugin is responsible for choosing a free port — there is **no port
-    /// registry in v1**, so a collision with a built-in (e.g. llama.cpp on 8080) is
-    /// the plugin author's responsibility to avoid.
+    /// URL. The plugin is responsible for choosing a free port: there is **no
+    /// allocator** — this number is what Core tries (after the profile offset), and a
+    /// collision is not repaired by moving anyone.
+    ///
+    /// There *is* a gate. `SidecarManager::claim_port` checks a live-sidecar registry
+    /// and bind-probes the port, and **refuses to start** the sidecar if either fails,
+    /// so a collision with a built-in (e.g. llama.cpp on 8080) surfaces as an app that
+    /// does not come up rather than as silent breakage. Detection, not resolution:
+    /// picking a free port is still the author's job. See `docs/port-allocation.md`
+    /// for the band map.
     pub port: u16,
 
     /// Health-check path on the process's server (default `"/health"`). A GET to
@@ -930,6 +937,16 @@ pub struct SidecarSpec {
     /// until the first proxy/broker hit wakes it on demand; a bounded health-wait
     /// warms it before the request is forwarded. `false` (the default) keeps the
     /// eager behaviour every existing manifest has: started at enable. Additive.
+    ///
+    /// **Ignored when [`provides_provider`] is set.** Such a sidecar is always started
+    /// eagerly, because the two declarations are mutually exclusive by construction: a
+    /// lazy sidecar's only wake trigger is a proxy/broker hit, while a provider's only
+    /// client is Pi, which dials the registered `baseUrl` directly and never traverses
+    /// the proxy. Nothing could ever wake it, and Core's boot purge of stale
+    /// sidecar-owned provider entries would then leave the provider permanently dead.
+    /// The coercion is logged at `info`; the manifest is NOT rejected.
+    ///
+    /// [`provides_provider`]: SidecarSpec::provides_provider
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lazy: bool,
 
@@ -957,6 +974,17 @@ pub struct SidecarSpec {
     /// ext-proxy hop and `/api/host/*`), and the host-RPC vocabulary has no
     /// provider-registration method. Registration is therefore Core-side, driven by
     /// this declaration.
+    ///
+    /// **Declaring this forces eager start and disables idle-stop**, overriding
+    /// [`lazy`] and [`idle_stop_secs`]. Pi bypasses the ext proxy and dials the
+    /// registered `baseUrl` directly, so no request can ever wake this sidecar on
+    /// demand; a sidecar that is never started never reaches the Healthy edge that
+    /// registers it, and one that is scaled to zero drops out of Pi's model list until
+    /// a wake that will never come. Both coercions are logged at `info` rather than
+    /// rejected by the validator, so existing manifests keep loading.
+    ///
+    /// [`lazy`]: SidecarSpec::lazy
+    /// [`idle_stop_secs`]: SidecarSpec::idle_stop_secs
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provides_provider: Option<ProviderRegistrationSpec>,
 }

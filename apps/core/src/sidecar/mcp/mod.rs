@@ -29,7 +29,7 @@ pub mod ui_tool;
 pub mod web_fetch;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use anyhow::{anyhow, Result};
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock as TokioRwLock;
 
-use client::{McpStdioCommand, McpTool};
+use client::{McpHttpEndpoint, McpStdioCommand, McpTarget, McpTool};
 
 use crate::plugin_manifest::PluginManifest;
 use crate::server::conversations::{ConversationStore, Tenancy};
@@ -309,11 +309,36 @@ pub fn global_registry() -> Option<Arc<McpRegistry>> {
     GLOBAL_REGISTRY.get().cloned()
 }
 
-/// A single MCP server as declared in config.
+/// A single MCP server as declared in config — **either** a stdio command to
+/// spawn **or** an HTTP endpoint to POST to.
+///
+/// The two halves are `command`+`args`+`env` and `url`+`headers`; `type`
+/// disambiguates when both or neither are present. `command` is optional
+/// precisely so a remote entry pasted from Cursor / Claude Desktop —
+/// `{"type":"http","url":"https://…","headers":{"Authorization":"Bearer …"}}` —
+/// parses as-is instead of being skipped for a missing required field.
+///
+/// **`headers`, not `env`.** A remote server has no process to inherit
+/// environment, every hosted MCP provider documents auth as a request header, and
+/// the config dialect users copy from writes `headers`. Mapping auth onto `env`
+/// would be a Ryu-only dialect that silently drops the credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).
-    pub command: String,
+    /// Absent for a remote (`url`) entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Transport hint, as written in the config file's `type` key: `stdio`,
+    /// `http`, `streamable-http`, or `sse`. Absent ⇒ inferred from which of
+    /// `command`/`url` is present. See [`McpServerConfig::transport_kind`].
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Endpoint URL for a remote (HTTP) server. Absent for a stdio entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Request headers sent with every call to a remote server (auth lives here).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     /// Arguments passed to the command.
     #[serde(default)]
     pub args: Vec<String>,
@@ -343,17 +368,44 @@ pub struct McpServerConfig {
 /// map). Best-effort: an unreadable/malformed file yields an empty map. Used by
 /// the update check to compare each server's recorded `version` against the
 /// catalog's current version.
+///
+/// "Malformed" means the *file* — a single malformed entry only drops itself, see
+/// [`McpConfigFile::servers`]. The `.ok()` below is what makes that distinction
+/// load-bearing: it turns a failure into an empty map, so before the per-entry
+/// split one remote-shaped entry made the update check believe nothing at all was
+/// installed.
 pub fn installed_configs() -> BTreeMap<String, McpServerConfig> {
     let path = McpRegistry::config_path();
-    std::fs::read_to_string(path)
+    std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<McpConfigFile>(&raw).ok())
-        .map(|f| f.mcp_servers)
+        .map(|f| f.servers(&path))
         .unwrap_or_default()
 }
 
 const fn default_true() -> bool {
     true
+}
+
+impl Default for McpServerConfig {
+    /// A blank stdio entry with `enabled: true` — matching what serde produces
+    /// for `{}`. Same reason as [`McpServerDecl`]'s: the struct now spans two
+    /// transports, and a stdio construction site should not have to name three
+    /// remote fields it never uses.
+    fn default() -> Self {
+        Self {
+            command: None,
+            transport: None,
+            url: None,
+            headers: BTreeMap::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: default_true(),
+            version: None,
+            catalog_id: None,
+        }
+    }
 }
 
 impl McpServerConfig {
@@ -381,17 +433,97 @@ impl McpServerConfig {
     /// (it carries a path separator) and which is Ryu's own `.exe`, never a shim. If
     /// a third constructor ever appears, route it through here rather than widening
     /// that one.
-    fn to_command(&self) -> McpStdioCommand {
-        McpStdioCommand {
-            command: spawn_program_for(&self.command),
-            args: self.args.clone(),
-            env: self
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+    ///
+    /// Now returns an [`McpTarget`], not an `McpStdioCommand`: the same seam, one
+    /// level wider, because a config entry may describe an HTTP endpoint instead
+    /// of a spawnable command. The stdio branch is unchanged and still the only
+    /// path to `Command::new`, so everything above about `spawn_program_for`
+    /// still holds; the HTTP branch never spawns anything at all. `Result`
+    /// because a malformed entry (a `type: "http"` with no `url`, a stdio entry
+    /// with no `command`) can now only be caught here — the file-level parse
+    /// deliberately accepts it so ONE bad entry never costs the user the file.
+    fn to_target(&self) -> Result<McpTarget> {
+        match self.transport_kind() {
+            McpTransportKind::Http => {
+                let url = self
+                    .url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("MCP server declares an http transport but no 'url'")
+                    })?;
+                Ok(McpTarget::Http(McpHttpEndpoint {
+                    url: url.to_owned(),
+                    headers: self.headers.clone(),
+                }))
+            }
+            McpTransportKind::Stdio => {
+                let command = self
+                    .command
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| {
+                        anyhow!("MCP server declares neither a 'command' (stdio) nor a 'url' (http)")
+                    })?;
+                Ok(McpTarget::Stdio(McpStdioCommand {
+                    command: spawn_program_for(command),
+                    args: self.args.clone(),
+                    env: self
+                        .env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                }))
+            }
         }
     }
+
+    /// Which transport this entry describes.
+    ///
+    /// Explicit `type` wins, normalized the same way the MCP registry catalog
+    /// normalizes a package's transport string (`PackageJson::transport_str`):
+    /// lowercased, with `stdio` as the default when unstated. `http`,
+    /// `streamable-http` (the spec's current name) and `sse` (its predecessor,
+    /// still what many published configs say) all mean "reach it over HTTP" here
+    /// — Core POSTs a frame and reads either a JSON or an SSE response body, which
+    /// serves both.
+    ///
+    /// An **unrecognized** `type` is not guessed into a transport: it falls
+    /// through to the same shape inference as an absent one (a `url` ⇒ HTTP,
+    /// otherwise stdio), so a typo'd `"typ": "htp"` with a `url` still works
+    /// rather than trying to spawn a process named after nothing.
+    pub fn transport_kind(&self) -> McpTransportKind {
+        let declared = self
+            .transport
+            .as_deref()
+            .map(|t| t.trim().to_ascii_lowercase());
+        match declared.as_deref() {
+            Some("stdio") => McpTransportKind::Stdio,
+            Some("http" | "streamable-http" | "streamable_http" | "sse") => McpTransportKind::Http,
+            // Unstated or unrecognized: infer from which half is filled in.
+            _ if self.url.as_deref().is_some_and(|u| !u.trim().is_empty()) => McpTransportKind::Http,
+            _ => McpTransportKind::Stdio,
+        }
+    }
+
+    /// The transport name to report to clients (`GET /api/mcp/servers`).
+    fn transport_label(&self) -> &'static str {
+        match self.transport_kind() {
+            McpTransportKind::Http => "http",
+            McpTransportKind::Stdio => "stdio",
+        }
+    }
+}
+
+/// The two transports a config entry can name. Not the same axis as the wire
+/// string — `http`, `streamable-http` and `sse` all collapse to
+/// [`McpTransportKind::Http`] here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransportKind {
+    Stdio,
+    Http,
 }
 
 /// Lower a manifest [`McpServerDecl`] (pure kernel-contracts data) into the
@@ -433,12 +565,20 @@ pub fn mcp_server_config_from_decl(
         .and_then(|var| std::env::var(var).ok())
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty());
+    // A remote declaration has no command to resolve at all — the three rungs
+    // above are about locating a *binary*, and there isn't one. Resolving `None`
+    // through them would produce `Some("")` and a spawn of the empty program.
+    let declared = decl.command.as_deref().unwrap_or("");
     let command = match env_override {
-        Some(overridden) => overridden,
-        None => managed_bin_fallback(&decl.command).unwrap_or_else(|| decl.command.clone()),
+        Some(overridden) => Some(overridden),
+        None if declared.is_empty() => None,
+        None => Some(managed_bin_fallback(declared).unwrap_or_else(|| declared.to_owned())),
     };
     McpServerConfig {
         command,
+        transport: decl.transport.clone(),
+        url: decl.url.clone(),
+        headers: decl.headers.clone(),
         args: decl.args.clone(),
         env: decl.env.clone(),
         description: decl.description.clone(),
@@ -572,7 +712,8 @@ pub fn may_register_mcp_servers(
 ///   name. The probe counts a `.cmd`/`.bat` shim as present ONLY because
 ///   [`spawn_program_for`] rewrites such a command to its full resolved path before
 ///   the spawn, and every registry spawn reaches `client` through
-///   [`McpServerConfig::to_command`], which calls it. Break that rewrite and this gate
+///   [`McpServerConfig::to_target`], which calls it on its stdio branch. Break that
+///   rewrite and this gate
 ///   silently starts passing commands that cannot spawn — the exact failure it exists
 ///   to prevent, for exactly the `npx` case above.
 ///
@@ -601,7 +742,7 @@ pub fn register_manifest_mcp_servers(
     let mut names = Vec::new();
     for (name, decl) in &manifest.mcp_servers {
         let config = mcp_server_config_from_decl(decl);
-        if !mcp_command_is_present(&config.command) {
+        if !mcp_server_is_present(&config) {
             tracing::warn!(
                 "plugin '{}' declares MCP server '{name}' but its command '{}' is not \
                  installed (no `command_env` override, absent from {}, not on PATH, and not \
@@ -609,7 +750,7 @@ pub fn register_manifest_mcp_servers(
                  that cannot spawn. Install it and restart Core (or re-enable the app) to pick \
                  it up",
                 manifest.id,
-                config.command,
+                config.command.as_deref().unwrap_or("(none)"),
                 crate::sidecar::download_manager::bin_dir().display()
             );
             continue;
@@ -664,6 +805,26 @@ pub(crate) fn mcp_command_is_present(command: &str) -> bool {
         return std::path::Path::new(command).is_file();
     }
     crate::sidecar::manifest_sidecar::which_on_path(command).is_some()
+}
+
+/// The transport-aware presence gate: can this config entry be *reached* at all?
+///
+/// [`mcp_command_is_present`] answers that for a stdio entry by probing the
+/// filesystem/`PATH`. There is no equivalent question for a remote entry — an
+/// HTTP endpoint has nothing installed locally — so a remote declaration is
+/// present whenever it names a non-empty `url`.
+///
+/// This distinction is load-bearing, not cosmetic: [`register_manifest_mcp_servers`]
+/// *skips* a server whose command is absent, with only a `warn!`. Left probing
+/// `command`, every remote declaration would take that branch (its command is
+/// `None` ⇒ blank ⇒ absent), so a perfectly valid hosted server would silently
+/// never register and the only trace would be a log line saying its command was
+/// not installed — describing a command it never had.
+pub(crate) fn mcp_server_is_present(cfg: &McpServerConfig) -> bool {
+    match cfg.transport_kind() {
+        McpTransportKind::Http => cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty()),
+        McpTransportKind::Stdio => mcp_command_is_present(cfg.command.as_deref().unwrap_or("")),
+    }
 }
 
 /// The program string `Command::new` must be given so `command` can actually spawn on
@@ -795,6 +956,10 @@ pub fn deregister_manifest_mcp_servers(registry: &McpRegistry, manifest: &Plugin
 
 /// On-disk config shape. Matches the de-facto `mcpServers` map used by Claude
 /// Desktop, Cursor, and friends, so users can paste an existing config.
+///
+/// The entries stay **raw** [`Value`]s here on purpose; [`McpConfigFile::servers`]
+/// lowers them one at a time. See that method for why the file-level parse must
+/// not be the thing that validates individual servers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct McpConfigFile {
     #[serde(
@@ -803,7 +968,48 @@ struct McpConfigFile {
         alias = "servers",
         alias = "mcp_servers"
     )]
-    mcp_servers: BTreeMap<String, McpServerConfig>,
+    raw_servers: BTreeMap<String, Value>,
+}
+
+impl McpConfigFile {
+    /// Lower the raw entries into spawnable [`McpServerConfig`]s **one at a time**,
+    /// skipping (and logging) only the entries that fail to parse.
+    ///
+    /// Per-entry rather than one `BTreeMap<String, McpServerConfig>` deserialize
+    /// because the all-or-nothing shape silently deleted the user's ENTIRE server
+    /// list. [`McpServerConfig::command`] is a required `String`, and the config
+    /// dialect we advertise compatibility with — Claude Desktop's — also carries
+    /// *remote* entries shaped `{"type":"http","url":"https://…"}`, which have no
+    /// `command` at all. Pasting a config with one of those made serde fail the
+    /// whole map, and every caller's error arm is a `warn!` + fall through: the
+    /// user's stdio servers all vanished, the built-ins came back, and the only
+    /// trace was a log line nobody reads.
+    ///
+    /// Keep it per-entry even after the remote (`url`/`transport`/`headers`)
+    /// fields land. The invariant is not "we understand every entry" — it is that
+    /// an entry we *cannot* understand costs the user that one entry, never the
+    /// file. Collapsing this back into a single deserialize re-arms the bug for
+    /// whatever the next unrecognized dialect turns out to be.
+    ///
+    /// `source` is only used to name the offending file in the warning.
+    fn servers(&self, source: &Path) -> BTreeMap<String, McpServerConfig> {
+        let mut servers = BTreeMap::new();
+        for (name, raw) in &self.raw_servers {
+            match serde_json::from_value::<McpServerConfig>(raw.clone()) {
+                Ok(cfg) => {
+                    servers.insert(name.clone(), cfg);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "skipping unparseable MCP server '{name}' in {}: {e} (every other \
+                         server in the file still loaded)",
+                        source.display()
+                    );
+                }
+            }
+        }
+        servers
+    }
 }
 
 /// Which declarative backend an `app__` tool resolved to, tagged onto its
@@ -1027,13 +1233,21 @@ pub struct WidgetResource {
 }
 
 /// Public summary of a registered server for the listing endpoint.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ServerSummary {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
     pub description: Option<String>,
     pub enabled: bool,
+    /// `"stdio"` or `"http"` for a config-declared server; `None` for a built-in
+    /// (whose "command" is a parenthetical label, not a transport at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// The endpoint of a remote server, so the UI can show *where* it points
+    /// instead of an empty `command` column. `None` for stdio and built-ins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Whether the server's command is present on disk. For a built-in like
     /// Ghost whose binary is installed on demand, this is `false` until the
     /// sidecar is installed — the UI uses it to show a "not yet available"
@@ -1080,6 +1294,54 @@ const APP_TOOL_SERVER: &str = "app";
 
 /// Id prefix for app-registered tools (`APP_TOOL_SERVER` + `TOOL_ID_SEP`).
 const APP_TOOL_PREFIX: &str = "app__";
+
+/// Most derived ext-API operations one app may contribute
+/// ([`McpRegistry::set_ext_api_routes`]).
+///
+/// Sized against what a *human* can be expected to have reviewed: an app whose
+/// spec lowers past this is exposing its whole internal surface, not an intended
+/// tool set, and the right fix is to narrow its manifest `http.routes` rather than
+/// to raise this number. 60 is comfortably above every first-party sidecar's
+/// declared surface today, so the cap is a guardrail and not a routine truncation.
+///
+/// **This is the EXPOSURE cap, and it is applied here — after the fetch hook's
+/// declared-route filter — on purpose.** The importer takes a cap too, but capping
+/// there would spend the 60-operation budget on operations that `ext_api::lower` is
+/// about to discard as undeclared: a declared operation could be truncated away while
+/// an undeclared one consumed its slot, and nothing would say so. The hook therefore
+/// imports against a much larger *parse* ceiling and lets this cap truncate the set
+/// that actually survived. See `manifest_sidecar::EXT_API_SPEC_OP_CEILING`.
+const EXT_API_PER_PLUGIN_CAP: usize = 60;
+
+/// Most derived ext-API operations the whole node may hold.
+///
+/// The per-plugin cap alone does not bound the node: derived rows are scored by
+/// the ranker on **every** `tool_search`, so cost is the node-wide total, and
+/// seven installed apps each politely under 60 is already 420 rows per search.
+const EXT_API_GLOBAL_CAP: usize = 400;
+
+/// **The derived-route keying invariant, in one predicate.** Does map key `key`
+/// belong to `plugin_id`?
+///
+/// The map is keyed per SIDECAR (`<plugin_id>/<spec.name>`, from
+/// [`crate::sidecar::manifest_sidecar::namespaced_name`]) because that is the unit the
+/// lowering hook is armed at, while three callers — the plugin-scoped clear, the
+/// plugin-scoped read model, and the per-plugin cap — ask a *plugin* question. This is
+/// the single place that translates between the two; deriving ownership a second way
+/// (parsing the key, or reading it back off `routes[0].plugin_id`) is what would let
+/// the clear and the cap drift apart, and an entry stored with ZERO routes has no
+/// `routes[0]` to read at all.
+///
+/// The trailing slash is the non-obvious half: without it `@ryu/crm` would also claim
+/// `@ryu/crm-plus`'s rows, so disabling one app would silently strip another's tools.
+/// The equality arm covers the degenerate single-contribution form
+/// ([`McpRegistry::set_ext_api_routes`]), where the key IS the plugin id.
+fn ext_api_key_owned_by(key: &str, plugin_id: &str) -> bool {
+    key == plugin_id
+        || (key.len() > plugin_id.len()
+            && key.starts_with(plugin_id)
+            && key.as_bytes()[plugin_id.len()] == b'/')
+}
 
 /// The id under which a Tool runnable is REGISTERED and dispatched — the single
 /// source of truth both registration (server handler) and resolution
@@ -1431,6 +1693,30 @@ pub struct McpRegistry {
     /// These are always returned alongside server-provided tools; no spawning
     /// required. Protected by a `Mutex` because writes are rare.
     app_tools: Mutex<Vec<RegistryTool>>,
+    /// Derived-from-OpenAPI routes ([`crate::ext_api`]), keyed by **sidecar**
+    /// ([`crate::sidecar::manifest_sidecar::namespaced_name`], i.e.
+    /// `<plugin_id>/<spec.name>`). Populated on the sidecar Healthy edge, cleared on
+    /// deactivate/update.
+    ///
+    /// **Deliberately not the `self_api` shape.** `self_api` keeps its routes in a
+    /// process-lifetime `OnceLock` free function, which is right there: they are
+    /// lowered from a compile-time OpenAPI document that cannot change while the
+    /// process runs. These routes come from a *live sidecar* that starts, stops,
+    /// gets upgraded and gets uninstalled, so the same structure here would be a
+    /// stale-forever cache — a tool row still advertised for an app the user
+    /// removed, dispatching into a proxy that now 404s. Hence a `Mutex`ed map with
+    /// an explicit clear, modelled on `app_tools` above.
+    ///
+    /// Keyed at all (not flattened into one `Vec`) precisely so
+    /// [`Self::clear_ext_api_routes`] can be an ownership-scoped removal rather
+    /// than `app_tools`' unowned `retain(|t| t.id != id)` — see
+    /// [`Self::set_ext_api_routes_for_sidecar`] for why that difference is not
+    /// cosmetic, and [`ext_api_key_owned_by`] for the plugin⇄sidecar keying
+    /// invariant that lets a plugin-scoped clear still reach every one of its
+    /// sidecars.
+    ///
+    /// Never held across an `.await`.
+    ext_api: Mutex<BTreeMap<String, Vec<crate::ext_api::ExtApiRoute>>>,
     /// HTTP client for built-in HTTP-backed providers (e.g. Shadow, U15).
     /// Stdio MCP servers don't use it; it's cheap to hold either way.
     http: reqwest::Client,
@@ -1486,6 +1772,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            ext_api: Mutex::new(BTreeMap::new()),
             capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
@@ -1507,6 +1794,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            ext_api: Mutex::new(BTreeMap::new()),
             capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
@@ -1600,11 +1888,19 @@ impl McpRegistry {
     /// diagnostic would claim it is suppressing nothing. This answers "how many
     /// external MCP processes would a normal boot spawn?", which is the number the
     /// user is weighing. A missing or invalid file is zero, not an error.
+    ///
+    /// Counts *lowered* entries ([`McpConfigFile::servers`]), not raw declared
+    /// ones, to keep answering that same question: an entry Core cannot parse
+    /// spawns nothing, so safe mode is not suppressing it and it must not inflate
+    /// the "held back" number. Counting per-entry is also what stops one bad entry
+    /// from reporting **zero** — the whole-file parse used to fail, and the
+    /// diagnostic then claimed safe mode was suppressing nothing at all.
     pub fn user_configured_server_count() -> usize {
-        std::fs::read_to_string(Self::config_path())
+        let path = Self::config_path();
+        std::fs::read_to_string(&path)
             .ok()
             .and_then(|contents| serde_json::from_str::<McpConfigFile>(&contents).ok())
-            .map_or(0, |file| file.mcp_servers.len())
+            .map_or(0, |file| file.servers(&path).len())
     }
 
     /// Built-in MCP servers Core always registers — no config file required.
@@ -1643,6 +1939,7 @@ impl McpRegistry {
             tool_cache: Mutex::new(BTreeMap::new()),
             resource_cache: Mutex::new(HashMap::new()),
             app_tools: Mutex::new(Vec::new()),
+            ext_api: Mutex::new(BTreeMap::new()),
             capability_cache: Mutex::new(None),
             http: reqwest::Client::new(),
             self_build_manifests: None,
@@ -1694,13 +1991,21 @@ impl McpRegistry {
         match std::fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<McpConfigFile>(&contents) {
                 Ok(file) => {
-                    let count = file.mcp_servers.len();
+                    // Per-entry lowering: one entry Core cannot parse must not take
+                    // the user's other servers down with it (see
+                    // `McpConfigFile::servers`). `declared` is logged alongside
+                    // `count` so a skipped entry is visible here, not only in the
+                    // per-entry warning.
+                    let declared = file.raw_servers.len();
+                    let parsed = file.servers(&path);
+                    let count = parsed.len();
                     // Config overrides built-ins on name collision.
-                    for (name, cfg) in file.mcp_servers {
+                    for (name, cfg) in parsed {
                         servers.insert(name, cfg);
                     }
                     tracing::info!(
-                        "loaded {count} MCP server(s) from {}; {} total with built-ins",
+                        "loaded {count} of {declared} MCP server(s) from {}; {} total with \
+                         built-ins",
                         path.display(),
                         servers.len()
                     );
@@ -1918,6 +2223,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             // Built-in wasmtime sandbox provider (M6 / issue #190).
             // Availability reflects whether the feature was compiled in.
@@ -1933,6 +2239,7 @@ impl McpRegistry {
                 ),
                 enabled: sandbox_enabled,
                 available: Some(sandbox_available),
+                ..Default::default()
             },
             ServerSummary {
                 name: notify_tool::SERVER_NAME.to_owned(),
@@ -1943,6 +2250,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: channel_tool::SERVER_NAME.to_owned(),
@@ -1954,6 +2262,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: search_conversations::SERVER_NAME.to_owned(),
@@ -1965,6 +2274,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: threads::SERVER_NAME.to_owned(),
@@ -1978,6 +2288,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: delegate::SERVER_NAME.to_owned(),
@@ -1991,6 +2302,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: orchestrator::SERVER_NAME.to_owned(),
@@ -2005,6 +2317,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: skills_tool::SERVER_NAME.to_owned(),
@@ -2016,6 +2329,7 @@ impl McpRegistry {
                 description: Some(skills_tool::server_description()),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
             ServerSummary {
                 name: ui_tool::SERVER_NAME.to_owned(),
@@ -2028,6 +2342,7 @@ impl McpRegistry {
                 ),
                 enabled: true,
                 available: Some(true),
+                ..Default::default()
             },
         ];
         // Capability facade servers (the swappable layers). Listed unconditionally,
@@ -2043,15 +2358,24 @@ impl McpRegistry {
             description: capability_tools::server_description(name).map(str::to_owned),
             enabled: true,
             available: None,
+            ..Default::default()
         }));
         let servers = self.servers.read().expect("mcp servers RwLock poisoned");
         summaries.extend(servers.iter().map(|(name, cfg)| ServerSummary {
             name: name.clone(),
-            command: cfg.command.clone(),
+            // A remote entry has no command; show the endpoint in the column the
+            // UI already renders rather than an empty cell.
+            command: cfg
+                .command
+                .clone()
+                .or_else(|| cfg.url.clone())
+                .unwrap_or_default(),
             args: cfg.args.clone(),
             description: cfg.description.clone(),
             enabled: cfg.enabled,
-            available: command_availability(&cfg.command),
+            available: config_availability(cfg),
+            transport: Some(cfg.transport_label().to_owned()),
+            url: cfg.url.clone(),
         }));
         summaries
     }
@@ -2077,11 +2401,12 @@ impl McpRegistry {
             let cfg = servers
                 .get(name)
                 .ok_or_else(|| anyhow!("unknown MCP server: {name}"))?;
-            (cfg.enabled, cfg.to_command())
+            (cfg.enabled, cfg.to_target())
         };
         if !enabled {
             return Ok(vec![]);
         }
+        let cmd = cmd?;
 
         if let Some(cached) = self
             .tool_cache
@@ -2332,7 +2657,7 @@ impl McpRegistry {
             if !cfg.enabled {
                 return None;
             }
-            cfg.to_command()
+            cfg.to_target().ok()?
         };
         let contents = client::read_resource(&cmd, uri).await.ok()?;
         let first = contents.into_iter().find(|c| c.text.is_some())?;
@@ -2364,7 +2689,12 @@ impl McpRegistry {
             if !cfg.enabled {
                 return Ok(());
             }
-            cfg.to_command()
+            cfg.to_target()
+        };
+        let Ok(cmd) = cmd else {
+            // A malformed entry lists no widgets rather than failing the prewarm;
+            // `tools_for_server` is where the user sees the real error.
+            return Ok(());
         };
         let resources = client::list_resources(&cmd).await.unwrap_or_default();
         for r in resources {
@@ -2833,6 +3163,117 @@ impl McpRegistry {
                 return Err(anyhow!("{reason}"));
             }
             return crate::self_api::dispatch(&self.http, tool_id, arguments).await;
+        }
+
+        // Derived ext-API tool (`crate::ext_api`): an installed app's OWN HTTP
+        // surface, lowered from its sidecar's OpenAPI document into search-gated
+        // tools. Dispatched by looping back through Core's `/api/ext/<plugin_id>/*`
+        // proxy — never straight at the sidecar port, which would bypass the
+        // enabled-gate, the per-route `RouteAuth`, `enforce_permission_on`, and (via
+        // `run_http_tool`) the egress grant, SSRF pin, budget, DLP scan and audit.
+        //
+        // Placed AFTER the self-API arm and BEFORE the `is_native_app_tool` scan
+        // deliberately: `split_tool_id` puts these on their own `ryu_ext` server, and
+        // reaching the app-tool lane would demand `app_tools` membership plus a
+        // `manifest.runnables` entry that a derived tool has by construction never
+        // had — every call would die with "unknown app tool".
+        //
+        // TENANCY: FAIL-CLOSED, same rule as the self-API arm above.
+        //
+        // The tempting argument for treating this plane as safer is that the
+        // ext-proxy carries an app-declared per-route `permission` gate the self-API
+        // loopback does not. That gate is real code (`ext_proxy::…
+        // enforce_permission_on`), but it is reached only for a route the manifest
+        // ANNOTATED — and of the packaged apps, **zero** annotate any route today
+        // (43 manifests, ~390 declared routes, 0 `permission` fields). So the branch
+        // never fires, and the derived call presents the node's own `RYU_TOKEN` to
+        // Core's protected route with no per-caller authorization behind it: byte for
+        // byte the situation the self-API refusal exists for. On an org-bound node
+        // that is a tenancy bypass — agent A reads every tenant's CRM records — so
+        // derived tools are refused unless the resolved principal is `Unrestricted`
+        // (⟺ the node is unbound/personal, where there is exactly one principal and
+        // the node token IS its boundary).
+        //
+        // The gate to relax when apps do start annotating is this one, and the
+        // condition to relax it on is per-ROUTE (`required_permission_for` returning
+        // `Some`), never per-plane — a plane-wide relaxation would ride in on the
+        // first annotated route and take every unannotated one with it.
+        if server == crate::ext_api::SERVER_NAME {
+            // Allowlist on the fully-qualified id, exactly as the self-API arm does,
+            // so `allow:["ryu_ext"]` authorizes this plane the way `allow:["ryu_api"]`
+            // authorizes that one.
+            if let Some(list) = allowlist {
+                let candidate = RegistryTool::candidate(tool_id, server, tool);
+                if !tool_allowed(&candidate, list) {
+                    return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
+                }
+            }
+            // Only ids a live lowering actually registered — never an arbitrary
+            // `ryu_ext__`-prefixed id a caller invents. This is the plane's
+            // allowlist-of-record: it is also what pins the URL, since the route
+            // (not the caller) supplies the method and the proxy path.
+            let Some(route) = self.ext_api_route(tool_id) else {
+                return Err(anyhow!("unknown derived tool '{tool_id}'"));
+            };
+            let unrestricted = match self.conversations.as_ref() {
+                Some(store) => matches!(
+                    ToolPrincipal::resolve(store, host_conversation_id).await,
+                    ToolPrincipal::Unrestricted
+                ),
+                None => crate::sidecar::control_plane::registered_org().is_none(),
+            };
+            if !unrestricted {
+                return Err(anyhow!(
+                    "app API tools are disabled on shared (org-bound) nodes: the call \
+                     loops back through Core with the node's own credentials rather \
+                     than your scoped identity, and '{}' annotates no per-route \
+                     permission of its own. Use them on a personal node.",
+                    route.plugin_id
+                ));
+            }
+            // The owning plugin's effective grants — the RECORD's Gateway-approved
+            // set for a Community-tier app, the manifest's declaration for a
+            // Core-tier one — resolved through the same `effective_tool_grants` path
+            // the app-tool arm uses. `None` means the owner is no longer an enabled
+            // manifest (a deactivate that raced this call, or an unwired store in a
+            // CLI/test context): refuse rather than dispatch with an empty grant set.
+            let Some(grants) = self.ext_api_effective_grants(&route.plugin_id).await else {
+                return Err(anyhow!(
+                    "derived tool '{tool_id}' has no enabled owning plugin '{}'",
+                    route.plugin_id
+                ));
+            };
+            // Principal + grants + auth header, decided in one pure place so each is
+            // assertable without a socket — see `ext_api::call_plan` for why the
+            // principal must be the OWNING PLUGIN and why the loopback egress grant
+            // is unioned in rather than demanded from 40 manifests.
+            let plan = crate::ext_api::call_plan(&route, &grants);
+            return crate::tool_exec::run_http_tool(
+                &route.url,
+                &route.method,
+                arguments,
+                &route.header_params,
+                &plan.secret_headers,
+                // fail_open=false: an unreachable sidecar must surface as an ERROR, not
+                // as the `http_unavailable` success envelope the fail-open path
+                // returns — which a model reads as "the app answered, there is
+                // nothing there" and narrates as an empty result. It also turns a
+                // 401/403 into that same soft answer, which is precisely the signal
+                // that says the auth header did not land.
+                false,
+                // unwrap_body=false: keep the `{status, body}` envelope. An app's own
+                // 4xx carries the actionable message (validation detail, not-found),
+                // and unwrapping would hand the model a bare body with the status —
+                // the half that says whether it worked — thrown away.
+                false,
+                &Value::Null,
+                &plan.grants,
+                profile_ids,
+                &plan.principal,
+                session_id.as_deref(),
+            )
+            .await
+            .map_err(|e| anyhow!(e));
         }
 
         // App-registered tool (tool-as-Runnable, M3): an enabled plugin re-exposes
@@ -3519,8 +3960,9 @@ impl McpRegistry {
             if !cfg.enabled {
                 return Err(anyhow!("MCP server '{server}' is disabled"));
             }
-            (cfg.enabled, cfg.to_command())
+            (cfg.enabled, cfg.to_target())
         };
+        let cmd = cmd?;
 
         if !enabled {
             return Err(anyhow!("MCP server '{server}' is disabled"));
@@ -3594,6 +4036,217 @@ impl McpRegistry {
         }
         // A removed provider tool can make a capability verb unserveable.
         capability_tools::invalidate();
+    }
+
+    // ── Derived ext-API routes (search-gated, never listed) ───────────────────
+
+    /// Replace the derived ext-API routes owned by one **sidecar** of `plugin_id`.
+    ///
+    /// `sidecar_key` is the manager's namespaced sidecar name
+    /// (`<plugin_id>/<spec.name>`, minted by
+    /// [`crate::sidecar::manifest_sidecar::namespaced_name`]) — never the bare plugin
+    /// id, except in the degenerate wrapper below.
+    ///
+    /// ## Why the key is the SIDECAR and not the plugin
+    ///
+    /// The Healthy-edge hook that calls this is armed **per sidecar**, because
+    /// [`crate::ext_api::lower`] pairs one sidecar's `http.mount` with that same
+    /// sidecar's declared `http.routes`. Keying the map by plugin instead made the two
+    /// halves disagree: the moment a manifest carried two `http` sidecars, whichever
+    /// reported healthy second would *overwrite* the first's rows, and the re-wake
+    /// guard would then answer "already lowered" for the plugin as a whole — so the
+    /// loser never got a second chance and the winner was decided by health-poll
+    /// ordering, i.e. differently on every boot.
+    ///
+    /// That is latent rather than live only by luck: exactly one shipped manifest
+    /// (`finetune`) declares two sidecars today, and its second one happens to carry
+    /// no `http` block, so nothing is armed for it. The next app that declares a
+    /// second HTTP sidecar — or the next time `finetune`'s second sidecar grows one —
+    /// would silently lose half its derived tools with no error anywhere. Keying by
+    /// sidecar removes the failure mode instead of relying on that coincidence.
+    ///
+    /// Dispatch is unaffected: [`Self::ext_api_route`] resolves a *tool id* by
+    /// scanning every entry's rows, never by reconstructing a key.
+    ///
+    /// Called on a manifest sidecar's **Healthy** edge with the output of
+    /// [`crate::ext_api::lower`]; [`Self::clear_ext_api_routes`] is its inverse, on
+    /// deactivate. Replace rather than merge, because a sidecar that came back with
+    /// a new spec must not keep serving rows from the old one.
+    ///
+    /// ## The two caps, and why this plane has them when `app_tools` does not
+    ///
+    /// [`Self::register_app_tool_tagged`] has **neither** a cardinality cap nor an
+    /// ownership check — its removal is a bare `retain(|t| t.id != id)`, so any
+    /// caller can unregister any tool, and any app may register unboundedly many.
+    /// Those are real gaps in that plane; they are survivable there only because
+    /// every app tool is *hand-declared* in a manifest a human wrote, so the count
+    /// is small by construction and the ids are curated.
+    ///
+    /// Neither of those is true here. Nobody curates a derived set: it is one row
+    /// per `operationId` in a document a build tool generated, so a mid-size
+    /// sidecar contributes hundreds of rows with machine names, and every one of
+    /// them is a candidate the ranker must score on every search. So this plane
+    /// does **not** inherit those gaps:
+    ///
+    /// - keyed by owning plugin, so a clear can only ever remove that plugin's own
+    ///   rows — the ownership check `app_tools` lacks;
+    /// - [`EXT_API_PER_PLUGIN_CAP`] bounds a single app's contribution;
+    /// - [`EXT_API_GLOBAL_CAP`] bounds the node-wide total, so N installed apps
+    ///   cannot each sit under the per-plugin cap and still collectively make
+    ///   search quadratically slower.
+    ///
+    /// Both caps **truncate rather than reject**: a partially derived app is still
+    /// useful, an empty one is not, and the surviving prefix is deterministic
+    /// (`lower` mints GET-first in a stable order, so the reads — the safe,
+    /// high-value half — are the half that survives). The global cap is spent
+    /// first-come, which means "app 7 gets 12 of its 60 because apps 1-6 filled the
+    /// budget" is possible and order-dependent. That is accepted deliberately: the
+    /// alternative is a fair-share re-balance that would silently *remove* rows
+    /// from an already-running app whenever an unrelated app woke up, and a tool
+    /// that vanishes mid-session is worse than one that never appeared. Both
+    /// truncations log what they dropped. The per-plugin cap is summed across ALL of
+    /// that plugin's sidecars ([`ext_api_key_owned_by`]), so splitting a surface into
+    /// two sidecars is not a way to buy twice the budget.
+    pub fn set_ext_api_routes_for_sidecar(
+        &self,
+        plugin_id: &str,
+        sidecar_key: &str,
+        routes: Vec<crate::ext_api::ExtApiRoute>,
+    ) {
+        let Ok(mut map) = self.ext_api.lock() else {
+            tracing::warn!("ext_api routes for '{sidecar_key}' dropped: registry mutex poisoned");
+            return;
+        };
+        let mut routes = routes;
+
+        // The per-plugin budget counts this plugin's OTHER sidecars, so the cap stays
+        // a per-app number after the re-key. Excluding this key is deliberate for the
+        // same reason the global sum below excludes it: these rows REPLACE whatever
+        // that sidecar contributed before, so counting the old ones would shrink a
+        // sidecar that fit perfectly well a moment ago, on nothing but a re-wake.
+        let sibling_rows: usize = map
+            .iter()
+            .filter(|(key, _)| {
+                key.as_str() != sidecar_key && ext_api_key_owned_by(key, plugin_id)
+            })
+            .map(|(_, r)| r.len())
+            .sum();
+        let plugin_budget = EXT_API_PER_PLUGIN_CAP.saturating_sub(sibling_rows);
+        if routes.len() > plugin_budget {
+            tracing::warn!(
+                "ext_api: '{sidecar_key}' derived {} operations but '{plugin_id}' has only \
+                 {plugin_budget} of its per-plugin cap of {EXT_API_PER_PLUGIN_CAP} left \
+                 ({sibling_rows} already spent by its other sidecars); keeping the first \
+                 {plugin_budget}",
+                routes.len()
+            );
+            routes.truncate(plugin_budget);
+        }
+
+        // The node-wide budget counts every OTHER entry's rows — this sidecar's
+        // previous rows are about to be replaced, so counting them would make a
+        // re-wake shrink an app that fit perfectly well a moment ago.
+        let others: usize = map
+            .iter()
+            .filter(|(key, _)| key.as_str() != sidecar_key)
+            .map(|(_, r)| r.len())
+            .sum();
+        let remaining = EXT_API_GLOBAL_CAP.saturating_sub(others);
+        if routes.len() > remaining {
+            tracing::warn!(
+                "ext_api: '{sidecar_key}' keeps {remaining} of {} derived operations; the \
+                 node-wide cap of {EXT_API_GLOBAL_CAP} is already {others} full",
+                routes.len()
+            );
+            routes.truncate(remaining);
+        }
+
+        // An empty vec is still STORED, not skipped: the key's presence is what
+        // `has_ext_api_routes_for_sidecar` answers, and a sidecar whose spec
+        // legitimately lowers to zero reachable operations must not be re-lowered on
+        // every Healthy edge for the rest of the session. (A sidecar truncated to zero
+        // by a full budget lands here too, and re-lowering would not win it room.)
+        map.insert(sidecar_key.to_owned(), routes);
+    }
+
+    /// Single-sidecar convenience over [`Self::set_ext_api_routes_for_sidecar`], where
+    /// the key IS the plugin id.
+    ///
+    /// That degenerate form is legal under the keying invariant — `ext_api_key_owned_by`
+    /// matches a key equal to the plugin id as well as one under `<plugin_id>/` — so a
+    /// plugin-scoped clear still reaches it. Kept for callers (and tests) that only ever
+    /// deal with one contribution per app; the production Healthy-edge path uses the
+    /// sidecar-keyed form so two HTTP sidecars cannot overwrite each other.
+    pub fn set_ext_api_routes(&self, plugin_id: &str, routes: Vec<crate::ext_api::ExtApiRoute>) {
+        self.set_ext_api_routes_for_sidecar(plugin_id, plugin_id, routes);
+    }
+
+    /// Drop every derived route owned by `plugin_id` (deactivate/uninstall/update).
+    ///
+    /// **Plugin-scoped on purpose, while the store is sidecar-keyed.** Both call sites
+    /// (`deactivate_plugin`, `update_app_handler`) know only the plugin id, and the
+    /// event they are reacting to — the app is gone, or its manifest changed — retires
+    /// *every* sidecar that app owns. So this sweeps by ownership rather than removing
+    /// one key; a plain `map.remove(plugin_id)` would leave a second sidecar's rows
+    /// searchable and callable for an app that is no longer enabled.
+    ///
+    /// Still ownership-scoped by construction — it cannot reach another app's rows the
+    /// way an id-matching `retain` over one flat bag could. Idempotent.
+    pub fn clear_ext_api_routes(&self, plugin_id: &str) {
+        if let Ok(mut map) = self.ext_api.lock() {
+            map.retain(|key, _| !ext_api_key_owned_by(key, plugin_id));
+        }
+    }
+
+    /// Whether **any** sidecar of `plugin_id` has had its spec lowered in this process.
+    ///
+    /// The read model's question ("does this app contribute derived tools yet"), NOT
+    /// the re-wake guard — see [`Self::has_ext_api_routes_for_sidecar`] for that. Using
+    /// this one at the latch is precisely the bug the sidecar keying exists to fix: it
+    /// answers `true` as soon as the app's *first* HTTP sidecar has lowered, which
+    /// would make every later sidecar of the same app skip its own fetch forever.
+    ///
+    /// True for a plugin whose lowering produced **zero** routes as well — that is
+    /// a completed lowering with an empty result, not a missing one.
+    pub fn has_ext_api_routes(&self, plugin_id: &str) -> bool {
+        self.ext_api
+            .lock()
+            .is_ok_and(|map| map.keys().any(|key| ext_api_key_owned_by(key, plugin_id)))
+    }
+
+    /// Whether THIS sidecar has already had its spec lowered in this process.
+    ///
+    /// **The re-wake guard.** A manifest sidecar can cross into Healthy many times
+    /// in one session (restart, health flap, upgrade), and lowering is not free —
+    /// it fetches and parses the sidecar's OpenAPI document. The Healthy-edge
+    /// handler tests this first and skips the whole fetch when the answer is yes,
+    /// so the work happens once per activation per sidecar rather than once per flap.
+    /// [`Self::clear_ext_api_routes`] on deactivate is what re-arms it — and because
+    /// that clear is plugin-scoped, it re-arms every sidecar of the app at once, which
+    /// is the pairing this two-method split exists to keep straight.
+    ///
+    /// True for a sidecar whose lowering produced **zero** routes as well — that is
+    /// a completed lowering with an empty result, not a missing one, and re-running
+    /// it would produce the same empty result.
+    pub fn has_ext_api_routes_for_sidecar(&self, sidecar_key: &str) -> bool {
+        self.ext_api
+            .lock()
+            .is_ok_and(|map| map.contains_key(sidecar_key))
+    }
+
+    /// Resolve one derived route by its fully-qualified tool id.
+    ///
+    /// Scans every plugin's rows rather than parsing the owner back out of the id:
+    /// the id carries the plugin *slug*, and slugification is lossy (`@ryu/crm` and
+    /// `ryu-crm` both slug to `ryu_crm`), so recovering the key from the id would be
+    /// a guess. The scan is over a bounded set — see the caps on
+    /// [`Self::set_ext_api_routes`].
+    fn ext_api_route(&self, tool_id: &str) -> Option<crate::ext_api::ExtApiRoute> {
+        let map = self.ext_api.lock().ok()?;
+        map.values()
+            .flatten()
+            .find(|r| r.id == tool_id)
+            .cloned()
     }
 
     /// The ENABLED plugin manifests — the candidate set every capability binding is
@@ -3905,6 +4558,44 @@ impl McpRegistry {
         None
     }
 
+    /// The effective grant set of the plugin that OWNS a derived ext-API route, or
+    /// `None` when it is not a currently-enabled manifest.
+    ///
+    /// Resolved live from the manifest store + app-store record on every call rather
+    /// than snapshotted into [`crate::ext_api::ExtApiRoute`] at lowering time. That
+    /// costs a lookup per dispatch and buys the only property that matters here: a
+    /// grant REVOKED after the sidecar went healthy takes effect on the next call.
+    /// A snapshot would keep serving the grants the app held at boot, which is
+    /// precisely the window an operator revokes a grant to close.
+    ///
+    /// `None` is the fail-closed answer for three different situations that all mean
+    /// "no owner right now": the plugin was disabled (its rows should already have
+    /// been cleared — this is the belt to that braces), the manifest is gone, or the
+    /// stores are unwired (CLI/test). The caller refuses on `None`; it must never
+    /// substitute an empty set, because an empty set is not "no grants" to
+    /// [`crate::ext_api::call_plan`] — the loopback egress union would still make the
+    /// call go through.
+    async fn ext_api_effective_grants(
+        &self,
+        plugin_id: &str,
+    ) -> Option<std::collections::HashSet<String>> {
+        let manifests = self.self_build_manifests.as_ref()?;
+        let store = self.self_build_app_store.as_ref()?;
+
+        // Enabled-only, matching `resolve_app_tool_backend` and the hook collector:
+        // an installed-but-disabled plugin owns nothing at dispatch.
+        let record = store
+            .list()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|r| r.id == plugin_id && r.enabled)?;
+
+        let guard = manifests.read().await;
+        let manifest = guard.iter().find(|m| m.id == plugin_id)?;
+        Some(effective_tool_grants(manifest, &record.approved_grants))
+    }
+
     /// Number of registered servers (for diagnostics/tests).
     pub fn len(&self) -> usize {
         self.servers
@@ -4002,6 +4693,25 @@ fn command_availability(command: &str) -> Option<bool> {
     }
 }
 
+/// Transport-aware wrapper around [`command_availability`].
+///
+/// A **remote** entry is `Some(true)` whenever it names a URL: there is nothing
+/// installed locally to look for, so the only honest local answer is "yes, this
+/// is reachable in principle". Whether the endpoint actually answers is a network
+/// question the lazy `tools/list` already surfaces as a real error.
+///
+/// Without this split a remote server would go down `command_availability`'s
+/// path with an empty string: not absolute, no separator ⇒ `None`, i.e. "can't
+/// tell" — which the UI renders as an indefinite state for a server that is
+/// perfectly well defined. `Some(false)` would be worse still ("not yet
+/// available", prompting the user to install something that does not exist).
+fn config_availability(cfg: &McpServerConfig) -> Option<bool> {
+    match cfg.transport_kind() {
+        McpTransportKind::Http => Some(cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty())),
+        McpTransportKind::Stdio => command_availability(cfg.command.as_deref().unwrap_or("")),
+    }
+}
+
 /// The fully-qualified id of the privileged agent-creation tool — gated by
 /// [`AgentCapabilities::can_create_agents`]. Other `agent_builder__*` tools
 /// (read/configure existing agents) are not creation and stay available.
@@ -4089,6 +4799,75 @@ mod tests {
 
     fn sample_tool() -> RegistryTool {
         RegistryTool::candidate("fs__read_file", "fs", "read_file")
+    }
+
+    /// One derived row. Only `id`/`plugin_id` matter to the storage paths below.
+    fn ext_row(id: &str, plugin: &str) -> crate::ext_api::ExtApiRoute {
+        crate::ext_api::ExtApiRoute {
+            id: id.to_owned(),
+            plugin_id: plugin.to_owned(),
+            method: "GET".to_owned(),
+            url: format!("core:/api/ext/{plugin}/thing"),
+            name: "Do the thing".to_owned(),
+            description: None,
+            header_params: vec![],
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn ext_rows(plugin: &str, tag: &str, n: usize) -> Vec<crate::ext_api::ExtApiRoute> {
+        (0..n)
+            .map(|i| ext_row(&format!("ryu_ext__{tag}__get_op_{i:03}"), plugin))
+            .collect()
+    }
+
+    /// Re-keying the store per SIDECAR must not turn the per-PLUGIN exposure cap into
+    /// a per-sidecar one — that would let any app buy an extra 60 searchable rows by
+    /// splitting its surface across two sidecars, which is a manifest edit, not a
+    /// review step. So the budget is summed across the plugin's other sidecars.
+    ///
+    /// The second half is the part that is easy to get wrong in the other direction:
+    /// the sum deliberately EXCLUDES the key being written, because those rows are
+    /// about to be replaced. Counting them would make a sidecar shrink on every
+    /// re-wake (60 → 0) for no reason a user could see.
+    #[tokio::test]
+    async fn the_per_plugin_cap_is_shared_across_a_plugins_sidecars() {
+        let reg = McpRegistry::empty();
+        let alpha = "@ryu/split/alpha";
+        let beta = "@ryu/split/beta";
+        let take = EXT_API_PER_PLUGIN_CAP - 20; // 40 of 60
+
+        reg.set_ext_api_routes_for_sidecar("@ryu/split", alpha, ext_rows("@ryu/split", "a", take));
+        reg.set_ext_api_routes_for_sidecar("@ryu/split", beta, ext_rows("@ryu/split", "b", take));
+
+        let rows = reg
+            .search_scoped("thing", Some(catalog::ToolKind::ExtApi), 1000, &[])
+            .await;
+        assert_eq!(
+            rows.len(),
+            EXT_API_PER_PLUGIN_CAP,
+            "two sidecars of one plugin share ONE per-plugin budget: {} + {} must land on \
+             the cap, not on double it",
+            take,
+            take
+        );
+        // …and the truncation kept the first N of the loser, not zero of it: a sidecar
+        // silently latched at zero rows is the failure this arithmetic can produce.
+        assert!(
+            reg.describe("ryu_ext__b__get_op_000").await.is_some(),
+            "the second sidecar must keep the budget that was left, not be zeroed"
+        );
+        assert!(reg.describe("ryu_ext__a__get_op_000").await.is_some());
+
+        // Re-storing the FIRST sidecar unchanged must not shrink it: its own previous
+        // rows are being replaced and must not be counted against its own budget.
+        reg.set_ext_api_routes_for_sidecar("@ryu/split", alpha, ext_rows("@ryu/split", "a", take));
+        assert!(
+            reg.describe(&format!("ryu_ext__a__get_op_{:03}", take - 1))
+                .await
+                .is_some(),
+            "a re-wake must not shrink a sidecar that fit a moment ago"
+        );
     }
 
     /// Make `ghost`'s manifest declaration RESOLVABLE for the life of the guard.
@@ -4323,12 +5102,13 @@ mod tests {
         mcp_servers.insert(
             server.to_owned(),
             crate::plugin_manifest::McpServerDecl {
-                command: present_command(),
+                command: Some(present_command()),
                 command_env: None,
                 args: vec!["-y".to_owned(), "some-mcp".to_owned()],
                 env: BTreeMap::new(),
                 description: Some("a plugin-declared server".to_owned()),
                 enabled: true,
+                ..Default::default()
             },
         );
         PluginManifest {
@@ -4354,7 +5134,7 @@ mod tests {
         assert!(reg.contains_server("com.test.srv"));
         let servers = reg.servers.read().expect("lock");
         let cfg = servers.get("com.test.srv").expect("server registered");
-        assert_eq!(cfg.command, present_command());
+        assert_eq!(cfg.command.as_deref(), Some(present_command().as_str()));
         assert_eq!(cfg.args, vec!["-y", "some-mcp"]);
     }
 
@@ -4374,12 +5154,13 @@ mod tests {
         manifest.mcp_servers.insert(
             "absent-srv".to_owned(),
             crate::plugin_manifest::McpServerDecl {
-                command: absent.clone(),
+                command: Some(absent.clone()),
                 command_env: None,
                 args: vec!["mcp".to_owned()],
                 env: BTreeMap::new(),
                 description: None,
                 enabled: true,
+                ..Default::default()
             },
         );
 
@@ -4409,7 +5190,7 @@ mod tests {
         let mut manifest = manifest_with_mcp_server("com.test.plugin", "env-srv");
         let decl = manifest.mcp_servers.get_mut("env-srv").expect("decl");
         // A bare name that is definitely not on PATH...
-        decl.command = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
+        decl.command = Some(format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4()));
         // ...redirected by env at a path that exists.
         decl.command_env = Some("RYU_TEST_PROBE_MCP_BIN".to_owned());
         std::env::set_var("RYU_TEST_PROBE_MCP_BIN", present_command());
@@ -4522,7 +5303,7 @@ mod tests {
         let reg = McpRegistry::empty();
         let mut manifest = manifest_with_mcp_server("com.test.plugin", "managed-srv");
         let decl = manifest.mcp_servers.get_mut("managed-srv").expect("decl");
-        decl.command = bin.command.clone();
+        decl.command = Some(bin.command.clone());
         decl.command_env = None;
 
         let names = register_as_enabled(&reg, &manifest, &[GRANT_MCP_SERVER]);
@@ -4534,8 +5315,12 @@ mod tests {
         );
         let servers = reg.servers.read().expect("lock");
         assert_eq!(
-            servers.get("managed-srv").expect("registered").command,
-            bin.path.to_string_lossy(),
+            servers
+                .get("managed-srv")
+                .expect("registered")
+                .command
+                .as_deref(),
+            Some(bin.path.to_string_lossy().as_ref()),
             "the stored command must be the absolute managed-bin path, not the bare name"
         );
     }
@@ -4551,12 +5336,13 @@ mod tests {
         std::env::set_var("RYU_TEST_MANAGED_MCP_BIN", present_command());
 
         let decl = crate::plugin_manifest::McpServerDecl {
-            command: bin.command.clone(),
+            command: Some(bin.command.clone()),
             command_env: Some("RYU_TEST_MANAGED_MCP_BIN".to_owned()),
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: true,
+            ..Default::default()
         };
         let resolved = mcp_server_config_from_decl(&decl).command;
 
@@ -4566,8 +5352,8 @@ mod tests {
         }
 
         assert_eq!(
-            resolved,
-            present_command(),
+            resolved.as_deref(),
+            Some(present_command().as_str()),
             "the env override must win even when the managed bin dir also has the command"
         );
     }
@@ -4590,17 +5376,18 @@ mod tests {
         );
 
         let decl = crate::plugin_manifest::McpServerDecl {
-            command: on_path.to_owned(),
+            command: Some(on_path.to_owned()),
             command_env: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: true,
+            ..Default::default()
         };
 
         assert_eq!(
-            mcp_server_config_from_decl(&decl).command,
-            on_path,
+            mcp_server_config_from_decl(&decl).command.as_deref(),
+            Some(on_path),
             "a PATH-resolved runner must reach Command::new as the bare name"
         );
         assert!(
@@ -4622,17 +5409,18 @@ mod tests {
         );
 
         let decl = crate::plugin_manifest::McpServerDecl {
-            command: exe.clone(),
+            command: Some(exe.clone()),
             command_env: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: true,
+            ..Default::default()
         };
 
         assert_eq!(
-            mcp_server_config_from_decl(&decl).command,
-            exe,
+            mcp_server_config_from_decl(&decl).command.as_deref(),
+            Some(exe.as_str()),
             "a declared path must be passed through verbatim"
         );
     }
@@ -4658,17 +5446,22 @@ mod tests {
         );
 
         let decl = crate::plugin_manifest::McpServerDecl {
-            command: absent.clone(),
+            command: Some(absent.clone()),
             command_env: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: true,
+            ..Default::default()
         };
         let resolved = mcp_server_config_from_decl(&decl).command;
-        assert_eq!(resolved, absent, "nothing to lower to; the bare name stands");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(absent.as_str()),
+            "nothing to lower to; the bare name stands"
+        );
         assert!(
-            !mcp_command_is_present(&resolved),
+            !mcp_command_is_present(resolved.as_deref().unwrap_or_default()),
             "and it must not probe as present"
         );
 
@@ -4819,31 +5612,46 @@ mod tests {
         );
     }
 
-    /// `to_command` is the only seam between a registry config and `Command::new`, and
-    /// on unix it must hand over exactly the configured program — present, absent, or
-    /// path-ish. Whitespace-padded commands are covered separately (they normalize to
-    /// what the probe validated, on every platform).
+    /// `to_target`'s stdio branch is the only seam between a registry config and
+    /// `Command::new`, and on unix it must hand over exactly the configured program —
+    /// present, absent, or path-ish. Whitespace-padded commands are covered separately
+    /// (they normalize to what the probe validated, on every platform).
     #[cfg(not(windows))]
     #[test]
     fn to_command_is_identity_on_unix() {
         let absent = format!("ryu-absent-mcp-{}", uuid::Uuid::new_v4());
         let present = present_command();
-        for command in ["sh", absent.as_str(), present.as_str(), ""] {
+        for command in ["sh", absent.as_str(), present.as_str()] {
             let cfg = McpServerConfig {
-                command: command.to_owned(),
+                command: Some(command.to_owned()),
                 args: vec!["-y".to_owned()],
-                env: BTreeMap::new(),
-                description: None,
-                enabled: true,
-                version: None,
-                catalog_id: None,
+                ..Default::default()
+        };
+            let McpTarget::Stdio(lowered) = cfg.to_target().expect("stdio target") else {
+                panic!("a config with a command must lower to the stdio transport");
             };
             assert_eq!(
-                cfg.to_command().command,
-                command,
+                lowered.command, command,
                 "unix spawn program must be the configured command verbatim"
             );
         }
+
+        // A BLANK command is the one input that is no longer passed through. It
+        // used to lower to an empty program string and fail at `Command::new`
+        // with an opaque ENOENT; now that `command` is optional it is
+        // indistinguishable from "no command declared", so it fails at lowering
+        // with a message that says which half of the entry is missing. That is a
+        // deliberate behaviour change, not identity being broken: nothing can
+        // spawn an empty program, so there is no identity to preserve.
+        let blank = McpServerConfig {
+            command: Some("   ".to_owned()),
+            ..Default::default()
+        };
+        let err = blank.to_target().expect_err("a blank command cannot lower");
+        assert!(
+            err.to_string().contains("'url'"),
+            "the error must point at the two ways to declare a server: {err}"
+        );
     }
 
     /// Uninstall/disable seam: deregistering a manifest's `mcp_servers` removes
@@ -4876,7 +5684,8 @@ mod tests {
         // The payload stands in for the classic one (an unsandboxed shell the next
         // tools/list would spawn) but must RESOLVE, or the grant gate below could pass
         // because the probe skipped the declaration instead.
-        manifest.mcp_servers.get_mut("evil").expect("decl").command = present_command();
+        manifest.mcp_servers.get_mut("evil").expect("decl").command =
+            Some(present_command().to_owned());
         // The plugin DECLARES the grant — self-declaration must not be enough.
         manifest.permission_grants = vec![GRANT_MCP_SERVER.to_owned()];
 
@@ -4940,7 +5749,7 @@ mod tests {
             .mcp_servers
             .get_mut("shared-name")
             .expect("decl")
-            .command = hijack.clone();
+            .command = Some(hijack.clone());
         assert!(
             mcp_command_is_present(&hijack),
             "the takeover payload must resolve, or this test passes for the wrong reason"
@@ -4957,8 +5766,9 @@ mod tests {
             servers
                 .get("shared-name")
                 .expect("still registered")
-                .command,
-            present_command(),
+                .command
+                .as_deref(),
+            Some(present_command().as_str()),
             "the original owner's command must survive the takeover attempt"
         );
     }
@@ -5030,20 +5840,21 @@ mod tests {
     fn command_env_overrides_command_when_set() {
         std::env::set_var("RYU_TEST_MCP_BIN", "/opt/ryu/bin/thing");
         let decl = crate::plugin_manifest::McpServerDecl {
-            command: "thing".to_owned(),
+            command: Some("thing".to_owned()),
             command_env: Some("RYU_TEST_MCP_BIN".to_owned()),
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: true,
+            ..Default::default()
         };
         let cfg = mcp_server_config_from_decl(&decl);
-        assert_eq!(cfg.command, "/opt/ryu/bin/thing");
+        assert_eq!(cfg.command.as_deref(), Some("/opt/ryu/bin/thing"));
         std::env::remove_var("RYU_TEST_MCP_BIN");
 
         // Unset env var ⇒ fall back to the bare command.
         let cfg2 = mcp_server_config_from_decl(&decl);
-        assert_eq!(cfg2.command, "thing");
+        assert_eq!(cfg2.command.as_deref(), Some("thing"));
     }
 
     #[test]
@@ -5110,8 +5921,8 @@ mod tests {
         assert_eq!(entry.args, vec!["mcp".to_owned()]);
         assert!(entry.enabled);
         assert_eq!(
-            entry.command,
-            ghost.program(),
+            entry.command.as_deref(),
+            Some(ghost.program().as_str()),
             "RYU_GHOST_BIN must override the bare `ghost` command"
         );
     }
@@ -5169,7 +5980,7 @@ mod tests {
             .get(AGENTBROWSER_SERVER)
             .expect("agentbrowser declares its MCP server");
         let lowered = mcp_server_config_from_decl(decl);
-        assert_eq!(lowered.command, "npx");
+        assert_eq!(lowered.command.as_deref(), Some("npx"));
         assert_eq!(
             lowered.args,
             vec![
@@ -5239,10 +6050,11 @@ mod tests {
             }
         }"#;
         let file: McpConfigFile = serde_json::from_str(json).unwrap();
-        assert_eq!(file.mcp_servers.len(), 2);
-        assert!(file.mcp_servers["fs"].enabled);
-        assert!(!file.mcp_servers["git"].enabled);
-        let reg = McpRegistry::from_servers(file.mcp_servers);
+        let servers = file.servers(Path::new("mcp.json"));
+        assert_eq!(servers.len(), 2);
+        assert!(servers["fs"].enabled);
+        assert!(!servers["git"].enabled);
+        let reg = McpRegistry::from_servers(servers);
         assert_eq!(reg.len(), 2);
         // Two config servers plus the 10 always-present built-in providers
         // (web_fetch, sandbox, notify, channel, search_conversations, threads,
@@ -5279,6 +6091,159 @@ mod tests {
         assert!(summaries
             .iter()
             .any(|s| s.name == search_conversations::SERVER_NAME));
+    }
+
+    /// The regression this file's per-entry parse exists for: a Claude-Desktop
+    /// remote entry (`{"type":"http","url":…}`, no `command`) pasted next to a
+    /// normal stdio server used to fail the whole-map deserialize, and every
+    /// caller's error arm is a `warn!` + fall through — so the user's entire
+    /// server list silently disappeared.
+    #[test]
+    fn mcp_config_with_one_bad_entry_keeps_the_others() {
+        // The bad entry is a genuinely malformed one (`args` must be an array).
+        // It used to be `{"type":"http","url":…}` — the shape that motivated the
+        // per-entry split — but that entry now PARSES, so keeping it here would
+        // have quietly turned this test into a tautology asserting nothing. The
+        // invariant under test is unchanged and independent of which dialects we
+        // understand: an entry we cannot parse costs the user that ONE entry,
+        // never the file.
+        let json = r#"{
+            "mcpServers": {
+                "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
+                "broken": { "command": "npx", "args": "not-an-array" }
+            }
+        }"#;
+        let file: McpConfigFile = serde_json::from_str(json).expect("file itself must still parse");
+        assert_eq!(
+            file.raw_servers.len(),
+            2,
+            "both entries survive the raw file-level parse"
+        );
+
+        let servers = file.servers(Path::new("mcp.json"));
+        assert_eq!(
+            servers.len(),
+            1,
+            "the unparseable entry costs itself, not the file"
+        );
+        assert_eq!(servers["fs"].command.as_deref(), Some("npx"));
+        assert!(
+            !servers.contains_key("broken"),
+            "the unparseable entry is the one that is dropped"
+        );
+    }
+
+    /// The entry shape a user pastes out of Claude Desktop / Cursor now parses
+    /// AND lowers to a live HTTP target — `command` optional, `type`/`url`/
+    /// `headers` understood, auth carried as a request header rather than being
+    /// silently dropped into `env`.
+    ///
+    /// This is the other half of [`mcp_config_with_one_bad_entry_keeps_the_others`]:
+    /// that test proves an entry we do not understand is survivable; this one
+    /// proves this particular entry is no longer in that category.
+    #[test]
+    fn remote_entry_parses_from_claude_desktop_shape() {
+        let json = r#"{
+            "mcpServers": {
+                "hosted": {
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": { "Authorization": "Bearer sk-test" }
+                }
+            }
+        }"#;
+        let file: McpConfigFile = serde_json::from_str(json).expect("file must parse");
+        let servers = file.servers(Path::new("mcp.json"));
+
+        let cfg = servers.get("hosted").expect("the remote entry must parse");
+        assert!(cfg.command.is_none(), "a remote entry declares no command");
+        assert_eq!(cfg.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(
+            cfg.headers.get("Authorization").map(String::as_str),
+            Some("Bearer sk-test"),
+            "auth must land in `headers`, not be dropped or rerouted to `env`"
+        );
+        assert_eq!(cfg.transport_kind(), McpTransportKind::Http);
+        assert!(cfg.enabled, "`enabled` still defaults to true");
+
+        // It must also be *reachable*, not merely parseable: the presence probe
+        // and the availability report are what decide whether registration keeps
+        // it, and both used to answer "absent" for a server with no command.
+        assert!(
+            mcp_server_is_present(cfg),
+            "a remote entry with a url must probe as present"
+        );
+        assert_eq!(config_availability(cfg), Some(true));
+
+        let McpTarget::Http(endpoint) = cfg.to_target().expect("lowers to a target") else {
+            panic!("a `type: http` entry must lower to the HTTP transport");
+        };
+        assert_eq!(endpoint.url, "https://mcp.example.com/mcp");
+        assert_eq!(
+            endpoint.headers.get("Authorization").map(String::as_str),
+            Some("Bearer sk-test"),
+            "the headers must reach the transport, or the call is unauthenticated"
+        );
+    }
+
+    /// The predecessor spellings resolve to the same transport, and an entry with
+    /// a `url` but no `type` is inferred rather than treated as stdio (which would
+    /// try to spawn a process named after nothing).
+    #[test]
+    fn remote_transport_aliases_and_inference() {
+        for declared in [
+            Some("http"),
+            Some("streamable-http"),
+            Some("sse"),
+            // Unrecognized: falls through to shape inference, which sees the url.
+            Some("htp"),
+            None,
+        ] {
+            let cfg = McpServerConfig {
+                transport: declared.map(str::to_owned),
+                url: Some("https://mcp.example.com/mcp".to_owned()),
+                ..Default::default()
+        };
+            assert_eq!(
+                cfg.transport_kind(),
+                McpTransportKind::Http,
+                "type={declared:?} with a url must select the HTTP transport"
+            );
+        }
+
+        // An explicit `stdio` wins over an incidental url, and a bare command is
+        // still stdio.
+        let stdio = McpServerConfig {
+            command: Some("npx".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(stdio.transport_kind(), McpTransportKind::Stdio);
+
+        // Neither half filled in is a stdio entry with nothing to spawn: it must
+        // fail at lowering, not silently produce an empty-program spawn.
+        let empty = McpServerConfig::default();
+        assert!(empty.to_target().is_err());
+    }
+
+    /// Happy-path guard: the per-entry loop must not become a filter that quietly
+    /// drops fields (or entries) a single deserialize used to carry through.
+    #[test]
+    fn mcp_config_all_valid_entries_still_parse() {
+        let json = r#"{
+            "mcpServers": {
+                "fs": { "command": "npx", "args": ["-y", "server-filesystem"], "description": "files" },
+                "git": { "command": "uvx", "args": ["mcp-server-git"], "enabled": false, "catalog_id": "io.github.git" }
+            }
+        }"#;
+        let file: McpConfigFile = serde_json::from_str(json).expect("file itself must still parse");
+        let servers = file.servers(Path::new("mcp.json"));
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers["fs"].args, vec!["-y", "server-filesystem"]);
+        assert_eq!(servers["fs"].description.as_deref(), Some("files"));
+        assert!(servers["fs"].enabled, "`enabled` still defaults to true");
+        assert!(!servers["git"].enabled);
+        assert_eq!(servers["git"].catalog_id.as_deref(), Some("io.github.git"));
     }
 
     #[test]
@@ -5461,6 +6426,148 @@ mod tests {
             .await
             .expect_err("app→app aliasing must be rejected");
         assert!(err.to_string().contains("invalid target"), "got: {err}");
+    }
+
+    // ── Derived ext-API tool dispatch (`crate::ext_api`) ───────────────────────
+
+    fn derived_route(id: &str, plugin_id: &str) -> crate::ext_api::ExtApiRoute {
+        crate::ext_api::ExtApiRoute {
+            id: id.to_owned(),
+            plugin_id: plugin_id.to_owned(),
+            method: "GET".to_owned(),
+            url: format!("core:/api/ext/{plugin_id}/records"),
+            name: "List records".to_owned(),
+            description: None,
+            header_params: Vec::new(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    /// A `ryu_ext__`-prefixed id that no live lowering registered must be refused,
+    /// never forwarded. The registered set is this plane's allowlist-of-record: it is
+    /// also what pins the URL and the method, so an unmatched id has no destination
+    /// at all and a fallthrough would mean a caller-invented id choosing one.
+    #[tokio::test]
+    async fn derived_tool_dispatch_rejects_unknown_id() {
+        let reg = McpRegistry::empty();
+        let err = reg
+            .call_tool(
+                "ryu_ext__ryu_crm__get_records",
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect_err("an unregistered derived id must be rejected");
+        assert!(
+            err.to_string().contains("unknown derived tool"),
+            "got: {err}"
+        );
+    }
+
+    /// A registered derived id whose owner is not a live enabled manifest is refused
+    /// too — fail-closed rather than dispatching with an empty grant set. An empty set
+    /// is NOT "no grants" here: `ext_api::call_plan` unions the loopback egress grant
+    /// in, so an empty set would still let the call through with no owner behind it.
+    #[tokio::test]
+    async fn derived_tool_dispatch_refuses_when_the_owner_is_not_enabled() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+        );
+        let err = reg
+            .call_tool(
+                "ryu_ext__ryu_crm__get_records",
+                serde_json::json!({}),
+                None,
+            )
+            .await
+            .expect_err("no wired app store means no enabled owner");
+        assert!(
+            err.to_string().contains("no enabled owning plugin"),
+            "got: {err}"
+        );
+    }
+
+    /// The allowlist is enforced on the fully-qualified id, exactly as the self-API
+    /// arm does it, so `allow:["ryu_ext"]` authorizes this plane the way
+    /// `allow:["ryu_api"]` authorizes that one — and an unrelated allowlist denies
+    /// BEFORE the route is even resolved.
+    #[tokio::test]
+    async fn derived_tool_dispatch_enforces_the_allowlist() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+        );
+        let denied = reg
+            .call_tool(
+                "ryu_ext__ryu_crm__get_records",
+                serde_json::json!({}),
+                Some(&["something_else".to_owned()]),
+            )
+            .await
+            .expect_err("absent from the allowlist");
+        assert!(
+            denied.to_string().contains("not in this agent's allowlist"),
+            "got: {denied}"
+        );
+
+        // Allowlisting the server segment passes the gate; the call then fails later,
+        // at the owner resolution, which is what proves the gate was passed.
+        let passed = reg
+            .call_tool(
+                "ryu_ext__ryu_crm__get_records",
+                serde_json::json!({}),
+                Some(&[crate::ext_api::SERVER_NAME.to_owned()]),
+            )
+            .await
+            .expect_err("no enabled owner in this test context");
+        assert!(
+            passed.to_string().contains("no enabled owning plugin"),
+            "allowlisting the server must let dispatch reach owner resolution: {passed}"
+        );
+    }
+
+    /// `clear_ext_api_routes` drops the owner's rows AND re-arms the lowering guard.
+    ///
+    /// This is the registry half of `clear_ext_api_routes_runs_on_deactivate`. The
+    /// call site itself — one statement at the top of `deactivate_plugin`, and one in
+    /// `update_app_handler` — is verified by compilation rather than by a test,
+    /// because reaching either would mean standing up a whole `ServerState` (app
+    /// store, manifest store, realtime bus, sidecar manager); a fake of that shape
+    /// would be asserting about the fake. What is genuinely at risk is the behaviour
+    /// below: that a clear both removes the rows and lets the next Healthy edge
+    /// re-lower, which is what makes a disabled-then-re-enabled app pick up its
+    /// CURRENT spec rather than the one from boot.
+    #[tokio::test]
+    async fn clear_ext_api_routes_runs_on_deactivate() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
+        );
+        reg.set_ext_api_routes(
+            "@ryu/news",
+            vec![derived_route("ryu_ext__ryu_news__get_items", "@ryu/news")],
+        );
+        assert!(reg.has_ext_api_routes("@ryu/crm"));
+
+        reg.clear_ext_api_routes("@ryu/crm");
+        assert!(
+            !reg.has_ext_api_routes("@ryu/crm"),
+            "clearing must re-arm the lowering guard, not just empty the rows"
+        );
+        assert!(
+            reg.ext_api_route("ryu_ext__ryu_crm__get_records").is_none(),
+            "the disabled app's derived tool must stop resolving"
+        );
+        // Ownership-scoped: the map is keyed by owner, so a clear can never reach
+        // another app's rows the way an id-matching `retain` over one flat bag could.
+        assert!(
+            reg.ext_api_route("ryu_ext__ryu_news__get_items").is_some(),
+            "another plugin's derived tools must survive"
+        );
     }
 
     #[tokio::test]

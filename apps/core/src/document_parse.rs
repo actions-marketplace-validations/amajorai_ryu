@@ -555,14 +555,42 @@ async fn wake_provider(
 /// Typed variant: the HTTP handlers below flatten this into a [`Response`]
 /// ([`provider_call`]), the in-process API keeps the reason so a caller can tell a
 /// transport timeout from a refused connection.
+///
+/// Takes `state` for ONE reason: the port is resolved here, from the sidecar manager's
+/// live port claim, and nowhere else in this file. Pinning the derivation to the single
+/// dial site is what keeps this facade from re-growing a second, drifting copy of "which
+/// port is the provider on" — the copy that, when it disagreed with the manager, sent
+/// the document bytes and the provider's minted `ext_token` to whatever unrelated
+/// process happened to hold the manifest's declared port. See
+/// [`crate::sidecar::manager::ForwardTarget`].
 async fn provider_call_typed(
+    state: &ServerState,
     route: &ProviderRoute,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
     timeout: std::time::Duration,
 ) -> Result<(StatusCode, Value), ParseFailure> {
-    let url = format!("http://127.0.0.1:{}{}", route.port, path);
+    let target = state
+        .manager
+        .forward_target(&route.sidecar_name)
+        .map_err(|denied| {
+            tracing::warn!(
+                sidecar = %denied.name(),
+                port = ?denied.port(),
+                "document.parse refused to forward: {}",
+                denied.reason()
+            );
+            ParseFailure::new(
+                ParseFailureReason::ProviderError,
+                format!(
+                    "document parser '{}' is unavailable: {}",
+                    denied.name(),
+                    denied.reason()
+                ),
+            )
+        })?;
+    let url = format!("http://127.0.0.1:{}{}", target.port(), path);
     let token = ext_token(node_token().as_deref(), &route.provider_id);
     let client = reqwest::Client::new();
     let mut req = client
@@ -595,13 +623,14 @@ async fn provider_call_typed(
 /// Route-only: the three HTTP handlers are its only callers, and [`parse_capability`]
 /// (the one that is mounted) is what keeps it live.
 async fn provider_call(
+    state: &ServerState,
     route: &ProviderRoute,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
     timeout: std::time::Duration,
 ) -> Result<(StatusCode, Value), Response> {
-    provider_call_typed(route, method, path, body, timeout)
+    provider_call_typed(state, route, method, path, body, timeout)
         .await
         .map_err(|_| {
             (
@@ -673,10 +702,12 @@ pub async fn parse_capability(State(state): State<ServerState>) -> Response {
     // A lazy provider is deliberately NOT woken to answer this. Every composer mount
     // asks what formats are readable; spinning a 1-2 GB Python process for a picker's
     // `accept` list would make opening a chat expensive. So the probe is a plain
-    // short-timeout call: if the sidecar is asleep nothing is listening on loopback
-    // and it fails immediately, and we answer with the floor plus the provider's
-    // identity. The format list fills in once a real parse has woken it.
+    // short-timeout call: an asleep sidecar is refused by the manager's forward gate
+    // (registered, claim held, process down) before anything is dialed at all, and we
+    // answer with the floor plus the provider's identity. The format list fills in once
+    // a real parse has woken it.
     let probe = provider_call(
+        &state,
         &route,
         reqwest::Method::GET,
         &sibling_path(&route, "capability"),
@@ -855,6 +886,7 @@ pub async fn parse_document(
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
     let (status, value) = match provider_call(
+        &state,
         &route,
         reqwest::Method::POST,
         &route.upstream_path,
@@ -960,6 +992,7 @@ pub async fn parse_job(State(state): State<ServerState>, Path(job_id): Path<Stri
     };
 
     let (status, value) = match provider_call(
+        &state,
         &route,
         reqwest::Method::GET,
         &sibling_path(&route, &format!("jobs/{job_id}")),
@@ -1567,6 +1600,7 @@ pub async fn submit_blob(
     let _activity = hold_provider(state, &route).await?;
 
     let (status, value) = provider_call_typed(
+        state,
         &route,
         reqwest::Method::POST,
         &route.upstream_path,
@@ -1619,6 +1653,7 @@ pub async fn job_outcome(
     let _activity = hold_provider(state, &route).await?;
 
     let (status, value) = provider_call_typed(
+        state,
         &route,
         reqwest::Method::GET,
         &sibling_path(&route, &format!("jobs/{job_id}")),

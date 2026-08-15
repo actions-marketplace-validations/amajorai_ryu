@@ -113,10 +113,62 @@ export interface LedgerEntry {
 	createdAt: string;
 	/** Signed micro-USD change: positive for top-ups, negative for usage. */
 	delta: number;
+	/** Wall-clock ms the billed work took; null when not measured. */
+	durationMs: number | null;
 	id: string;
+	inputTokens: number | null;
+	/** Model or resource id that produced the charge. */
+	model: string | null;
+	orgId: string | null;
+	outputTokens: number | null;
+	/** Upstream provider that served the work. NOT the credit pool. */
+	provider: string | null;
 	reason: LedgerReason;
 	refId: string | null;
+	/** Human-facing label for what the spend was for. */
+	taskLabel: string | null;
+	userId: string | null;
 	walletId: string;
+}
+
+/** One grouped row of a usage breakdown. */
+export interface UsageBreakdownRow {
+	/** Micro-USD SPENT, as a positive number. */
+	amountMicroUsd: number;
+	count: number;
+	key: string | null;
+}
+
+/** Aggregates for a usage window. */
+export interface UsageStats {
+	byModel: UsageBreakdownRow[];
+	byProvider: UsageBreakdownRow[];
+	byReason: UsageBreakdownRow[];
+	creditedMicroUsd: number;
+	durationMs: number;
+	inputTokens: number;
+	outputTokens: number;
+	spentMicroUsd: number;
+	transactions: number;
+}
+
+/** The `/usage` response: one keyset page plus the window's aggregates. */
+export interface UsageResponse {
+	entries: LedgerEntry[];
+	/** Pass back as `before` for the next page; null when exhausted. */
+	nextCursor: string | null;
+	stats: UsageStats;
+}
+
+/** Filters accepted by `/usage`. All optional. */
+export interface UsageFilters {
+	before?: string | null;
+	limit?: number;
+	model?: string | null;
+	provider?: string | null;
+	reason?: string | null;
+	since?: string | null;
+	until?: string | null;
 }
 
 /** The `/wallet` response: balance + a newest-first window of the ledger. */
@@ -228,6 +280,32 @@ export async function fetchWallet(): Promise<WalletResponse> {
 		throw await toError(resp);
 	}
 	return (await resp.json()) as WalletResponse;
+}
+
+/**
+ * One page of the org's usage statement.
+ *
+ * Keyset-paged on `createdAt`: pass the previous response's `nextCursor` as
+ * `before`. Never a page NUMBER — the ledger grows at the head, so an offset page
+ * would repeat a row at every boundary as new spend lands mid-read.
+ */
+export async function fetchUsage(
+	filters: UsageFilters = {}
+): Promise<UsageResponse> {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(filters)) {
+		if (value !== null && value !== undefined && value !== "") {
+			params.set(key, String(value));
+		}
+	}
+	const query = params.toString();
+	const resp = await fetch(`${BASE}/usage${query ? `?${query}` : ""}`, {
+		headers: authHeaders(),
+	});
+	if (!resp.ok) {
+		throw await toError(resp);
+	}
+	return (await resp.json()) as UsageResponse;
 }
 
 /**

@@ -184,6 +184,19 @@ impl McpRegistry {
         let skill_rows = self.skill_candidates(skills_allowlist, &builtins);
         builtins.extend(skill_rows);
 
+        // Derived ext-API routes (an installed app's own OpenAPI surface, lowered
+        // by `crate::ext_api`), merged for the third time on the same terms: one
+        // search door, one ranking pass, `kind`-filtered by `run_search`.
+        //
+        // Appended AFTER the skills merge on purpose. `skill_candidates` takes the
+        // already-built candidate list to drop id collisions, and that de-dup is
+        // about the `skills__*` namespace specifically — a skill slugged `search`
+        // colliding with the `skills__search` tool. Derived ids all live under
+        // `ryu_ext__`, so they can never take part in that collision, and feeding
+        // them in as `already_listed` would only widen a check to a namespace it
+        // has nothing to say about.
+        builtins.extend(self.ext_api_candidates());
+
         // Composio: searchable-not-listed. Pull live, capped, key-gated.
         let want_composio = matches!(kind, None | Some(ToolKind::Composio));
         let composio = if want_composio && super::composio::is_configured() {
@@ -244,6 +257,49 @@ impl McpRegistry {
             .collect()
     }
 
+    /// Every registered derived ext-API route as a catalog descriptor
+    /// ([`ToolKind::ExtApi`]).
+    ///
+    /// ## `kind` is minted here, never inferred
+    ///
+    /// The kind is written **directly** onto each descriptor rather than being
+    /// routed through [`descriptor_from`] / [`kind_for`]. That is not a shortcut,
+    /// it is the point: [`classify_kind`] resolves an unknown server segment to
+    /// [`ToolKind::Mcp`] as its fallthrough, so a derived row that reached it would
+    /// come out labelled `mcp` — with no compile error and no failing test — and
+    /// would then be invisible to `?kind=ext-api` while polluting `?kind=mcp`.
+    /// Teaching `classify_kind` about `ryu_ext` instead would have been the other
+    /// option, but these rows are not `RegistryTool`s at all (they have no server
+    /// map entry, no cache row, no dispatch through `tools_for_server`), so they
+    /// have nothing to gain from the ingest adapter and one specific thing to lose.
+    ///
+    /// Returns empty when no app has lowered a spec (the ordinary case on a node
+    /// with no OpenAPI-carrying sidecars running).
+    fn ext_api_candidates(&self) -> Vec<ToolDescriptor> {
+        let Ok(map) = self.ext_api.lock() else {
+            return Vec::new();
+        };
+        map.values()
+            .flatten()
+            .map(|route| {
+                let (arg_names, arg_descriptions) =
+                    ryu_tool_registry::arg_summary(Some(&route.input_schema));
+                ToolDescriptor {
+                    id: route.id.clone(),
+                    name: route.name.clone(),
+                    description: route.description.clone().unwrap_or_default(),
+                    kind: ToolKind::ExtApi,
+                    arg_names,
+                    arg_descriptions,
+                    score: None,
+                    meta: None,
+                    widget_accessible: false,
+                    output_template: None,
+                }
+            })
+            .collect()
+    }
+
     /// Describe a single catalog entry by its fully-qualified id. Returns `None`
     /// when the id is not found. A `composio__*` id is `shallow:true` with a single
     /// freeform `arguments` row (the action's full schema is not listed).
@@ -284,6 +340,22 @@ impl McpRegistry {
             return crate::self_api::describe(id);
         }
 
+        // Derived ext-API: not in list_all_tools either, so it must be answered
+        // here, above the scan, or an id `search` just returned would describe as
+        // unknown and the search → describe → call path would dead-end.
+        //
+        // Unscoped, unlike the skill branch at the bottom of this method — and that
+        // asymmetry is deliberate, not the same oversight `describe_scoped` exists
+        // to have fixed. A skill has a SECOND, per-agent list (`AgentRecord.skills`)
+        // that a scoped search narrows by, so leaving `describe` unscoped there let
+        // an agent recover withheld metadata by guessing an id. Derived tools have
+        // no such list: they are gated once, at lowering time, on whether the owning
+        // app is compiled in, and every agent on the node sees the same set. There
+        // is nothing here for a guessed id to recover.
+        if crate::ext_api::is_ext_api(id) {
+            return self.describe_ext_api(id);
+        }
+
         if let Some(tool) = self.list_all_tools().await.into_iter().find(|t| t.id == id) {
             return Some(ryu_tool_registry::describe_from_parts(
                 &tool.id,
@@ -297,6 +369,34 @@ impl McpRegistry {
         // Skills: merged into search, absent from `list_all_tools` — so this is the
         // fallback, reached only after every real tool id has failed to match.
         self.describe_skill(id, skills_allowlist)
+    }
+
+    /// Describe a `ryu_ext__…` id as the derived HTTP operation it names.
+    ///
+    /// **This method is why derived tools are callable at all.** Search returns
+    /// name + description only (an L1 row), so a model that finds a derived tool
+    /// learns its arguments exactly one way: by calling `describe` and reading the
+    /// `args` back. Passing the route's `input_schema` through
+    /// [`ryu_tool_registry::describe_from_parts`] — the same call the CoreApi arm
+    /// makes — is what lowers the spec's `properties` into a real
+    /// [`DescribedArg`] list, with `shallow: false` and the full schema echoed in
+    /// `parameters`.
+    ///
+    /// Returning a schema-less `DescribedTool` here would compile, pass a naive
+    /// "describe returns Some" test, and leave every derived tool **discoverable
+    /// and uncallable** — the model can name it and cannot fill it in. That is not
+    /// hypothetical: it is the live state of the app-tool plane, where
+    /// `register_app_tool_tagged` builds rows from `RegistryTool::candidate`, whose
+    /// `input_schema` is `None`.
+    fn describe_ext_api(&self, id: &str) -> Option<DescribedTool> {
+        let route = self.ext_api_route(id)?;
+        Some(ryu_tool_registry::describe_from_parts(
+            &route.id,
+            &route.name,
+            route.description.as_deref().unwrap_or_default(),
+            ToolKind::ExtApi,
+            Some(&route.input_schema),
+        ))
     }
 
     /// Describe a `skills__<slug>` id as the Agent Skill it names.
@@ -800,6 +900,305 @@ mod tests {
         let results = reg.search_scoped("anything", None, 25, &[]).await;
         assert!(results.iter().all(|d| d.kind != ToolKind::Skill));
         assert!(reg.describe("skills__whatever").await.is_none());
+    }
+
+    // ── Derived ext-API routes in the one catalog ────────────────────────────
+
+    /// A derived route with a real two-property schema — the arguments are the
+    /// whole point of `describe_ext_api`, so a schema-less fixture would make
+    /// every assertion below vacuous.
+    fn ext_route(id: &str, plugin: &str, method: &str, name: &str) -> crate::ext_api::ExtApiRoute {
+        crate::ext_api::ExtApiRoute {
+            id: id.to_owned(),
+            plugin_id: plugin.to_owned(),
+            method: method.to_owned(),
+            url: format!("core:/api/ext/{plugin}/contacts"),
+            name: name.to_owned(),
+            description: Some("search the CRM contact book by name".to_owned()),
+            header_params: vec![],
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "free-text contact query" },
+                    "limit": { "type": "integer", "description": "max rows to return" },
+                },
+                "required": ["query"],
+            }),
+        }
+    }
+
+    /// **The load-bearing invariant.** Derived rows are search-gated, never listed:
+    /// per-turn context cost is exactly zero because function definitions come only
+    /// from `tools_for_agent` → `list_all_tools`, and one sidecar can contribute
+    /// hundreds of operations.
+    ///
+    /// The positive control is not decoration. Asserting only the absence would
+    /// pass identically if `set_ext_api_routes` silently stored nothing at all, so
+    /// the same test first proves the row is real and reachable through `search`.
+    #[tokio::test]
+    async fn derived_tools_are_absent_from_list_all_tools() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![ext_route(
+                "ryu_ext__ryu_crm__post_tools_search",
+                "@ryu/crm",
+                "POST",
+                "Search contacts",
+            )],
+        );
+
+        // Positive control: the row exists and search can find it.
+        let found = reg.search_scoped("contact search", None, 25, &[]).await;
+        assert!(
+            found
+                .iter()
+                .any(|d| d.id == "ryu_ext__ryu_crm__post_tools_search"),
+            "the derived row must be reachable through search: {found:?}"
+        );
+
+        // …and is absent from BOTH listing paths — `list_all_tools` itself and the
+        // per-turn `tools_for_agent` view that lowers into function definitions.
+        let listed = reg.list_all_tools().await;
+        assert!(
+            listed.iter().all(|t| !crate::ext_api::is_ext_api(&t.id)),
+            "derived tools must never be listed: {:?}",
+            listed.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
+        let for_agent = reg.tools_for_agent(None).await;
+        assert!(
+            for_agent.iter().all(|t| !crate::ext_api::is_ext_api(&t.id)),
+            "derived tools must never reach an agent's function definitions"
+        );
+    }
+
+    /// Derived rows rank in the one catalog and carry their own plane, so
+    /// `?kind=ext-api` selects them and every other filter excludes them.
+    #[tokio::test]
+    async fn derived_tools_appear_in_search_with_ext_api_kind() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![ext_route(
+                "ryu_ext__ryu_crm__get_api_contacts",
+                "@ryu/crm",
+                "GET",
+                "List contacts",
+            )],
+        );
+        reg.register_app_tool_tagged(
+            "app__crm_sync".into(),
+            "crm_sync".into(),
+            Some("sync the CRM contact book".into()),
+            Some(AppToolBackendTag::Http),
+        );
+
+        let row = reg
+            .search_scoped("contacts", None, 25, &[])
+            .await
+            .into_iter()
+            .find(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts")
+            .expect("the derived route is in the merged catalog");
+        assert_eq!(
+            row.kind,
+            ToolKind::ExtApi,
+            "the row must name its plane — a fallthrough to Mcp would be silent"
+        );
+        assert_eq!(row.name, "List contacts");
+        assert!(
+            row.arg_names.iter().any(|a| a == "query"),
+            "the L1 row still summarises its args: {:?}",
+            row.arg_names
+        );
+
+        let only_ext = reg
+            .search_scoped("contacts", Some(ToolKind::ExtApi), 25, &[])
+            .await;
+        assert!(!only_ext.is_empty());
+        assert!(
+            only_ext.iter().all(|d| d.kind == ToolKind::ExtApi),
+            "kind=ext-api must return derived rows only: {only_ext:?}"
+        );
+        assert!(
+            only_ext
+                .iter()
+                .any(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts")
+        );
+
+        // …and a different filter does not leak them.
+        let only_apps = reg
+            .search_scoped("contacts", Some(ToolKind::App), 25, &[])
+            .await;
+        assert!(
+            only_apps.iter().all(|d| d.kind != ToolKind::ExtApi),
+            "a non-ext-api filter must not leak derived rows: {only_apps:?}"
+        );
+    }
+
+    /// The single most important assertion in this stage: search hands back name +
+    /// description only, so a derived tool is callable ONLY if `describe` returns
+    /// its arguments. A schema-less answer here leaves every derived tool
+    /// discoverable and uncallable.
+    #[tokio::test]
+    async fn describe_ext_api_returns_arguments() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![ext_route(
+                "ryu_ext__ryu_crm__post_tools_search",
+                "@ryu/crm",
+                "POST",
+                "Search contacts",
+            )],
+        );
+
+        let d = reg
+            .describe("ryu_ext__ryu_crm__post_tools_search")
+            .await
+            .expect("a derived route must be describable");
+        assert_eq!(d.kind, ToolKind::ExtApi);
+        assert!(!d.shallow, "the full schema is known, so this is not shallow");
+        assert!(
+            d.parameters.is_some(),
+            "the raw JSON Schema must be echoed for a caller that wants it"
+        );
+
+        let query = d
+            .args
+            .iter()
+            .find(|a| a.name == "query")
+            .expect("describe must lower the schema's properties into args");
+        assert_eq!(query.r#type, "string");
+        assert_eq!(query.description, "free-text contact query");
+        assert!(query.required, "the schema's `required` list must survive");
+        let limit = d
+            .args
+            .iter()
+            .find(|a| a.name == "limit")
+            .expect("every property, not just the first");
+        assert!(!limit.description.is_empty());
+        assert!(!limit.required);
+
+        // The scoped entry point agrees — the skill allowlist has no say here.
+        assert!(reg
+            .describe_scoped(
+                "ryu_ext__ryu_crm__post_tools_search",
+                &["some-unrelated-skill".to_string()]
+            )
+            .await
+            .is_some());
+
+        // An id in the namespace that names no route is simply unknown.
+        assert!(reg.describe("ryu_ext__ryu_crm__get_nope").await.is_none());
+    }
+
+    /// The per-plugin cap truncates rather than rejects, and it keeps the FIRST
+    /// rows — `ext_api::lower` mints GET-first in a documented, deterministic
+    /// order, so "the first N" means the reads survive. Asserting only the count
+    /// would pass under a hash-ordered truncation that drops a different 60 every
+    /// boot.
+    #[tokio::test]
+    async fn set_ext_api_routes_enforces_the_per_plugin_cap() {
+        let over = super::super::EXT_API_PER_PLUGIN_CAP + 25;
+        let routes: Vec<_> = (0..over)
+            .map(|i| {
+                ext_route(
+                    &format!("ryu_ext__ryu_crm__get_op_{i:03}"),
+                    "@ryu/crm",
+                    "GET",
+                    "Contacts operation",
+                )
+            })
+            .collect();
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes("@ryu/crm", routes);
+
+        let rows = reg
+            .search_scoped("contacts", Some(ToolKind::ExtApi), 1000, &[])
+            .await;
+        assert_eq!(
+            rows.len(),
+            super::super::EXT_API_PER_PLUGIN_CAP,
+            "one app may not contribute an unbounded number of derived rows"
+        );
+        // The surviving prefix is the FIRST N, in mint order.
+        assert!(
+            reg.describe("ryu_ext__ryu_crm__get_op_000").await.is_some(),
+            "the first operation must survive truncation"
+        );
+        assert!(
+            reg.describe(&format!(
+                "ryu_ext__ryu_crm__get_op_{:03}",
+                super::super::EXT_API_PER_PLUGIN_CAP - 1
+            ))
+            .await
+            .is_some(),
+            "…through the last one under the cap"
+        );
+        assert!(
+            reg.describe(&format!(
+                "ryu_ext__ryu_crm__get_op_{:03}",
+                super::super::EXT_API_PER_PLUGIN_CAP
+            ))
+            .await
+            .is_none(),
+            "…and the first one over it is dropped, not swapped in"
+        );
+    }
+
+    /// Deactivating one app drops that app's derived rows and NOTHING else. The
+    /// map is keyed by owner precisely so this cannot become `app_tools`' unowned
+    /// `retain(|t| t.id != id)`, where any caller can remove any row.
+    #[tokio::test]
+    async fn clear_ext_api_routes_removes_only_that_plugin() {
+        let reg = McpRegistry::empty();
+        reg.set_ext_api_routes(
+            "@ryu/crm",
+            vec![ext_route(
+                "ryu_ext__ryu_crm__get_api_contacts",
+                "@ryu/crm",
+                "GET",
+                "List contacts",
+            )],
+        );
+        reg.set_ext_api_routes(
+            "@ryu/quests",
+            vec![ext_route(
+                "ryu_ext__ryu_quests__get_api_quests_id",
+                "@ryu/quests",
+                "GET",
+                "Get a quest",
+            )],
+        );
+        assert!(reg.has_ext_api_routes("@ryu/crm"));
+        assert!(reg.has_ext_api_routes("@ryu/quests"));
+
+        reg.clear_ext_api_routes("@ryu/crm");
+
+        assert!(!reg.has_ext_api_routes("@ryu/crm"), "the re-wake guard re-arms");
+        assert!(reg.has_ext_api_routes("@ryu/quests"));
+        assert!(reg
+            .describe("ryu_ext__ryu_crm__get_api_contacts")
+            .await
+            .is_none());
+        assert!(reg
+            .describe("ryu_ext__ryu_quests__get_api_quests_id")
+            .await
+            .is_some());
+        let rows = reg
+            .search_scoped("quest contacts", Some(ToolKind::ExtApi), 25, &[])
+            .await;
+        assert_eq!(rows.len(), 1, "only the other app's rows remain: {rows:?}");
+
+        // Idempotent, and an unknown plugin id is a no-op rather than a wipe.
+        reg.clear_ext_api_routes("@ryu/crm");
+        reg.clear_ext_api_routes("@ryu/never-installed");
+        assert!(reg.has_ext_api_routes("@ryu/quests"));
+
+        // A lowering that produced zero routes still counts as done — the guard is
+        // key presence, so a spec with nothing reachable is not re-fetched forever.
+        reg.set_ext_api_routes("@ryu/empty", vec![]);
+        assert!(reg.has_ext_api_routes("@ryu/empty"));
     }
 
     #[tokio::test]

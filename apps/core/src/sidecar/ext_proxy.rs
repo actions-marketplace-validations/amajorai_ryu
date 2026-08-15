@@ -49,6 +49,7 @@ use std::collections::HashSet;
 
 use crate::plugin_manifest::schema::{HttpProxySpec, RouteAuth, SidecarSpec};
 use crate::server::ServerState;
+use crate::sidecar::manager::{ForwardDenied, ForwardTarget};
 
 /// Env var carrying the per-plugin shared secret Core injects into a sidecar and
 /// re-stamps on every proxied hop / expects on the host-API callback.
@@ -113,6 +114,19 @@ fn fire_lazy_activation(state: &ServerState, event: &'static str) {
 /// forbids baking a `com.ryu.<app>` fallback port into Core, and each of those clients
 /// used to carry its own `*_FALLBACK_PORT` const that could silently drift from the
 /// fixture it claimed to mirror.
+///
+/// **This is a bind-time answer, not a dial-time one — and its callers still treat it as
+/// dial-time.** The ext-proxy, the capability broker and `document.parse` no longer
+/// resolve a port this way: they go through
+/// [`crate::sidecar::SidecarManager::forward_target`], which returns only a port the
+/// manager holds a live claim on, so a sidecar whose `claim_port` was refused is refused
+/// rather than handed Core-authenticated traffic and its minted `RYU_EXT_TOKEN` (see
+/// [`ForwardTarget`]). The legacy `*_client.rs` drivers listed above have NOT been moved
+/// onto that gate; each caches the manifest port at construction and dials it directly
+/// with the plugin's ext token, so each is still exposed to a port squatted before Core
+/// registered the sidecar. Moving them is a follow-on: the fix is to resolve
+/// `forward_target` per call instead of caching a port, not to add a check here (this
+/// function cannot see the manager). Do not add new callers.
 ///
 /// `None` means the manifest does not declare that sidecar at all. For a **built-in**
 /// that is a build-time invariant, not a runtime condition — the fixture is
@@ -185,7 +199,14 @@ fn ct_eq(a: &str, b: &str) -> bool {
 /// because this IS the gate: undeclared paths must 404, and a parametric route like
 /// `/inboxes/:id` must still match `/inboxes/abc` (naive string-equality would 404 it,
 /// naive prefix-match would wrongly admit undeclared subpaths).
-fn route_matches(pattern: &str, actual: &str) -> bool {
+///
+/// `pub(crate)` because [`crate::ext_api::lower`] intersects an app's OpenAPI
+/// operations against the same declared patterns before minting derived tools —
+/// an operation this matcher would 404 must not become a tool that always fails.
+/// It calls THIS function rather than carrying its own copy: two definitions of
+/// one security gate is exactly how the gate quietly stops matching the thing it
+/// was written to catch. Do not re-privatize.
+pub(crate) fn route_matches(pattern: &str, actual: &str) -> bool {
     let pat: Vec<&str> = pattern.trim_start_matches('/').split('/').collect();
     let act: Vec<&str> = actual.trim_start_matches('/').split('/').collect();
     for (i, p) in pat.iter().enumerate() {
@@ -213,12 +234,56 @@ fn route_matches(pattern: &str, actual: &str) -> bool {
 /// forwards — so `/webhook/..%2fadmin` could match a Public `/webhook/*rest` route
 /// (no node bearer) yet reach the sidecar's protected `/admin` mount carrying a valid
 /// Core-stamped bearer. Reject dot-segments up front so match and forward can never
-/// disagree. `%2e`/`%2E` are already decoded to `.` by the axum path extractor.
+/// disagree.
+///
+/// ## Why this decodes in a loop rather than trusting the extractor
+///
+/// This used to compare each segment against the literal `"."`/`".."` on the stated
+/// grounds that "`%2e`/`%2E` are already decoded to `.` by the axum path extractor".
+/// That is true, but it is true exactly ONCE, and one decode is not enough as soon as
+/// a caller controls a path parameter's VALUE rather than the route.
+///
+/// A derived (OpenAPI-generated) tool fills `{id}` from model-supplied arguments, and
+/// `build_rest_request` percent-encodes that value on the way in — so a model that
+/// sends `%2e%2e` produces `%252e%252e`, the extractor decodes it once back to
+/// `%2e%2e`, and a literal comparison against `".."` sees an ordinary-looking segment
+/// and waves it through. The sidecar's own framework then decodes a second time and
+/// gets `..`. The gate and the thing it is guarding disagreed about how many times to
+/// decode, which is the whole bug.
+///
+/// So: decode until it stops changing (bounded — a decode loop on attacker-supplied
+/// input must not be unbounded), and reject if ANY round shows a dot segment.
 fn has_dot_segment(sub_path: &str) -> bool {
-    sub_path
-        .trim_start_matches('/')
-        .split('/')
-        .any(|seg| seg == "." || seg == "..")
+    /// Enough to cover realistic multi-encoding while staying a hard bound. Real
+    /// traffic needs zero or one round; anything approaching this is an attack.
+    const MAX_DECODE_ROUNDS: usize = 8;
+
+    let mut current = sub_path.to_owned();
+    for _ in 0..MAX_DECODE_ROUNDS {
+        if current
+            .trim_start_matches('/')
+            .split('/')
+            .any(|seg| seg == "." || seg == "..")
+        {
+            return true;
+        }
+        let decoded = match urlencoding::decode(&current) {
+            Ok(next) => next.into_owned(),
+            // Not valid percent-encoding (or not UTF-8 once decoded). Nothing
+            // downstream will get a cleaner read of it than we just did.
+            Err(_) => return false,
+        };
+        // A segment separator that only APPEARS after decoding (`..%2fadmin`) means
+        // the pre-decode split never saw the boundary. Re-splitting on the next
+        // round is what catches it.
+        if decoded == current {
+            return false;
+        }
+        current = decoded;
+    }
+    // Still changing after the bound: pathologically nested encoding. Refuse rather
+    // than hand a path we have not finished understanding to the forwarder.
+    true
 }
 
 /// The value captured by a named `:param` of `pattern` from `actual`, or `None` when
@@ -547,9 +612,10 @@ async fn proxy_for_plugin(
     // Resolved while the manifest guard is still held, since the gate below runs
     // after it is dropped.
     let required = required_permission_for(route, sub_path, plugin_id);
-    // Profile-aware: proxy to the SAME shifted port the sidecar was told to bind
-    // (identity in release; +offset in dev/custom profiles).
-    let port = crate::profile::port(spec.port);
+    // NOTE: the manifest supplies mount, routes, auth, permission and max_body_bytes —
+    // everything EXCEPT the port. The port comes from the manager's claim registry
+    // (`forward_target`, below), never from `spec.port`: see [`ForwardTarget`] for why
+    // those two facts must not be allowed to disagree at a hop.
     let mount = http
         .mount
         .as_deref()
@@ -608,44 +674,99 @@ async fn proxy_for_plugin(
         }
     }
 
-    // Wake-on-demand — STRICTLY AFTER the auth and permission checks above, so
-    // neither an unauthenticated nor an unauthorized caller can spin a process
-    // (both also short-circuit before the body is buffered, so a refused caller
-    // cannot push `max_body_bytes` through Core either). Only sidecars that opted
-    // into on-demand start are touched; a plain eager sidecar (mid-download at
-    // enable, say) is left alone.
-    // The `_activity` guard pins it alive + feeds its idle clock while Core sets up the
-    // forward, making idle-stop real for manifest sidecars. NOTE: `forward_to_sidecar`
-    // now returns the response at HEADER-arrival (its body streams), so this guard drops
-    // when headers land, not at body-end. That is fine today because every SSE-serving
-    // sidecar (dashboards/meetings/quests/monitors) is EAGER, so `wake_eligible` is
-    // false here and the guard is `None`. A future lazy/idle-stop sidecar that serves a
-    // long-lived stream would need this guard moved INTO the response `Body` so the idle
-    // reaper cannot kill it mid-stream.
+    // ── Registration gate + wake-on-demand ────────────────────────────────────
+    //
+    // STRICTLY AFTER the auth and permission checks above, so neither an
+    // unauthenticated nor an unauthorized caller can spin a process (both also
+    // short-circuit before the body is buffered, so a refused caller cannot push
+    // `max_body_bytes` through Core either).
+    //
+    // The gate: the ONLY port we will ever dial is one the manager holds a live claim
+    // on for this sidecar. Before this existed, the proxy dialed `profile::port(spec.port)`
+    // unconditionally — so a sidecar whose `claim_port` was REFUSED (an unrelated host
+    // process already listening on the declared port; very plausible in the dev profile's
+    // +1000 band) had Core deliver authenticated requests, full bodies, cookies and the
+    // plugin's minted `RYU_EXT_TOKEN` straight to that foreign process, while the app
+    // merely looked broken. `is_wake_eligible` did NOT cover this: `lazy_registered` is
+    // populated only AFTER a successful claim, so a failed-claim LAZY sidecar reads as
+    // not-wake-eligible and fell through to the same blind forward as an eager one.
+    //
+    // Registration and running-ness are two different questions, which is why the arms
+    // below are not one flat check: `register()` claims the port and inserts into the
+    // registry WITHOUT starting the process, so "registered, claim held, not running" is
+    // the normal resting state of a lazy sidecar and must still wake. Only "never
+    // registered" is a refusal, and it must never wake — `wake_sidecar` would error
+    // "unknown sidecar" anyway, and forwarding is the vulnerability itself.
+    let mut target = match state.manager.forward_target(&sidecar_name) {
+        Ok(t) => Some(t),
+        // Never registered ⇒ refuse without dialing anything. 503 (not 502): 502 in this
+        // file means "we dialed upstream and it failed"; 503 means "we never dialed".
+        Err(denied @ ForwardDenied::NotRegistered { .. }) => return sidecar_unavailable(&denied),
+        // Registered but down. Wake-eligible ⇒ the pre-existing wake path, byte-identical.
+        Err(denied @ ForwardDenied::NotRunning { .. }) => {
+            if !wake_eligible {
+                // Eager sidecar mid-download or crash-looping. It used to forward blind
+                // into whatever holds its port; now it is a clean, named 503.
+                return sidecar_unavailable(&denied);
+            }
+            None
+        }
+    };
+
+    // The `_activity` guard pins the sidecar alive + feeds its idle clock while Core sets
+    // up the forward, making idle-stop real for manifest sidecars. Keyed on
+    // `wake_eligible` — NOT on which arm above we took — because a WARM lazy/idle-stop
+    // sidecar (the `Ok` arm) needs the guard just as much as a cold one, or the idle
+    // reaper can stop it mid-request. NOTE: `forward_to_sidecar` returns the response at
+    // HEADER-arrival (its body streams), so this guard drops when headers land, not at
+    // body-end. That is fine today because every SSE-serving sidecar
+    // (dashboards/meetings/quests/monitors) is EAGER, so `wake_eligible` is false here and
+    // the guard is `None`. A future lazy/idle-stop sidecar that serves a long-lived stream
+    // would need this guard moved INTO the response `Body` so the idle reaper cannot kill
+    // it mid-stream.
     let _activity = if wake_eligible {
-        match state
-            .manager
-            .wake_and_await_healthy(&sidecar_name, WAKE_WARMUP_TIMEOUT)
-            .await
-        {
-            Ok(woke) => {
-                if woke {
-                    // Cold-start edge: register any `onRoute`-gated Runnables.
-                    fire_lazy_activation(state, ACTIVATION_ON_ROUTE);
+        if target.is_none() {
+            match state
+                .manager
+                .wake_and_await_healthy(&sidecar_name, WAKE_WARMUP_TIMEOUT)
+                .await
+            {
+                Ok(woke) => {
+                    if woke {
+                        // Cold-start edge: register any `onRoute`-gated Runnables.
+                        fire_lazy_activation(state, ACTIVATION_ON_ROUTE);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("ext proxy: waking sidecar '{sidecar_name}' failed: {e}");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "sidecar warming up, retry shortly",
+                    )
+                        .into_response();
                 }
             }
-            Err(e) => {
-                tracing::warn!("ext proxy: waking sidecar '{sidecar_name}' failed: {e}");
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "sidecar warming up, retry shortly",
-                )
-                    .into_response();
-            }
+            // Re-resolve rather than trusting the wake's return: a wake that reports
+            // success but leaves the process down must 503, never fall back to a blind
+            // forward at the declared port.
+            target = match state.manager.forward_target(&sidecar_name) {
+                Ok(t) => Some(t),
+                Err(denied) => return sidecar_unavailable(&denied),
+            };
         }
         Some(state.manager.enter_request(&sidecar_name))
     } else {
         None
+    };
+
+    let Some(target) = target else {
+        // Unreachable: every arm above either set `target` or returned. Belt-and-braces
+        // so a future edit that adds an arm fails closed rather than dialing blind.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar unavailable, retry shortly",
+        )
+            .into_response();
     };
 
     let (parts, body) = req.into_parts();
@@ -668,7 +789,7 @@ async fn proxy_for_plugin(
     let upstream_path = upstream_path_for(&mount, sub_path);
 
     forward_to_sidecar(ForwardArgs {
-        port,
+        target,
         upstream_path: &upstream_path,
         query: &query,
         method: parts.method,
@@ -679,12 +800,42 @@ async fn proxy_for_plugin(
     .await
 }
 
+/// The refusal every "I never dialed" path in this file returns: **503**, naming the
+/// sidecar key, the port and the reason.
+///
+/// The 502/503 split is the file's discriminator and is load-bearing for whoever reads
+/// the log: 502 (in [`forward_to_sidecar`]) means Core dialed a sidecar it legitimately
+/// owns and the hop failed; 503 means Core refused to dial at all because it does not own
+/// that port. Naming the port is deliberate — the apps-store manifests publish them
+/// already, so there is nothing to redact, and without it the operator cannot tell which
+/// port to free. The durable half of the diagnosis (why registration failed, visible even
+/// with no request in flight) rides `/api/sidecar/status` as `failure_reason`.
+fn sidecar_unavailable(denied: &ForwardDenied) -> Response {
+    let name = denied.name();
+    let reason = denied.reason();
+    tracing::warn!(sidecar = %name, port = ?denied.port(), "ext proxy refused to forward: {reason}");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "sidecar unavailable",
+            "sidecar": name,
+            "port": denied.port(),
+            "reason": reason,
+        })),
+    )
+        .into_response()
+}
+
 /// Inputs to [`forward_to_sidecar`]. Grouped in a struct so the shared forwarder is
 /// not an 8-argument function (both the inbound ext-proxy and the capability broker
 /// call it).
 struct ForwardArgs<'a> {
-    /// The loopback port of the target sidecar.
-    port: u16,
+    /// Proof that the manager registered this sidecar, still holds its port claim, and
+    /// the owning process is alive — carrying the port to dial. NOT a bare `u16` on
+    /// purpose: the only way to build one is [`crate::sidecar::SidecarManager::forward_target`]
+    /// (outside `#[cfg(test)]`), so no caller can forward to a manifest-derived port that
+    /// some *other* process on the host happens to be squatting on. See [`ForwardTarget`].
+    target: ForwardTarget,
     /// The full upstream path on the sidecar (mount + sub-path, no query).
     upstream_path: &'a str,
     /// The query string including the leading `?`, or empty.
@@ -707,7 +858,7 @@ struct ForwardArgs<'a> {
 /// capability broker so their auth/token/hop-header handling can never drift.
 async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
     let ForwardArgs {
-        port,
+        target,
         upstream_path,
         query,
         method,
@@ -717,6 +868,7 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
     } = args;
 
     let hop_token = ext_token(node_token().as_deref(), hop_plugin_id);
+    let port = target.port();
     let target = format!("http://127.0.0.1:{port}{upstream_path}{query}");
 
     // Connect-timeout only — NO total-request timeout: the response body may be a
@@ -1555,7 +1707,7 @@ async fn host_capability(
     };
     let ProviderRoute {
         provider_id,
-        port,
+        sidecar_name,
         upstream_path,
         wake_name,
     } = match resolved {
@@ -1592,6 +1744,18 @@ async fn host_capability(
         None
     };
 
+    // 3c. The SAME registration gate the inbound proxy applies. The broker used to be
+    //     asymmetric with the proxy here: it derived its wake target from the MANIFEST
+    //     spec (`spec.lazy || idle_stop_secs`), so a lazy provider that failed to
+    //     register at least failed closed on the wake — but an EAGER provider had no
+    //     gate at all and forwarded straight to `profile::port(spec.port)`, squatter or
+    //     not. Resolving through the manager immediately before dialing closes that hole
+    //     and removes the asymmetry: both lanes now dial only a claimed, live port.
+    let target = match state.manager.forward_target(&sidecar_name) {
+        Ok(t) => t,
+        Err(denied) => return sidecar_unavailable(&denied),
+    };
+
     // 4. Forward the caller's body to the provider's route, stamping the PROVIDER's
     //    minted token (forward_to_sidecar overwrites the caller's Authorization).
     let body_bytes = match axum::body::to_bytes(body, DEFAULT_MAX_PROXY_BYTES).await {
@@ -1606,7 +1770,7 @@ async fn host_capability(
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     forward_to_sidecar(ForwardArgs {
-        port,
+        target,
         upstream_path: &upstream_path,
         query: &query,
         method: reqwest::Method::POST,
@@ -1618,9 +1782,12 @@ async fn host_capability(
 }
 
 /// Pin a provider's [`ProvidesEntry`] to a concrete [`ProviderRoute`] (provider id +
-/// port + upstream path + optional wake target) — resolving the named sidecar's port
-/// + mount + route. Returns a 501 for an in-process capability (no sidecar/route) the
+/// sidecar key + upstream path + optional wake target) — resolving the named sidecar's
+/// mount + route. Returns a 501 for an in-process capability (no sidecar/route) the
 /// broker cannot proxy.
+///
+/// Deliberately resolves NO port: the port is the manager's to hand out
+/// ([`crate::sidecar::SidecarManager::forward_target`]), not the manifest's.
 ///
 /// `pub(crate)` for [`crate::document_parse`], which resolves a `document.parse`
 /// provider's sidecar route exactly the way the broker does rather than growing a
@@ -1650,13 +1817,17 @@ pub(crate) fn resolve_provider_route(
         .and_then(|h| h.mount.as_deref())
         .map(|m| m.trim_end_matches('/').to_owned())
         .unwrap_or_default();
+    // The manager key for the provider's sidecar. Computed UNCONDITIONALLY: it is now
+    // the route's only handle on a port (the caller resolves it through
+    // `SidecarManager::forward_target` right before dialing), separate from the
+    // should-I-wake hint below which stays manifest-derived.
+    let sidecar_name = crate::sidecar::manifest_sidecar::namespaced_name(provider_id, &spec.name);
     // If the provider sidecar opted into on-demand start, name it so the broker can
     // wake it before forwarding (the capability-broker analogue of the ext-proxy wake).
-    let wake_name = (spec.lazy || spec.idle_stop_secs.is_some())
-        .then(|| crate::sidecar::manifest_sidecar::namespaced_name(provider_id, &spec.name));
+    let wake_name = (spec.lazy || spec.idle_stop_secs.is_some()).then(|| sidecar_name.clone());
     Ok(ProviderRoute {
         provider_id: provider_id.to_owned(),
-        port: crate::profile::port(spec.port),
+        sidecar_name,
         upstream_path: format!("{mount}{route}"),
         wake_name,
     })
@@ -1669,7 +1840,13 @@ pub(crate) fn resolve_provider_route(
 #[derive(Debug)]
 pub(crate) struct ProviderRoute {
     pub(crate) provider_id: String,
-    pub(crate) port: u16,
+    /// The manager key (`<plugin_id>/<local_name>`) of the provider's sidecar. NOT a
+    /// port: every consumer resolves this through
+    /// [`crate::sidecar::SidecarManager::forward_target`] immediately before dialing, so
+    /// a provider that never registered (its declared port is held by some other host
+    /// process) is refused instead of handed the caller's body and the provider's minted
+    /// token. See [`ForwardTarget`].
+    pub(crate) sidecar_name: String,
     pub(crate) upstream_path: String,
     /// The manager key to wake before forwarding, when the provider sidecar is
     /// lazy/idle-eligible; `None` for an eager provider (forward directly).
@@ -1736,6 +1913,33 @@ mod tests {
         assert!(!has_dot_segment("/files/a.b.c/d"));
         assert!(!has_dot_segment("/inboxes/:id"));
         assert!(!has_dot_segment(""));
+    }
+
+    #[test]
+    fn multiply_encoded_dot_segments_are_rejected() {
+        // The single-decode assumption this guard used to rest on holds for a route,
+        // but not for a path parameter VALUE. A derived tool fills `{id}` from model
+        // arguments and `build_rest_request` percent-encodes on the way in, so a model
+        // sending `%2e%2e` arrives here as `%2e%2e` after the extractor's one decode —
+        // which is not the literal `..`, but the sidecar's own framework will decode it
+        // a second time and get one.
+        assert!(has_dot_segment("/records/%2e%2e/admin"));
+        assert!(has_dot_segment("/records/%2E%2E/admin"));
+        assert!(has_dot_segment("/records/.%2e/admin"));
+        assert!(has_dot_segment("/records/%2e./admin"));
+        // Separator that only appears after decoding: the pre-decode split never saw
+        // a boundary here, so only re-splitting on the next round catches it.
+        assert!(has_dot_segment("/webhook/..%2fadmin"));
+        assert!(has_dot_segment("/webhook/%2e%2e%2fadmin"));
+        // Double-encoded, i.e. what `urlencoding::encode("%2e%2e")` actually produces.
+        assert!(has_dot_segment("/records/%252e%252e/admin"));
+
+        // Encoded content that is NOT a dot segment still passes — the guard must not
+        // become "reject anything with a percent sign", or ordinary ids with spaces or
+        // slashes in them stop working.
+        assert!(!has_dot_segment("/records/my%20record/fields"));
+        assert!(!has_dot_segment("/records/a%2Eb/fields"));
+        assert!(!has_dot_segment("/search/%7Bquery%7D"));
     }
 
     // ── App-declared route permissions ──────────────────────────────────────────
@@ -1965,7 +2169,7 @@ mod tests {
 
         let call = || async {
             forward_to_sidecar(ForwardArgs {
-                port,
+                target: ForwardTarget::for_test(port),
                 upstream_path: "/ok",
                 query: "",
                 method: reqwest::Method::GET,
@@ -2022,7 +2226,7 @@ mod tests {
 
         let src_headers = HeaderMap::new();
         let fut = forward_to_sidecar(ForwardArgs {
-            port,
+            target: ForwardTarget::for_test(port),
             upstream_path: "/events",
             query: "",
             method: reqwest::Method::GET,
@@ -2096,16 +2300,58 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_route_pins_port_mount_and_path() {
+    fn resolve_provider_route_pins_sidecar_mount_and_path() {
         let m = provider_manifest(9099, Some("/api/rag/"));
         let entry = m.provided_capabilities()[0].clone();
         let route = resolve_provider_route(&m, &entry, "@ryu/rag").expect("resolves");
         assert_eq!(route.provider_id, "@ryu/rag");
-        assert_eq!(route.port, 9099);
+        // The route carries the manager KEY, never a manifest-derived port: the port is
+        // resolved through `forward_target` at the hop, so a provider whose declared port
+        // is squatted by another process is refused rather than dialed.
+        assert_eq!(route.sidecar_name, "@ryu/rag/rag");
         // Mount trailing slash trimmed, route appended.
         assert_eq!(route.upstream_path, "/api/rag/query");
         // The fixture provider is eager (lazy=false, no idle_stop_secs) ⇒ no wake.
         assert_eq!(route.wake_name, None);
+    }
+
+    /// The refusal body must be diagnosable on its own: the sidecar key, the port, and
+    /// a reason that distinguishes "another process holds the port" from "our process
+    /// is down". And it must be 503, never 502 — 502 in this file is reserved for "we
+    /// dialed a sidecar we own and the hop failed", which is a different instruction to
+    /// whoever is reading the log.
+    #[tokio::test]
+    async fn refusal_is_a_503_naming_the_sidecar_port_and_reason() {
+        let not_registered = ForwardDenied::NotRegistered {
+            name: "@ryu/monitors/ryu-monitors".to_owned(),
+            declared_port: Some(8003),
+        };
+        let resp = sidecar_unavailable(&not_registered);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "sidecar unavailable");
+        assert_eq!(v["sidecar"], "@ryu/monitors/ryu-monitors");
+        assert_eq!(v["port"], 8003);
+        assert!(
+            v["reason"]
+                .as_str()
+                .unwrap()
+                .contains("held by another process"),
+            "the not-registered reason must name the actual cause: {v}"
+        );
+
+        // The other arm is a DIFFERENT reason — a status panel (and a human) must be
+        // able to tell "someone else owns this port" from "our own process crashed".
+        let dead = ForwardDenied::NotRunning {
+            name: "@ryu/monitors/ryu-monitors".to_owned(),
+            port: 8003,
+        };
+        let resp = sidecar_unavailable(&dead);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["reason"].as_str().unwrap().contains("not running"));
     }
 
     #[test]
@@ -2207,7 +2453,7 @@ mod tests {
 
         let src_headers = HeaderMap::new();
         let resp = forward_to_sidecar(ForwardArgs {
-            port,
+            target: ForwardTarget::for_test(port),
             upstream_path: &upstream_path_for("/api/x", "/"),
             query: "",
             method: reqwest::Method::GET,

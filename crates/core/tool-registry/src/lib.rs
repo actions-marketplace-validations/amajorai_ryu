@@ -86,6 +86,23 @@ pub enum ToolKind {
     /// makes the allowlist arm below, and Core's refusal path, work without a
     /// bespoke lookup.
     Skill,
+    /// A tool **derived** from an app sidecar's OpenAPI document: one row per
+    /// operation, generated at ingest from the document's `operationId`s.
+    ///
+    /// That derivation is the whole distinction from [`ToolKind::App`]. An `App`
+    /// row is a runnable the app author hand-declared in `manifest.json` and
+    /// chose to expose; an `ExtApi` row exists merely because the sidecar's spec
+    /// described an endpoint. Nobody curated the set, so it is typically large,
+    /// machine-named (`get_api_users`), and covers every endpoint the sidecar
+    /// serves — which is why [`ToolDescriptor::matches_allowlist`] admits these
+    /// by fully-qualified id only, and why Core's approval policy treats a
+    /// non-GET one as risky on its own.
+    ///
+    /// Explicit rename so the wire value is the hyphenated `ext-api` (the
+    /// `rename_all = "lowercase"` default would be `extapi`), matching the
+    /// `core-api` precedent above.
+    #[serde(rename = "ext-api")]
+    ExtApi,
 }
 
 impl ToolKind {
@@ -107,6 +124,7 @@ impl ToolKind {
         ToolKind::CoreApi,
         ToolKind::Command,
         ToolKind::Skill,
+        ToolKind::ExtApi,
     ];
 
     /// The canonical wire spelling — the value [`ToolKind::parse_filter`] round-trips
@@ -123,6 +141,7 @@ impl ToolKind {
             ToolKind::CoreApi => "core-api",
             ToolKind::Command => "command",
             ToolKind::Skill => "skill",
+            ToolKind::ExtApi => "ext-api",
         }
     }
 
@@ -139,6 +158,10 @@ impl ToolKind {
             "core-api" | "core_api" | "coreapi" => Some(ToolKind::CoreApi),
             "command" => Some(ToolKind::Command),
             "skill" | "skills" => Some(ToolKind::Skill),
+            // Same hyphen/underscore/no-sep tolerance as `core-api`, for the same
+            // reason: the canonical spelling is hyphenated but callers reach for
+            // whichever separator their own code uses.
+            "ext-api" | "ext_api" | "extapi" => Some(ToolKind::ExtApi),
             _ => None, // "any" or unknown
         }
     }
@@ -201,8 +224,31 @@ impl ToolDescriptor {
     /// including ones outside that agent's skill allowlist — which `skills__load`
     /// will still refuse. See `McpRegistry::search_scoped` for where the skill
     /// allowlist *is* applied and which plane still misses it.
+    ///
+    /// ## [`ToolKind::ExtApi`]: the fully-qualified id and nothing else
+    ///
+    /// Derived rows get the strictest form of all — never the bare name, and
+    /// (unlike skills) never the leading id segment either.
+    ///
+    /// The bare `name` is excluded for the same reason as a skill's, but the
+    /// collision is far likelier: a derived tool's name is a slug generated from
+    /// somebody else's OpenAPI `operationId`, so ordinary words (`search`,
+    /// `send`, `get_api_users`) fall out of a document nobody on this node
+    /// reviewed. An allowlist entry a user wrote for an entirely different plane
+    /// (`search`, meant for `exa__search`) would then admit a derived endpoint —
+    /// the cross-plane bare-name match recorded above as security fix #1, over a
+    /// much larger name space.
+    ///
+    /// The leading **segment** is excluded on top of that, which is where this
+    /// arm deliberately differs from the Skill arm. `skills` is a real
+    /// per-provider grant: one entry means "this agent may load skills", and
+    /// nothing more. The derived plane's leading segment is a prefix that every
+    /// installed app's derived tools share, so honouring it would turn a single
+    /// allowlist entry into a grant over every endpoint of every app's OpenAPI
+    /// surface. There is no segment here that means less than that, so there is
+    /// no segment grant here at all.
     pub fn matches_allowlist(&self, allowlist: &[String]) -> bool {
-        if self.kind == ToolKind::Composio {
+        if self.kind == ToolKind::Composio || self.kind == ToolKind::ExtApi {
             return allowlist.iter().any(|e| e == &self.id);
         }
         let (server, name) = self
@@ -628,6 +674,54 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(before, seen.len(), "ToolKind::ALL lists a kind twice");
+    }
+
+    /// The generic `all_round_trips…` test above already walks every variant, but
+    /// only through `wire_name`. This pins the two things that would still be
+    /// wrong-but-silent for [`ToolKind::ExtApi`] specifically: the serde rename
+    /// (without it the wire value is `extapi`, which `parse_filter` would map to
+    /// "no filter"), and the separator aliases a caller may actually send.
+    #[test]
+    fn ext_api_kind_round_trips_through_wire_name_and_parse_filter() {
+        assert_eq!(ToolKind::ExtApi.wire_name(), "ext-api");
+        assert_eq!(
+            serde_json::to_string(&ToolKind::ExtApi).unwrap(),
+            "\"ext-api\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolKind>("\"ext-api\"").unwrap(),
+            ToolKind::ExtApi
+        );
+        assert_eq!(ToolKind::parse_filter("ext-api"), Some(ToolKind::ExtApi));
+        assert_eq!(ToolKind::parse_filter("ext_api"), Some(ToolKind::ExtApi));
+        assert_eq!(ToolKind::parse_filter("EXTAPI"), Some(ToolKind::ExtApi));
+        // Present in `ALL`, or every mirror-parity test passes vacuously for it.
+        assert!(ToolKind::ALL.contains(&ToolKind::ExtApi));
+    }
+
+    /// A derived row is reachable **only** by its fully-qualified id — not by the
+    /// `operationId`-derived bare name, and not by the leading segment its whole
+    /// plane shares.
+    #[test]
+    fn ext_api_allowlist_matches_by_id_only() {
+        let d = desc(
+            "ryu_ext__crm_get_api_users",
+            "get_api_users",
+            "list users",
+            ToolKind::ExtApi,
+        );
+        assert!(d.matches_allowlist(&["ryu_ext__crm_get_api_users".to_string()]));
+        // The bare name comes out of an OpenAPI document nobody reviewed; an
+        // allowlist entry written for another plane must not admit it.
+        assert!(!d.matches_allowlist(&["get_api_users".to_string()]));
+        // The leading segment is shared by every app's derived tools, so honouring
+        // it would be a grant over every installed app's whole API surface.
+        assert!(!d.matches_allowlist(&["ryu_ext".to_string()]));
+        assert!(!d.matches_allowlist(&[]));
+        // The other planes are unchanged: the same bare name on a real MCP tool
+        // still matches — only the derived row refuses it.
+        let m = desc("exa__get_api_users", "get_api_users", "", ToolKind::Mcp);
+        assert!(m.matches_allowlist(&["get_api_users".to_string()]));
     }
 
     #[test]

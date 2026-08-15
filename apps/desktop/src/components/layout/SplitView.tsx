@@ -255,13 +255,23 @@ export function SplitGutters({
 		activeRef.current = null;
 		window.removeEventListener("pointermove", onPointerMove);
 		window.removeEventListener("pointerup", endDrag);
+		// A cancelled pointer (OS-level gesture, focus loss) never sends
+		// `pointerup`, so without this listener the body would keep its resize
+		// cursor and `user-select: none` for the rest of the session.
+		window.removeEventListener("pointercancel", endDrag);
 		document.body.style.cursor = "";
 		document.body.style.userSelect = "";
 	}, [onPointerMove]);
 
+	// NOTE: no momentum here, on purpose. A divider is placed, not thrown —
+	// macOS split dividers and window edges carry no inertia, and projecting a
+	// flick past the release point would read as the gutter slipping out from
+	// under the pointer. `lib/gesture.ts` exists for surfaces that DO fly free.
 	const beginDrag = useCallback(
 		(spec: GutterSpec, e: ReactPointerEvent) => {
 			e.preventDefault();
+			// Keeps the drag alive when the pointer outruns the thin gutter.
+			e.currentTarget.setPointerCapture?.(e.pointerId);
 			activeRef.current = spec;
 			startSizesRef.current = [...spec.sizes];
 			startPosRef.current =
@@ -271,6 +281,7 @@ export function SplitGutters({
 			document.body.style.userSelect = "none";
 			window.addEventListener("pointermove", onPointerMove);
 			window.addEventListener("pointerup", endDrag);
+			window.addEventListener("pointercancel", endDrag);
 		},
 		[onPointerMove, endDrag]
 	);
@@ -287,7 +298,9 @@ export function SplitGutters({
 					}
 					key={`${spec.path.join(".")}:${spec.boundary}`}
 					onPointerDown={(e) => beginDrag(spec, e)}
-					style={gutterStyle(spec)}
+					// Without `touch-action: none` the browser claims the drag for
+					// scrolling and a touch never resizes the split at all.
+					style={{ ...gutterStyle(spec), touchAction: "none" }}
 					type="button"
 				>
 					<span

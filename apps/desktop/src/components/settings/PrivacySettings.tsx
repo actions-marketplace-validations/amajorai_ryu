@@ -12,8 +12,15 @@
 // (the canonical kebab keys) so later phases read one source of truth and so
 // collection can never precede consent.
 
-import { Alert01Icon, CloudServerIcon } from "@hugeicons/core-free-icons";
+import {
+	Alert01Icon,
+	ChartLineData01Icon,
+	CloudServerIcon,
+	Stethoscope02Icon,
+	Wrench01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { SettingsSubpages } from "@ryu/blocks/desktop/settings-nav.tsx";
 import { Button } from "@ryu/ui/components/button";
 import { Input } from "@ryu/ui/components/input";
 import {
@@ -35,6 +42,7 @@ import {
 import { FRONTEND_URL } from "@/lib/auth-client.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { usePendingSubpage } from "@/src/hooks/useSettingSubpage.ts";
 import { setAnalyticsEnabled } from "@/src/lib/analytics.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
@@ -82,6 +90,9 @@ const SUPPORT_DURATION_OPTIONS = [1, 8, 24] as const;
 const DEFAULT_SUPPORT_DURATION_HOURS = 1;
 
 export function PrivacySettings() {
+	// Which sub-page a pending settings-search hit is on — a row on a closed page
+	// is not in the DOM the reveal polls.
+	const pendingSubpage = usePendingSubpage("privacy");
 	const activeNode = useActiveNode();
 	// Memoize the target so it is stable across renders. A fresh object each
 	// render would make the load effect (and every write callback) refire every
@@ -358,7 +369,19 @@ export function PrivacySettings() {
 		);
 	}, []);
 
-	return (
+	// ── Sub-pages ────────────────────────────────────────────────────────────
+	// Seven sections, each a switch under a paragraph of explanation, in one
+	// scroll — so the answer to "what does Ryu send anywhere" was four screens
+	// long. Grouped into three pages the way iOS Privacy & Security is: what we
+	// collect, what you can export or grant, and what runs on its own.
+	//
+	// The disclosure banner and "Learn more" stay on the index: the first is the
+	// consent prompt itself, and the second is the plain-English summary that
+	// makes the rest legible.
+	//
+	// Groups → page ids are mirrored in `SUBPAGE_BY_GROUP` (`settings-index.ts`)
+	// so settings search can still reveal a row behind a closed page.
+	const disclosureIntro = (
 		<div className="space-y-6">
 			{disclosureAck ? null : (
 				<SettingsCard className="flex flex-col gap-3 border-primary/40">
@@ -396,7 +419,11 @@ export function PrivacySettings() {
 					</div>
 				</SettingsCard>
 			)}
+		</div>
+	);
 
+	const sharingPage = (
+		<>
 			<SettingsSection
 				caption="On by default. Anonymous, content-free usage events (which screens you open, whether onboarding finished, install success) help us improve Ryu. Never includes prompts, conversations, files, or any agent content; identified only by a random install ID, not your account."
 				title="Product analytics"
@@ -455,7 +482,11 @@ export function PrivacySettings() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const diagnosticsPage = (
+		<>
 			<SettingsSection
 				caption="Off by default. When on, Core and the Gateway export their local run-trace and audit records (already content-free: hashed args, redacted keys) to an OpenTelemetry (OTLP) endpoint you choose. With no endpoint set, nothing is exported even when this is on. Point it at Axiom, Grafana, a self-hosted Collector, or anything OTLP-native."
 				title="Diagnostics export"
@@ -541,7 +572,11 @@ export function PrivacySettings() {
 					</SettingsItem>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const healingPage = (
+		<>
 			<SettingsSection
 				caption="When a run fails, Ryu can diagnose why and propose a fix. By default the fix is proposed in your Inbox for you to approve. Turn on auto-fix to let it retry on its own (bounded to a couple of attempts). The diagnosis runs through your gateway."
 				title="Self-healing"
@@ -572,7 +607,11 @@ export function PrivacySettings() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const learnMore = (
+		<>
 			<SettingsSection title="Learn more">
 				<SettingsCard>
 					<p className="text-muted-foreground text-xs leading-relaxed">
@@ -590,6 +629,42 @@ export function PrivacySettings() {
 					</p>
 				</SettingsCard>
 			</SettingsSection>
-		</div>
+		</>
+	);
+
+	return (
+		<SettingsSubpages
+			backLabel="Privacy"
+			intro={disclosureIntro}
+			label="What leaves this computer"
+			outro={learnMore}
+			pages={[
+				{
+					id: "sharing",
+					title: "Usage & crash data",
+					hint: "Anonymous analytics, community stats, and crash reports.",
+					icon: ChartLineData01Icon,
+					tint: "blue",
+					content: sharingPage,
+				},
+				{
+					id: "diagnostics",
+					title: "Diagnostics & support",
+					hint: "Export traces to your own endpoint, or open a read-only support channel.",
+					icon: Stethoscope02Icon,
+					tint: "teal",
+					content: diagnosticsPage,
+				},
+				{
+					id: "healing",
+					title: "Self-healing",
+					hint: "Let Ryu diagnose a failed run and propose — or apply — a fix.",
+					icon: Wrench01Icon,
+					tint: "orange",
+					content: healingPage,
+				},
+			]}
+			revealPageId={pendingSubpage}
+		/>
 	);
 }

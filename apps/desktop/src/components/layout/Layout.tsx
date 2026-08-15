@@ -19,6 +19,12 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { useIsMobile } from "@ryu/ui/hooks/use-mobile.ts";
+import {
+	clampWithRubberband,
+	createVelocityTracker,
+	projectEndpoint,
+} from "@ryu/ui/lib/gesture.ts";
+import { haptic } from "@ryu/ui/lib/haptics.ts";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -119,6 +125,17 @@ import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 seedBuiltinRoutes();
 
 const isMac = navigator.userAgent.includes("Mac");
+
+/** Docked-sidebar resize bounds. */
+const SIDEBAR_MIN_WIDTH = 180;
+const SIDEBAR_MAX_WIDTH = 480;
+/**
+ * Collapse the sidebar when the rail drag was HEADED below this width, even if
+ * the pointer lifted before reaching it. Sits under the minimum so only a
+ * deliberate inward gesture — a real flick, or a drag that already fought the
+ * rubber-band past the min — can trigger it.
+ */
+const SIDEBAR_COLLAPSE_PROJECTION = 140;
 
 // Floating chrome at the bottom-left of each split pane: a title pill (always
 // visible; fades only when the pointer is near it so content behind stays
@@ -411,14 +428,30 @@ function LayoutContent({
 	const resizingRef = useRef(false);
 	const startXRef = useRef(0);
 	const startWidthRef = useRef(sidebarWidth);
+	const widthRef = useRef(sidebarWidth);
+	const pointerIdRef = useRef<number | null>(null);
+	// Position history for the release velocity — see `endRailDrag`.
+	const railVelocityRef = useRef(createVelocityTracker());
 
-	const handleRailMouseDown = useCallback(
-		(e: React.MouseEvent) => {
+	// POINTER events, not mouse events. The rail used to listen for
+	// `mousemove`/`mouseup`, which a pen or a touch drag never fires — the
+	// sidebar simply could not be resized by either. `setPointerCapture` then
+	// keeps the drag alive when the pointer leaves the 2px handle, which is what
+	// the document-level listener was standing in for.
+	const handleRailPointerDown = useCallback(
+		(e: React.PointerEvent) => {
 			e.preventDefault();
 			e.stopPropagation();
+			// Capture on the handle: every subsequent move/up for this pointer is
+			// retargeted here and still bubbles to the document listeners below.
+			e.currentTarget.setPointerCapture?.(e.pointerId);
+			pointerIdRef.current = e.pointerId;
 			resizingRef.current = true;
 			startXRef.current = e.clientX;
 			startWidthRef.current = sidebarWidth;
+			widthRef.current = sidebarWidth;
+			railVelocityRef.current.reset();
+			railVelocityRef.current.sample(e.clientX, e.timeStamp);
 			document.body.style.cursor = "col-resize";
 			document.body.style.userSelect = "none";
 		},
@@ -426,28 +459,89 @@ function LayoutContent({
 	);
 
 	useEffect(() => {
-		const onMove = (e: MouseEvent) => {
-			if (!resizingRef.current) {
-				return;
-			}
-			const next = startWidthRef.current + (e.clientX - startXRef.current);
-			onSidebarWidthChange(Math.max(180, Math.min(480, next)));
-		};
-		const onUp = () => {
-			if (!resizingRef.current) {
-				return;
-			}
+		const finishDrag = () => {
 			resizingRef.current = false;
+			pointerIdRef.current = null;
 			document.body.style.cursor = "";
 			document.body.style.userSelect = "";
 		};
-		document.addEventListener("mousemove", onMove, { passive: true });
-		document.addEventListener("mouseup", onUp);
-		return () => {
-			document.removeEventListener("mousemove", onMove);
-			document.removeEventListener("mouseup", onUp);
+
+		const onMove = (e: PointerEvent) => {
+			if (!resizingRef.current || e.pointerId !== pointerIdRef.current) {
+				return;
+			}
+			railVelocityRef.current.sample(e.clientX, e.timeStamp);
+			const raw = startWidthRef.current + (e.clientX - startXRef.current);
+			// Give at the limits instead of stopping dead. The overshoot is
+			// transient — `endRailDrag` snaps back to the hard bounds on release,
+			// so nothing out of range is ever the resting value.
+			const next = clampWithRubberband(
+				raw,
+				SIDEBAR_MIN_WIDTH,
+				SIDEBAR_MAX_WIDTH,
+				window.innerWidth
+			);
+			widthRef.current = next;
+			onSidebarWidthChange(next);
 		};
-	}, [onSidebarWidthChange]);
+
+		const onUp = (e: PointerEvent) => {
+			if (!resizingRef.current || e.pointerId !== pointerIdRef.current) {
+				return;
+			}
+			railVelocityRef.current.sample(e.clientX, e.timeStamp);
+			// Where the gesture was HEADED, not where the pointer happened to stop.
+			// A decisive inward flick collapses the sidebar even if the finger
+			// lifted well short of the edge; a slow drag to the same pixel does
+			// not. Without this the release velocity is simply discarded and both
+			// gestures produce the same result.
+			const projected = projectEndpoint(
+				widthRef.current,
+				railVelocityRef.current.velocity()
+			);
+			finishDrag();
+			if (projected < SIDEBAR_COLLAPSE_PROJECTION) {
+				// Restore the pre-drag width so reopening does not come back pinned
+				// to the minimum.
+				onSidebarWidthChange(startWidthRef.current);
+				// Same frame as the collapse, not after it — the feedback has to
+				// coincide with the event that caused it to read as one thing.
+				haptic("snap");
+				setOpen(false);
+				return;
+			}
+			onSidebarWidthChange(
+				Math.max(
+					SIDEBAR_MIN_WIDTH,
+					Math.min(SIDEBAR_MAX_WIDTH, widthRef.current)
+				)
+			);
+		};
+
+		// A cancelled pointer (OS gesture, focus loss) never sends `pointerup`;
+		// without this the body keeps `col-resize` and `user-select: none`.
+		const onCancel = (e: PointerEvent) => {
+			if (e.pointerId !== pointerIdRef.current) {
+				return;
+			}
+			finishDrag();
+			onSidebarWidthChange(
+				Math.max(
+					SIDEBAR_MIN_WIDTH,
+					Math.min(SIDEBAR_MAX_WIDTH, widthRef.current)
+				)
+			);
+		};
+
+		document.addEventListener("pointermove", onMove, { passive: true });
+		document.addEventListener("pointerup", onUp);
+		document.addEventListener("pointercancel", onCancel);
+		return () => {
+			document.removeEventListener("pointermove", onMove);
+			document.removeEventListener("pointerup", onUp);
+			document.removeEventListener("pointercancel", onCancel);
+		};
+	}, [onSidebarWidthChange, setOpen]);
 
 	// Close floating sidebar when the docked one opens
 	useEffect(() => {
@@ -734,8 +828,11 @@ function LayoutContent({
 				// biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: sidebar resize handle
 				<div
 					className="fixed top-0 z-20 h-full w-2 cursor-col-resize opacity-0 transition-opacity hover:bg-sidebar-border hover:opacity-100"
-					onMouseDown={handleRailMouseDown}
-					style={{ left: `${sidebarWidth - 4}px` }}
+					onPointerDown={handleRailPointerDown}
+					// `touch-action: none` is what actually makes this draggable by
+					// touch: without it the browser claims the gesture for scrolling
+					// before the second pointermove ever reaches us.
+					style={{ left: `${sidebarWidth - 4}px`, touchAction: "none" }}
 				/>
 			)}
 
@@ -771,7 +868,8 @@ function LayoutContent({
 						/>
 						<div
 							className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize opacity-0 transition-opacity hover:bg-sidebar-border hover:opacity-100"
-							onMouseDown={handleRailMouseDown}
+							onPointerDown={handleRailPointerDown}
+							style={{ touchAction: "none" }}
 						/>
 					</div>
 

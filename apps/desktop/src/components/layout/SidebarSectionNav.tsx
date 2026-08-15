@@ -1,5 +1,6 @@
 "use client";
 
+import { SPRING_MORPH } from "@ryu/ui/lib/ease.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { motion, type Transition, useReducedMotion } from "framer-motion";
 import { useState } from "react";
@@ -15,12 +16,9 @@ import { useState } from "react";
  * AppSidebar's SidebarSection); clicking a row scrolls that anchor into view.
  */
 
-const MORPH_SPRING: Transition = {
-	type: "spring",
-	stiffness: 320,
-	damping: 34,
-	mass: 0.9,
-};
+// Shared with MorphPopover via the SPRING_MORPH token — these were two
+// byte-identical inline copies before.
+const MORPH_SPRING: Transition = SPRING_MORPH;
 const REDUCED_TRANSITION: Transition = { duration: 0.15, ease: "easeOut" };
 const PEEK_WIDTH = 5;
 const PEEK_HEIGHT = 46;

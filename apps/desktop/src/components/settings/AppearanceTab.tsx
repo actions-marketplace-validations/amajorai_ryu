@@ -1,14 +1,22 @@
 import {
 	ArrowDown01Icon,
+	BubbleChatIcon,
 	Cancel01Icon,
+	ChartLineData01Icon,
+	DashboardSquare01Icon,
 	Delete02Icon,
 	FloppyDiskIcon,
+	Folder01Icon,
+	GitCompareIcon,
 	Share08Icon,
+	SparklesIcon,
+	TextFontIcon,
 	Tick01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PatchDiff } from "@pierre/diffs/react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
+import { SettingsSubpages } from "@ryu/blocks/desktop/settings-nav.tsx";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Collapsible,
@@ -92,6 +100,7 @@ import {
 	usePreviewSeasonalTheme,
 	useSeasonalThemeSetting,
 } from "@/src/hooks/useSeasonalEffects.ts";
+import { usePendingSubpage } from "@/src/hooks/useSettingSubpage.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
 import {
 	type SidebarMode,
@@ -1061,6 +1070,10 @@ function SeasonalEffectsSettings() {
 }
 
 export function AppearanceTab() {
+	// A settings-search hit may name a row on a sub-page that is currently
+	// closed — and therefore not in the DOM the reveal polls. This says which
+	// page to open first.
+	const pendingSubpage = usePendingSubpage("appearance");
 	const { theme, setTheme } = useTheme();
 	// next-themes' setter lives in React; bind it so registry reset can call it.
 	useEffect(() => {
@@ -1499,7 +1512,22 @@ export function AppearanceTab() {
 		setAppearanceResetConfirm(false);
 	};
 
-	return (
+	// ── Sub-pages ────────────────────────────────────────────────────────────
+	// Appearance is the longest pane in the app: eleven groups and ~1,200 lines
+	// of controls in a single scroll, where finding "line numbers" meant knowing
+	// it was a diff-viewer setting and then scrolling past ninety others. The
+	// Apple answer to a pane this size is not a longer scroll — it is a short
+	// index that pushes one page per topic, so that is what this is.
+	//
+	// Theme and colour stay on the index rather than behind a row: they are what
+	// this pane is FOR, and a settings pane whose headline setting is one click
+	// away has organised itself at the user's expense.
+	//
+	// The bodies below are the same nodes as before, moved verbatim. If you add a
+	// group, add it here AND to `APPEARANCE_SUBPAGE_BY_GROUP` in
+	// `settings-index.ts` — that map is what lets settings search reveal a row
+	// that is currently behind a closed page.
+	const themeIntro = (
 		<div className="space-y-6">
 			<SettingsSection
 				caption="Choose how Ryu looks on your device."
@@ -1594,7 +1622,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsCard>
 			</SettingsSection>
+		</div>
+	);
 
+	const layoutPage = (
+		<>
 			<SettingsSection title="Layout & sizing">
 				<SettingsCard className="space-y-3">
 					<div className="space-y-1.5">
@@ -1768,7 +1800,11 @@ export function AppearanceTab() {
 			</SettingsSection>
 
 			<TimezoneSetting />
+		</>
+	);
 
+	const motionPage = (
+		<>
 			<SettingsSection title="Motion">
 				<SettingsGroup>
 					<SettingsItem
@@ -1798,7 +1834,11 @@ export function AppearanceTab() {
 			</SettingsSection>
 
 			<SeasonalEffectsSettings />
+		</>
+	);
 
+	const interfacePage = (
+		<>
 			<SettingsSection title="Interface">
 				<SettingsGroup>
 					<SettingsItem
@@ -1980,7 +2020,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const chatPage = (
+		<>
 			<SettingsSection title="Chat">
 				<SettingsGroup>
 					<SettingsItem
@@ -2115,7 +2159,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const usagePage = (
+		<>
 			<SettingsSection
 				caption="Subscription usage meters for agents like Claude Code and Codex, shown beside the composer and, optionally, next to each agent in the sidebar."
 				title="Usage meter"
@@ -2197,7 +2245,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const diffPage = (
+		<>
 			<SettingsSection
 				caption="How code diffs render in the workspace Changes tab. The Split/Stacked control also lives in that tab's toolbar."
 				title="Diff viewer"
@@ -2453,7 +2505,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const filesPage = (
+		<>
 			<SettingsSection
 				caption="How the workspace Files tab renders your project tree. Density and search also live in that tab's toolbar."
 				title="File tree"
@@ -2705,7 +2761,11 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const resetPage = (
+		<>
 			<SettingsSection title="Reset">
 				<SettingsGroup>
 					<SettingsItem
@@ -2743,6 +2803,81 @@ export function AppearanceTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
-		</div>
+		</>
+	);
+
+	return (
+		<SettingsSubpages
+			backLabel="Appearance"
+			intro={themeIntro}
+			label="Customize"
+			pages={[
+				{
+					id: "layout",
+					title: "Layout & text",
+					hint: "Density, widths, and the fonts the interface is set in.",
+					icon: TextFontIcon,
+					tint: "indigo",
+					content: layoutPage,
+				},
+				{
+					id: "motion",
+					title: "Motion & effects",
+					hint: "How much the interface animates, and the seasonal extras.",
+					icon: SparklesIcon,
+					tint: "pink",
+					content: motionPage,
+				},
+				{
+					id: "interface",
+					title: "Interface",
+					hint: "The sidebar, the cursor, shadows, and how lists are grouped.",
+					icon: DashboardSquare01Icon,
+					tint: "blue",
+					content: interfacePage,
+				},
+				{
+					id: "chat",
+					title: "Chat",
+					hint: "How much detail a conversation shows while it runs.",
+					icon: BubbleChatIcon,
+					tint: "teal",
+					content: chatPage,
+				},
+				{
+					id: "usage",
+					title: "Usage meter",
+					hint: "Whether the spend meter is shown, and in what shape.",
+					icon: ChartLineData01Icon,
+					tint: "green",
+					content: usagePage,
+				},
+				{
+					id: "diff",
+					title: "Diff viewer",
+					hint: "How code changes are drawn: layout, themes, and markers.",
+					icon: GitCompareIcon,
+					tint: "orange",
+					content: diffPage,
+				},
+				{
+					id: "files",
+					title: "File tree",
+					hint: "Density, icons, and behaviour of the file browser.",
+					icon: Folder01Icon,
+					tint: "yellow",
+					content: filesPage,
+				},
+				{
+					id: "reset",
+					title: "Reset",
+					hint: "Put every appearance setting back to its default.",
+					icon: Delete02Icon,
+					tint: "red",
+					content: resetPage,
+				},
+			]}
+			revealPageId={pendingSubpage}
+		/>
 	);
 }

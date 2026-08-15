@@ -18,7 +18,7 @@
         "command_env": "__APP_BIN_ENV__",
         "port_env": "__APP_PORT_ENV__"
       },
-      "port": 7899,
+      "port": 8342,
       "health_path": "/health",
       "lazy": true,
       "idle_stop_secs": 300,

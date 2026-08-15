@@ -55,8 +55,11 @@ pub async fn get_evals(State(state): State<SharedState>) -> Json<Value> {
 // ─── POST /v1/evals/run ───────────────────────────────────────────────────────
 //
 // Replays a dataset through the gateway pipeline and returns per-case scores
-// plus an aggregate. v1 scorers: latency / token_efficiency / policy_pass /
-// optional substring_match. LLM-judge and custom dataset scorers are deferred.
+// plus an aggregate. Every case is scored on latency / token_efficiency /
+// policy_pass / optional substring_match, plus any per-case `assertions`
+// (including `llm_judge`, which judges through this same pipeline) and any
+// registry evaluators requested per-case or run-level in `evaluators`
+// (evaluators that cannot run over a text dataset report `executed: false`).
 //
 // The model/provider for each replay flows through the existing router — nothing
 // is hardcoded. When `dataset` is empty or absent the built-in 3-case dataset

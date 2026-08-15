@@ -2228,6 +2228,19 @@ pub async fn run(
                         // `enforce_budget` above.
                         let credit_permit = credit_reservation.take();
                         let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                        // Built BEFORE the spawn, like `request_id` and `pool`
+                        // above: the task takes ownership of `ctx` and
+                        // `decision`, so reading either inside it would move a
+                        // value the surrounding handler still needs.
+                        let debit_attribution = DebitAttribution {
+                            provider: Some(provider.name().to_string()),
+                            model: Some(decision.model.clone()),
+                            input_tokens: Some(input_tokens as u64),
+                            output_tokens: Some(output_tokens as u64),
+                            duration_ms: Some(latency_ms as u64),
+                            user_id: ctx.user_id.clone(),
+                            task_label: None,
+                        };
                         tokio::spawn(async move {
                             debit_wallet_for_request(
                                 state2,
@@ -2242,6 +2255,11 @@ pub async fn run(
                                 // pre-flight gate guessed (a fallback may have
                                 // served this).
                                 pool,
+                                // Same rule as `pool`: the provider and model
+                                // that ACTUALLY served, so a fallback shows the
+                                // model the customer was really charged for
+                                // rather than the one they asked for.
+                                debit_attribution,
                             )
                             .await;
                             drop(credit_permit);
@@ -3081,6 +3099,21 @@ pub async fn run_multimodal(
                         let state_debit = state.clone();
                         let ref_id = format!("{}:{}", ctx.request_id, modality.as_str());
                         let pool = crate::credit_pools::pool_for_gateway_provider(provider.name());
+                        let debit_attribution = DebitAttribution {
+                            provider: Some(provider.name().to_string()),
+                            model: Some(decision.model.clone()),
+                            // The provider's REPORTED compute time when the
+                            // metered path priced this call, absent when it fell
+                            // back to the flat rate — so a statement row with no
+                            // duration is exactly a row that was estimated.
+                            duration_ms: response["usage"]["compute_seconds"]
+                                .as_f64()
+                                .filter(|s| *s > 0.0)
+                                .map(|s| (s * 1000.0).round() as u64),
+                            user_id: ctx.user_id.clone(),
+                            task_label: Some(modality.as_str().to_string()),
+                            ..Default::default()
+                        };
                         tokio::spawn(async move {
                             debit_wallet_for_request(
                                 state_debit,
@@ -3093,6 +3126,8 @@ pub async fn run_multimodal(
                                 // is scoped to token budgets).
                                 None,
                                 pool,
+                                // No token counts: media has none.
+                                debit_attribution,
                             )
                             .await;
                             drop(credit_permit);
@@ -3327,6 +3362,20 @@ pub async fn submit_video_job(
                     fail_closed_sticky,
                     None,
                     crate::credit_pools::pool_for_gateway_provider(provider.name()),
+                    DebitAttribution {
+                        provider: Some(provider.name().to_string()),
+                        model: Some(decision.model.clone()),
+                        // Present exactly when the provider reported compute
+                        // time; absent means this row was priced at the flat
+                        // fallback rate. (submit)
+                        duration_ms: response["usage"]["compute_seconds"]
+                            .as_f64()
+                            .filter(|s| *s > 0.0)
+                            .map(|s| (s * 1000.0).round() as u64),
+                        user_id: ctx.user_id.clone(),
+                        task_label: Some("video".to_string()),
+                        ..Default::default()
+                    },
                 ));
             }
         }
@@ -3420,6 +3469,22 @@ pub async fn poll_video_job(
                     fail_closed_sticky,
                     None,
                     crate::credit_pools::pool_for_gateway_provider(provider.name()),
+                    DebitAttribution {
+                        provider: Some(provider.name().to_string()),
+                        // The JOB's own model, not a request decision: a poll
+                        // arrives on a later request that never made one.
+                        model: Some(job.model.clone()),
+                        // Present exactly when the provider reported compute
+                        // time; absent means this row was priced at the flat
+                        // fallback rate. (poll)
+                        duration_ms: poll_payload["usage"]["compute_seconds"]
+                            .as_f64()
+                            .filter(|s| *s > 0.0)
+                            .map(|s| (s * 1000.0).round() as u64),
+                        user_id: ctx.user_id.clone(),
+                        task_label: Some("video".to_string()),
+                        ..Default::default()
+                    },
                 ));
             }
         }
@@ -4277,6 +4342,40 @@ fn sse_parse_cost(raw: &str) -> Option<f64> {
 /// Both optional fields are ADDITIVE: absent means absent, not `null`, so a
 /// control plane that ignores them (or predates them) sees a byte-identical
 /// legacy body.
+/// What a debit was FOR, alongside how much it was.
+///
+/// A struct rather than seven more positional parameters: `debit_wallet_for_request`
+/// already takes seven, and the fields here are all `Option` of two or three
+/// types, so positional args would be trivially transposable at six call sites
+/// with no compiler error to catch it — `provider` and `model` are both
+/// `Option<String>`.
+///
+/// Every field is optional and every absent field is OMITTED from the wire body,
+/// never sent as `null`. A control plane that predates these keys sees a
+/// byte-identical legacy body, which is the same additive contract `alertTier`
+/// and `pool` already follow.
+///
+/// PURELY DESCRIPTIVE. Nothing downstream branches on any of it — these become
+/// receipt lines on a ledger row so a customer can be told what a charge was for.
+/// That is exactly why a missing value is fine and a wrong one is not worth a
+/// failed debit for work already served.
+#[derive(Debug, Clone, Default)]
+struct DebitAttribution {
+    /// Wall-clock milliseconds the billed work took.
+    duration_ms: Option<u64>,
+    input_tokens: Option<u64>,
+    /// Model or resource id that produced the charge.
+    model: Option<String>,
+    output_tokens: Option<u64>,
+    /// Upstream provider that served the work. NOT the credit pool: the pool is
+    /// which donated allowance pays, this is who did the work.
+    provider: Option<String>,
+    /// Human-facing label for what the spend was for.
+    task_label: Option<String>,
+    /// The user whose action incurred the charge, when the request carried one.
+    user_id: Option<String>,
+}
+
 fn debit_request_body(
     org_id: &str,
     amount_micro_usd: u64,
@@ -4284,6 +4383,7 @@ fn debit_request_body(
     ref_id: &str,
     budget_alert_tier: Option<AlertTier>,
     pool: Option<&str>,
+    attribution: &DebitAttribution,
 ) -> Value {
     let mut body = json!({
         "orgId": org_id,
@@ -4308,6 +4408,32 @@ fn debit_request_body(
     // reach pool-restricted grant money, and only its OWN pool's.
     if let Some(pool) = pool {
         obj.insert("pool".to_string(), Value::String(pool.to_string()));
+    }
+    // Attribution. Each key is inserted only when present, so an unattributed
+    // debit is byte-identical to the legacy body.
+    let mut put_str = |key: &str, value: &Option<String>| {
+        if let Some(v) = value {
+            let trimmed = v.trim();
+            // A blank is not information. Sending `""` would land an
+            // empty-string model on the row, which renders as a present but
+            // nameless value — worse than an honest absence.
+            if !trimmed.is_empty() {
+                obj.insert(key.to_string(), Value::String(trimmed.to_string()));
+            }
+        }
+    };
+    put_str("provider", &attribution.provider);
+    put_str("model", &attribution.model);
+    put_str("userId", &attribution.user_id);
+    put_str("taskLabel", &attribution.task_label);
+    for (key, value) in [
+        ("inputTokens", attribution.input_tokens),
+        ("outputTokens", attribution.output_tokens),
+        ("durationMs", attribution.duration_ms),
+    ] {
+        if let Some(v) = value {
+            obj.insert(key.to_string(), Value::Number(v.into()));
+        }
     }
     body
 }
@@ -4349,6 +4475,10 @@ async fn debit_wallet_for_request(
     // explicitly, because an accidental `None` is silent — the spend simply never
     // draws grant money and never appears in per-pool burn.
     pool: Option<&'static str>,
+    // What the charge was for. `Default::default()` at a site that genuinely
+    // knows nothing; never a placeholder value, because a wrong model on an
+    // invoice line is worse than a blank one.
+    attribution: DebitAttribution,
 ) {
     let credits = &state.config.credits;
     if !credits.is_active() {
@@ -4379,7 +4509,15 @@ async fn debit_wallet_for_request(
         "{}/api/credits/debit",
         credits.base_url.trim_end_matches('/')
     );
-    let body = debit_request_body(&org_id, amount, reason, &ref_id, budget_alert_tier, pool);
+    let body = debit_request_body(
+        &org_id,
+        amount,
+        reason,
+        &ref_id,
+        budget_alert_tier,
+        pool,
+        &attribution,
+    );
 
     let resp = state
         .http
@@ -4510,6 +4648,16 @@ fn spawn_tool_call_debit(
         // grant money — it bills the ordinary subscription/top-up buckets, which
         // is what `None` means to the control-plane debit.
         None,
+        // No model and no duration: this row is a COUNT of executed tool calls,
+        // not a timed inference. `taskLabel` carries the count so a statement can
+        // say "3 tool calls" instead of showing an unexplained charge — this is
+        // the row a customer is most likely to query, and until now it was the
+        // one with the least to say for itself.
+        DebitAttribution {
+            provider: Some("composio".to_string()),
+            task_label: Some(format!("{billable_tool_calls} tool calls")),
+            ..Default::default()
+        },
     ));
 }
 
@@ -4944,6 +5092,20 @@ fn attach_stream_observer(
                                 // non-streaming path; the stream state carries
                                 // the provider that actually served the bytes.
                                 crate::credit_pools::pool_for_gateway_provider(&s.provider_name),
+                                // The same four facts the audit row above already
+                                // records for this stream, so a ledger line and
+                                // its audit entry cannot disagree about what was
+                                // served. `latency_ms` here is time to stream
+                                // END, which is the work actually billed.
+                                DebitAttribution {
+                                    provider: Some(s.provider_name.clone()),
+                                    model: Some(s.model.clone()),
+                                    input_tokens: Some(input_tokens as u64),
+                                    output_tokens: Some(output_tokens as u64),
+                                    duration_ms: Some(latency_ms as u64),
+                                    user_id: s.ctx.user_id.clone(),
+                                    task_label: None,
+                                },
                             )
                             .await;
                         }
@@ -5812,7 +5974,15 @@ mod tests {
     fn debit_body_carries_the_pool_only_when_the_provider_is_tagged() {
         // Untagged provider ⇒ the pre-pool body, byte-identical. `pool` must be
         // ABSENT, not `null`: the control plane distinguishes the two.
-        let legacy = debit_request_body("o1", 1_234, "gateway_usage", "req_1", None, None);
+        let legacy = debit_request_body(
+            "o1",
+            1_234,
+            "gateway_usage",
+            "req_1",
+            None,
+            None,
+            &DebitAttribution::default(),
+        );
         assert_eq!(legacy["orgId"], "o1");
         assert_eq!(legacy["amountMicroUsd"], 1_234);
         assert_eq!(legacy["reason"], "gateway_usage");
@@ -5830,9 +6000,88 @@ mod tests {
             "req_1",
             Some(AlertTier::Warn),
             crate::credit_pools::pool_for_gateway_provider("bedrock"),
+            &DebitAttribution::default(),
         );
         assert_eq!(pooled["pool"], "bedrock");
         assert_eq!(pooled["alertTier"], "warn");
+    }
+
+    /// Attribution is ADDITIVE and every absent field is OMITTED.
+    ///
+    /// The contract that matters is the same one `pool` and `alertTier` already
+    /// hold: a control plane that does not know these keys must see a
+    /// byte-identical legacy body. Sending `null` instead of omitting would
+    /// satisfy a naive "is it there" check while writing an explicit null into
+    /// a column whose whole meaning is "not reported".
+    #[test]
+    fn debit_body_omits_attribution_it_was_not_given() {
+        let bare = debit_request_body(
+            "o1",
+            10,
+            "gateway_usage",
+            "req_1",
+            None,
+            None,
+            &DebitAttribution::default(),
+        );
+        for key in [
+            "provider",
+            "model",
+            "userId",
+            "taskLabel",
+            "inputTokens",
+            "outputTokens",
+            "durationMs",
+        ] {
+            assert!(bare.get(key).is_none(), "{key} must be absent, not null");
+        }
+
+        let full = debit_request_body(
+            "o1",
+            10,
+            "gateway_usage",
+            "req_1",
+            None,
+            None,
+            &DebitAttribution {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-sonnet-5".to_string()),
+                input_tokens: Some(4_210),
+                output_tokens: Some(380),
+                duration_ms: Some(2_140),
+                user_id: Some("u_1".to_string()),
+                task_label: Some("3 tool calls".to_string()),
+            },
+        );
+        assert_eq!(full["provider"], "anthropic");
+        assert_eq!(full["model"], "claude-sonnet-5");
+        assert_eq!(full["inputTokens"], 4_210);
+        assert_eq!(full["outputTokens"], 380);
+        assert_eq!(full["durationMs"], 2_140);
+        assert_eq!(full["userId"], "u_1");
+        assert_eq!(full["taskLabel"], "3 tool calls");
+    }
+
+    /// A blank string is not a value. An empty-string model on a ledger row
+    /// renders as a present-but-nameless model, which reads as a bug to whoever
+    /// is looking at their invoice — strictly worse than an honest blank.
+    #[test]
+    fn debit_body_treats_a_blank_attribution_string_as_absent() {
+        let blank = debit_request_body(
+            "o1",
+            10,
+            "gateway_usage",
+            "req_1",
+            None,
+            None,
+            &DebitAttribution {
+                provider: Some("   ".to_string()),
+                model: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert!(blank.get("provider").is_none());
+        assert!(blank.get("model").is_none());
     }
 
     #[test]

@@ -407,7 +407,14 @@ impl EvalsRegistry {
 // ─── Dataset eval runner ─────────────────────────────────────────────────────
 //
 // v1 scorers: latency, token_efficiency, policy_pass, substring_match (optional).
-// LLM-judge and custom dataset scorers are explicitly deferred to a follow-up.
+// LLM-judge has since shipped, split across this crate's boundary: both pure
+// halves live here — `build_judge_prompt` renders the rubric into a prompt and
+// `parse_judge_verdict` reads the reply back into `(pass, score)` — but the
+// provider round-trip between them cannot, because judging means another async
+// pass through the gateway pipeline this crate has no handle on. So the caller
+// owns that leg, and `eval_assertion_deterministic` hard-fails
+// `Assertion::LlmJudge` rather than let a judge misrouted onto the sync path
+// score as anything at all.
 // Richer scoring strategies or provider-pinning are NOT in scope for v1.
 
 // ─── Assertions ──────────────────────────────────────────────────────────────

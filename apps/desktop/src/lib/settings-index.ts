@@ -51,6 +51,72 @@ export interface SettingsEntry {
 	label: string;
 	/** The dialog section value (`general`, `appearance`, `routing`, …). */
 	section: string;
+	/**
+	 * The sub-page inside that section, for a pane that drills in
+	 * ({@link SettingsSubpages}) instead of scrolling. Load-bearing for search: a
+	 * row inside a closed sub-page is not in the DOM, and the reveal gives up
+	 * after two seconds of polling — so without this a hit would land on the
+	 * section and highlight nothing.
+	 *
+	 * Most entries leave it unset and let {@link subpageFor} derive it from the
+	 * group, which is the same partition the pane itself uses.
+	 */
+	subpage?: string;
+}
+
+/**
+ * Section → group → sub-page id, for the panes that drill in rather than scroll.
+ *
+ * Each split follows that pane's `SettingsSection` groups exactly, so the
+ * mapping is stated once here rather than stamped onto a hundred entries by
+ * hand. A group missing from its section's map (Appearance's Theme, General's
+ * "On startup") stays on the pane's own index page, which is where a pane's
+ * headline settings belong.
+ */
+const SUBPAGE_BY_GROUP: Record<string, Record<string, string>> = {
+	appearance: {
+		"Layout & sizing": "layout",
+		Typography: "layout",
+		Motion: "motion",
+		"Seasonal effects": "motion",
+		Interface: "interface",
+		Chat: "chat",
+		"Usage meter": "usage",
+		"Diff viewer": "diff",
+		"File tree": "files",
+		Reset: "reset",
+	},
+	// Not 1:1 with the sections here: the three "what we collect" groups share
+	// one page, because three rows asking the same question is a longer index,
+	// not a clearer one.
+	privacy: {
+		"Product analytics": "sharing",
+		"Community stats": "sharing",
+		"Crash reports": "sharing",
+		"Diagnostics export": "diagnostics",
+		"Support access (local)": "diagnostics",
+		"Self-healing": "healing",
+	},
+	general: {
+		Tabs: "tabs",
+		"Pane layouts": "tabs",
+		Chats: "chats",
+		Terminal: "terminal",
+		System: "system",
+		Setup: "setup",
+	},
+};
+
+/**
+ * Which sub-page holds this setting, or null when its section is a flat scroll.
+ * An explicit `subpage` on the entry wins; otherwise it is derived from the
+ * group.
+ */
+export function subpageFor(entry: SettingsEntry): string | null {
+	if (entry.subpage) {
+		return entry.subpage;
+	}
+	return SUBPAGE_BY_GROUP[entry.section]?.[entry.group] ?? null;
 }
 
 /** Human labels for section values, so a result can say where it lives. */

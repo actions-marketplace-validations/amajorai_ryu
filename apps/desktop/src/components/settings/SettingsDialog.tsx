@@ -1,3 +1,26 @@
+import {
+	CloudIcon,
+	Coins01Icon,
+	ComputerIcon,
+	CreditCardIcon,
+	GiftIcon,
+	GridIcon,
+	KeyboardIcon,
+	Mic01Icon,
+	PaintBoardIcon,
+	PuzzleIcon,
+	Refresh01Icon,
+	SecurityCheckIcon,
+	Settings01Icon,
+	SourceCodeIcon,
+	UserCircleIcon,
+	UserGroupIcon,
+} from "@hugeicons/core-free-icons";
+import type { IconSvgElement } from "@hugeicons/react";
+import {
+	SettingsIconTile,
+	type SettingsTint,
+} from "@ryu/blocks/desktop/settings-nav.tsx";
 import { AuthorizedAppsTab, ReferralsTab } from "@ryu/settings";
 import { Dialog, DialogContent } from "@ryu/ui/components/dialog.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
@@ -30,6 +53,7 @@ import { requestSettingReveal } from "@/src/lib/settings-focus.ts";
 import type { SettingsEntry } from "@/src/lib/settings-index.ts";
 import { openFeedbackWidget } from "@/src/lib/userjot.ts";
 import CreditsTab from "@/src/pages/CreditsPage.tsx";
+import UsageTab from "@/src/pages/UsagePage.tsx";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 import type { SettingsSectionValue } from "@/src/store/useSettingsDialog.ts";
 import { AccountTab } from "./AccountTab.tsx";
@@ -60,7 +84,15 @@ const queryClient = new QueryClient();
 type SectionValue = SettingsSectionValue;
 
 interface NavItem {
+	/**
+	 * The tinted tile left of the label, the way iOS/macOS Settings marks a row.
+	 * Optional because the dynamic Apps/Plugins items are built elsewhere and a
+	 * manifest declares a settings tab, not a glyph — the label always carries the
+	 * meaning, the tile only makes the list scannable.
+	 */
+	icon?: IconSvgElement;
 	label: string;
+	tint?: SettingsTint;
 	value: string;
 }
 
@@ -99,18 +131,48 @@ interface NavGroup {
 const NAV_GROUPS: NavGroup[] = [
 	{
 		items: [
-			{ value: "general", label: "General" },
-			{ value: "appearance", label: "Appearance" },
-			{ value: "keyboard", label: "Keyboard Shortcuts" },
-			{ value: "voice", label: "Voice" },
+			{
+				value: "general",
+				label: "General",
+				icon: Settings01Icon,
+				tint: "gray",
+			},
+			{
+				value: "appearance",
+				label: "Appearance",
+				icon: PaintBoardIcon,
+				tint: "purple",
+			},
+			{
+				value: "keyboard",
+				label: "Keyboard Shortcuts",
+				icon: KeyboardIcon,
+				tint: "indigo",
+			},
+			{ value: "voice", label: "Voice", icon: Mic01Icon, tint: "orange" },
 		],
 	},
 	{
 		title: "Account",
 		items: [
-			{ value: "account", label: "Account" },
-			{ value: "sessions", label: "Sessions" },
-			{ value: "authorized-apps", label: "Authorized Apps" },
+			{
+				value: "account",
+				label: "Account",
+				icon: UserCircleIcon,
+				tint: "blue",
+			},
+			{
+				value: "sessions",
+				label: "Sessions",
+				icon: SecurityCheckIcon,
+				tint: "teal",
+			},
+			{
+				value: "authorized-apps",
+				label: "Authorized Apps",
+				icon: GridIcon,
+				tint: "gray",
+			},
 		],
 	},
 	{
@@ -118,10 +180,19 @@ const NAV_GROUPS: NavGroup[] = [
 		// The scope of everything under this heading, stated once at the top of it.
 		header: <ServicesOrgSwitcher />,
 		items: [
-			{ value: "billing", label: "Billing" },
-			{ value: "referrals", label: "Referrals" },
-			{ value: "teams", label: "Teams" },
-			{ value: "credits", label: "Credits" },
+			{
+				value: "billing",
+				label: "Billing",
+				icon: CreditCardIcon,
+				tint: "green",
+			},
+			{ value: "referrals", label: "Referrals", icon: GiftIcon, tint: "pink" },
+			{ value: "teams", label: "Teams", icon: UserGroupIcon, tint: "indigo" },
+			{ value: "credits", label: "Credits", icon: Coins01Icon, tint: "green" },
+			// Next to Credits on purpose: the balance and what drew it down are the
+			// same question asked twice, and splitting them across groups is how a
+			// customer ends up asking support what a charge was.
+			{ value: "usage", label: "Usage", icon: Coins01Icon, tint: "green" },
 		],
 	},
 	{
@@ -133,9 +204,24 @@ const NAV_GROUPS: NavGroup[] = [
 		// search-result breadcrumb disagree about the same tab.
 		title: "Advanced",
 		items: [
-			{ value: "updates", label: "Updates" },
-			{ value: "developer", label: "Developer" },
-			{ value: "sync", label: "Settings Sync" },
+			{
+				value: "updates",
+				label: "Updates",
+				icon: Refresh01Icon,
+				tint: "teal",
+			},
+			{
+				value: "developer",
+				label: "Developer",
+				icon: SourceCodeIcon,
+				tint: "gray",
+			},
+			{
+				value: "sync",
+				label: "Settings Sync",
+				icon: CloudIcon,
+				tint: "blue",
+			},
 		],
 	},
 ];
@@ -189,6 +275,8 @@ function SectionContent({ value }: { value: SectionValue }) {
 			return <TeamsBillingTab />;
 		case "credits":
 			return <CreditsTab />;
+		case "usage":
+			return <UsageTab />;
 		case "developer":
 			return <DeveloperTab />;
 		case "voice":
@@ -251,7 +339,20 @@ export function SettingsDialog({
 	// union, and reading `group.header` off it is an error even though every
 	// member legitimately lacks the field.
 	const navGroups = useMemo<NavGroup[]>(
-		() => [...NAV_GROUPS, ...buildEntityNavGroups(appEntities, pluginEntities)],
+		() => [
+			...NAV_GROUPS,
+			// One stand-in tile per dynamic header, in grey: a manifest contributes a
+			// settings tab, not a glyph, so the tile says "contributed" rather than
+			// pretending to identify the app.
+			...buildEntityNavGroups(appEntities, pluginEntities).map((group) => ({
+				title: group.title,
+				items: group.items.map((item) => ({
+					...item,
+					icon: group.title === "Apps" ? GridIcon : PuzzleIcon,
+					tint: "gray" as SettingsTint,
+				})),
+			})),
+		],
 		[appEntities, pluginEntities]
 	);
 	const allItems = useMemo(
@@ -366,7 +467,14 @@ export function SettingsDialog({
 																	setSearch("");
 																}}
 															>
-																{item.label}
+																{item.icon ? (
+																	<SettingsIconTile
+																		icon={item.icon}
+																		size="sm"
+																		tint={item.tint}
+																	/>
+																) : null}
+																<span className="truncate">{item.label}</span>
 															</SidebarMenuButton>
 														</SidebarMenuItem>
 													))}
@@ -397,7 +505,14 @@ export function SettingsDialog({
 																isActive={activeSection === item.value}
 																onClick={() => setActiveSection(item.value)}
 															>
-																{item.label}
+																{item.icon ? (
+																	<SettingsIconTile
+																		icon={item.icon}
+																		size="sm"
+																		tint={item.tint}
+																	/>
+																) : null}
+																<span className="truncate">{item.label}</span>
 															</SidebarMenuButton>
 														</SidebarMenuItem>
 													))}
@@ -418,7 +533,12 @@ export function SettingsDialog({
 									<SidebarMenu>
 										<SidebarMenuItem>
 											<SidebarMenuButton onClick={handleOpenGateway}>
-												Gateway settings
+												<SettingsIconTile
+													icon={ComputerIcon}
+													size="sm"
+													tint="gray"
+												/>
+												<span className="truncate">Gateway settings</span>
 											</SidebarMenuButton>
 										</SidebarMenuItem>
 									</SidebarMenu>

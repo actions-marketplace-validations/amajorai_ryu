@@ -90,6 +90,142 @@ pub struct EngineSwap {
     pub unchanged: bool,
 }
 
+/// A **proof of ownership** for one loopback port: this manager registered the named
+/// sidecar, still holds the port claim for it, and the child it spawned was alive as of
+/// the `waitpid` this lookup performed.
+///
+/// Note the exact scope of that last clause — it is checked, not assumed (the flag it
+/// used to read was set at spawn and cleared only by `stop`, so a crashed sidecar
+/// carried this proof forever), but it is a point-in-time answer about *our own child*.
+/// It says nothing about a process that outlived a previous Core: no `Child` handle
+/// survives the boot, so such a process is indistinguishable from any other stranger on
+/// the port and Core never dials it. `claim_port` refuses, the sidecar stays
+/// unregistered, and its routes 503 with a reason naming the port to free.
+///
+/// The type exists to make a class of bug unrepresentable. Before it, "which port do I
+/// dial for this sidecar" had TWO independent answers — the manifest's declared
+/// `spec.port` (via `profile::port`) and the manager's `port_claims` registry — and they
+/// silently disagree in exactly the dangerous case: a sidecar whose `claim_port` was
+/// refused because another process on the host already holds that port. Core would then
+/// refuse to start the real sidecar and still forward Core-authenticated requests — full
+/// bodies, cookies, and the plugin's minted `RYU_EXT_TOKEN` — to the foreign process
+/// squatting there. Collapsing the two facts into one checked lookup is the fix, and the
+/// missing public constructor is what keeps it collapsed: no present or future caller can
+/// hand `forward_to_sidecar` a manifest-derived port by accident, because the only way to
+/// obtain one of these outside tests is [`SidecarManager::forward_target`].
+#[derive(Debug, Clone, Copy)]
+pub struct ForwardTarget {
+    port: u16,
+}
+
+impl ForwardTarget {
+    /// The loopback port to dial. Always the port the manager CLAIMED for the sidecar
+    /// (already profile-shifted — `ManifestSidecar::port()` returns
+    /// `profile::port(spec.port)`, which is the value both the child binds and the claim
+    /// registry stores), never a value re-derived from the manifest at the hop.
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Test-only escape hatch for the stub-server hop tests, which bind an ephemeral
+    /// port with no manager behind it. Deliberately `#[cfg(test)]`: a production
+    /// constructor would reopen the exact hole this type closes.
+    #[cfg(test)]
+    pub fn for_test(port: u16) -> Self {
+        Self { port }
+    }
+}
+
+/// Why a sidecar has no dialable port right now. The two arms are distinguished
+/// because they mean very different things to the caller — and to the user reading
+/// the failure.
+#[derive(Debug, Clone)]
+pub enum ForwardDenied {
+    /// The name never entered the runtime registry: its `claim_port` was refused (some
+    /// other process on this host holds the declared port), or the app was never
+    /// enabled. There is nothing to wake — `wake_sidecar` would fail with "unknown
+    /// sidecar" — and forwarding to the declared port is precisely the vulnerability.
+    ///
+    /// This arm is TERMINAL until a human intervenes, by design. Core does not try to
+    /// reclaim the port, because it has no way to prove the process holding it is one of
+    /// ours, and acting on a guess would mean signalling an unrelated program.
+    NotRegistered {
+        name: String,
+        /// The port the manifest declared, echoed so the failure is diagnosable
+        /// (the manifests publish these already; there is nothing to redact).
+        declared_port: Option<u16>,
+    },
+    /// Registered and the claim is ours, but the process is not up. Legitimate and
+    /// routine for a lazy / idle-stopped sidecar (which the caller then wakes); a real
+    /// failure for an eager one (mid-download, crash-looping).
+    NotRunning { name: String, port: u16 },
+}
+
+impl ForwardDenied {
+    /// The manager key, for the failure body / log line.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::NotRegistered { name, .. } | Self::NotRunning { name, .. } => name,
+        }
+    }
+
+    /// The port involved, when one is known.
+    pub(crate) fn port(&self) -> Option<u16> {
+        match self {
+            Self::NotRegistered { declared_port, .. } => *declared_port,
+            Self::NotRunning { port, .. } => Some(*port),
+        }
+    }
+
+    /// Human-readable cause, rendered verbatim into the 503 body so the condition is
+    /// diagnosable from the response alone (the durable half lives on
+    /// `/api/sidecar/status` as `failure_reason`).
+    ///
+    /// The `NotRegistered` wording says the whole truth, because there is no recovery
+    /// path behind it and pretending otherwise wastes the reader's time: Core refused to
+    /// claim the port, it will not evict whoever holds it — a probe cannot tell an
+    /// orphan of ours from an unrelated program, and guessing wrong means Core killing
+    /// something else on the user's machine — so a human has to free the port. The
+    /// likeliest holder is named (a sidecar left running by an unclean Core exit)
+    /// because that is the one the user can act on.
+    ///
+    /// # Where the port number comes from
+    ///
+    /// NOT from `declared_port`, which is `None` on exactly the path that matters: a
+    /// refused `claim_port` leaves no claim entry behind, and `forward_target` builds
+    /// this arm from the claim registry. The durable reason recorded at the refusal is
+    /// what carries the number (it embeds `claim_port`'s own error text), so it is
+    /// preferred whenever one exists — the 503 body and the `/api/sidecar/status`
+    /// `failure_reason` then say the same thing, which is the point.
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::NotRegistered {
+                name,
+                declared_port,
+            } => {
+                if let Some(recorded) =
+                    crate::sidecar::manifest_sidecar::registration_failure_reason(name)
+                {
+                    return format!("not registered: {recorded}");
+                }
+                let port = declared_port.map_or_else(
+                    || "the declared port".to_owned(),
+                    |port| format!("port {port}"),
+                );
+                format!(
+                    "not registered: {port} is held by another process on this host, or the \
+                     app is not enabled. Core will not kill a process it cannot prove it \
+                     spawned; free {port} — most often a sidecar left behind by an unclean \
+                     shutdown — then disable and re-enable this app"
+                )
+            }
+            Self::NotRunning { port, .. } => {
+                format!("registered on port {port} but not running (start failed or crashed)")
+            }
+        }
+    }
+}
+
 pub struct SidecarManager {
     sidecars: HashMap<String, Arc<dyn Sidecar>>,
     /// Sidecars registered at RUNTIME (not at construction) — the manifest-declared
@@ -481,9 +617,37 @@ impl SidecarManager {
         // Port registry: claim the declared port BEFORE inserting, so a collision
         // with a built-in (already bound) or another plugin fails fast. Idempotent
         // for the same owner, so a re-register keeps the claim.
+        //
+        // A refusal here is the failure the whole ext-proxy registration gate exists
+        // for, and it is otherwise INVISIBLE: the name never enters `dynamic`, so it is
+        // absent from `statuses()` rather than reported as failed. Record it (with
+        // `claim_port`'s own wording, which names the port and the OS error) so
+        // `/api/sidecar/status` can explain why the app is dead. Recorded HERE and not
+        // at the enable-time call sites deliberately — those wrap `register_and_start`,
+        // whose error may equally come from `start()`, which would mislabel a crashed
+        // process as a registration failure.
         if let Some(port) = sidecar.port() {
-            self.claim_port(port, &name)?;
+            if let Err(e) = self.claim_port(port, &name) {
+                // `claim_port`'s wording verbatim (it names the port and the OS error),
+                // plus the remedy — and the remedy is a HUMAN one. Core does not kill
+                // whatever holds the port: a bind-probe cannot tell a sidecar our own
+                // predecessor left running from an unrelated program, and evicting on a
+                // guess would mean destroying something else on the user's machine. So
+                // the reason names the likeliest cause the user can actually act on.
+                // Deliberately says **re-enable**, not "restart this sidecar": a refused
+                // claim means the name never entered `dynamic`, so there is nothing for
+                // the restart endpoint to find. Re-enabling the app re-enters the
+                // register path and is the way out.
+                let reason = format!(
+                    "{e}. Core will not kill a process it cannot prove it spawned — free \
+                     port {port} (most often a sidecar left behind by an unclean \
+                     shutdown), then disable and re-enable this app"
+                );
+                crate::sidecar::manifest_sidecar::record_registration_failure(&name, &reason);
+                return Err(e);
+            }
         }
+        crate::sidecar::manifest_sidecar::clear_registration_failure(&name);
         self.dynamic
             .write()
             .unwrap()
@@ -590,6 +754,13 @@ impl SidecarManager {
         let sidecar = self.dynamic.write().unwrap().remove(name);
         // Release the port claim so the port frees for a re-enable or another plugin.
         self.release_port(name);
+        // A disabled app must not keep a "failed to register" reason on the status
+        // plane forever — the condition is no longer true of anything we own.
+        crate::sidecar::manifest_sidecar::clear_registration_failure(name);
+        // Same for a recorded crash: the process it described is gone along with the
+        // registration, so keeping the reason would make a disabled app read as a
+        // failing one forever (and `start()` — the other clear — never runs again).
+        crate::sidecar::manifest_sidecar::clear_crash_reason(name);
         // Drop the idle/lazy/start-lock bookkeeping so a re-enable starts clean and
         // a stale idle clock can't fire against a name that no longer exists.
         self.lazy_registered.write().unwrap().remove(name);
@@ -602,7 +773,28 @@ impl SidecarManager {
         Ok(())
     }
 
-    /// Stop and restart a single sidecar by name.
+    /// Stop and restart a single sidecar by name — built-in or manifest-declared.
+    ///
+    /// # The dynamic arm was missing entirely
+    ///
+    /// This only ever consulted `self.sidecars`, the construction-time built-in map. For
+    /// every manifest sidecar — i.e. every app — `POST /api/sidecar/{name}/restart`
+    /// therefore returned `{"success": true}` having done precisely nothing. That is an
+    /// independent bug, and it is also the cheapest affordance available for the sidecar
+    /// that CRASHED: its claim is kept (see [`Self::note_crash_if_exited`]) and its name
+    /// is still in `dynamic`, so one existing button brings it back with no new endpoint
+    /// and no new UI contract.
+    ///
+    /// # What it is NOT a way out of
+    ///
+    /// It does not recover the port-squatted case. A refused `claim_port` means the name
+    /// never entered `dynamic`, so there is nothing here to find and this returns `Ok(())`
+    /// having touched nothing — the same shape as an unknown name. The way out of that one
+    /// is for a human to free the port and then disable/re-enable the app, which re-enters
+    /// the register path. Core does not free it for them: it cannot prove the process
+    /// holding the port is one it spawned, and killing on a guess is worse than the 503.
+    /// The refusal reason on the status plane says exactly that; do not restate it here
+    /// as "restart".
     pub async fn restart_sidecar(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
         if let Some(sidecar) = self.sidecars.get(name) {
             if let Some(handle) = self.health_monitors.lock().unwrap().remove(name) {
@@ -611,8 +803,23 @@ impl SidecarManager {
             sidecar.stop().await?;
             sidecar.start().await?;
             self.spawn_health_monitor(name);
+            return Ok(());
         }
-        Ok(())
+        let Some(sidecar) = self.dynamic.read().unwrap().get(name).map(Arc::clone) else {
+            return Ok(());
+        };
+        // Read the lazy mark into a local FIRST: `register_inner` takes the same lock for
+        // writing, and holding the read guard across the call would deadlock.
+        let was_lazy = self.lazy_registered.read().unwrap().contains(name);
+        if let Some(handle) = self.health_monitors.lock().unwrap().remove(name) {
+            handle.abort();
+        }
+        // Stop BEFORE the re-register: `register_inner` short-circuits on an
+        // already-registered-and-running name, so a restart that skipped the stop would
+        // be a silent no-op.
+        sidecar.stop().await?;
+        self.register_inner(&sidecar, was_lazy)?;
+        self.start_dynamic_locked(name).await
     }
 
     /// Mark a sidecar as installed so `start_sidecar` / `start_all` will run it.
@@ -728,6 +935,16 @@ impl SidecarManager {
                 pid: sidecar.pid(),
                 memory_bytes: sample.map(|s| s.memory_bytes),
                 cpu_percent: sample.map(|s| s.cpu_percent),
+                // Registration failure first, crash second: a sidecar that never
+                // registered cannot have crashed, so the more fundamental condition
+                // wins when (impossibly) both are set. The crash link is what stops a
+                // died-on-its-own sidecar from rendering as an ordinary scaled-to-zero
+                // one — before it existed this row read `running: true,
+                // failure_reason: None` for a process that no longer existed.
+                failure_reason: crate::sidecar::manifest_sidecar::registration_failure_reason(
+                    name,
+                )
+                .or_else(|| crate::sidecar::manifest_sidecar::crash_reason(name)),
             }
         };
         let mut out: Vec<SidecarStatus> = self
@@ -747,6 +964,27 @@ impl SidecarManager {
         // Manifest-declared managed sidecars ride the same status surface for free.
         for (name, sidecar) in &dynamic {
             out.push(status_for(name, sidecar));
+        }
+        // Sidecars that failed to REGISTER own no `Arc<dyn Sidecar>`, so they cannot go
+        // through `status_for` — synthesize a row each. This is the only way they appear
+        // on the status plane at all: a refused `claim_port` used to leave them silently
+        // ABSENT (not "failed"), which is why "port squatted by another process" showed
+        // up to the user as an app that simply did not work, with no reason anywhere.
+        for (name, reason) in crate::sidecar::manifest_sidecar::registration_failures() {
+            if out.iter().any(|s| s.name == name) {
+                continue;
+            }
+            out.push(SidecarStatus {
+                name,
+                running: false,
+                // Not `lazy`: a lazy sidecar is registered-and-scaled-to-zero and WILL
+                // wake. This one will not — nothing owns its port.
+                lazy: false,
+                pid: None,
+                memory_bytes: None,
+                cpu_percent: None,
+                failure_reason: Some(reason),
+            });
         }
         out
     }
@@ -895,6 +1133,83 @@ impl SidecarManager {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// The port THIS manager holds a claim on for `name` — the raw read behind
+    /// [`Self::forward_target`], without the liveness check. Exposed for status/
+    /// diagnostics; a caller about to DIAL must use `forward_target`, never this.
+    pub fn claimed_port(&self, name: &str) -> Option<u16> {
+        self.port_claims
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, owner)| owner.as_str() == name)
+            .map(|(port, _)| *port)
+    }
+
+    /// **The only way to obtain a dialable port for a sidecar.** Returns the port this
+    /// manager CLAIMED for `name`, and only when the child we spawned for it is still
+    /// alive as of this call.
+    ///
+    /// Reads three facts in order — is it registered, do we hold its claim, is it up —
+    /// and never consults the manifest. That ordering is the security argument, and the
+    /// three facts prove three *different* things, which is worth stating separately
+    /// because conflating them is what the original hole was made of:
+    ///
+    /// - A manifest-declared port is an **aspiration** — text a plugin author wrote.
+    ///   Never dial it.
+    /// - The **claim** proves *reservation*: no other sidecar in this process took the
+    ///   port, and the bind-probe at claim time saw it free. It proves nothing about
+    ///   who is listening there now.
+    /// - The **liveness check** proves *occupancy by our child*, and only at the instant
+    ///   it runs: it is a `waitpid(WNOHANG)` on the `Child` this manager holds
+    ///   ([`crate::sidecar::process::ProcessHandle::is_running`]), not the spawn-time
+    ///   flag it used to be. That flag was the bug — it survived the process it
+    ///   described, so a crashed sidecar's vacated port stayed dialable and the ext
+    ///   proxy would stamp `RYU_EXT_TOKEN` onto a request aimed at whatever bound it
+    ///   next.
+    ///
+    /// Neither fact says anything about a process that outlived a **previous** Core: no
+    /// `Child` handle survives the boot, so nothing here can distinguish our own orphan
+    /// from a stranger — and because it cannot, Core treats both the same way and dials
+    /// neither. There is no reclaim step; the port stays unclaimed until a human frees
+    /// it.
+    ///
+    /// When `claim_port` was refused (an unrelated
+    /// host process, or another sidecar, already holds the port) the name never enters
+    /// `dynamic`, so this returns [`ForwardDenied::NotRegistered`] and the caller must
+    /// refuse rather than hand a foreign listener Core-authenticated traffic and the
+    /// plugin's minted `RYU_EXT_TOKEN`.
+    ///
+    /// [`ForwardDenied::NotRunning`] is deliberately a SEPARATE arm rather than a flat
+    /// error: it is the normal resting state of a lazy / idle-stopped sidecar
+    /// ([`Self::register`] claims the port and inserts into `dynamic` WITHOUT starting
+    /// the process), so callers translate it into a wake, not a refusal. Only the
+    /// not-wake-eligible case is a genuine failure.
+    pub fn forward_target(&self, name: &str) -> Result<ForwardTarget, ForwardDenied> {
+        let Some(sidecar) = self.dynamic.read().unwrap().get(name).map(Arc::clone) else {
+            return Err(ForwardDenied::NotRegistered {
+                name: name.to_owned(),
+                // A refused claim leaves no claim entry, so this is usually `None`;
+                // it is `Some` only in the odd case of a claim outliving its entry.
+                declared_port: self.claimed_port(name),
+            });
+        };
+        // The claim registry, not `sidecar.port()`: the claim is what proves no other
+        // owner took the port out from under us between registration and this hop.
+        let Some(port) = self.claimed_port(name) else {
+            return Err(ForwardDenied::NotRegistered {
+                name: name.to_owned(),
+                declared_port: sidecar.port(),
+            });
+        };
+        if !sidecar.is_running() {
+            return Err(ForwardDenied::NotRunning {
+                name: name.to_owned(),
+                port,
+            });
+        }
+        Ok(ForwardTarget { port })
     }
 
     /// Whether `name` opted into on-demand start — it was registered lazy, or it
@@ -1065,6 +1380,87 @@ impl SidecarManager {
         Err(last_err.unwrap())
     }
 
+    /// The health monitor's per-tick crash check, factored out so the decision is
+    /// testable without waiting a [`HEALTH_INTERVAL`]. Returns `true` when the sidecar's
+    /// process died on its own — the monitor then records the reason and self-cancels.
+    ///
+    /// # Why this runs BEFORE the probe
+    ///
+    /// The probe it precedes is `health_check`, and `ManifestSidecar::health_check`
+    /// presents the plugin's minted `RYU_EXT_TOKEN` via `.bearer_auth`. Against a
+    /// sidecar whose process died, the OS port is free and may already be bound by an
+    /// unrelated local process — so probing first would *deliver the credential* to that
+    /// process every 30 seconds, with no request from anyone and nothing for an attacker
+    /// to do but wait. Detecting the exit first and cancelling the monitor is what closes
+    /// that lane; the truthful `is_running` behind [`Self::forward_target`] closes the
+    /// request-driven one.
+    ///
+    /// # Why `has_exited()` and not `!is_running()`
+    ///
+    /// [`crate::sidecar::process::ProcessHandle::stop`] *takes* the child, so after a
+    /// deliberate stop — plugin disable, idle scale-to-zero — `has_exited()` is false
+    /// while `is_running()` is also false. Only the first distinguishes a crash from a
+    /// routine scale-to-zero, and recording the latter as a failure would put a
+    /// permanent "crashed" reason on every idle-stopped app.
+    ///
+    /// # Why the port claim is deliberately NOT released here
+    ///
+    /// The instinct is "reap ⇒ release", and it is wrong: [`Self::forward_target`] reads
+    /// the claim *before* liveness, so dropping the claim downgrades `NotRunning` ("wake
+    /// me") to `NotRegistered` ("hard 503, nothing owns this port"). That would
+    /// manufacture the unrecoverable dead end on every single crash, and would also
+    /// leave the port genuinely free for a squatter. A claim is Core's *reservation*;
+    /// nothing about a dead child makes the reservation wrong. Keeping it is also what
+    /// preserves recovery: a crashed wake-eligible sidecar gets `NotRunning` → wake →
+    /// restart on the next request.
+    ///
+    /// Nothing here restarts the process directly: an unbounded auto-restart of a
+    /// crash-looping child is its own hazard, and the request-driven wake already covers
+    /// the case where anyone still wants it.
+    ///
+    /// # Why the crash teardown hook fires here and nowhere else
+    ///
+    /// This is the only place in Core that learns a sidecar's child died on its own.
+    /// [`Sidecar::stop`] is what releases a live process's state, and a crash never
+    /// calls it — so anything `stop` would have dropped stays valid-looking until the
+    /// next boot unless it is dropped from here. That is exactly what happened to a
+    /// [`crate::sidecar::manifest_sidecar::ManifestSidecar`]'s registered provider: a
+    /// `models.json` row holding a loopback `baseUrl` and the plugin's ext token as its
+    /// `apiKey`, pointed at the port the crash just freed, and dialed by Pi directly —
+    /// past the ext proxy, past the refusal `forward_target` returns for the same
+    /// sidecar. [`Sidecar::on_crash_detected`] is the seam that closes it.
+    fn note_crash_if_exited(&self, name: &str, sidecar: &Arc<dyn Sidecar>) -> bool {
+        if !sidecar.has_exited() {
+            return false;
+        }
+        crate::sidecar::manifest_sidecar::record_crash_reason(
+            name,
+            "process exited unexpectedly (no stop was requested); the port claim is still \
+             held for it, so a wake-eligible sidecar restarts on the next request and any \
+             other can be restarted from the sidecar status surface",
+        );
+        // Give the sidecar the teardown its own `stop()` would have run. A crash runs
+        // NOTHING — that is the whole hazard — so any state whose validity ended with
+        // the process has to be dropped from here or it survives to the next boot. For
+        // a manifest sidecar that state is its registered model provider: a live row in
+        // `models.json` carrying `http://127.0.0.1:<port>/v1` plus the plugin's minted
+        // ext token as `apiKey`, aimed at a port the dead child has just released. Pi
+        // dials that baseUrl DIRECTLY, so nothing else in this file guards it: not the
+        // ext proxy's registration gate, not `forward_target`'s refusal below — the
+        // credential simply goes to whoever binds the port next. See
+        // `ManifestSidecar::on_crash_detected`.
+        //
+        // Sync and unconditional. The default impl is empty (built-ins register no
+        // provider), the manifest impl short-circuits on an atomic for the sidecars
+        // that never registered one, and the only work left in the remaining case is a
+        // small `models.json` rewrite that logs its own failures — so this cannot
+        // meaningfully stall the monitor, and the monitor breaks on the very next line
+        // anyway. It is deliberately NOT spawned: a detached task could still be
+        // pending while the vacated port is being handed out.
+        sidecar.on_crash_detected();
+        true
+    }
+
     /// Start (or replace) the background `/health` poll loop for `name`.
     ///
     /// Called by every path that brings a sidecar up — `start_all`, [`Self::start_sidecar`],
@@ -1115,6 +1511,11 @@ impl SidecarManager {
                     let Some(sidecar) = sidecar else {
                         break;
                     };
+                    // Crash detection runs BEFORE the probe — see `note_crash_if_exited`
+                    // for why that ordering is the security property, not a style choice.
+                    if manager.note_crash_if_exited(&name, &sidecar) {
+                        break;
+                    }
                     match sidecar.health_check().await {
                         HealthStatus::Healthy => {}
                         HealthStatus::Degraded(msg) => {
@@ -1271,6 +1672,278 @@ mod tests {
         );
     }
 
+    /// A [`Sidecar`] backed by a REAL [`crate::sidecar::process::ProcessHandle`].
+    ///
+    /// `FakeSidecar` above backs `is_running` with a plain `AtomicBool` and inherits
+    /// the trait's `has_exited() == false`, so a defect-1 test written against it
+    /// passes identically before and after the liveness fix — it never touches the
+    /// layer that changed. Everything below therefore runs a real child.
+    struct ChildBackedSidecar {
+        name: String,
+        port: Option<u16>,
+        handle: crate::sidecar::process::ProcessHandle,
+    }
+
+    impl ChildBackedSidecar {
+        fn new(name: &str, port: Option<u16>) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_string(),
+                port,
+                handle: crate::sidecar::process::ProcessHandle::new(),
+            })
+        }
+    }
+
+    impl Sidecar for ChildBackedSidecar {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn is_required(&self) -> bool {
+            false
+        }
+        fn start(&self) -> BoxFuture<anyhow::Result<()>> {
+            let handle = self.handle.clone();
+            Box::pin(async move {
+                // Long-lived on purpose: the tests below choose when it dies.
+                handle
+                    .start_path_with_args("/bin/sh", &["-c".to_owned(), "sleep 300".to_owned()])
+                    .await
+            })
+        }
+        fn stop(&self) -> BoxFuture<anyhow::Result<()>> {
+            let handle = self.handle.clone();
+            Box::pin(async move { handle.stop().await })
+        }
+        fn health_check(&self) -> BoxFuture<HealthStatus> {
+            Box::pin(async move { HealthStatus::Healthy })
+        }
+        fn is_running(&self) -> bool {
+            self.handle.is_running()
+        }
+        fn has_exited(&self) -> bool {
+            self.handle.has_exited()
+        }
+        fn pid(&self) -> Option<u32> {
+            self.handle.pid()
+        }
+        fn port(&self) -> Option<u16> {
+            self.port
+        }
+    }
+
+    /// **Defect 1, at the manager layer.** A registered sidecar whose process dies on
+    /// its own must stop being dialable and must say so on the status plane.
+    ///
+    /// Before the fix: `is_running()` read a spawn-time `AtomicBool` that only `stop()`
+    /// ever cleared, so `forward_target` returned `Ok(ForwardTarget)` for a process
+    /// that no longer existed and the ext proxy stamped `RYU_EXT_TOKEN` onto a request
+    /// aimed at whatever local process had since bound the vacated port. The status row
+    /// said `running: true, failure_reason: None`.
+    ///
+    /// The `NotRunning` (not `NotRegistered`) assertion is load-bearing: it pins the
+    /// decision to KEEP the port claim on a crash. Releasing it would turn every crash
+    /// into the unrecoverable `NotRegistered` hard 503 — the one shape no wake and no
+    /// restart can undo, because the name is not in `dynamic` for either to find.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn crashed_sidecar_is_denied_and_reported() {
+        let mgr = SidecarManager::new_noop();
+        let port = free_port();
+        let name = "com.acme.crash/engine";
+        let sc = ChildBackedSidecar::new(name, Some(port));
+        mgr.register_and_start(sc.clone()).await.unwrap();
+
+        // Baseline: alive, dialable, no failure reason.
+        assert!(sc.is_running());
+        assert!(mgr.forward_target(name).is_ok(), "live sidecar is dialable");
+        let pid = sc.pid().expect("a spawned child has a pid");
+
+        // Kill it out from under Core — the OOM / `kill -9` case.
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .expect("SIGKILL the test child");
+        eventually("child is reaped", || sc.has_exited()).await;
+
+        // The forwarding gate now refuses, and refuses with the arm that keeps the
+        // claim (and therefore keeps the sidecar wake-eligible).
+        match mgr.forward_target(name) {
+            Err(ForwardDenied::NotRunning { port: p, .. }) => assert_eq!(p, port),
+            other => panic!("crashed sidecar must be denied as NotRunning, got {other:?}"),
+        }
+        assert_eq!(
+            mgr.claimed_port(name),
+            Some(port),
+            "the port claim must survive a crash — releasing it would downgrade \
+             NotRunning (wake me) to NotRegistered (hard 503)"
+        );
+
+        // The health monitor's per-tick decision records the reason and self-cancels.
+        let sidecar: Arc<dyn Sidecar> = sc.clone();
+        assert!(
+            mgr.note_crash_if_exited(name, &sidecar),
+            "the monitor must detect the exit before its next probe — the probe is what \
+             presents RYU_EXT_TOKEN to whoever holds the port"
+        );
+
+        // …and the status plane says so, instead of `running: true, reason: None`.
+        let statuses = mgr.statuses();
+        let row = statuses.iter().find(|s| s.name == name).expect("status row");
+        assert!(!row.running, "a crashed sidecar must not report running");
+        assert!(
+            row.failure_reason
+                .as_deref()
+                .is_some_and(|r| r.contains("exited unexpectedly")),
+            "crashed sidecar needs a failure_reason, got {:?}",
+            row.failure_reason
+        );
+
+        mgr.stop_and_deregister(name).await.unwrap();
+    }
+
+    /// A deliberate stop is not a crash: `stop()` takes the child, so `has_exited()`
+    /// stays false and no failure reason is recorded. This is why the monitor keys on
+    /// `has_exited()` rather than `!is_running()` — otherwise every idle scale-to-zero
+    /// would brand a healthy app as crashed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_stopped_sidecar_is_not_reported_as_crashed() {
+        let mgr = SidecarManager::new_noop();
+        let name = "com.acme.idle/engine";
+        let sc = ChildBackedSidecar::new(name, Some(free_port()));
+        mgr.register_and_start(sc.clone()).await.unwrap();
+        sc.stop().await.unwrap();
+
+        assert!(!sc.is_running());
+        let sidecar: Arc<dyn Sidecar> = sc.clone();
+        assert!(
+            !mgr.note_crash_if_exited(name, &sidecar),
+            "a stopped sidecar must never be recorded as crashed"
+        );
+        let statuses = mgr.statuses();
+        let row = statuses.iter().find(|s| s.name == name).expect("status row");
+        assert!(row.failure_reason.is_none());
+
+        mgr.stop_and_deregister(name).await.unwrap();
+    }
+
+    /// A sidecar whose exit status is ours to set, and that counts the crash-teardown
+    /// callbacks it receives. No real child: the property under test is which callback
+    /// the monitor's decision fires, and a spawned-then-SIGKILLed process would only
+    /// add a race to it.
+    struct CrashTeardownSidecar {
+        name: String,
+        exited: Arc<AtomicBool>,
+        teardowns: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl CrashTeardownSidecar {
+        fn new(name: &str) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_string(),
+                exited: Arc::new(AtomicBool::new(false)),
+                teardowns: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            })
+        }
+    }
+
+    impl Sidecar for CrashTeardownSidecar {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn is_required(&self) -> bool {
+            false
+        }
+        fn start(&self) -> BoxFuture<anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn stop(&self) -> BoxFuture<anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn health_check(&self) -> BoxFuture<HealthStatus> {
+            Box::pin(async { HealthStatus::Healthy })
+        }
+        fn is_running(&self) -> bool {
+            !self.exited.load(Ordering::SeqCst)
+        }
+        fn has_exited(&self) -> bool {
+            self.exited.load(Ordering::SeqCst)
+        }
+        fn on_crash_detected(&self) {
+            self.teardowns.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// **The credential lane a crash leaves open.** Detecting the exit and writing a
+    /// reason is not enough: whatever `stop()` would have released has to be released
+    /// here too, because a crash calls `stop()` never. For a
+    /// [`crate::sidecar::manifest_sidecar::ManifestSidecar`] that is its registered
+    /// model provider — a `models.json` row holding the plugin's minted ext token as
+    /// `apiKey` and the loopback port the dead child has just freed as `baseUrl`, which
+    /// Pi dials DIRECTLY (never through the ext proxy, so no gate in this file covers
+    /// it). Before this hook the row survived until the next Core boot's
+    /// `purge_sidecar_providers`, i.e. potentially forever on a long-running node.
+    ///
+    /// This pins the manager half — that the crash decision invokes the teardown, once,
+    /// and only for an actual crash. `manifest_sidecar`'s
+    /// `crash_teardown_drops_the_provider_row_and_its_credential` pins the other half:
+    /// that the teardown really removes the credential-bearing row.
+    #[tokio::test]
+    async fn crash_detection_runs_the_sidecars_crash_teardown() {
+        let mgr = SidecarManager::new_noop();
+        let name = "com.acme.teardown/engine";
+        let sc = CrashTeardownSidecar::new(name);
+        mgr.register_and_start(sc.clone()).await.unwrap();
+        let sidecar: Arc<dyn Sidecar> = sc.clone();
+
+        // A live sidecar releases nothing — its provider row is the truth.
+        assert!(!mgr.note_crash_if_exited(name, &sidecar));
+        assert_eq!(
+            sc.teardowns.load(Ordering::SeqCst),
+            0,
+            "a running sidecar must keep its registrations"
+        );
+
+        // The child dies on its own.
+        sc.exited.store(true, Ordering::SeqCst);
+        assert!(mgr.note_crash_if_exited(name, &sidecar));
+        assert_eq!(
+            sc.teardowns.load(Ordering::SeqCst),
+            1,
+            "the crash decision must run the sidecar's own teardown — recording a reason \
+             leaves the dead sidecar's provider row (and the ext token in it) pointed at \
+             a port anything on the box may now bind"
+        );
+
+        mgr.stop_and_deregister(name).await.unwrap();
+    }
+
+    /// `restart_sidecar` only ever consulted the built-in `sidecars` map, so
+    /// `POST /api/sidecar/{name}/restart` reported success while doing nothing for every
+    /// manifest sidecar — i.e. for every app. It is also the affordance the crashed-but-
+    /// registered sidecar from defect 1 recovers through.
+    #[tokio::test]
+    async fn restart_sidecar_reaches_dynamic_sidecars() {
+        let mgr = SidecarManager::new_noop();
+        let name = "com.acme.restart/engine";
+        let sc = FakeSidecar::new(name);
+        mgr.register_and_start(sc.clone()).await.unwrap();
+        assert_eq!(sc.start_calls.load(Ordering::SeqCst), 1);
+
+        mgr.restart_sidecar(name).await.unwrap();
+        assert_eq!(
+            sc.start_calls.load(Ordering::SeqCst),
+            2,
+            "restart must actually restart a manifest sidecar, not silently succeed"
+        );
+        assert!(sc.is_running());
+
+        // An unknown name stays a harmless no-op, as before.
+        mgr.restart_sidecar("nope/missing").await.unwrap();
+        mgr.stop_and_deregister(name).await.unwrap();
+    }
+
     /// stop_and_deregister on an unknown name is a harmless no-op (not an error).
     #[tokio::test]
     async fn deregister_unknown_is_noop() {
@@ -1278,14 +1951,100 @@ mod tests {
         mgr.stop_and_deregister("nope/missing").await.unwrap();
     }
 
-    /// Bind a free ephemeral port, then reserve it back for a deterministic
-    /// "already in use" target the OS won't hand out concurrently.
+    /// A port no other test in this binary will be handed, and that nothing on the
+    /// host currently holds.
+    ///
+    /// # Why not `bind(("127.0.0.1", 0))` and return the port
+    ///
+    /// That is what this used to do, and it is a TOCTOU: the listener is dropped
+    /// before the caller ever claims the port, so between the two the OS is free to
+    /// hand the very same number to a concurrently running test — the squatters in
+    /// this module all bind port 0 — which then holds it for the rest of its run. The
+    /// caller's `claim_port` bind probe then fails with "already in use", from a test
+    /// that never mentions ports. `port_registry_rejects_collision_and_frees_on_deregister`
+    /// failed 2 of 6 clean runs that way, and the odds only got worse as callers here
+    /// went from 2 to 11.
+    ///
+    /// The fix has three parts, and each one closes a hole the previous attempt left
+    /// open — the intermediate versions are recorded because each looked sufficient:
+    ///
+    /// * **Allocate below the ephemeral range.** `21000..25000` sits under every
+    ///   platform's ephemeral band (49152+ on this machine — `sysctl
+    ///   net.inet.ip.portrange.first` — 32768+ on Linux), so the OS never hands one of
+    ///   these out to a `bind(…, 0)` elsewhere in the suite, and the squatters stop
+    ///   being able to steal a number this handed out.
+    /// * **Never bind the port we are about to hand out.** Not obvious, and it was
+    ///   worth ~2 failures in 20 runs on its own. Instrumenting a bind-probing version
+    ///   to immediately re-bind its own probe port showed the second bind failing with
+    ///   `EADDRINUSE` — same process, microseconds later, with no listener anywhere
+    ///   (`lsof -iTCP:21000-25000` stayed empty across 2000 samples). This suite forks
+    ///   children (`ChildBackedSidecar` spawns `/bin/sh -c "sleep 300"`), and a fork
+    ///   that lands while a probe listener is open copies that descriptor into the
+    ///   child, which holds the port until its `exec` closes it: invisible to `lsof`,
+    ///   sub-millisecond, and on the exact port just promised to the caller — whose
+    ///   `claim_port` bind then fails. A standalone bind/rebind loop with no forks
+    ///   never reproduced it, which is what pointed at the fork. So the "is anything
+    ///   really there" check is a **connect**: it never occupies the port, and a
+    ///   refused connection is the pass condition.
+    /// * **Reserve through a shadow port, so the exclusion is kernel-enforced across
+    ///   PROCESSES.** Several agent jobs share this working tree, so two `cargo test`
+    ///   runs at once are routine, and two processes are two independent counters over
+    ///   one host's ports. Per-process lanes only made a tie less likely (still ~2 in
+    ///   40 runs, because same-lane processes run the identical suite in near
+    ///   lockstep). Instead, handing out `P` requires first binding `P + 20000` and
+    ///   holding it for the life of the process: every test process follows the same
+    ///   protocol, so the kernel's own "one binder per port" rule becomes the
+    ///   allocator's mutual exclusion, for threads and processes alike. Binding the
+    ///   *shadow* is safe where binding `P` was not — nobody ever claims a shadow port,
+    ///   so a descriptor leaked into a forked child is harmless.
+    ///
+    /// Tests that want a port to *stay* taken must keep binding port 0 themselves and
+    /// hold the listener — see `port_registry_bind_probe_rejects_bound_port`, which is
+    /// the pattern this helper deliberately does NOT try to provide.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        const BASE: u16 = 21_000;
+        const SPAN: u16 = 4_000;
+        /// Reservations live one band above the ports themselves: `21000..25000` is
+        /// handed out, `41000..45000` is only ever bound by this helper. Still under
+        /// the ephemeral floor.
+        const SHADOW_OFFSET: u16 = 20_000;
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        static START: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+        // The reservations, held open until the process exits. Never read — the
+        // listeners exist so the kernel keeps refusing the shadow port to anyone else.
+        static HELD: Mutex<Vec<std::net::TcpListener>> = Mutex::new(Vec::new());
+
+        // Start somewhere unpredictable so concurrent runs do not walk the band in
+        // lockstep and spend their first draws losing races. Mixed with the clock
+        // because pids are handed out sequentially: two processes started seconds apart
+        // get adjacent pids, i.e. adjacent starts, which is worse than random.
+        let start = *START.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| u64::from(d.subsec_nanos()))
+                .unwrap_or_default();
+            let mixed = u64::from(std::process::id()) ^ (nanos << 13);
+            ((mixed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 47) as u16) % SPAN
+        });
+
+        for _ in 0..SPAN {
+            let step = NEXT.fetch_add(1, Ordering::SeqCst);
+            let port = BASE + (start.wrapping_add(step) % SPAN);
+            // Lost the reservation to another test process (or another thread here):
+            // that port belongs to whoever holds the shadow, so move on.
+            let Ok(reservation) = std::net::TcpListener::bind(("127.0.0.1", port + SHADOW_OFFSET))
+            else {
+                continue;
+            };
+            HELD.lock().unwrap_or_else(|e| e.into_inner()).push(reservation);
+            // Reserved — but something outside the suite (a stray dev server) could
+            // still be serving on the real port. Ask by connecting, never by binding.
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_err() {
+                return port;
+            }
+        }
+        panic!("no free port in {BASE}..{} for this test", BASE + SPAN);
     }
 
     /// The port registry rejects a second sidecar declaring a port already claimed
@@ -1331,6 +2090,249 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!sc.is_running());
+    }
+
+    // ── The ext-proxy registration gate (forward_target) ───────────────────────
+
+    /// The precondition the whole gate rests on, pinned — including the
+    /// counter-intuitive lazy half. A sidecar whose `claim_port` was refused is absent
+    /// from `dynamic`, absent from `lazy_registered`, and therefore **not**
+    /// wake-eligible: `lazy_registered` is populated only AFTER a successful claim, so
+    /// a LAZY sidecar that lost its port reads exactly like an eager one and used to
+    /// fall through the proxy's `is_wake_eligible` check into a blind forward. That is
+    /// why `is_wake_eligible` could never have been the gate.
+    #[tokio::test]
+    async fn failed_port_claim_leaves_the_sidecar_unregistered_and_not_wake_eligible() {
+        let mgr = SidecarManager::new_noop();
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+
+        // Eager and lazy alike.
+        let eager = FakeSidecar::with_port("gate.claimfail.eager/svc", port);
+        assert!(mgr.register_and_start(eager).await.is_err());
+        let lazy = FakeSidecar::with_port("gate.claimfail.lazy/svc", port);
+        assert!(mgr.register(lazy).is_err());
+
+        for name in ["gate.claimfail.eager/svc", "gate.claimfail.lazy/svc"] {
+            assert!(
+                mgr.dynamic.read().unwrap().get(name).is_none(),
+                "{name} must not be in the dynamic registry"
+            );
+            assert!(
+                !mgr.lazy_registered.read().unwrap().contains(name),
+                "{name} must not be marked lazy-registered"
+            );
+            assert!(
+                !mgr.is_wake_eligible(name),
+                "{name}: a failed claim is NOT wake-eligible, even when lazy"
+            );
+            assert!(matches!(
+                mgr.forward_target(name),
+                Err(ForwardDenied::NotRegistered { .. })
+            ));
+        }
+    }
+
+    /// The security assertion, stated as "the port is never dialed": a squatted port
+    /// belongs to somebody else, and the manager must hand out no way to reach it.
+    /// Asserted by counting ACCEPTS on the squatting listener — a test that only
+    /// checked the error would still pass if the request were forwarded and the
+    /// response discarded.
+    #[tokio::test]
+    async fn unregistered_sidecar_is_refused_and_the_port_is_never_dialed() {
+        use std::sync::atomic::AtomicU32;
+
+        let mgr = SidecarManager::new_noop();
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let accepts = Arc::new(AtomicU32::new(0));
+        {
+            let accepts = Arc::clone(&accepts);
+            std::thread::spawn(move || {
+                for stream in squatter.incoming() {
+                    if stream.is_err() {
+                        break;
+                    }
+                    accepts.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        let sc = FakeSidecar::with_port("gate.squatted/svc", port);
+        assert!(mgr.register_and_start(sc).await.is_err());
+
+        // No ForwardTarget can be minted, so `forward_to_sidecar` cannot be called at
+        // all: the type is the gate, not a runtime check a caller might forget.
+        let denied = mgr.forward_target("gate.squatted/svc").unwrap_err();
+        assert!(matches!(denied, ForwardDenied::NotRegistered { .. }));
+        // The refusal is TERMINAL — Core does not reclaim the port, because it cannot
+        // prove whoever holds it is a process it spawned — so the body has to carry
+        // everything a human needs to act. `declared_port` is `None` on this path (a
+        // refused claim leaves no claim entry), which is why the port has to come from
+        // the reason recorded at the refusal rather than from the variant.
+        let reason = denied.reason();
+        assert!(reason.contains("not registered"), "{reason}");
+        assert!(
+            reason.contains(&port.to_string()),
+            "the refusal must name the port to free: {reason}"
+        );
+        assert!(
+            reason.contains("free port") && reason.contains("re-enable"),
+            "the refusal must state the remedy, which is a human freeing the port: {reason}"
+        );
+        // …and the durable half on `/api/sidecar/status` says the same thing.
+        assert!(
+            mgr.statuses().iter().any(|s| s.name == "gate.squatted/svc"
+                && !s.running
+                && s.failure_reason.as_deref().is_some_and(|r| r
+                    .contains(&port.to_string()))),
+            "the status row must carry the same port-naming reason"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            0,
+            "the squatting process must never receive a connection"
+        );
+    }
+
+    /// A lazy sidecar's legitimate resting state — registered, claim held, process
+    /// down — is the ADMIT-then-wake arm, not a refusal. This is the regression guard
+    /// for the gate: if a future tightening collapses `NotRunning` into `NotRegistered`,
+    /// lazy wake dies silently and every lazy app 503s forever.
+    #[tokio::test]
+    async fn lazy_registered_sidecar_is_not_running_but_admitted_and_wakes() {
+        let mgr = SidecarManager::new_noop();
+        let port = free_port();
+        let sc = FakeSidecar::with_port("gate.lazywake/svc", port);
+        mgr.register(sc.clone()).unwrap();
+
+        assert!(!sc.is_running(), "register() must not start the process");
+        assert!(mgr.is_wake_eligible("gate.lazywake/svc"));
+        match mgr.forward_target("gate.lazywake/svc") {
+            Err(ForwardDenied::NotRunning { name, port: p }) => {
+                assert_eq!(name, "gate.lazywake/svc");
+                assert_eq!(p, port, "the CLAIMED port is reported, not a manifest one");
+            }
+            other => panic!("a registered, not-yet-woken lazy sidecar must be NotRunning: {other:?}"),
+        }
+
+        // Waking it makes it dialable, at the same claimed port.
+        mgr.wake_sidecar("gate.lazywake/svc").await.unwrap();
+        assert!(sc.is_running(), "wake must start the lazy sidecar");
+        assert_eq!(mgr.forward_target("gate.lazywake/svc").unwrap().port(), port);
+    }
+
+    /// An EAGER sidecar that registered (claim held) but whose process is down must be
+    /// refused, not forwarded. Today's behaviour before the gate was to dial the
+    /// declared port regardless of who was listening on it.
+    #[tokio::test]
+    async fn registered_but_dead_sidecar_is_refused_not_forwarded() {
+        let mgr = SidecarManager::new_noop();
+        let port = free_port();
+        let sc = FakeSidecar::with_port("gate.dead/svc", port);
+        mgr.register_and_start(sc.clone()).await.unwrap();
+        assert!(mgr.forward_target("gate.dead/svc").is_ok());
+
+        sc.stop().await.unwrap();
+        let denied = mgr.forward_target("gate.dead/svc").unwrap_err();
+        assert!(matches!(denied, ForwardDenied::NotRunning { .. }));
+        assert!(
+            !mgr.is_wake_eligible("gate.dead/svc"),
+            "an eager sidecar is not wake-eligible, so the proxy 503s rather than waking"
+        );
+    }
+
+    /// **The scale-from-zero regression guard.** An idle-stopped sidecar is stopped by
+    /// the reaper via a bare `sidecar.stop()` — it stays in `dynamic` and KEEPS its port
+    /// claim (only `stop_and_deregister` calls `release_port`). That is precisely what
+    /// makes the gate compatible with idle-stop: the claim is what reserves the port
+    /// across the sleep, so the sidecar reads as `NotRunning` (admit-then-wake) rather
+    /// than `NotRegistered` (refuse). If a future change ever released the claim on
+    /// idle-stop, every scaled-to-zero app would 503 forever with no wake attempt — a
+    /// silent failure this test is here to make loud.
+    #[tokio::test]
+    async fn idle_stopped_sidecar_keeps_its_claim_and_still_wakes() {
+        let mut cfg = HashMap::new();
+        cfg.insert("gate.idle/svc".to_string(), Duration::from_secs(60));
+        let mgr = SidecarManager::new_noop_with_idle(cfg);
+        let port = free_port();
+        let sc = FakeSidecar::with_port("gate.idle/svc", port);
+        mgr.register_and_start(sc.clone()).await.unwrap();
+        assert_eq!(mgr.forward_target("gate.idle/svc").unwrap().port(), port);
+
+        // Exactly what the idle reaper does: stop the process, touch nothing else.
+        sc.stop().await.unwrap();
+
+        assert!(
+            mgr.is_wake_eligible("gate.idle/svc"),
+            "idle-configured ⇒ wake-eligible, so the proxy takes the wake arm"
+        );
+        match mgr.forward_target("gate.idle/svc") {
+            Err(ForwardDenied::NotRunning { port: p, .. }) => assert_eq!(p, port),
+            other => panic!("a scaled-to-zero sidecar must stay registered: {other:?}"),
+        }
+        assert_eq!(
+            mgr.claimed_port("gate.idle/svc"),
+            Some(port),
+            "the claim must survive the sleep — it is what reserves the port for the wake"
+        );
+
+        mgr.wake_sidecar("gate.idle/svc").await.unwrap();
+        assert_eq!(mgr.forward_target("gate.idle/svc").unwrap().port(), port);
+    }
+
+    /// The collapse of the two facts, pinned: `forward_target` returns the port the
+    /// manager CLAIMED, which is the only port a live child of ours can be on. This is
+    /// the test that fails if someone reintroduces `profile::port(spec.port)` at a hop.
+    #[tokio::test]
+    async fn forward_target_yields_the_claimed_port() {
+        let mgr = SidecarManager::new_noop();
+        let claimed = free_port();
+        let sc = FakeSidecar::with_port("gate.claimed/svc", claimed);
+        mgr.register_and_start(sc).await.unwrap();
+
+        assert_eq!(mgr.claimed_port("gate.claimed/svc"), Some(claimed));
+        assert_eq!(mgr.forward_target("gate.claimed/svc").unwrap().port(), claimed);
+        // And an unknown name yields nothing at all — no port to dial, by construction.
+        assert!(mgr.claimed_port("plug.nobody/svc").is_none());
+        assert!(mgr.forward_target("plug.nobody/svc").is_err());
+    }
+
+    /// The diagnosability half. A refused claim used to leave the sidecar ABSENT from
+    /// `statuses()` — not "failed", missing — so the app looked broken with no reason
+    /// on any surface. It must now appear with the bind-probe error verbatim, and the
+    /// record must clear when the app is disabled.
+    #[tokio::test]
+    async fn failed_registration_surfaces_in_sidecar_status_with_the_port() {
+        let mgr = SidecarManager::new_noop();
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let name = format!("plug.diag{port}/svc");
+
+        let sc = FakeSidecar::with_port(&name, port);
+        assert!(mgr.register_and_start(sc).await.is_err());
+
+        let statuses = mgr.statuses();
+        let entry = statuses
+            .iter()
+            .find(|s| s.name == name)
+            .expect("a failed-to-register sidecar must still appear in statuses");
+        assert!(!entry.running);
+        assert!(!entry.lazy, "a failed claim will never wake — not 'lazy'");
+        let reason = entry
+            .failure_reason
+            .as_deref()
+            .expect("failure_reason explains why it is not running");
+        assert!(
+            reason.contains(&port.to_string()) && reason.contains("already in use"),
+            "the reason must name the port and the bind probe: {reason}"
+        );
+
+        // Disabling the app clears the record rather than leaving a stale reason.
+        mgr.stop_and_deregister(&name).await.unwrap();
+        assert!(mgr.statuses().iter().all(|s| s.name != name));
     }
 
     // ── Idle-stop (scale-to-zero) ─────────────────────────────────────────────

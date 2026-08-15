@@ -35,8 +35,8 @@ rather than on this app's id.
 ```bash
 bun install --cwd sidecar
 __APP_TOKEN_ENV__=dev-token bun run dev
-curl -s localhost:7899/health
-curl -s -H 'Authorization: Bearer dev-token' localhost:7899/items
+curl -s localhost:8342/health
+curl -s -H 'Authorization: Bearer dev-token' localhost:8342/items
 ```
 
 Every route except `GET /health` is bearer-gated and **fails closed**: with no
@@ -45,10 +45,14 @@ every protected route 401s. Do not relax that — loopback is not a trust bounda
 
 ## Before you ship
 
-- **Pick a free port.** There is no port registry. `7899` is the scaffold default;
-  avoid Core (`7980`), the Gateway (`7981`), the built-in sidecar band
-  (`7990`–`8003`) and the local engines (`8080`–`8087`). Core injects the
-  profile-shifted port through `__APP_PORT_ENV__`, so read it — never hardcode.
+- **Pick a free port.** There is no registry and no allocator: the manifest number
+  is what Core tries. `8342` is the scaffold default — change it, or every app
+  built from this template collides with every other. Pick from the community band
+  `8300`–`8699`, avoiding round numbers; Core (`7980`), the Gateway (`7981`), the
+  first-party app band (`7990`–`8079`) and the local engines (`8080`–`8096`) are all
+  taken. Core injects the profile-shifted port through `__APP_PORT_ENV__`, so read
+  it — never hardcode. A collision does not relocate you: Core bind-probes the port
+  and refuses to start the sidecar.
 - **Build the binary.** `sidecars[].process.command` names `ryu-__APP_NAME__` on
   `PATH`; `bun run --cwd sidecar build` compiles it. `__APP_BIN_ENV__` points a
   node at a local build instead.

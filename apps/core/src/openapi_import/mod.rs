@@ -74,16 +74,43 @@ pub fn parse_spec(bytes: &[u8]) -> Result<Value, String> {
 /// HTTP methods that carry an operation object under a path item.
 const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
 
-/// Transform a parsed spec into an [`ImportedApi`]. Returns an error only when the
-/// spec has no resolvable base URL or no operations — individual malformed
-/// operations are skipped, not fatal.
+/// Transform a parsed spec into an [`ImportedApi`], resolving the base URL from the
+/// spec itself. Returns an error only when the spec has no resolvable base URL or no
+/// operations — individual malformed operations are skipped, not fatal.
 pub fn spec_to_api(spec: &Value, cap: usize) -> Result<ImportedApi, String> {
+    spec_to_api_with_base(spec, cap, None)
+}
+
+/// [`spec_to_api`] with a caller-supplied base URL that wins over the spec's own
+/// `servers` / `host` block.
+///
+/// WHY the override exists: our own app sidecars publish OpenAPI sub-documents that
+/// carry NO `servers` entry, so [`resolve_base_url`] returns `None` and the import
+/// dies before it looks at a single operation. The obvious "fix" — teaching each
+/// sidecar to emit `servers(...)` — is the wrong one: an app under `apps-store/<app>`
+/// is mirrored out as a standalone satellite repo that must build and ship from its
+/// own tree alone (see AGENTS.md), and a hardcoded `servers` URL would bake this
+/// Core's loopback host and ext-proxy port into all 22 published satellites. So the
+/// address stays where it is actually known — in the Core that mounts the sidecar —
+/// and is threaded in here instead.
+///
+/// `base_url_override` must be absolute (`http://127.0.0.1:<port>/...`): the derived
+/// egress `domain` comes from [`host_of`], which cannot parse a host out of a
+/// relative mount path.
+pub fn spec_to_api_with_base(
+    spec: &Value,
+    cap: usize,
+    base_url_override: Option<&str>,
+) -> Result<ImportedApi, String> {
     let title = spec
         .pointer("/info/title")
         .and_then(Value::as_str)
         .unwrap_or("API")
         .to_owned();
-    let base_url = resolve_base_url(spec).ok_or("no resolvable server/base URL in spec")?;
+    let base_url = base_url_override
+        .map(str::to_owned)
+        .or_else(|| resolve_base_url(spec))
+        .ok_or("no resolvable server/base URL in spec")?;
     let domain =
         host_of(&base_url).ok_or_else(|| format!("could not parse host from '{base_url}'"))?;
     let schemes = security_schemes(spec);
@@ -99,12 +126,13 @@ pub fn spec_to_api(spec: &Value, cap: usize) -> Result<ImportedApi, String> {
         let Some(item) = item.as_object() else {
             continue;
         };
-        let path_level = collect_params(item.get("parameters"));
+        let path_level = collect_params(spec, item.get("parameters"));
         for method in METHODS {
             let Some(op) = item.get(method).and_then(Value::as_object) else {
                 continue;
             };
             if let Some(tool) = build_tool(
+                spec,
                 method,
                 path,
                 op,
@@ -146,14 +174,98 @@ struct Param {
     description: Option<String>,
 }
 
-fn collect_params(raw: Option<&Value>) -> Vec<Param> {
+/// How many `$ref` hops [`resolve_ref`] will follow before giving up. Real specs
+/// chain at most two or three (`parameter → schema → schema`); the cap is really a
+/// cycle guard, since a self- or mutually-referential schema (a tree node whose
+/// child is the same node) is legal OpenAPI and would otherwise loop forever.
+const MAX_REF_DEPTH: usize = 8;
+/// One level of `$ref` expansion inside an already-resolved object's `properties`.
+/// Deliberately shallow: the point is to hand the model a readable schema for a
+/// field, not to inline a whole recursive object graph into `input_schema`.
+const NESTED_REF_DEPTH: usize = MAX_REF_DEPTH;
+
+/// Follow a local `$ref` to the node it names, returning non-ref nodes unchanged.
+///
+/// Only same-document refs (`#/...`) resolve — an external one (`common.yaml#/x`)
+/// fails `strip_prefix` and yields `None`, which every caller treats as "leave this
+/// alone", the same best-effort posture as the rest of the module. `Value::pointer`
+/// already implements RFC 6901, so `#/components/schemas/Foo` (OpenAPI 3) and
+/// `#/definitions/Foo` (Swagger 2) both work without branching on the prefix.
+/// A nullable wrapper also counts as a hop. An OPTIONAL body or field is not written
+/// as a bare `$ref` by either generator we consume: FastAPI renders `Optional[Model]`
+/// as `{"anyOf": [{"$ref": …}, {"type": "null"}]}`, and utoipa renders `Option<T>` as
+/// the `oneOf` equivalent. Both put the ref one level down, where a top-of-node check
+/// never sees it — so the schema resolves to a wrapper with no `properties`, and the
+/// derived tool ships with zero arguments. That is precisely the failure this resolver
+/// exists to prevent, arrived at from a direction the obvious implementation misses.
+///
+/// So: when a node is a `oneOf`/`anyOf` whose branches are exactly ONE meaningful
+/// schema plus null-ish alternatives, unwrap to that branch and keep resolving. A
+/// genuine union of several real schemas is left alone — there is no single correct
+/// argument shape to pick, and inventing one would be worse than saying nothing.
+fn unwrap_nullable<'a>(node: &'a Value) -> Option<&'a Value> {
+    let branches = node
+        .get("oneOf")
+        .or_else(|| node.get("anyOf"))?
+        .as_array()?;
+    let mut meaningful = branches.iter().filter(|b| !is_null_schema(b));
+    let only = meaningful.next()?;
+    meaningful.next().is_none().then_some(only)
+}
+
+/// Whether a schema branch carries no information beyond "may be absent".
+fn is_null_schema(node: &Value) -> bool {
+    match node.get("type") {
+        // OpenAPI 3.1 / JSON Schema 2020-12 spell it as a type.
+        Some(Value::String(t)) => t == "null",
+        Some(Value::Array(types)) => types.iter().all(|t| t.as_str() == Some("null")),
+        // OpenAPI 3.0 has no null type; a nullable branch appears as `{"nullable": true}`
+        // or, from some generators, an empty schema.
+        None => {
+            node.get("nullable").and_then(Value::as_bool) == Some(true)
+                || node.as_object().is_some_and(serde_json::Map::is_empty)
+        }
+        _ => false,
+    }
+}
+
+/// Follow a local `$ref` to the node it names, returning non-ref nodes unchanged.
+///
+/// Only same-document refs (`#/...`) resolve — an external one (`common.yaml#/x`)
+/// fails `strip_prefix` and yields `None`, which every caller treats as "leave this
+/// alone", the same best-effort posture as the rest of the module. `Value::pointer`
+/// already implements RFC 6901, so `#/components/schemas/Foo` (OpenAPI 3) and
+/// `#/definitions/Foo` (Swagger 2) both work without branching on the prefix.
+///
+/// Nullable `oneOf`/`anyOf` wrappers are transparent here — see [`unwrap_nullable`].
+fn resolve_ref<'a>(spec: &'a Value, node: &'a Value, depth: usize) -> Option<&'a Value> {
+    let mut cur = node;
+    for _ in 0..depth {
+        if let Some(target) = cur.get("$ref").and_then(Value::as_str) {
+            cur = spec.pointer(target.strip_prefix('#')?)?;
+            continue;
+        }
+        if let Some(inner) = unwrap_nullable(cur) {
+            cur = inner;
+            continue;
+        }
+        return Some(cur);
+    }
+    // Depth exhausted: the chain is cyclic (or absurdly deep). Bail rather than loop.
+    None
+}
+
+fn collect_params(spec: &Value, raw: Option<&Value>) -> Vec<Param> {
     let mut out = Vec::new();
     let Some(arr) = raw.and_then(Value::as_array) else {
         return out;
     };
     for p in arr {
-        let Some(obj) = p.as_object() else { continue };
-        // `$ref` params are skipped (best-effort — resolving refs is out of scope).
+        // A parameter may itself be a `$ref` into `#/components/parameters` (or
+        // Swagger 2's `#/parameters`); resolve it, and skip only if it does not.
+        let Some(obj) = resolve_ref(spec, p, MAX_REF_DEPTH).and_then(Value::as_object) else {
+            continue;
+        };
         let (Some(name), Some(location)) = (
             obj.get("name").and_then(Value::as_str),
             obj.get("in").and_then(Value::as_str),
@@ -169,6 +281,7 @@ fn collect_params(raw: Option<&Value>) -> Vec<Param> {
                 .unwrap_or(false),
             schema: obj
                 .get("schema")
+                .and_then(|s| resolve_ref(spec, s, MAX_REF_DEPTH))
                 .cloned()
                 .unwrap_or(json!({ "type": "string" })),
             description: obj
@@ -182,6 +295,7 @@ fn collect_params(raw: Option<&Value>) -> Vec<Param> {
 
 #[allow(clippy::too_many_arguments)]
 fn build_tool(
+    spec: &Value,
     method: &str,
     path: &str,
     op: &Map<String, Value>,
@@ -218,7 +332,7 @@ fn build_tool(
 
     // Merge path-level then operation-level params (op wins on name+in collision).
     let mut params = Vec::new();
-    params.extend(collect_params(op.get("parameters")));
+    params.extend(collect_params(spec, op.get("parameters")));
     for p in path_level {
         if !params
             .iter()
@@ -250,14 +364,30 @@ fn build_tool(
 
     // Request body: merge a JSON object body's properties as top-level args (they
     // flow to the JSON body via run_http_tool for non-GET methods).
+    //
+    // Both hops go through `resolve_ref`, and both are load-bearing. A generated
+    // document almost never inlines the body schema here: FastAPI *always* emits
+    // `{"$ref": "#/components/schemas/…"}`, and utoipa does the same as soon as a
+    // handler declares a real `request_body` type instead of `serde_json::Value`.
+    // A `$ref` node carries no `properties` key, so reading it unresolved yields a
+    // tool the model can discover and call but can never fill in — every argument
+    // silently invisible, with no error anywhere to explain why.
     if let Some(body_schema) = op
         .get("requestBody")
+        .and_then(|rb| resolve_ref(spec, rb, MAX_REF_DEPTH))
         .and_then(|rb| rb.pointer("/content/application~1json/schema"))
+        .and_then(|s| resolve_ref(spec, s, MAX_REF_DEPTH))
         .and_then(Value::as_object)
     {
         if let Some(props) = body_schema.get("properties").and_then(Value::as_object) {
             for (k, v) in props {
-                properties.entry(k.clone()).or_insert_with(|| v.clone());
+                // A property may itself be a `$ref` to a nested component. Resolve
+                // one level so the model sees a usable schema rather than an opaque
+                // pointer it cannot interpret; deeper nesting keeps the ref.
+                let resolved = resolve_ref(spec, v, NESTED_REF_DEPTH).unwrap_or(v);
+                properties
+                    .entry(k.clone())
+                    .or_insert_with(|| resolved.clone());
             }
         }
         if let Some(req) = body_schema.get("required").and_then(Value::as_array) {
@@ -591,5 +721,330 @@ mod tests {
         let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
         assert_eq!(api.domain, "y.example");
         assert_eq!(api.tools[0].slug, "aget");
+    }
+
+    /// A document with no `servers` block — the shape utoipa and FastAPI both
+    /// generate. Without an override this fails at the first line of
+    /// `spec_to_api_with_base`, which is what blocked deriving tools from an app
+    /// sidecar's own spec.
+    fn serverless_spec() -> Value {
+        json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Quests" },
+            "paths": {
+                "/api/quests/{id}": {
+                    "get": {
+                        "operationId": "get_quest",
+                        "summary": "Read one quest",
+                        "parameters": [
+                            { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+                        ]
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn spec_to_api_with_base_overrides_missing_servers() {
+        let spec = serverless_spec();
+        assert!(
+            spec_to_api(&spec, DEFAULT_OP_CAP).is_err(),
+            "a serverless spec must still fail without an override"
+        );
+
+        let api = spec_to_api_with_base(&spec, DEFAULT_OP_CAP, Some("http://127.0.0.1:8011")).unwrap();
+        assert_eq!(api.base_url, "http://127.0.0.1:8011");
+        // Pins the `host_of` assumption: the override must be an ABSOLUTE URL, or
+        // domain derivation (and with it the egress grant) has nothing to parse.
+        assert_eq!(api.domain, "127.0.0.1");
+        assert_eq!(api.tools.len(), 1);
+        assert_eq!(api.tools[0].url, "http://127.0.0.1:8011/api/quests/{id}");
+    }
+
+    #[test]
+    fn spec_to_api_still_reads_servers_when_no_override() {
+        let api = spec_to_api_with_base(&petstore(), DEFAULT_OP_CAP, None).unwrap();
+        assert_eq!(api.domain, "api.petstore.example");
+        assert!(api.tools.iter().all(|t| t.url.starts_with("https://api.petstore.example/v1")));
+    }
+
+    #[test]
+    fn request_body_ref_is_resolved_into_properties() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "CRM" },
+            "servers": [{ "url": "https://crm.example" }],
+            "components": {
+                "schemas": {
+                    "CreateThing": {
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {
+                            "title": { "type": "string", "description": "Display name." },
+                            "owner": { "$ref": "#/components/schemas/Owner" }
+                        }
+                    },
+                    "Owner": { "type": "object", "properties": { "email": { "type": "string" } } }
+                }
+            },
+            "paths": {
+                "/things": {
+                    "post": {
+                        "operationId": "createThing",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/CreateThing" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        let tool = &api.tools[0];
+        let props = tool.input_schema.pointer("/properties").unwrap();
+        assert!(
+            props.get("title").is_some(),
+            "a $ref body must contribute its properties, got {props:#}"
+        );
+        assert_eq!(
+            tool.input_schema.pointer("/required/0").and_then(Value::as_str),
+            Some("title")
+        );
+        // A property that is itself a `$ref` resolves one level, so the model sees a
+        // real schema instead of an opaque pointer.
+        assert_eq!(
+            props.pointer("/owner/properties/email/type").and_then(Value::as_str),
+            Some("string")
+        );
+    }
+
+    #[test]
+    fn ref_cycle_does_not_hang() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Loop" },
+            "servers": [{ "url": "https://loop.example" }],
+            "components": {
+                "schemas": { "Node": { "$ref": "#/components/schemas/Node" } }
+            },
+            "paths": {
+                "/n": {
+                    "post": {
+                        "operationId": "makeNode",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/Node" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // The cap bails instead of looping. `build_tool` does not treat a missing
+        // body schema as fatal, so the tool still exists — just with no body args.
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        let props = api.tools[0].input_schema.pointer("/properties").unwrap();
+        assert_eq!(props.as_object().map(serde_json::Map::len), Some(0));
+    }
+
+    #[test]
+    fn swagger2_definitions_ref_is_resolved() {
+        // `Value::pointer` is RFC 6901, so a `#/definitions/...` target resolves with
+        // no prefix branching. This pins that, rather than Swagger 2 `in: body`
+        // parameter flattening, which this importer deliberately does not do.
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Legacy" },
+            "servers": [{ "url": "https://legacy.example" }],
+            "definitions": {
+                "Thing": { "type": "object", "properties": { "sku": { "type": "string" } } }
+            },
+            "paths": {
+                "/things": {
+                    "post": {
+                        "operationId": "addThing",
+                        "requestBody": {
+                            "content": {
+                                "application/json": { "schema": { "$ref": "#/definitions/Thing" } }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        assert!(api.tools[0].input_schema.pointer("/properties/sku").is_some());
+    }
+
+    #[test]
+    fn nullable_wrapped_body_ref_still_resolves() {
+        // FastAPI writes `Optional[Model]` exactly like this, and utoipa writes
+        // `Option<T>` as the `oneOf` equivalent. Before the wrapper was made
+        // transparent, this produced a tool with zero arguments — discoverable and
+        // uncallable — with nothing anywhere to say why.
+        let body = |wrapper: &str| {
+            json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Opt" },
+                "servers": [{ "url": "https://opt.example" }],
+                "components": {
+                    "schemas": {
+                        "Patch": {
+                            "type": "object",
+                            "properties": { "title": { "type": "string" } }
+                        }
+                    }
+                },
+                "paths": {
+                    "/things/{id}": {
+                        "patch": {
+                            "operationId": "patchThing",
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            wrapper: [
+                                                { "$ref": "#/components/schemas/Patch" },
+                                                { "type": "null" }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        };
+
+        for wrapper in ["anyOf", "oneOf"] {
+            let api = spec_to_api(&body(wrapper), DEFAULT_OP_CAP).unwrap();
+            assert!(
+                api.tools[0]
+                    .input_schema
+                    .pointer("/properties/title")
+                    .is_some(),
+                "{wrapper}-wrapped body ref must still yield arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_union_body_is_left_alone() {
+        // Two meaningful branches: there is no single correct argument shape, and
+        // picking one would advertise arguments the endpoint may reject. Saying
+        // nothing is the honest answer.
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Union" },
+            "servers": [{ "url": "https://u.example" }],
+            "components": {
+                "schemas": {
+                    "A": { "type": "object", "properties": { "a": { "type": "string" } } },
+                    "B": { "type": "object", "properties": { "b": { "type": "string" } } }
+                }
+            },
+            "paths": {
+                "/x": {
+                    "post": {
+                        "operationId": "postX",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": { "oneOf": [
+                                        { "$ref": "#/components/schemas/A" },
+                                        { "$ref": "#/components/schemas/B" }
+                                    ]}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        let props = api.tools[0].input_schema.pointer("/properties").unwrap();
+        assert_eq!(props.as_object().map(serde_json::Map::len), Some(0));
+    }
+
+    #[test]
+    fn openapi_30_nullable_branch_is_also_transparent() {
+        // OpenAPI 3.0 has no null type; generators emit `{"nullable": true}` instead.
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Legacy opt" },
+            "servers": [{ "url": "https://l.example" }],
+            "components": {
+                "schemas": {
+                    "P": { "type": "object", "properties": { "n": { "type": "integer" } } }
+                }
+            },
+            "paths": {
+                "/p": {
+                    "post": {
+                        "operationId": "postP",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": { "anyOf": [
+                                        { "$ref": "#/components/schemas/P" },
+                                        { "nullable": true }
+                                    ]}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        assert!(api.tools[0]
+            .input_schema
+            .pointer("/properties/n")
+            .is_some());
+    }
+
+    #[test]
+    fn ref_parameters_are_resolved_rather_than_skipped() {
+        let spec = json!({
+            "openapi": "3.0.0",
+            "info": { "title": "Refs" },
+            "servers": [{ "url": "https://refs.example" }],
+            "components": {
+                "parameters": {
+                    "PageParam": {
+                        "name": "page",
+                        "in": "query",
+                        "schema": { "type": "integer" },
+                        "description": "1-based page number."
+                    }
+                }
+            },
+            "paths": {
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "parameters": [{ "$ref": "#/components/parameters/PageParam" }]
+                    }
+                }
+            }
+        });
+
+        let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
+        assert_eq!(
+            api.tools[0].input_schema.pointer("/properties/page/type").and_then(Value::as_str),
+            Some("integer")
+        );
     }
 }

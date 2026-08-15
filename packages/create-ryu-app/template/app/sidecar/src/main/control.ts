@@ -27,7 +27,7 @@ import { createServer, type Server } from "node:http";
 /** Default loopback port. There is NO port registry: picking a free one is the
  *  app author's job. Stay clear of Core (:7980), the Gateway (:7981), the
  *  built-in sidecar band (:7990–:8003), and the local engines (:8080–:8087). */
-const CONTROL_BASE_PORT = 7899;
+const CONTROL_BASE_PORT = 8342;
 
 /** A Core running under `RYU_PROFILE=dev` shifts every port by this much so a dev
  *  node and a release node coexist. Core injects the shifted value through

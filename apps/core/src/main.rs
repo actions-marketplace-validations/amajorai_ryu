@@ -34,6 +34,10 @@ mod downloads;
 mod entitlement;
 mod events;
 mod exec_approval;
+/// Derived app-API tools: an installed app's own OpenAPI document lowered into
+/// `ryu_ext__*` tools addressed through the ext-proxy. Sibling of [`self_api`],
+/// which does the same for Core's own generated document.
+mod ext_api;
 mod fal_auth;
 mod hardware;
 mod healing_client;
@@ -1722,6 +1726,21 @@ async fn main() {
         tokio::spawn(async move {
             crate::server::fire_activation_event(&startup_state, "onStartup").await;
         });
+    }
+
+    // Drop any sidecar-registered provider entry left in models.json by an unclean
+    // exit. `deregister_sidecar_provider` only runs from a sidecar's own `stop()`, so
+    // a SIGKILL/panic/power-loss leaves a `baseUrl` at a loopback port plus that
+    // plugin's minted ext token persisted — and Pi dials `baseUrl` DIRECTLY, bypassing
+    // the ext-proxy and its registration gate. If any other process now holds that
+    // port, it is handed the token and every inference body. Synchronous and BEFORE
+    // the reconcile below: the healthy sidecars re-register their entries moments
+    // later, so the purge window is exactly the "not healthy yet" state the entry is
+    // meant to represent.
+    match crate::pi_config::purge_sidecar_providers() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("purged {n} stale sidecar provider entr(ies) from models.json"),
+        Err(e) => tracing::warn!("purging stale sidecar provider entries failed: {e}"),
     }
 
     // Reconcile manifest-declared managed sidecars (the app ⇄ sidecar bridge):

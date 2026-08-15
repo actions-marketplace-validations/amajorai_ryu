@@ -36,7 +36,6 @@
       "lazy": true,
       "idle_stop_secs": 300,
       "http": {
-        "mount": "/api/simulator",
         "public_mount": "/api/simulator",
         "routes": [
           { "path": "/" },

@@ -1326,6 +1326,60 @@ pub fn deregister_sidecar_provider(plugin_id: &str, provider_id: &str) -> Result
     }
 }
 
+/// Drop EVERY sidecar-registered provider entry (anything carrying
+/// [`PROVIDER_OWNER_FIELD`]) from `models.json`. Returns how many were removed.
+///
+/// Called once at Core boot, before the sidecar reconcile pass, unconditionally.
+///
+/// **Why unconditional.** [`deregister_sidecar_provider`] runs only from a sidecar's
+/// own `stop()` and from the crash hook the health monitor fires when it catches that
+/// sidecar's child dead (`ManifestSidecar::on_crash_detected`) — both of which need a
+/// live Core to run at all. So an unclean Core exit — SIGKILL, panic, OOM, power loss — leaves
+/// `{ baseUrl: "http://127.0.0.1:<port>", apiKey: "<that plugin's ext token>" }`
+/// persisted. Pi reads `models.json` and dials `baseUrl` **directly**, bypassing the
+/// ext-proxy and every gate that guards it, so on the next boot — if any other process
+/// now holds that port — Pi hands a stranger the plugin's minted token plus every
+/// inference request body. Same class as the ext-proxy hole this sits next to: a
+/// persisted port outliving the process that owned it. The proxy's registration gate
+/// cannot fix it, because Pi never goes through the proxy.
+///
+/// Purging is safe, not merely tolerable: re-registration is automatic (a
+/// `ManifestSidecar` is reconstructed at boot with `provider_registered = false`, so the
+/// first Healthy edge rewrites the entry), and the purge window is exactly the
+/// "not healthy yet" state the entry is supposed to represent. Unowned entries — a
+/// hand-configured Ollama/vLLM provider — and the built-ins are untouched, which is the
+/// same ownership rule [`deregister_sidecar_provider`] enforces.
+///
+/// Removes the entry directly rather than routing through [`remove_provider`]: this is
+/// a boot-time sweep of many entries and `remove_provider` also rewrites settings
+/// (active provider / routing) per call. The active selection is left alone on purpose —
+/// re-registration restores the entry moments later, and silently repointing the user's
+/// active provider at the gateway on every unclean restart would be the louder bug.
+pub fn purge_sidecar_providers() -> Result<usize> {
+    let mut models = read_models();
+    let Some(providers) = models["providers"].as_object_mut() else {
+        return Ok(0);
+    };
+    let owned: Vec<String> = providers
+        .iter()
+        .filter(|(_, entry)| entry.get(PROVIDER_OWNER_FIELD).is_some())
+        .map(|(id, _)| id.clone())
+        .collect();
+    if owned.is_empty() {
+        return Ok(0);
+    }
+    for id in &owned {
+        providers.remove(id);
+    }
+    tracing::info!(
+        "pi_config: purged {} stale sidecar-registered provider(s) at boot: {}",
+        owned.len(),
+        owned.join(", ")
+    );
+    write_models(&models)?;
+    Ok(owned.len())
+}
+
 /// The plugin id stamped on a custom provider entry, if it was sidecar-registered.
 fn provider_owner(id: &str) -> Option<String> {
     read_models()["providers"]
@@ -3882,6 +3936,59 @@ mod tests {
             assert!(read_models()["providers"].get("chatgpt-bridge").is_none());
         });
     }
+
+    /// The boot purge: an unclean exit leaves a sidecar-owned entry holding a loopback
+    /// `baseUrl` and the plugin's minted ext token, and Pi dials that `baseUrl`
+    /// DIRECTLY — bypassing the ext-proxy and its registration gate — so if any other
+    /// process now holds the port it is handed the token and every request body. The
+    /// sweep must take every owned entry and leave hand-configured ones alone: the
+    /// ownership stamp is the whole authority for touching an entry.
+    #[test]
+    fn stale_owned_provider_entries_are_purged_at_boot() {
+        with_temp_dir(|| {
+            let spec = ProviderRegistrationSpec {
+                id: "chatgpt-bridge".to_owned(),
+                label: None,
+                api: None,
+                base_path: None,
+                models: vec![],
+            };
+            register_sidecar_provider("com.example.bridge", &spec, 7997, Some("ext-tok")).unwrap();
+            // A provider the USER configured by hand — no owner stamp, so not ours.
+            let mut mine = Map::new();
+            mine.insert(
+                "baseUrl".to_owned(),
+                Value::String("http://127.0.0.1:11434/v1".to_owned()),
+            );
+            upsert_provider("my-ollama", mine).unwrap();
+
+            assert_eq!(purge_sidecar_providers().unwrap(), 1);
+
+            let providers = read_models()["providers"].clone();
+            assert!(
+                providers.get("chatgpt-bridge").is_none(),
+                "the stale sidecar entry (and its ext token) must be gone"
+            );
+            assert_eq!(
+                providers["my-ollama"]["baseUrl"], "http://127.0.0.1:11434/v1",
+                "an unowned, hand-configured provider must survive untouched"
+            );
+
+            // Idempotent: nothing owned left to purge.
+            assert_eq!(purge_sidecar_providers().unwrap(), 0);
+        });
+    }
+
+    // A `purged_sidecar_provider_is_absent_then_restored_on_reregister` test used to
+    // sit here, claiming to cover "defect 3, the state half". It did not: every call it
+    // made — `register_sidecar_provider`, `purge_sidecar_providers`, `read_models` — is
+    // pre-existing behavior covered by the two tests above, so reverting the defect-3
+    // fix (the `provides_provider` ⇒ eager-start coercion) in its entirety left it
+    // passing. A test that cannot fail for the defect it names is worse than no test:
+    // it reads as coverage. The coercion is a `sidecar::manifest_sidecar` concern and is
+    // covered there — `provider_declaring_sidecar_starts_eagerly_even_when_lazy` for the
+    // predicate, `apply_sidecars_gates_the_register_only_branch_on_starts_eagerly` for
+    // the call site that makes the predicate matter.
 
     /// The load-bearing guard: a plugin may NOT claim a built-in provider id. Allowing
     /// it would let a plugin repoint `openai-codex`'s baseUrl at its own server and

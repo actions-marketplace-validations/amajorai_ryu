@@ -1,5 +1,6 @@
 "use client";
 
+import { SPRING_MORPH } from "@ryu/ui/lib/ease.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import { motion, type Transition, useReducedMotion } from "framer-motion";
 import type React from "react";
@@ -11,12 +12,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // panel, growing up-and-left as its width/height animate (right/bottom stay
 // pinned, so no x/y translate math). The eyes and the chat body crossfade inside
 // it. Modelled on the beui feedback-widget morph — calm, crisp, no filter.
-const MORPH_SPRING: Transition = {
-	type: "spring",
-	stiffness: 320,
-	damping: 34,
-	mass: 0.9,
-};
+// The spring itself is the shared SPRING_MORPH token: SidebarSectionNav had a
+// byte-identical copy of these three numbers, which is how a "calm morph" drifts
+// into two slightly different calm morphs.
+const MORPH_SPRING: Transition = SPRING_MORPH;
 // Content crossfade: fast opacity swap while the shell springs. Opening waits a
 // beat so the box is already growing before the panel reads in.
 const CONTENT_FADE = 0.14;

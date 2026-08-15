@@ -1098,8 +1098,11 @@ export function SectionOverflowPopover<T>({
 						value={query}
 					/>
 				</div>
+				{/* Content dissolves under the search field above rather than
+				    meeting it at a hard line. Top-only: the list ends on the
+				    popover edge, so a bottom fade would just dim the last row. */}
 				<div
-					className="max-h-80 overflow-y-auto overscroll-contain"
+					className="ryu-scroll-edge-top max-h-80 overflow-y-auto overscroll-contain"
 					ref={scrollRef}
 				>
 					{windowed.length === 0 ? (

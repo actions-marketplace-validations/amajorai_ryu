@@ -1,3 +1,11 @@
+import {
+	BubbleChatIcon,
+	CommandLineIcon,
+	ComputerIcon,
+	LayoutTable01Icon,
+	Rocket01Icon,
+} from "@hugeicons/core-free-icons";
+import { SettingsSubpages } from "@ryu/blocks/desktop/settings-nav.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Select,
@@ -29,6 +37,7 @@ import {
 	setQueueDrainMode,
 	useQueueDrainMode,
 } from "@/src/hooks/useQueueDrainMode.ts";
+import { usePendingSubpage } from "@/src/hooks/useSettingSubpage.ts";
 import {
 	type StartupBehavior,
 	setStartupBehavior,
@@ -101,6 +110,9 @@ const TAB_SWITCH_OPTIONS: { value: TabSwitchBehavior; label: string }[] = [
 ];
 
 export function GeneralTab() {
+	// Which sub-page a settings-search hit lives on, so the reveal has something
+	// to find — a row on a closed page is not in the DOM.
+	const pendingSubpage = usePendingSubpage("general");
 	const navigate = useNavigate();
 	const tabOverrideEnabled = useNodeTabOverride();
 	const tabLayout = useTabLayout();
@@ -231,7 +243,16 @@ export function GeneralTab() {
 		navigate("/onboarding");
 	};
 
-	return (
+	// ── Sub-pages ────────────────────────────────────────────────────────────
+	// Six groups covering tabs, chats, the terminal, tray behaviour and setup —
+	// unrelated topics that shared one scroll. Split the way iOS/macOS General
+	// is: an index of topics, one page each. "On startup" stays on the index
+	// because it is the question people open this pane to answer.
+	//
+	// Bodies are the same nodes as before, moved verbatim. Adding a group here
+	// means adding it to `SUBPAGE_BY_GROUP` in `settings-index.ts` too, or
+	// settings search will land on this pane and highlight nothing.
+	const startupIntro = (
 		<div className="space-y-6">
 			<SettingsSection
 				caption="What Ryu opens when you launch it."
@@ -265,7 +286,11 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</div>
+	);
 
+	const tabsPage = (
+		<>
 			<SettingsSection caption="How open tabs look and behave." title="Tabs">
 				<SettingsGroup>
 					<SettingsItem
@@ -388,7 +413,11 @@ export function GeneralTab() {
 			{/* Split-view layout presets: captured from the split's own context
 			    menu, renamed or deleted here. */}
 			<SplitPresetSettings />
+		</>
+	);
 
+	const chatsPage = (
+		<>
 			<SettingsSection
 				caption="How Ryu shows your agents' own chat history."
 				title="Chats"
@@ -432,7 +461,11 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const terminalPage = (
+		<>
 			<SettingsSection
 				caption="How the built-in terminal and git actions run commands."
 				title="Terminal"
@@ -465,7 +498,11 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const systemPage = (
+		<>
 			<SettingsSection
 				caption="How Ryu appears in the system tray and runs in the background."
 				title="System"
@@ -519,7 +556,11 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+		</>
+	);
 
+	const setupPage = (
+		<>
 			<SettingsSection title="Setup">
 				<SettingsGroup>
 					<SettingsItem
@@ -538,6 +579,57 @@ export function GeneralTab() {
 			    preference about this window, while Safe Mode changes what the node
 			    itself loads on its next boot. */}
 			<SafeModeSettings />
-		</div>
+		</>
+	);
+
+	return (
+		<SettingsSubpages
+			backLabel="General"
+			intro={startupIntro}
+			label="Settings"
+			pages={[
+				{
+					id: "tabs",
+					title: "Tabs & panes",
+					hint: "How open tabs look and behave, and the split-pane presets.",
+					icon: LayoutTable01Icon,
+					tint: "blue",
+					content: tabsPage,
+				},
+				{
+					id: "chats",
+					title: "Chats",
+					hint: "How Ryu shows your agents' own chat history.",
+					icon: BubbleChatIcon,
+					tint: "teal",
+					content: chatsPage,
+				},
+				{
+					id: "terminal",
+					title: "Terminal",
+					hint: "How the built-in terminal and git actions run commands.",
+					icon: CommandLineIcon,
+					tint: "gray",
+					content: terminalPage,
+				},
+				{
+					id: "system",
+					title: "System & tray",
+					hint: "How Ryu appears in the system tray and runs in the background.",
+					icon: ComputerIcon,
+					tint: "indigo",
+					content: systemPage,
+				},
+				{
+					id: "setup",
+					title: "Setup & recovery",
+					hint: "Re-run onboarding, or start Ryu in safe mode.",
+					icon: Rocket01Icon,
+					tint: "orange",
+					content: setupPage,
+				},
+			]}
+			revealPageId={pendingSubpage}
+		/>
 	);
 }

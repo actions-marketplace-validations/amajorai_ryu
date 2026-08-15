@@ -35,6 +35,47 @@
 //! our in-process handler during the turn. The ACP SDK's `McpActiveSession`
 //! handles the per-turn lifecycle; each tool call routes through `call_tool`
 //! here before the result is returned to the agent.
+//!
+//! # The NETWORK transport (`POST /mcp/:agent_id`) — Goal C
+//!
+//! [`serve_http_jsonrpc`] serves the *same* handler over a stateless JSON-RPC
+//! POST, so an external MCP client (Claude Desktop, Cursor, another Ryu node)
+//! reaches Core's live [`McpRegistry`] instead of a hand-written REST wrapper.
+//! `server::mod` mounts it; this module owns the protocol.
+//!
+//! **Hand-rolled rather than rmcp's `transport-streamable-http-server`.** Nothing
+//! in the dispatch path touches rmcp's request plumbing — both `list_tools` and
+//! `call_tool` take `_context: RequestContext<..>` and ignore it — so the meta-tool
+//! logic lifts out cleanly and the protocol surface a stateless, session-less
+//! server needs (`initialize`, `notifications/*`, `tools/list`, `tools/call`,
+//! `ping`) is small enough to state plainly. Modelled on
+//! `apps/web/src/lib/mcp-server.ts`, which is already proven against real MCP
+//! hosts. No new dependency and no cargo-feature trap: enabling rmcp's `local`
+//! feature ANYWHERE in the workspace silently deletes `StreamableHttpService`, and
+//! rmcp 1.x ships no SSE-server transport at all, so the feature route would have
+//! been a standing hazard for a surface this small.
+//!
+//! ## An external client's `tools/list` is SHORT, and that is the design
+//!
+//! It shows the offered registry tools plus `tool_search` / `describe` (and
+//! `execute` / `resume` when code mode is available) — **not** hundreds of tools.
+//! Two whole planes are deliberately *searchable but not listed*: Composio actions
+//! and the ext-API tools derived from an installed app's OpenAPI document
+//! ([`crate::ext_api`]). They are reachable through `tool_search` → `describe` →
+//! call by exact id, and `McpRegistry::call_tool` enforces the allowlist on the
+//! way through. This is progressive disclosure, not a missing feature: a node with
+//! a dozen apps installed derives hundreds of operations, and pushing all of them
+//! into every client's context window is precisely what the meta-tools exist to
+//! avoid. If you are here because "my derived tools don't show up in tools/list" —
+//! they are not supposed to; search for them.
+//!
+//! ## Canonical surface
+//!
+//! `POST /mcp/:agent_id` is the canonical MCP surface for external clients. The
+//! separate `apps/mcp` stdio server is ~24 hand-written REST wrappers that bypass
+//! [`McpRegistry`] entirely, so nothing registered at runtime — every app tool,
+//! every derived ext-API operation — can ever appear in its `tools/list`. Treat it
+//! as legacy: new tools belong in the registry, and the registry is served here.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -95,14 +136,17 @@ pub async fn build_ryu_mcp_server(
     permission_tx: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     permission_scope_id: Option<String>,
 ) -> Option<McpServer<Agent, NullRun>> {
-    let tools = mcp.tools_for_agent(allowlist.as_deref()).await;
-
     // Withhold capability-gated tools this agent is not permitted: the
     // delegation/discovery providers when its `orchestrator` capability is off,
     // and the agent-creation tool when `can_create_agents` is off. Resolved from
     // the agent's config record (defaults: delegation on, creation off).
+    //
+    // NOTE: the TOOL LIST is deliberately *not* resolved here — see
+    // [`RyuMcpHandler::build_tool_list`] for why a build-time snapshot was a bug.
+    // `caps` stays a build-time value: it is one agent-config field that does not
+    // change mid-session, and re-reading it per request would add an agent-store
+    // hit to every `tools/list` for no observable difference.
     let caps = mcp.agent_capabilities(&agent_id).await;
-    let tools = crate::sidecar::mcp::filter_capability_tools(tools, caps);
 
     // Effective allowlist used by `call_tool`: when restricted, the agent's
     // selected Composio ids must be callable, so merge `composio__<slug>` in.
@@ -123,7 +167,6 @@ pub async fn build_ryu_mcp_server(
         composio_actions,
         agent_id,
         identity_profile_ids,
-        tools,
         caps,
         permission_tx,
         permission_scope_id,
@@ -145,8 +188,6 @@ struct RyuMcpServer {
     /// tool call targeting a NEEDS_AUTH bound domain elicits, and an AUTHENTICATED
     /// one reads the credential under the gateway grant. Empty = no vault consult.
     identity_profile_ids: Vec<String>,
-    /// Pre-fetched list of allowed registry tools (avoids async in `connect`).
-    tools: Vec<crate::sidecar::mcp::RegistryTool>,
     /// This agent's orchestration capabilities, enforced again at dispatch time
     /// (defense in depth) so a model cannot call a gated tool it was not offered.
     caps: crate::sidecar::mcp::AgentCapabilities,
@@ -171,7 +212,6 @@ impl McpServerConnect<Agent> for RyuMcpServer {
             composio_actions: self.composio_actions.clone(),
             agent_id: self.agent_id.clone(),
             identity_profile_ids: self.identity_profile_ids.clone(),
-            tools: self.tools.clone(),
             caps: self.caps,
             permission_tx: self.permission_tx.clone(),
             permission_scope_id: self.permission_scope_id.clone(),
@@ -256,7 +296,7 @@ fn tool_search_def() -> Value {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Natural-language description of the capability you need (e.g. 'send a slack message')." },
-                    "kind": { "type": "string", "enum": ["mcp", "builtin", "composio", "app", "core-api", "command", "skill", "any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'any' (default) searches all.", "default": "any" },
+                    "kind": { "type": "string", "enum": ["mcp", "builtin", "composio", "app", "core-api", "command", "skill", "ext-api", "any"], "description": "Optional filter by source plane. 'skill' returns only Agent Skills. 'ext-api' returns only tools derived from an installed app's OpenAPI document. 'any' (default) searches all.", "default": "any" },
                     "limit": { "type": "integer", "description": "Max results.", "default": 8, "minimum": 1, "maximum": 25 }
                 },
                 "required": ["query"]
@@ -347,7 +387,6 @@ struct RyuMcpHandler {
     agent_id: String,
     /// Bound Identity Vault profiles (epic #517); see [`RyuMcpServer`].
     identity_profile_ids: Vec<String>,
-    tools: Vec<crate::sidecar::mcp::RegistryTool>,
     /// This agent's orchestration capabilities; gated tools are refused here even
     /// if a model emits a call to one that was never advertised (defense in depth).
     caps: crate::sidecar::mcp::AgentCapabilities,
@@ -361,9 +400,34 @@ impl RyuMcpHandler {
     /// Build the full offered tool list (registry + Composio + meta-tools). Split
     /// out of `list_tools` so it is unit-testable without an rmcp
     /// `RequestContext` (which has no public constructor).
-    fn build_tool_list(&self) -> Vec<Tool> {
-        let mut tools: Vec<Tool> = self
-            .tools
+    ///
+    /// # The registry is read HERE, per request — never snapshotted at build time
+    ///
+    /// This used to be a `Vec<RegistryTool>` field, resolved once in
+    /// [`build_ryu_mcp_server`] and cloned into every connection. That froze the
+    /// served list at router/session-construction time, and almost everything
+    /// interesting registers *later*: an app's tools land on the sidecar's Healthy
+    /// edge (`register_app_tool`), an MCP server's `tools/list` is fetched lazily,
+    /// a plugin enabled mid-session adds rows. A client that connected first saw
+    /// none of it, forever, with no error anywhere to explain why — the failure
+    /// mode is silence, which is why this carries a regression test
+    /// (`list_tools_reflects_registry_mutations_between_requests`) rather than a
+    /// comment alone.
+    ///
+    /// The cost is one `tools_for_agent` pass per `tools/list`, which is what that
+    /// call means. `list_tools` is already `async`, so there was never a
+    /// type-level reason for the snapshot; it existed only because `connect` is
+    /// sync and the field was populated to dodge that.
+    ///
+    /// `self.allowlist` is the *effective* list (registry grants + merged
+    /// `composio__*` ids) where the pre-fix snapshot used the raw one. The merged
+    /// entries live in the `composio__` namespace, which `list_all_tools` never
+    /// emits — Composio is searchable-not-listed — so the filter result is
+    /// unchanged.
+    async fn build_tool_list(&self) -> Vec<Tool> {
+        let registry_tools = self.mcp.tools_for_agent(self.allowlist.as_deref()).await;
+        let registry_tools = crate::sidecar::mcp::filter_capability_tools(registry_tools, self.caps);
+        let mut tools: Vec<Tool> = registry_tools
             .iter()
             .map(|t| {
                 let schema: serde_json::Map<String, Value> = t
@@ -485,99 +549,25 @@ impl RyuMcpHandler {
             )),
         }
     }
-}
 
-async fn require_agent_builder_configure_permission(
-    permission_tx: &Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
-    permission_scope_id: Option<&str>,
-    args: &Value,
-) -> Result<(), McpError> {
-    if let Some(scope_id) = permission_scope_id {
-        if AGENT_BUILDER_CONFIGURE_APPROVALS
-            .lock()
-            .map(|approvals| approvals.contains(scope_id))
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-    }
-    let Some(tx) = permission_tx else {
-        return Ok(());
-    };
-    let agent_id = args
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .unwrap_or("this agent");
-    let chosen = crate::sidecar::adapters::acp::request_user_permission(
-        tx,
-        json!({
-            "title": "configure itself",
-            "kind": "agent_builder.configure",
-            "agent_id": agent_id,
-            "fields": {
-                "title": "configure itself"
-            }
-        }),
-        json!([
-            {
-                "optionId": "allow_session",
-                "name": "Allow",
-                "kind": "allow_once"
-            },
-            {
-                "optionId": "reject_once",
-                "name": "Deny",
-                "kind": "reject_once"
-            }
-        ]),
-        // The host conversation, so `POST /api/chat/permission` can gate the decision
-        // on the thread that raised it.
-        permission_scope_id.map(str::to_owned),
-    )
-    .await;
-    match chosen.as_deref() {
-        Some("allow_session" | "allow_once") => {
-            if let Some(scope_id) = permission_scope_id {
-                if let Ok(mut approvals) = AGENT_BUILDER_CONFIGURE_APPROVALS.lock() {
-                    approvals.insert(scope_id.to_owned());
-                }
-            }
-            Ok(())
-        }
-        _ => Err(McpError::new(
-            rmcp::model::ErrorCode::INVALID_REQUEST,
-            "user denied permission to configure the agent".to_owned(),
-            None,
-        )),
-    }
-}
-
-impl rmcp::ServerHandler for RyuMcpHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::default()
-            .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::LATEST)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
-        _context: RequestContext<rmcp::RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.build_tool_list()))
-    }
-
-    async fn call_tool(
-        &self,
-        request: rmcp::model::CallToolRequestParams,
-        _context: RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        let tool_id = request.name.as_ref();
-        let args: Value = request
-            .arguments
-            .clone()
-            .map(Value::Object)
-            .unwrap_or(Value::Null);
+    /// Run one tool call and return the **model-facing text** for it.
+    ///
+    /// The whole body of [`rmcp::ServerHandler::call_tool`] lives here so both
+    /// transports share one dispatch path byte for byte: the in-process ACP bridge
+    /// (through the `ServerHandler` impl below) and the network JSON-RPC endpoint
+    /// (through [`serve_http_jsonrpc`]). It takes no `RequestContext` because the
+    /// `ServerHandler` methods never read theirs — which is exactly why the HTTP
+    /// transport could be hand-rolled instead of pulling in an rmcp server
+    /// transport whose only contribution would have been to manufacture that
+    /// unused context.
+    ///
+    /// Every governance layer therefore applies identically on both transports:
+    /// the capability gates, the `agent_builder__configure_agent` permission gate
+    /// (which *denies* a channel-less caller — see
+    /// [`require_agent_builder_configure_permission`]), the allowlist recheck
+    /// inside `McpRegistry::call_tool`, the approval engine, and the untrusted-
+    /// content boundary at the model edge. There is no second, laxer path.
+    async fn dispatch_tool(&self, tool_id: &str, args: Value) -> Result<String, McpError> {
         // Retained for the widget-emit path (the `_` arm moves `args` into
         // `call_tool_with_identity`).
         let tool_input = args.clone();
@@ -679,6 +669,12 @@ impl rmcp::ServerHandler for RyuMcpHandler {
                     // dispatch, never cached at build time. This is what stops Bob's
                     // agent reading Alice's chats through `threads__read_thread` /
                     // `search_conversations__search`.
+                    //
+                    // On the HTTP transport it is `None` (there is no conversation),
+                    // which lowers to a fail-closed `Unresolved` principal on a bound
+                    // node — the conversation-reading tools refuse rather than guess.
+                    // See [`serve_http_jsonrpc`] for why a client-supplied id must
+                    // never be threaded in here to "fix" that.
                     self.permission_scope_id.as_deref(),
                 )
                 .await
@@ -691,7 +687,8 @@ impl rmcp::ServerHandler for RyuMcpHandler {
         // planes, so a tool that resolves to a `WidgetBinding` emits the widget
         // side-channel here, keyed to the tool call, in addition to the normal
         // text result. Only on the interactive/streaming path (a `permission_tx`
-        // is present); headless callers get the text result and no widget.
+        // is present); headless callers — every HTTP caller included — get the
+        // text result and no widget.
         if let Some(tx) = &self.permission_tx {
             // ACP plane: the bridge does not know the ACP-side tool-call id, so it
             // passes `None` and `build_widget_event` derives the synthetic
@@ -719,8 +716,321 @@ impl rmcp::ServerHandler for RyuMcpHandler {
         // Injection defense: external/registry/Composio tool RESULTS re-entering
         // the ACP model are untrusted (poisoned web/tool output can impersonate
         // the transcript). See `neutralize_external_result`.
-        let text = neutralize_external_result(tool_id, text);
+        Ok(neutralize_external_result(tool_id, text))
+    }
+}
+
+/// Gate `agent_builder__configure_agent` — an agent rewriting its OWN
+/// configuration — behind an interactive user prompt raised over `permission_tx`.
+///
+/// **No channel ⇒ DENY.** `permission_tx` is the ACP stream back-channel the
+/// prompt travels on; its absence does not mean "unattended, proceed", it means
+/// there is nobody to ask. A permission check that cannot ask must not assume
+/// yes. In-process ACP callers always supply the channel (`acp.rs` builds the
+/// bridge with `Some(instance_tx)` and keeps a relay alive for the whole
+/// instance), so for years this branch was unreachable — it was the transport
+/// contract, written down before a transport that trips it existed.
+///
+/// **That transport now exists: `POST /mcp/:agent_id`** ([`serve_http_jsonrpc`]).
+/// A network MCP client can never hold an `AcpEvent` sender, so it lands in this
+/// branch on every call, and returning `Ok` here would hand a remote caller agent
+/// self-reconfiguration with no prompt and no inbox item. The branch is live;
+/// `configure_agent_is_denied_without_a_permission_channel` is what holds it.
+///
+/// This was the one governance layer in the `call_tool` path that read the
+/// transport at all. Every other layer decides the same way for every caller:
+/// [`crate::approvals::gate_tool_call`] routes an approval through the inbox
+/// engine without ever looking at whether a stream is attached, and the allowlist
+/// recheck inside `McpRegistry::call_tool` refuses an un-granted tool id no matter
+/// who is asking. Only this one treated "nobody is listening" as consent.
+///
+/// The channel check deliberately runs BEFORE the one-time session-approval
+/// cache. The cache records a decision a human made through an interactive
+/// prompt, keyed by a caller-supplied scope id this function does not
+/// authenticate; replaying it for a transport that could never have raised that
+/// prompt would let a network client inherit somebody else's "Allow" just by
+/// naming their conversation. "No channel is never allowed" holds unconditionally.
+async fn require_agent_builder_configure_permission(
+    permission_tx: &Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
+    permission_scope_id: Option<&str>,
+    args: &Value,
+) -> Result<(), McpError> {
+    let Some(tx) = permission_tx else {
+        return Err(McpError::new(
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "'agent_builder__configure_agent' requires an interactive permission channel \
+             to ask the user for approval, and this transport has none; call it from an \
+             interactive session"
+                .to_owned(),
+            None,
+        ));
+    };
+    if let Some(scope_id) = permission_scope_id {
+        if AGENT_BUILDER_CONFIGURE_APPROVALS
+            .lock()
+            .map(|approvals| approvals.contains(scope_id))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    let agent_id = args
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .unwrap_or("this agent");
+    let chosen = crate::sidecar::adapters::acp::request_user_permission(
+        tx,
+        json!({
+            "title": "configure itself",
+            "kind": "agent_builder.configure",
+            "agent_id": agent_id,
+            "fields": {
+                "title": "configure itself"
+            }
+        }),
+        json!([
+            {
+                "optionId": "allow_session",
+                "name": "Allow",
+                "kind": "allow_once"
+            },
+            {
+                "optionId": "reject_once",
+                "name": "Deny",
+                "kind": "reject_once"
+            }
+        ]),
+        // The host conversation, so `POST /api/chat/permission` can gate the decision
+        // on the thread that raised it.
+        permission_scope_id.map(str::to_owned),
+    )
+    .await;
+    match chosen.as_deref() {
+        Some("allow_session" | "allow_once") => {
+            if let Some(scope_id) = permission_scope_id {
+                if let Ok(mut approvals) = AGENT_BUILDER_CONFIGURE_APPROVALS.lock() {
+                    approvals.insert(scope_id.to_owned());
+                }
+            }
+            Ok(())
+        }
+        _ => Err(McpError::new(
+            rmcp::model::ErrorCode::INVALID_REQUEST,
+            "user denied permission to configure the agent".to_owned(),
+            None,
+        )),
+    }
+}
+
+impl rmcp::ServerHandler for RyuMcpHandler {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::default()
+            .with_server_info(Implementation::from_build_env())
+            .with_protocol_version(ProtocolVersion::LATEST)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.build_tool_list().await))
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let args: Value = request
+            .arguments
+            .clone()
+            .map(Value::Object)
+            .unwrap_or(Value::Null);
+        let text = self.dispatch_tool(request.name.as_ref(), args).await?;
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+}
+
+// ── The network transport: stateless JSON-RPC over `POST /mcp/:agent_id` ──────
+
+/// The MCP protocol revision this server implements.
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+// JSON-RPC 2.0 error codes (the subset this server emits).
+const JSONRPC_INVALID_REQUEST: i64 = -32_600;
+const JSONRPC_METHOD_NOT_FOUND: i64 = -32_601;
+const JSONRPC_INVALID_PARAMS: i64 = -32_602;
+
+fn rpc_ok(id: Value, result: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn rpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
+}
+
+/// Serve one JSON-RPC message against the live registry, as `agent_id`.
+///
+/// Returns the response to send, or `None` for a **notification** — a message with
+/// no `id`, which JSON-RPC requires be answered with nothing at all. The caller
+/// (`server::mod`) turns `None` into `202 Accepted` with an empty body.
+///
+/// Stateless on purpose: no session ids are issued, nothing is carried between
+/// requests, and every request is answered with a single JSON response rather than
+/// an SSE stream. That is a legal Streamable HTTP server and it means the endpoint
+/// cannot accumulate per-client state.
+///
+/// **One message per call, never a batch.** The route refuses a top-level array
+/// before it reaches here (`server::mcp_batch_refusal`): the revision this server
+/// advertises, [`MCP_PROTOCOL_VERSION`], removed JSON-RPC batching, and a loop over
+/// caller-sized input would turn one authenticated request into N registry
+/// dispatches. Do not re-introduce a fan-out here — the refusal is what bounds the
+/// work a single request can commission.
+///
+/// # What this caller is, and is not
+///
+/// `agent_id` is the principal, resolved and validated by the route before it gets
+/// here. The handler is built with `permission_tx: None` and
+/// `permission_scope_id: None`, and both are load-bearing rather than defaults
+/// left unfilled:
+///
+/// - **No permission channel ⇒ no interactive prompts.** A network client can
+///   never hold an `AcpEvent` sender, so
+///   [`require_agent_builder_configure_permission`] refuses
+///   `agent_builder__configure_agent` outright instead of assuming consent. That
+///   contract was written down before this transport existed; this is the
+///   transport it was written for.
+/// - **No conversation scope ⇒ a fail-closed tool principal.** `permission_scope_id`
+///   is the *host conversation id*, and on the ACP plane it is how a tool call is
+///   authorized as the owner of the conversation the turn runs in. An HTTP client
+///   has no conversation, so it passes `None`, and the conversation-reading tools
+///   (`threads__*`, `search_conversations__*`) resolve `Unresolved` and refuse on a
+///   bound node. **Do not "fix" that by accepting a conversation id from the
+///   request.** It would be client-supplied and unauthenticated — the same trap
+///   `CallToolBody::user_id` is documented as, one step worse, because this one
+///   names a tenancy principal rather than just an audit label. Bob's node token
+///   would read Alice's threads by typing her conversation id.
+pub(crate) async fn serve_http_jsonrpc(
+    mcp: Arc<McpRegistry>,
+    agent_id: String,
+    allowlist: Option<Vec<String>>,
+    identity_profile_ids: Vec<String>,
+    message: &Value,
+) -> Option<Value> {
+    let Some(obj) = message.as_object() else {
+        return Some(rpc_err(
+            Value::Null,
+            JSONRPC_INVALID_REQUEST,
+            "request must be a JSON-RPC object",
+        ));
+    };
+    // A notification carries NO `id` key at all — distinct from `"id": null`, which
+    // is a (badly-behaved but answerable) request.
+    let is_notification = !obj.contains_key("id");
+    let id = obj.get("id").cloned().unwrap_or(Value::Null);
+    let method = obj.get("method").and_then(Value::as_str);
+    let (Some("2.0"), Some(method)) = (obj.get("jsonrpc").and_then(Value::as_str), method) else {
+        return Some(rpc_err(
+            id,
+            JSONRPC_INVALID_REQUEST,
+            "not a JSON-RPC 2.0 request",
+        ));
+    };
+
+    // Answered without touching the registry, so an unknown/handshake method never
+    // pays for a `tools_for_agent` pass.
+    match method {
+        "initialize" => {
+            return Some(rpc_ok(
+                id,
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": {
+                        "name": "ryu-core",
+                        "title": "Ryu",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                    "instructions":
+                        "Ryu's live tool registry, scoped to one agent. `tools/list` is short by \
+                         design: it offers the agent's granted tools plus the discovery \
+                         meta-tools. Whole planes — Composio actions and the operations derived \
+                         from installed apps' OpenAPI documents — are searchable but not listed. \
+                         Call `tool_search` to find a capability, `describe` for its argument \
+                         schema, then call the tool by its exact id.",
+                }),
+            ));
+        }
+        "ping" => return (!is_notification).then(|| rpc_ok(id, json!({}))),
+        _ if method.starts_with("notifications/") => return None,
+        _ => {}
+    }
+
+    // Resolved per request, like everything else on this transport: there is no
+    // session here to hang a snapshot on, and a stateless endpoint that cached
+    // agent config would be the frozen-snapshot bug again in a second place.
+    let caps = mcp.agent_capabilities(&agent_id).await;
+    let handler = RyuMcpHandler {
+        mcp,
+        allowlist,
+        // Composio actions are a per-agent ACP-session concern (`acp.rs` threads the
+        // selected slugs in). An HTTP client discovers them through `tool_search`
+        // instead, which pulls Composio live — so nothing is lost by offering none.
+        composio_actions: Vec::new(),
+        agent_id,
+        identity_profile_ids,
+        caps,
+        permission_tx: None,
+        permission_scope_id: None,
+    };
+
+    match method {
+        "tools/list" => Some(rpc_ok(
+            id,
+            json!({ "tools": handler.build_tool_list().await }),
+        )),
+        "tools/call" => {
+            let params = obj.get("params").and_then(Value::as_object);
+            let Some(name) = params
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+            else {
+                return Some(rpc_err(
+                    id,
+                    JSONRPC_INVALID_PARAMS,
+                    "tools/call requires params.name",
+                ));
+            };
+            let args = params
+                .and_then(|p| p.get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            // A tool that RAN and reported a problem is a successful JSON-RPC call
+            // carrying `isError: true` — not a JSON-RPC error. Conflating the two
+            // makes a refused tool read to the client as a transport fault, and a
+            // model driving the client cannot recover from a transport fault.
+            match handler.dispatch_tool(name, args).await {
+                Ok(text) => Some(rpc_ok(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
+                )),
+                Err(e) => Some(rpc_ok(
+                    id,
+                    json!({
+                        "content": [{ "type": "text", "text": e.message }],
+                        "isError": true,
+                    }),
+                )),
+            }
+        }
+        _ if is_notification => None,
+        _ => Some(rpc_err(
+            id,
+            JSONRPC_METHOD_NOT_FOUND,
+            format!("unknown method: {method}"),
+        )),
     }
 }
 
@@ -997,7 +1307,6 @@ mod tests {
         allowlist: Option<Vec<String>>,
         composio_actions: Vec<String>,
     ) -> RyuMcpHandler {
-        let tools = mcp.tools_for_agent(allowlist.as_deref()).await;
         let effective_allowlist = allowlist.map(|mut list| {
             for slug in &composio_actions {
                 let id = format!("composio__{slug}");
@@ -1013,11 +1322,30 @@ mod tests {
             composio_actions,
             agent_id: "ryu".to_owned(),
             identity_profile_ids: Vec::new(),
-            tools,
             caps: crate::sidecar::mcp::AgentCapabilities::default(),
             permission_tx: None,
             permission_scope_id: None,
         }
+    }
+
+    /// One `tools/call` over the HTTP transport, as the `ryu` agent with no
+    /// allowlist. Returns the JSON-RPC `result` object.
+    async fn http_call(mcp: &Arc<McpRegistry>, name: &str, args: Value) -> Value {
+        let response = serve_http_jsonrpc(
+            Arc::clone(mcp),
+            "ryu".to_owned(),
+            None,
+            Vec::new(),
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": args },
+            }),
+        )
+        .await
+        .expect("a request with an id is always answered");
+        response["result"].clone()
     }
 
     fn names_of(tools: &[Tool]) -> Vec<String> {
@@ -1201,7 +1529,10 @@ mod tests {
             m.insert(
                 "mock-server".to_owned(),
                 McpServerConfig {
-                    command: "echo".to_owned(),
+                    command: Some("echo".to_owned()),
+                    transport: None,
+                    url: None,
+                    headers: BTreeMap::new(),
                     args: vec![],
                     env: BTreeMap::new(),
                     description: Some("mock".to_owned()),
@@ -1267,7 +1598,7 @@ mod tests {
             vec!["SLACK_SEND_MESSAGE".to_owned()],
         )
         .await;
-        let listed = h.build_tool_list();
+        let listed = h.build_tool_list().await;
         let names = names_of(&listed);
         assert!(
             names.iter().any(|n| n == "composio__SLACK_SEND_MESSAGE"),
@@ -1288,7 +1619,7 @@ mod tests {
     async fn empty_allowlist_still_offers_meta_tools_in_list() {
         let mcp = empty_registry();
         let h = handler(Arc::clone(&mcp), Some(vec![]), vec![]).await;
-        let names = names_of(&h.build_tool_list());
+        let names = names_of(&h.build_tool_list().await);
         assert!(names.iter().any(|n| n == "tool_search"), "{names:?}");
         assert!(names.iter().any(|n| n == "describe"), "{names:?}");
     }
@@ -1330,7 +1661,7 @@ mod tests {
         // Discoverable ≠ offered. Skills are merged at SEARCH time only, so the
         // agent's tool list — the set of functions it may emit a call for — must not
         // contain one, unrestricted allowlist and all.
-        let offered = names_of(&h.build_tool_list());
+        let offered = names_of(&h.build_tool_list().await);
         assert!(
             !offered.iter().any(|n| n.starts_with("skills__merge")),
             "a skill must never be offered as a callable function: {offered:?}"
@@ -1427,6 +1758,44 @@ mod tests {
         assert!(tool.input_schema.contains_key("properties"));
     }
 
+    /// A transport with no interactive permission channel may NOT let an agent
+    /// reconfigure itself. The absence of a `permission_tx` means there is nobody
+    /// to prompt, so the gate refuses rather than assuming consent — otherwise a
+    /// network MCP client, which can never hold an `AcpEvent` sender, would run
+    /// `agent_builder__configure_agent` with no prompt and no inbox item.
+    ///
+    /// A previously cached session approval must not rescue it either: the scope
+    /// id is caller-supplied, and the decision it records was made on a stream
+    /// this caller does not have.
+    #[tokio::test]
+    async fn configure_agent_is_denied_without_a_permission_channel() {
+        let args = json!({ "agent_id": "ryu" });
+        let denied = require_agent_builder_configure_permission(&None, None, &args).await;
+        assert!(
+            denied.is_err(),
+            "no permission channel must deny, not silently allow"
+        );
+
+        // Even with a scope that already carries a one-time approval from an
+        // interactive session, a channel-less caller is refused.
+        let scope = "conv_no_channel_test";
+        AGENT_BUILDER_CONFIGURE_APPROVALS
+            .lock()
+            .expect("approvals lock")
+            .insert(scope.to_owned());
+        let denied_with_cached_approval =
+            require_agent_builder_configure_permission(&None, Some(scope), &args).await;
+        AGENT_BUILDER_CONFIGURE_APPROVALS
+            .lock()
+            .expect("approvals lock")
+            .remove(scope);
+        assert!(
+            denied_with_cached_approval.is_err(),
+            "a cached approval must not be replayable onto a transport that could \
+             never have raised the prompt that granted it"
+        );
+    }
+
     #[test]
     fn neutralize_external_result_empty_string_still_wrapped_when_enabled() {
         let _guard = untrusted::FLAG_TEST_LOCK
@@ -1440,5 +1809,256 @@ mod tests {
         assert!(out.ends_with(untrusted::UNTRUSTED_CLOSE));
         // Restore default-ON for sibling tests.
         untrusted::set_enabled("true");
+    }
+
+    // ── The network transport (`POST /mcp/:agent_id`) ─────────────────────────
+
+    /// **The frozen-snapshot regression.** `tools/list` must read the registry on
+    /// every request.
+    ///
+    /// The offered set used to be a `Vec<RegistryTool>` resolved once in
+    /// `build_ryu_mcp_server` and cloned into each connection. Over a network
+    /// transport that is fatal in a way nothing reports: an MCP client connects at
+    /// boot, and every tool registered afterwards — app tools on the sidecar
+    /// Healthy edge, a plugin enabled from the Store, an MCP server whose
+    /// `tools/list` resolved lazily — is invisible to it for the life of the
+    /// process. No error, no empty result, just a list that silently stopped
+    /// tracking reality.
+    ///
+    /// So: two `tools/list` calls with a registration between them, and the second
+    /// MUST see it. Registering *between* the calls is the whole point — a test
+    /// that registers first would pass against the snapshot too.
+    #[tokio::test]
+    async fn list_tools_reflects_registry_mutations_between_requests() {
+        let mcp = empty_registry();
+        let list = |mcp: Arc<McpRegistry>| async move {
+            let response = serve_http_jsonrpc(
+                mcp,
+                "ryu".to_owned(),
+                None,
+                Vec::new(),
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            )
+            .await
+            .expect("a request with an id is always answered");
+            response["result"]["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .map(|t| t["name"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let before = list(Arc::clone(&mcp)).await;
+        assert!(
+            !before.iter().any(|n| n == "app__late_riser"),
+            "precondition: the tool is not registered yet: {before:?}"
+        );
+        // The meta-tools are the stable floor of every listing.
+        assert!(before.iter().any(|n| n == "tool_search"), "{before:?}");
+
+        // The mutation an already-connected client must be able to see.
+        mcp.register_app_tool(
+            "app__late_riser".to_owned(),
+            "late_riser".to_owned(),
+            Some("registered after the first tools/list".to_owned()),
+        );
+
+        let after = list(Arc::clone(&mcp)).await;
+        assert!(
+            after.iter().any(|n| n == "app__late_riser"),
+            "a tool registered between two requests must appear in the second — \
+             a build-time snapshot would freeze this list forever: {after:?}"
+        );
+        mcp.unregister_app_tool("app__late_riser");
+    }
+
+    /// Derived ext-API tools are **searchable but not listed**, over HTTP exactly
+    /// as on the ACP plane. Both halves are asserted, because each alone would
+    /// pass against the opposite bug: reachable-through-search catches a transport
+    /// that forgot to route `tool_search` at the registry, and absent-from-listing
+    /// catches an accidental merge of the derived plane into `list_all_tools`,
+    /// which would push every operation of every installed app into every client's
+    /// context window.
+    #[tokio::test]
+    async fn derived_tools_are_reachable_through_search_over_http() {
+        let mcp = empty_registry();
+        let tool_id = "ryu_ext__crm__post_create_invoice";
+        mcp.set_ext_api_routes(
+            "@ryu/crm",
+            vec![crate::ext_api::ExtApiRoute {
+                id: tool_id.to_owned(),
+                plugin_id: "@ryu/crm".to_owned(),
+                method: "POST".to_owned(),
+                url: "core:/api/ext/@ryu/crm/invoices".to_owned(),
+                name: "Create invoice".to_owned(),
+                description: Some("Create a new invoice for a customer".to_owned()),
+                header_params: Vec::new(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            }],
+        );
+
+        // 1. SEARCHABLE: `tool_search` over the network surfaces it, tagged with the
+        //    plane it came from so the client knows it is a real callable id.
+        let result = http_call(
+            &mcp,
+            "tool_search",
+            json!({ "query": "create invoice", "limit": 25 }),
+        )
+        .await;
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("tool_search returns text content");
+        let envelope: Value = serde_json::from_str(text).expect("tool_search returns JSON");
+        let row = envelope["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .find(|r| r["id"] == json!(tool_id))
+            .cloned()
+            .unwrap_or_else(|| panic!("derived tool missing from the HTTP catalog: {envelope}"));
+        assert_eq!(row["kind"], json!("ext-api"), "{row}");
+        assert!(
+            !result["isError"].as_bool().unwrap_or(true),
+            "a meta-tool call is not an error: {result}"
+        );
+
+        // 2. NOT LISTED: it must not be in `tools/list`. This is the design — see
+        //    the module docs — not an omission to be "fixed".
+        let listed = serve_http_jsonrpc(
+            Arc::clone(&mcp),
+            "ryu".to_owned(),
+            None,
+            Vec::new(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await
+        .expect("answered");
+        let tools = listed["result"]["tools"].as_array().expect("tools array");
+        let names: Vec<String> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.starts_with("ryu_ext__")),
+            "derived tools are search-gated and must never enter tools/list: {names:?}"
+        );
+
+        // 3. WIRE SHAPE. rmcp's `Tool` is serialized straight onto the JSON-RPC
+        //    wire, so its serde spelling IS the MCP wire contract. MCP names the
+        //    field `inputSchema`; rmcp gets there via `rename_all = "camelCase"` on
+        //    the struct, which a version bump could quietly change. `name` is
+        //    spelled identically either way, so every other assertion in this file
+        //    would keep passing while real hosts saw tools with no argument schema
+        //    and models invented arguments for them. Pin it here.
+        let entry = tools
+            .iter()
+            .find(|t| t["name"] == json!("tool_search"))
+            .expect("the meta-tools are always listed");
+        assert!(
+            entry.get("inputSchema").is_some(),
+            "MCP requires `inputSchema` (camelCase): {entry}"
+        );
+        assert!(
+            entry.get("input_schema").is_none(),
+            "snake_case would mean every host sees an unschema'd tool: {entry}"
+        );
+        assert_eq!(
+            entry["inputSchema"]["properties"]["query"]["type"],
+            json!("string"),
+            "the schema itself must round-trip, not just its key: {entry}"
+        );
+
+        mcp.clear_ext_api_routes("@ryu/crm");
+    }
+
+    /// The hand-rolled JSON-RPC envelope, in the shapes a real MCP host depends on.
+    #[tokio::test]
+    async fn jsonrpc_envelope_follows_the_protocol() {
+        let mcp = empty_registry();
+        let serve = |message: Value| {
+            let mcp = Arc::clone(&mcp);
+            async move { serve_http_jsonrpc(mcp, "ryu".to_owned(), None, Vec::new(), &message).await }
+        };
+
+        // `initialize` advertises the protocol revision and the tools capability.
+        let init = serve(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
+            .await
+            .expect("answered");
+        assert_eq!(init["result"]["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
+        assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], json!(false));
+
+        // A NOTIFICATION (no `id` key at all) is answered with nothing — replying
+        // to one is itself a protocol violation, and `notifications/initialized` is
+        // the first thing most hosts send.
+        assert!(
+            serve(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+                .await
+                .is_none()
+        );
+        assert!(serve(json!({ "jsonrpc": "2.0", "method": "ping" })).await.is_none());
+        // But `"id": null` is a request, not a notification, and gets an answer.
+        assert!(serve(json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }))
+            .await
+            .is_some());
+
+        // Unknown method → a JSON-RPC error, with the id echoed back.
+        let unknown = serve(json!({ "jsonrpc": "2.0", "id": "x", "method": "resources/list" }))
+            .await
+            .expect("answered");
+        assert_eq!(unknown["error"]["code"], json!(JSONRPC_METHOD_NOT_FOUND));
+        assert_eq!(unknown["id"], json!("x"));
+
+        // Not JSON-RPC 2.0 → invalid request.
+        let bad = serve(json!({ "id": 1, "method": "tools/list" }))
+            .await
+            .expect("answered");
+        assert_eq!(bad["error"]["code"], json!(JSONRPC_INVALID_REQUEST));
+
+        // `tools/call` with no name → invalid params (a protocol fault, correctly).
+        let no_name = serve(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call" }))
+            .await
+            .expect("answered");
+        assert_eq!(no_name["error"]["code"], json!(JSONRPC_INVALID_PARAMS));
+    }
+
+    /// A tool that RAN and failed is a successful JSON-RPC call carrying
+    /// `isError: true` — never a JSON-RPC `error`. A host that sees a transport
+    /// fault cannot hand the failure back to its model to recover from; a host
+    /// that sees `isError` can.
+    #[tokio::test]
+    async fn a_refused_tool_is_an_is_error_result_not_a_transport_fault() {
+        let mcp = empty_registry();
+        // Not on any registry: dispatch refuses it.
+        let result = http_call(&mcp, "nope__does_not_exist", json!({})).await;
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert!(
+            result["content"][0]["text"].as_str().is_some_and(|t| !t.is_empty()),
+            "the refusal carries a message the model can act on: {result}"
+        );
+    }
+
+    /// The HTTP transport holds no interactive permission channel, so the one gate
+    /// that reads the transport refuses it. Asserted end-to-end through
+    /// `serve_http_jsonrpc` rather than only at
+    /// `require_agent_builder_configure_permission`, because the thing that could
+    /// regress is the *wiring* — a future `permission_tx: Some(..)` threaded in
+    /// from a request field would compile fine and silently open the gate.
+    #[tokio::test]
+    async fn http_callers_cannot_reconfigure_the_agent() {
+        let mcp = empty_registry();
+        let result = http_call(
+            &mcp,
+            "agent_builder__configure_agent",
+            json!({ "agent_id": "ryu" }),
+        )
+        .await;
+        assert_eq!(result["isError"], json!(true), "{result}");
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("interactive")),
+            "the refusal must name the missing permission channel: {result}"
+        );
     }
 }

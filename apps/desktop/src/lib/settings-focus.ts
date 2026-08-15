@@ -21,9 +21,40 @@ import type { SettingsEntry } from "./settings-index.ts";
 /** The pending reveal, if a result was clicked and not yet consumed. */
 let pending: SettingsEntry | null = null;
 
+/**
+ * Panes that need to know a reveal was requested BEFORE it is consumed.
+ *
+ * A pane split into sub-pages has to open the right one first: the row is not in
+ * the DOM until it does, and {@link revealSettingWhenReady} gives up after two
+ * seconds of polling. Consuming here would race the content pane for the same
+ * one-shot request, so these listeners only ever peek.
+ */
+const listeners = new Set<(entry: SettingsEntry) => void>();
+
 /** Ask the next render of `entry.section` to scroll to and flash that row. */
 export function requestSettingReveal(entry: SettingsEntry): void {
 	pending = entry;
+	for (const listener of listeners) {
+		listener(entry);
+	}
+}
+
+/**
+ * Read the pending reveal for `section` WITHOUT consuming it. For a sub-paged
+ * pane deciding which page to open; the content pane still consumes it.
+ */
+export function peekSettingReveal(section: string): SettingsEntry | null {
+	return pending && pending.section === section ? pending : null;
+}
+
+/** Subscribe to reveal requests. Returns an unsubscribe function. */
+export function subscribeSettingReveal(
+	listener: (entry: SettingsEntry) => void
+): () => void {
+	listeners.add(listener);
+	return () => {
+		listeners.delete(listener);
+	};
 }
 
 /**

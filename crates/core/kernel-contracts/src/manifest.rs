@@ -1482,20 +1482,44 @@ impl PluginManifest {
     }
 }
 
-/// One declarative **stdio MCP server** a plugin registers (see
-/// [`PluginManifest::mcp_servers`]).
+/// One declarative **MCP server** a plugin registers (see
+/// [`PluginManifest::mcp_servers`]) — either a stdio command to spawn or a remote
+/// HTTP endpoint to call.
 ///
 /// This is the manifest-side, dependency-free mirror of Core's runtime
 /// `McpServerConfig`: pure data (schemars/serde only) so it can live in
 /// kernel-contracts, with Core lowering it into its registry type on enable. A
-/// server is spawned per request as `command args…` (stdio); `command_env` lets
+/// stdio server is spawned per request as `command args…`; `command_env` lets
 /// the manifest name an env var Core resolves to an absolute binary path
 /// (e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the
-/// bare `command`.
+/// bare `command`. An HTTP server names a [`url`](McpServerDecl::url) instead and
+/// spawns nothing at all.
+///
+/// The field names mirror the `mcp.json` dialect users already paste from Cursor
+/// and Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a
+/// hand-written config entry are the same shape. Auth belongs in
+/// [`headers`](McpServerDecl::headers), never in `env` — a remote server has no
+/// process to inherit environment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct McpServerDecl {
     /// Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).
-    pub command: String,
+    /// Absent for a remote (`url`) server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred
+    /// from whichever of `command`/`url` is present. `http`, `streamable-http`
+    /// and `sse` all select Core's HTTP transport.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+
+    /// Endpoint URL for a remote (HTTP) server. Absent for a stdio server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Request headers sent with every call to a remote server (auth lives here).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 
     /// Optional env var whose value, when set, OVERRIDES [`command`] with an
     /// absolute binary path. Lets a plugin ship a bare `command` that Core repoints
@@ -1525,6 +1549,26 @@ pub struct McpServerDecl {
 
 const fn default_mcp_server_enabled() -> bool {
     true
+}
+
+impl Default for McpServerDecl {
+    /// A blank stdio declaration with `enabled: true` — matching what serde
+    /// produces for `{}`. Exists so a caller (or a test) can name only the fields
+    /// it cares about now that the struct spans two transports; without it every
+    /// stdio literal has to spell out three remote fields it will never use.
+    fn default() -> Self {
+        Self {
+            command: None,
+            transport: None,
+            url: None,
+            headers: BTreeMap::new(),
+            command_env: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            description: None,
+            enabled: default_mcp_server_enabled(),
+        }
+    }
 }
 
 /// Companion surface descriptor — an optional in-desktop overlay or sidebar panel

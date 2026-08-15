@@ -26,6 +26,7 @@ import {
 	LockedIcon,
 	Message01Icon,
 	Refresh01Icon,
+	Search01Icon,
 	Tick01Icon,
 	Tick02Icon,
 	Wrench01Icon,
@@ -63,7 +64,7 @@ import {
 import { Textarea } from "@ryu/ui/components/textarea";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
 	AGENT_BANNER_BASE,
 	AgentBannerDialog,
@@ -71,6 +72,12 @@ import {
 	resolveAgentBanner,
 	useAgentBannerPrefs,
 } from "./agent-banner-dialog.tsx";
+import {
+	AGENT_TAB_LABELS,
+	type AgentSettingsEntry,
+	revealAgentSetting,
+	searchAgentSettings,
+} from "./agent-settings-search.ts";
 import { GuidedSetup } from "./guided-setup.tsx";
 import {
 	SettingsCard,
@@ -2205,6 +2212,18 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	// Opens on Behavior — what the agent does is the first question, not which
 	// engine serves it.
 	const [activeTab, setActiveTab] = useState("behavior");
+	// Sixty-odd settings behind seven pills: the same "which tab is it under"
+	// problem the settings dialogs already solved with a row-level index. Same
+	// answer here — `agent-settings-search.ts` indexes the ROWS, and picking a hit
+	// switches to its tab and flashes it.
+	const [settingsQuery, setSettingsQuery] = useState("");
+	// Scopes the reveal to the editor body, so a row title that also appears in
+	// the search results list can't win over the real row in the panel.
+	const editorRef = useRef<HTMLDivElement | null>(null);
+	const settingsHits = useMemo(
+		() => searchAgentSettings(settingsQuery),
+		[settingsQuery]
+	);
 	// New agents start in the guided flow; "Set it up myself" drops the guide and
 	// reveals the same panels as tabs.
 	const [guided, setGuided] = useState(true);
@@ -3220,6 +3239,21 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 
 	const activeHint = editorTabs.find((tab) => tab.id === activeTab)?.hint ?? "";
 
+	// Activity and Prompt Studio only exist when their panels were injected, so a
+	// hit filed under an absent tab would switch to a pill that isn't there and
+	// leave the editor showing nothing. Drop those instead of showing a dead row.
+	const availableTabs = new Set(editorTabs.map((tab) => tab.id));
+	const visibleHits = settingsHits.filter((hit) => availableTabs.has(hit.tab));
+
+	// Switch to the hit's tab, then flash the row. The reveal polls, because the
+	// panel is a commit (or, for one that fetches first, a few hundred ms) away
+	// from being in the DOM when this runs.
+	const handleSelectSetting = (entry: AgentSettingsEntry) => {
+		setActiveTab(entry.tab);
+		setSettingsQuery("");
+		revealAgentSetting(entry, editorRef.current ?? document);
+	};
+
 	const actions = (
 		<>
 			{formError ? (
@@ -3330,8 +3364,65 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		);
 	}
 
+	// The search field + its result list. Sits at the top right of the tab strip,
+	// where macOS Settings puts it, and collapses to a full-width row of its own
+	// once the pills wrap.
+	const settingsSearch = (
+		<div className="relative w-full shrink-0 sm:w-56">
+			<HugeiconsIcon
+				className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+				icon={Search01Icon}
+			/>
+			<Input
+				aria-label="Search agent settings"
+				className="h-8 pl-8 text-sm"
+				onChange={(e) => setSettingsQuery(e.target.value)}
+				onKeyDown={(e) => {
+					if (e.key === "Escape") {
+						setSettingsQuery("");
+					}
+					// Enter takes the top hit — the shortest path when you already know
+					// the name of the setting and just typed enough of it.
+					if (e.key === "Enter" && visibleHits.length > 0) {
+						e.preventDefault();
+						handleSelectSetting(visibleHits[0]);
+					}
+				}}
+				placeholder="Search settings…"
+				value={settingsQuery}
+			/>
+			{settingsQuery.trim() ? (
+				<div className="absolute top-9 right-0 z-30 max-h-80 w-full min-w-64 overflow-y-auto rounded-lg border bg-popover p-1 shadow-md">
+					{visibleHits.length === 0 ? (
+						<p className="px-2.5 py-2 text-muted-foreground text-sm">
+							No settings match “{settingsQuery.trim()}”.
+						</p>
+					) : (
+						visibleHits.map((hit) => (
+							<button
+								className="flex w-full flex-col items-start gap-0.5 rounded-md px-2.5 py-1.5 text-left hover:bg-accent"
+								key={hit.id}
+								onClick={() => handleSelectSetting(hit)}
+								type="button"
+							>
+								<span className="font-medium text-sm">{hit.label}</span>
+								{/* Where it lives, so a hit is a direction and not just a
+								    name — the breadcrumb is the whole point of searching for
+								    a setting you have never opened. */}
+								<span className="text-muted-foreground text-xs">
+									{AGENT_TAB_LABELS[hit.tab]}
+									{hit.group ? ` › ${hit.group}` : ""}
+								</span>
+							</button>
+						))
+					)}
+				</div>
+			) : null}
+		</div>
+	);
+
 	return (
-		<div className="mx-auto w-full max-w-5xl">
+		<div className="mx-auto w-full max-w-5xl" ref={editorRef}>
 			<div className="flex min-w-0 flex-col gap-7">
 				<ProfileHeader
 					agentIcon={agentIcon}
@@ -3353,13 +3444,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				/>
 
 				<Tabs className="gap-3" onValueChange={setActiveTab} value={activeTab}>
-					<TabsList className="flex-wrap" variant="pills">
-						{editorTabs.map((tab) => (
-							<TabsTrigger key={tab.id} value={tab.id}>
-								{tab.label}
-							</TabsTrigger>
-						))}
-					</TabsList>
+					<div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+						<TabsList className="flex-wrap" variant="pills">
+							{editorTabs.map((tab) => (
+								<TabsTrigger key={tab.id} value={tab.id}>
+									{tab.label}
+								</TabsTrigger>
+							))}
+						</TabsList>
+						{settingsSearch}
+					</div>
 
 					{/* One line telling you what this group holds — the cheapest fix for
 					    "I can't find the setting I need". */}

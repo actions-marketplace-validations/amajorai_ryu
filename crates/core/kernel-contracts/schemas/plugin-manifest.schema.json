@@ -1169,7 +1169,7 @@
       "type": "object"
     },
     "McpServerDecl": {
-      "description": "One declarative **stdio MCP server** a plugin registers (see\n[`PluginManifest::mcp_servers`]).\n\nThis is the manifest-side, dependency-free mirror of Core's runtime\n`McpServerConfig`: pure data (schemars/serde only) so it can live in\nkernel-contracts, with Core lowering it into its registry type on enable. A\nserver is spawned per request as `command args…` (stdio); `command_env` lets\nthe manifest name an env var Core resolves to an absolute binary path\n(e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the\nbare `command`.",
+      "description": "One declarative **MCP server** a plugin registers (see\n[`PluginManifest::mcp_servers`]) — either a stdio command to spawn or a remote\nHTTP endpoint to call.\n\nThis is the manifest-side, dependency-free mirror of Core's runtime\n`McpServerConfig`: pure data (schemars/serde only) so it can live in\nkernel-contracts, with Core lowering it into its registry type on enable. A\nstdio server is spawned per request as `command args…`; `command_env` lets\nthe manifest name an env var Core resolves to an absolute binary path\n(e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the\nbare `command`. An HTTP server names a [`url`](McpServerDecl::url) instead and\nspawns nothing at all.\n\nThe field names mirror the `mcp.json` dialect users already paste from Cursor\nand Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a\nhand-written config entry are the same shape. Auth belongs in\n[`headers`](McpServerDecl::headers), never in `env` — a remote server has no\nprocess to inherit environment.",
       "properties": {
         "args": {
           "description": "Arguments passed to the command.",
@@ -1179,8 +1179,11 @@
           "type": "array"
         },
         "command": {
-          "description": "Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).",
-          "type": "string"
+          "description": "Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).\nAbsent for a remote (`url`) server.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "command_env": {
           "description": "Optional env var whose value, when set, OVERRIDES [`command`] with an\nabsolute binary path. Lets a plugin ship a bare `command` that Core repoints\nat a profile-specific downloaded binary. Absent ⇒ use `command` verbatim.\n\n[`command`]: McpServerDecl::command",
@@ -1207,11 +1210,29 @@
           },
           "description": "Extra environment variables for the server process.",
           "type": "object"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Request headers sent with every call to a remote server (auth lives here).",
+          "type": "object"
+        },
+        "type": {
+          "description": "Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred\nfrom whichever of `command`/`url` is present. `http`, `streamable-http`\nand `sse` all select Core's HTTP transport.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Endpoint URL for a remote (HTTP) server. Absent for a stdio server.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "command"
-      ],
       "type": "object"
     },
     "MessageActionContribution": {
@@ -2140,7 +2161,7 @@
           ]
         },
         "lazy": {
-          "description": "**Lazy activation** — spawn-on-first-use instead of at plugin-enable. When\n`true` the sidecar is *registered* (claims its port, appears in\n`/api/sidecar/status` as not-running) at enable but its process is NOT started\nuntil the first proxy/broker hit wakes it on demand; a bounded health-wait\nwarms it before the request is forwarded. `false` (the default) keeps the\neager behaviour every existing manifest has: started at enable. Additive.",
+          "description": "**Lazy activation** — spawn-on-first-use instead of at plugin-enable. When\n`true` the sidecar is *registered* (claims its port, appears in\n`/api/sidecar/status` as not-running) at enable but its process is NOT started\nuntil the first proxy/broker hit wakes it on demand; a bounded health-wait\nwarms it before the request is forwarded. `false` (the default) keeps the\neager behaviour every existing manifest has: started at enable. Additive.\n\n**Ignored when [`provides_provider`] is set.** Such a sidecar is always started\neagerly, because the two declarations are mutually exclusive by construction: a\nlazy sidecar's only wake trigger is a proxy/broker hit, while a provider's only\nclient is Pi, which dials the registered `baseUrl` directly and never traverses\nthe proxy. Nothing could ever wake it, and Core's boot purge of stale\nsidecar-owned provider entries would then leave the provider permanently dead.\nThe coercion is logged at `info`; the manifest is NOT rejected.\n\n[`provides_provider`]: SidecarSpec::provides_provider",
           "type": "boolean"
         },
         "name": {
@@ -2148,7 +2169,7 @@
           "type": "string"
         },
         "port": {
-          "description": "TCP port the process's HTTP server binds to, used to build the health-check\nURL. The plugin is responsible for choosing a free port — there is **no port\nregistry in v1**, so a collision with a built-in (e.g. llama.cpp on 8080) is\nthe plugin author's responsibility to avoid.",
+          "description": "TCP port the process's HTTP server binds to, used to build the health-check\nURL. The plugin is responsible for choosing a free port: there is **no\nallocator** — this number is what Core tries (after the profile offset), and a\ncollision is not repaired by moving anyone.\n\nThere *is* a gate. `SidecarManager::claim_port` checks a live-sidecar registry\nand bind-probes the port, and **refuses to start** the sidecar if either fails,\nso a collision with a built-in (e.g. llama.cpp on 8080) surfaces as an app that\ndoes not come up rather than as silent breakage. Detection, not resolution:\npicking a free port is still the author's job. See `docs/port-allocation.md`\nfor the band map.",
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0,
@@ -2167,7 +2188,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional **model-provider** declaration: when present, this sidecar serves an\nOpenAI-compatible endpoint and Core registers it as a selectable provider once\nthe process reports healthy, then deregisters it when the plugin is disabled or\nuninstalled. This is what makes a third-party *auth bridge* possible without a\nCore change: the plugin performs its own login/refresh, serves `/v1`, and\ndeclares that fact here. Absent = the sidecar is not a model provider.\n\nA sidecar cannot self-register: it holds only `RYU_EXT_TOKEN` (scoped to the\next-proxy hop and `/api/host/*`), and the host-RPC vocabulary has no\nprovider-registration method. Registration is therefore Core-side, driven by\nthis declaration."
+          "description": "Optional **model-provider** declaration: when present, this sidecar serves an\nOpenAI-compatible endpoint and Core registers it as a selectable provider once\nthe process reports healthy, then deregisters it when the plugin is disabled or\nuninstalled. This is what makes a third-party *auth bridge* possible without a\nCore change: the plugin performs its own login/refresh, serves `/v1`, and\ndeclares that fact here. Absent = the sidecar is not a model provider.\n\nA sidecar cannot self-register: it holds only `RYU_EXT_TOKEN` (scoped to the\next-proxy hop and `/api/host/*`), and the host-RPC vocabulary has no\nprovider-registration method. Registration is therefore Core-side, driven by\nthis declaration.\n\n**Declaring this forces eager start and disables idle-stop**, overriding\n[`lazy`] and [`idle_stop_secs`]. Pi bypasses the ext proxy and dials the\nregistered `baseUrl` directly, so no request can ever wake this sidecar on\ndemand; a sidecar that is never started never reaches the Healthy edge that\nregisters it, and one that is scaled to zero drops out of Pi's model list until\na wake that will never come. Both coercions are logged at `info` rather than\nrejected by the validator, so existing manifests keep loading.\n\n[`lazy`]: SidecarSpec::lazy\n[`idle_stop_secs`]: SidecarSpec::idle_stop_secs"
         }
       },
       "required": [

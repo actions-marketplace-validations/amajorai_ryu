@@ -16,6 +16,7 @@ import { Label } from "@ryu/ui/components/label";
 import { OTPInput, type OTPStatus } from "@ryu/ui/components/motion/otp-input";
 import { Separator } from "@ryu/ui/components/separator";
 import { TextSwap } from "@ryu/ui/components/text-swap";
+import { SPRING_PANEL } from "@ryu/ui/lib/ease.ts";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useState } from "react";
 import QRCode from "react-qr-code";
@@ -25,8 +26,11 @@ import { authClient } from "@/lib/auth-client.ts";
 type Step = "password" | "qr" | "verify" | "backup" | "manage";
 
 // Wallet-app morph: the panel springs to its new height as the active step
-// swaps, per beui.dev/components/motion/morphing-modal (stiffness 420, damping 40).
-const SPRING_PANEL = { type: "spring", stiffness: 420, damping: 40 } as const;
+// swaps, per beui.dev/components/motion/morphing-modal. This used to redeclare
+// `stiffness: 420, damping: 40` locally under the same name as the shared token
+// — a shadowing copy that could not track fixes to the real one. It now IS the
+// shared token, which is also critically damped rather than overshoot-free by
+// accident.
 
 // Pulls the base32 secret out of the otpauth:// URI for manual entry.
 const TOTP_SECRET_RE = /secret=([^&]+)/;
