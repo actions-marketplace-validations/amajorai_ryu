@@ -328,7 +328,7 @@ export function CreditTransferCard() {
 										}
 									/>
 									<span className="min-w-0 flex-1">
-										<span className="block font-medium text-sm tabular-nums">
+										<span className="block font-heading font-medium text-sm tabular-nums">
 											{formatUsd(grant.remainingMicroUsd)}
 										</span>
 										<span className="block text-muted-foreground text-xs">
@@ -344,7 +344,11 @@ export function CreditTransferCard() {
 
 				<div className="space-y-1.5">
 					<Label htmlFor="transfer-topup">
-						Top-up balance ({formatUsd(topupAvailable)} available)
+						Top-up balance (
+						<span className="font-heading tabular-nums">
+							{formatUsd(topupAvailable)}
+						</span>{" "}
+						available)
 					</Label>
 					<Input
 						id="transfer-topup"
@@ -362,9 +366,12 @@ export function CreditTransferCard() {
 
 				<div className="flex items-center justify-between gap-3">
 					<p className="text-muted-foreground text-sm tabular-nums">
-						{nothingChosen
-							? "Nothing selected"
-							: `Moving ${formatUsd(selectedMicroUsd + topupMicroUsd)}`}
+						{nothingChosen ? "Nothing selected" : "Moving "}
+						{nothingChosen ? null : (
+							<span className="font-heading text-foreground">
+								{formatUsd(selectedMicroUsd + topupMicroUsd)}
+							</span>
+						)}
 					</p>
 					<Button
 						disabled={

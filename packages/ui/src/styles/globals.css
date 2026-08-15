@@ -1087,6 +1087,33 @@ html[data-dialog-overlay-blur="off"] [data-slot="drawer-content"]::before {
 	}
 }
 
+/* --- Text marquee (spell.sh) ---
+   The vertical username reel on the /username page and the referral surfaces.
+   Each row is positioned by its own inline `translate` and the animation only
+   has to move it from there to `--destination`, so the stagger lives in the
+   markup (see text-marquee.tsx) and this stays a two-line keyframe. The mask
+   fades rows out as they pass the top and bottom edges of the fixed-height
+   window. */
+.t-text-marquee-mask {
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		rgb(0, 0, 0) 43.6902%,
+		transparent 100%
+	);
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		rgb(0, 0, 0) 43.6902%,
+		transparent 100%
+	);
+}
+@keyframes t-text-marquee {
+	to {
+		translate: 0 var(--destination);
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.t-badge,
 	.t-badge-dot,

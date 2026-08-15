@@ -1,7 +1,7 @@
 {
   "id": "@ryu/blueprint",
   "name": "Blueprint",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Developer Tools",
   "description": "Review an agent's plan before it touches a file. The agent publishes its plan over MCP; Blueprint parses the markdown into addressable blocks and renders it next to a dependency graph derived from the steps' own `depends_on` edges — so the two questions a wall of markdown cannot answer become visible at a glance: what actually has to happen first, and which step is the one everything else is waiting on. A plan reads as a sequence because prose is a sequence; the work almost never is. You annotate what you object to, anchored to the block or step it belongs to — a comment, a redline carrying the replacement text you want, a question, or a blocker — and then approve or request changes. The verdict is not a mood: it is a document. Requesting changes serializes every annotation into deterministic text the agent reads back through `blueprint__plan_status`, each finding naming the step or block it attaches to and, for a redline, the exact substitution proposed, so a revision answers what was actually written rather than what a summary of it sounded like. Re-publishing under the same plan id appends a revision instead of creating a new plan, and block ids are content-stable across revisions, so the second draft arrives as a diff against the first — the paragraphs you already read are still the paragraphs you already read.",
   "tagline": "Read the plan as a graph, mark it up, and send back a verdict the agent can act on",

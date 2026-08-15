@@ -1,7 +1,7 @@
 {
   "id": "@ryu/approvals",
   "name": "Approvals",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Security",
   "description": "Approval inbox: a human-in-the-loop queue where agent-proposed actions, edits, and fixes wait for your accept or reject before they take effect.",
   "tagline": "Nothing happens until you say yes",

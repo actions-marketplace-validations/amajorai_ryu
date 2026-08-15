@@ -1,7 +1,7 @@
 {
   "id": "@ryu/firewall",
   "name": "Gateway Firewall",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "An on/off switch over the Gateway's built-in firewall, which screens model traffic for prompt injection and PII. Enabling this plugin forces `firewall.enabled` on at the next Gateway restart; the pattern set and policy mode stay owned by the Gateway config (GET/PUT /v1/config), not by this plugin.",
   "tagline": "Turn on the Gateway's prompt-injection and PII screen",
   "keywords": ["security", "firewall", "gateway", "prompt-injection", "pii"],

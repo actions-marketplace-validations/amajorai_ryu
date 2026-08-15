@@ -34,6 +34,7 @@ import {
 	PinOffIcon,
 	Search01Icon,
 	ServerStack01Icon,
+	Settings03Icon,
 	SlidersHorizontalIcon,
 	Tick02Icon,
 	Upload01Icon,
@@ -140,6 +141,7 @@ import {
 } from "react";
 import { UsageBar } from "@/components/agent-elements/input/usage-bar.tsx";
 import { AddChannelDialog } from "@/src/components/channels/AddChannelDialog.tsx";
+import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { NodeFolderBrowser } from "@/src/components/chat/NodeFolderBrowser.tsx";
 import {
@@ -180,6 +182,7 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { useAgentRowStyle } from "@/src/hooks/useAgentRowStyle.ts";
 import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
+import { useAutoSetupImport } from "@/src/hooks/useAutoSetupImport.ts";
 import { useAutoThreadImport } from "@/src/hooks/useAutoThreadImport.ts";
 import { useChannels } from "@/src/hooks/useChannels.ts";
 import { useChatDateGrouping } from "@/src/hooks/useChatDateGrouping.ts";
@@ -198,12 +201,12 @@ import {
 } from "@/src/hooks/usePluginContributions.ts";
 import { useSchedules } from "@/src/hooks/useSchedules.ts";
 import { useSidebarGroupedNav } from "@/src/hooks/useSidebarGroupedNav.ts";
-import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
 import {
 	DEFAULT_SIDEBAR_MODE,
 	type SidebarMode,
 	useSidebarMode,
 } from "@/src/hooks/useSidebarMode.ts";
+import { useSidebarModes } from "@/src/hooks/useSidebarModes.ts";
 import { useSidebarVariant } from "@/src/hooks/useSidebarVariant.ts";
 import { setTabLayout, useTabLayout } from "@/src/hooks/useTabLayout.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
@@ -281,6 +284,7 @@ import {
 	SidebarPreviewTitle,
 	SidebarPreviewTitleHistory,
 } from "./sidebar-item-preview.tsx";
+import { resolveSidebarMode } from "./sidebar-modes.ts";
 // The section vocabulary (built-in keys + labels + glyphs) and the order
 // persistence/reconciliation that goes with it. Kept in its own module so the
 // part that must never lose a user's saved layout is unit-testable without a DOM.
@@ -296,7 +300,6 @@ import {
 	SURFACE_PLUGIN_OWNER,
 	saveSectionOrder,
 } from "./sidebar-sections.ts";
-import { resolveSidebarMode } from "./sidebar-modes.ts";
 import { TabGlyph, useTabBusy } from "./TitleBar.tsx";
 import {
 	type EntityRow,
@@ -304,6 +307,7 @@ import {
 	TabEntityMenuSection,
 	useContributedRowsFor,
 } from "./tab-entity-menu.tsx";
+import { TabRenameInput, useTabRename } from "./tab-rename.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 
 // Re-exported so the sidebar stays the single import surface for its own types
@@ -1375,7 +1379,7 @@ export function ChatRow({
 	const participants = conv.participants ?? [];
 	const latestAgentId =
 		participants.length > 1
-			? participants[participants.length - 1]
+			? participants.at(-1)
 			: (conv.agentId ?? participants[0] ?? null);
 	const latestAgent = latestAgentId
 		? agents.find((a) => a.id === latestAgentId)
@@ -2367,6 +2371,15 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 	const busy = useTabBusy(tab);
 	const rowState = isActive ? "bg-muted" : "hover:bg-muted/60";
 	const textState = isActive ? "text-foreground" : "text-muted-foreground";
+	const {
+		isEditing,
+		canRename,
+		startEditing,
+		commitEditing,
+		cancelEditing,
+		draft,
+		setDraft,
+	} = useTabRename(tab);
 
 	return (
 		<SidebarMenuItem>
@@ -2376,6 +2389,7 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 					<div
 						className={`group/row relative flex h-8 cursor-pointer items-center gap-2 rounded-md pr-2 pl-2 transition-colors ${rowState} ${tab.unloaded ? "opacity-60" : ""} ${isDragging ? "opacity-40" : ""}`}
 						onClick={() => activateTab(tab.id)}
+						onDoubleClick={canRename ? startEditing : undefined}
 						onKeyDown={(e) => {
 							if (e.key === "Enter") {
 								activateTab(tab.id);
@@ -2434,13 +2448,25 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 						</button>
 						{/* Busy and resting share one label: the shimmer rides the same
 						    faded clip line, so a streaming title never falls back to an
-						    ellipsis and the row cannot jump as a run starts or ends. */}
-						<OverflowTooltip
-							className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
-							fade
-							shimmer={busy && !tab.unloaded}
-							text={tab.title}
-						/>
+						    ellipsis and the row cannot jump as a run starts or ends.
+						    A double-click on the row starts an inline rename for a
+						    renamable tab, replacing the label with the input below. */}
+						{isEditing ? (
+							<TabRenameInput
+								className="text-sm"
+								onCancel={cancelEditing}
+								onChange={setDraft}
+								onCommit={commitEditing}
+								value={draft}
+							/>
+						) : (
+							<OverflowTooltip
+								className={`min-w-0 flex-1 overflow-hidden whitespace-nowrap text-sm ${textState} ${tab.unloaded ? "italic" : ""}`}
+								fade
+								shimmer={busy && !tab.unloaded}
+								text={tab.title}
+							/>
+						)}
 					</div>
 				</ContextMenuTrigger>
 				<ContextMenuContent>
@@ -6787,6 +6813,7 @@ function ChatsSection({
 	loose,
 	menu,
 	onImport,
+	onImportSetup,
 	onNew,
 	onToggleCollapsed,
 	pageSize,
@@ -6796,6 +6823,8 @@ function ChatsSection({
 	loose: Conversation[];
 	/** Open the "import a past agent thread" dialog (Claude Code / Codex). */
 	onImport: () => void;
+	/** Open the "import agent setup from a folder" dialog. */
+	onImportSetup: () => void;
 	onNew: () => void;
 }) {
 	const [groupByDate] = useChatDateGrouping();
@@ -6858,6 +6887,13 @@ function ChatsSection({
 							icon={Upload01Icon}
 							onClick={onImport}
 							title="Import a past agent thread"
+						/>
+					</span>
+					<span className="mr-1">
+						<SectionActionButton
+							icon={Settings03Icon}
+							onClick={onImportSetup}
+							title="Import agent setup from a folder"
 						/>
 					</span>
 					<SectionAddButton onClick={onNew} title="New chat" />
@@ -8051,6 +8087,7 @@ export function SidebarPanelContent({
 	// The "import a past agent thread" dialog, shared by the Chats header button
 	// and (when enabled) fed continuously by the background auto-importer below.
 	const [importOpen, setImportOpen] = useState(false);
+	const [setupImportOpen, setSetupImportOpen] = useState(false);
 	const importTarget = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
@@ -8060,6 +8097,15 @@ export function SidebarPanelContent({
 	// conversation list so they appear grouped without a manual step.
 	useAutoThreadImport({
 		agents,
+		target: importTarget,
+		onImported: () => {
+			refresh();
+		},
+	});
+	// Background auto-import of setup *instructions* from the well-known agent
+	// config roots, gated by the General setting (skills/MCP/plugins stay behind
+	// the explicit review in the manual dialog).
+	useAutoSetupImport({
 		target: importTarget,
 		onImported: () => {
 			refresh();
@@ -8829,6 +8875,7 @@ export function SidebarPanelContent({
 						handlers={chatRowHandlers}
 						loose={looseChats}
 						onImport={() => setImportOpen(true)}
+						onImportSetup={() => setSetupImportOpen(true)}
 						onNew={handleNewConversation}
 					/>
 				);
@@ -9116,6 +9163,14 @@ export function SidebarPanelContent({
 				}}
 				onOpenChange={setImportOpen}
 				open={importOpen}
+				target={importTarget}
+			/>
+			<ImportSetupDialog
+				onImported={() => {
+					refresh();
+				}}
+				onOpenChange={setSetupImportOpen}
+				open={setupImportOpen}
 				target={importTarget}
 			/>
 		</>

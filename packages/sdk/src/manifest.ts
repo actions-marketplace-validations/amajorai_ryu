@@ -410,6 +410,13 @@ export const ContributesSchema = z.object({
 	 *  Rust-side `Contributes.dock_panels`; without it the CLI's zod parse would
 	 *  strip the dock panel an app declares here. */
 	dock_panels: z.array(z.record(z.string(), z.unknown())).default([]),
+	/** App-registered live activities (the desktop "Dynamic Island" cards). Loosely
+	 *  typed for the same reason as the surfaces above — the shell owns the
+	 *  `spec` vocabulary. Mirrors the Rust-side `Contributes.live_activities`;
+	 *  without it the CLI's zod parse would strip every live activity an app
+	 *  declares here, so a packed bundle would ship a dock that silently stays
+	 *  empty. */
+	live_activities: z.array(z.record(z.string(), z.unknown())).default([]),
 	/** Deletable data categories the app owns — one "Delete all X" row in Settings
 	 *  → Danger Zone. Mirrors the Rust-side `Contributes.data_categories`; without
 	 *  it the CLI's zod parse would strip the declaration before signing, and the

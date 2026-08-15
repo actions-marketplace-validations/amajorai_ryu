@@ -62,6 +62,20 @@ export {
 	WidgetContributionSchema,
 } from "./manifest.ts";
 export type {
+	JsonSchema,
+	McpStdioCommand,
+	McpTool,
+	PassthroughRegistration,
+	SdkRunnable,
+} from "./mcp/index.ts";
+export {
+	callTool,
+	listTools,
+	MCP_PROTOCOL_VERSION,
+	McpServer,
+	unwrapContent,
+} from "./mcp/index.ts";
+export type {
 	ChatDelta,
 	ChatMessage,
 	ChatResult,
@@ -74,6 +88,21 @@ export {
 	resolveGatewayToken,
 	resolveGatewayUrl,
 } from "./model/gateway.ts";
+export type {
+	CommandContribution,
+	Disposable,
+	PanelContribution,
+	PanelRegion,
+	PluginContext,
+	RouteContribution,
+	RyuHostServices,
+	RyuPlugin,
+	RyuPluginModule,
+	SettingsSectionContribution,
+	StoreSectionContribution,
+	ThemeContribution,
+} from "./plugin/ryu-plugin.ts";
+export { toDisposable } from "./plugin/ryu-plugin.ts";
 export type {
 	AgentCard,
 	AgentManifestOptions,

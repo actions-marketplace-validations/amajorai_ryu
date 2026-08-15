@@ -1,8 +1,10 @@
-﻿import type React from "react";
+﻿import { ToolResult } from "@ryu/ui/components/agents/tool-result";
+import { cn } from "@ryu/ui/lib/utils";
+import { Wrench } from "lucide-react";
+import type React from "react";
 import { memo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
-import { ToolRowBase } from "./tool-row-base.tsx";
 
 export interface GenericToolRowProps {
 	onComplete: () => void;
@@ -19,12 +21,18 @@ export function GenericToolRow({
 	const isPending = state === "animating";
 
 	return (
-		<ToolRowBase
-			completeLabel={step.toolName}
-			detail={step.toolDetail}
-			isAnimating={isPending}
-			shimmerLabel={step.toolName}
-		/>
+		<ToolResult
+			defaultOpen={!isPending}
+			icon={<Wrench className="size-4" />}
+			kind="custom"
+			status={isPending ? "running" : "success"}
+			title={step.toolName}
+			tool={step.toolName}
+		>
+			{step.toolDetail ? (
+				<span className="text-muted-foreground text-xs">{step.toolDetail}</span>
+			) : null}
+		</ToolResult>
 	);
 }
 
@@ -41,20 +49,29 @@ export const GenericTool = memo(function GenericTool({
 	title,
 	subtitle,
 	isPending,
+	isError,
 }: GenericToolProps) {
 	const Icon = icon;
 
 	return (
-		<ToolRowBase
-			completeLabel={title}
-			detail={subtitle}
+		<ToolResult
+			defaultOpen={!isPending}
 			icon={
 				Icon ? (
 					<Icon className="h-full w-full shrink-0 text-muted-foreground" />
-				) : undefined
+				) : (
+					<Wrench className="size-4" />
+				)
 			}
-			isAnimating={isPending}
-			shimmerLabel={title}
-		/>
+			kind="custom"
+			meta={subtitle}
+			status={isError ? "error" : isPending ? "running" : "success"}
+			title={title}
+			tool={title}
+		>
+			{subtitle ? (
+				<span className={cn("text-muted-foreground text-xs")}>{subtitle}</span>
+			) : null}
+		</ToolResult>
 	);
 });

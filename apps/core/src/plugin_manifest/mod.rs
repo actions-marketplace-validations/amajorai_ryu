@@ -256,8 +256,8 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   blocks where the canonical `snippet` is a string. `web.extract` needs none of
 ///   that and binds declaratively, asking for `advanced_settings.full_content` so
 ///   the per-URL record carries one markdown string.
-/// - `ghost.manifest.json` — Ghost desktop-automation MCP tool (system plugin, Windows-first).
-/// - `shadow.manifest.json` — Shadow screen/audio capture + semantic memory (system plugin, Windows-first).
+/// - `ghost.manifest.json` — Ghost desktop-automation MCP tool (system plugin, cross-platform).
+/// - `shadow.manifest.json` — Shadow screen/audio capture + semantic memory (system plugin, cross-platform).
 ///
 /// The two sidecar-backed system tools (`agentbrowser`, `ghost`) declare an
 /// **empty** `runnables` list on purpose: their tools are owned by the stdio MCP
@@ -432,6 +432,12 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/brave/manifest.json"),
     include_str!("../../../../plugins-store/serper/manifest.json"),
     include_str!("../../../../plugins-store/parallel/manifest.json"),
+    // `docs` is the read-only docs MCP plugin: it declares a REMOTE HTTP server
+    // (`docs` → https://docs.ryuhq.com/mcp) serving search + page content from
+    // the docs site itself — the same content /llms.txt exposes, as MCP tools.
+    // Nothing to spawn, nothing to install: Core-tier so the server registers
+    // (see the `CORE_PLUGINS` row), default-on so every agent can look up docs.
+    include_str!("../../../../plugins-store/docs/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
@@ -545,6 +551,17 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // hook still pre-gates on `match.flag`, and the flag is the completeness
     // signal too — an approved `ExitPlanMode` writes it back off.
     include_str!("../../../../plugins-store/plan-continue/manifest.json"),
+    // `auto-continue` is `plan-continue`'s general sibling: instead of keying on
+    // the plan-mode pill, its hook arms per-conversation via `/auto-continue` and
+    // asks a LOCAL scanner sub-agent (`hook:run-agent`, `code_read` preset) to read
+    // the reply AND the real workspace, then continues only when the scanner
+    // explicitly reports work another turn could finish now. Community and NOT in
+    // `CORE_DEFAULT_ON` for `plan-continue`'s reason and then some: a scanner agent
+    // run per turn spends the user's tokens unattended, so it has to be a thing
+    // they asked for. Its `match.stateful` gate is the arming switch — presence of
+    // the KV record — so an unarmed conversation costs one KV read, not a sandbox
+    // spawn, and the loop is off by default.
+    include_str!("../../../../plugins-store/auto-continue/manifest.json"),
     // The two Pi capabilities Core used to hardcode into every managed-Pi spawn,
     // now plugins the user can turn off: `pi-shell` (background bash) and
     // `pi-subagent` (the `Task` tool). Each ships ONE `contributes.pi_extensions`
@@ -562,6 +579,17 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // sub-agents from the flagship agent on every fresh install.
     include_str!("../../../../plugins-store/pi-shell/manifest.json"),
     include_str!("../../../../plugins-store/pi-subagent/manifest.json"),
+    // `pi-monitor` is the third Pi capability: a from-scratch `monitor` tool
+    // (the same idea as Claude Code's `Monitor`) for the managed Pi agent —
+    // watch a command or WebSocket, stream every line, and end on an `until`
+    // match, exit, or timeout. Same carriage as its two siblings: ONE
+    // `contributes.pi_extensions` row pointing at the TypeScript in its own
+    // package, materialized by `pi_config::app_extensions` into
+    // `~/.ryu/pi-agent/extensions/` for the next Pi process. Core-tier (a
+    // Community-tier plugin needs the operator-only `pi:extension` grant) and
+    // in `CORE_DEFAULT_ON` like the other two, because a default-off capability
+    // that mirrors a first-class Claude Code tool would read as a regression.
+    include_str!("../../../../plugins-store/pi-monitor/manifest.json"),
     // `rtk` surfaces the built-in RTK (Rust Token Killer) command-wrapping tool
     // (`rtk__run`) as an installable plugin. Like `spider`, it is a fully
     // declarative `command`-backend tool: the fixture CARRIES its runnable (the
@@ -578,6 +606,18 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // surfacing findings as an out-of-band note. Toggle + `/security` command +
     // reviewer-model picker mirror `double-check`. Community-tier, opt-in.
     include_str!("../../../../plugins-store/security-guidance/manifest.json"),
+    // `bitwarden` surfaces the Bitwarden Secrets Manager CLI (`bws`) as four
+    // declarative `command`-backend tools (`bitwarden__status` / `__projects` /
+    // `__list` / `__get`). Faithful to Hermes's Bitwarden Secrets Manager feature:
+    // one machine-account bootstrap token (`BWS_ACCESS_TOKEN`, read from Core's
+    // process env via `command_env`) replaces N provider keys, and the agent pulls
+    // credentials on demand instead of them living in plaintext config. Like
+    // `spider`/`rtk` it is a fully declarative plugin — the fixture CARRIES its
+    // runnables (there is no Rust provider), and the `bws` binary is BYO, reached
+    // through the command-tool allowlist (seeded at `~/.ryu/bin/bws`). The optional
+    // `BWS_SERVER_URL` env mirrors Hermes's `secrets.bitwarden.server_url` region
+    // knob. Community-tier, opt-in.
+    include_str!("../../../../plugins-store/bitwarden/manifest.json"),
     // `auto-expand` is the first `pre_user_turn` hook: before a message is sent it
     // calls a configurable model (`hook:side-model`) to rewrite the prompt into a
     // clearer form and returns a `replace` directive, so the improved prompt is
@@ -623,6 +663,16 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // ext-proxy. Availability is a RUNTIME probe (`/capabilities`): iOS shows only on a
     // Mac with Xcode; Android wherever the SDK is present.
     include_str!("../../../../apps-store/simulator/manifest.json"),
+    // Virtual Desktop: an interactive headless desktop for any node. The `ryu-desktop`
+    // sidecar brings up Xvfb + a window manager + a loopback VNC server, and Core's
+    // generic WebSocket ext-proxy (`/api/ext/ws/<plugin>/<route>`) carries the desktop
+    // panel's noVNC stream to it — so managed-cloud, self-hosted and local nodes all
+    // get a live, driveable desktop with no new firewall port. Ghost drives the SAME
+    // `DISPLAY` (Core passes it through the MCP env allowlist), so agents and the human
+    // watch/control one screen. OPT-IN like the browser/simulator — NOT in
+    // `CORE_DEFAULT_ON`, because the virtual-desktop toolchain (xvfb/tigervnc) is not
+    // on a normal install; the panel prompts to enable + install it.
+    include_str!("../../../../apps-store/desktop/manifest.json"),
     // UGC: a creator-marketing campaign tracker (campaign briefs + budgets, a creator
     // roster, post submissions with approve/reject review, per-post metric snapshots
     // refreshed through a curated Composio action map, and CPM/flat payouts accrued,
@@ -1050,6 +1100,33 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `CORE_DEFAULT_ON`, so a normal install never spawns the sidecar unless a user
     // enables the app.
     include_str!("../../../../apps-store/subtitles/manifest.json"),
+    // ── Language-server plugins: one per language, mirroring Claude Code ──────
+    //
+    // These twelve are the `contributes.lsp_servers` binding of Anthropic's
+    // official code-intelligence plugins (`anthropics/claude-plugins-official`),
+    // so the same config body loads in either host. Each is CONFIG ONLY — it
+    // declares how to reach a language server and never bundles the binary; a
+    // `command` that is not on PATH is a graceful skip with a visible reason.
+    // `crate::lsp` arbitrates the enabled ones into the managed Pi's
+    // `ryu-lsp.json`, which is what activates the `ryu-lsp.ts` binding's tools.
+    //
+    // Community-tier and OPT-IN — deliberately absent from `CORE_PLUGINS` and
+    // `CORE_DEFAULT_ON`. An enabled LSP plugin puts its server into the managed
+    // Pi's config (spawned lazily on the first touched file), so seeding all
+    // twelve on a fresh install would write a twelve-server table nobody asked
+    // for. The user enables the one language they actually use.
+    include_str!("../../../../plugins-store/clangd-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/csharp-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/gopls-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/jdtls-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/kotlin-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/lua-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/php-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/pyright-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/ruby-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/rust-analyzer-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/swift-lsp/manifest.json"),
+    include_str!("../../../../plugins-store/typescript-lsp/manifest.json"),
 ];
 
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared

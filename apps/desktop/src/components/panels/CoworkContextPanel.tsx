@@ -22,6 +22,7 @@ import {
 	BrowserIcon,
 	CheckmarkCircle02Icon,
 	ComputerTerminal01Icon,
+	DatabaseIcon,
 	Delete01Icon,
 	File01Icon,
 	Flowchart01Icon,
@@ -709,6 +710,9 @@ const ARTIFACT_KIND_ICON: Record<ArtifactKind, IconSvgElement> = {
 	svg: Image02Icon,
 	mermaid: Flowchart01Icon,
 	code: SourceCodeIcon,
+	file: File01Icon,
+	space: FolderOpenIcon,
+	database: DatabaseIcon,
 };
 
 const ARTIFACT_KIND_LABEL: Record<ArtifactKind, string> = {
@@ -716,6 +720,9 @@ const ARTIFACT_KIND_LABEL: Record<ArtifactKind, string> = {
 	svg: "SVG",
 	mermaid: "Diagram",
 	code: "Code",
+	file: "File",
+	space: "Space",
+	database: "Database",
 };
 
 function RenderedArtifactsList({

@@ -1,7 +1,7 @@
 {
   "id": "@ryu/security-guidance",
   "name": "Security Guidance",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Scans each answer for security vulnerabilities and has a second model review the code before you ship it. Off until you flip the Security review toggle in the composer, or run `/security` for a one-off review of the last answer; the reviewer model is configurable.",
   "tagline": "Catch vulnerabilities before you ship them",
   "keywords": ["security", "review", "code", "vulnerabilities"],

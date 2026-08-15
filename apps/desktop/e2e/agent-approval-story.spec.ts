@@ -53,7 +53,10 @@ test("the bash row's approval strip renders one button per option", async ({
 	await page.goto(STORY_URL, { waitUntil: "domcontentloaded" });
 	const card = page.getByTestId("bash-card");
 	await expect(card).toBeVisible();
-	await expect(card.getByRole("button")).toHaveCount(4);
+	// The row is a beUI ToolResult disclosure whose header is itself a button,
+	// so the count is 1 (disclosure) + 4 (approval options) — the old fixed
+	// Approve/Skip pair would produce 3, so the option count still gates it.
+	await expect(card.getByRole("button")).toHaveCount(5);
 
 	// The command is highlighted in the row itself, not just in the card above.
 	const token = card.locator("pre code span[style*='--agent-code-light']");

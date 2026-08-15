@@ -90,10 +90,12 @@ function MonitorViz() {
 				</span>
 			</div>
 			<div className="flex items-baseline gap-2">
-				<span className="font-medium text-2xl text-foreground tabular-nums">
+				<span className="font-heading font-medium text-2xl text-foreground tabular-nums">
 					${price}
 				</span>
-				<span className="text-foreground/30 text-xs line-through">$129</span>
+				<span className="font-heading text-foreground/30 text-xs line-through tabular-nums">
+					$129
+				</span>
 			</div>
 			<div
 				className="flex items-center gap-2 transition-opacity duration-300"

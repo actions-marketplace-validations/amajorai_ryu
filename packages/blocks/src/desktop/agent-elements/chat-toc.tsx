@@ -5,10 +5,6 @@ import {
 	HoverCardContent,
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
-import {
-	useMessageScroller,
-	useMessageScrollerVisibility,
-} from "@ryu/ui/components/message-scroller";
 import { cn } from "@ryu/ui/lib/utils";
 import { motion, useReducedMotion } from "motion/react";
 import { memo, type ReactNode, useEffect, useState } from "react";
@@ -60,16 +56,22 @@ const MAX_PREVIEW_FILES = 4;
  * message down the left gutter of the message list. Collapsed to bare lines by
  * default; hovering a marker opens a preview popover (user prompt, agent reply,
  * files changed). Clicking scrolls that turn into view.
+ *
+ * Scroll state is a PROP, not a hook: the message list owns the scroller and
+ * hands `currentAnchorId` + `onScrollToMessage` down, so this stays
+ * presentational and renderable in isolation.
  */
 export const ChatToc = memo(function ChatToc({
 	items,
+	currentAnchorId,
+	onScrollToMessage,
 	className,
 }: {
 	items: ChatTocItem[];
+	currentAnchorId?: string | null;
+	onScrollToMessage?: (messageId: string) => void;
 	className?: string;
 }) {
-	const { scrollToMessage } = useMessageScroller();
-	const { currentAnchorId } = useMessageScrollerVisibility();
 	const [hoveredIndex, setHoveredIndex] = useState(NO_HOVER);
 	const reduceMotion = useReducedMotion();
 
@@ -79,12 +81,12 @@ export const ChatToc = memo(function ChatToc({
 			const messageId = (event as CustomEvent<{ messageId?: string }>).detail
 				?.messageId;
 			if (messageId) {
-				scrollToMessage(messageId, { align: "start" });
+				onScrollToMessage?.(messageId);
 			}
 		};
 		window.addEventListener("ryu:scroll-to-message", onJump);
 		return () => window.removeEventListener("ryu:scroll-to-message", onJump);
-	}, [scrollToMessage]);
+	}, [onScrollToMessage]);
 
 	// Nothing worth navigating with a single turn.
 	if (items.length < 2) {
@@ -114,7 +116,7 @@ export const ChatToc = memo(function ChatToc({
 							closeDelay={0}
 							delay={0}
 							onBlur={() => setHoveredIndex(NO_HOVER)}
-							onClick={() => scrollToMessage(item.id, { align: "start" })}
+							onClick={() => onScrollToMessage?.(item.id)}
 							onFocus={() => setHoveredIndex(index)}
 							onMouseEnter={() => setHoveredIndex(index)}
 						>

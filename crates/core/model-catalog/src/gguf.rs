@@ -50,6 +50,9 @@ const DIFFUSION_ARCHITECTURES: &[&str] = &[
     "sd3",   // Stable Diffusion 3.x / 3.5
     "mmdit", // Multimodal Diffusion Transformer (SD3 alternate)
     "auraflow",
+    "wan", // Wan 2.1 / 2.2 video (calcuis/QuantStack GGUF conversions)
+    "ltx", // LTX-Video (open_model_labs GGUF conversions)
+    "ltx-video",
 ];
 
 /// True when `arch` (a `general.architecture` value) identifies a diffusion
@@ -289,7 +292,17 @@ mod tests {
     #[test]
     fn is_diffusion_matches_known_architectures() {
         for arch in [
-            "flux", "sdxl", "sd3", "sd", "sd1", "sd2", "mmdit", "auraflow",
+            "flux",
+            "sdxl",
+            "sd3",
+            "sd",
+            "sd1",
+            "sd2",
+            "mmdit",
+            "auraflow",
+            "wan",
+            "ltx",
+            "ltx-video",
         ] {
             let bytes = synth_gguf(&[("general.architecture", arch)]);
             let meta = parse(&bytes);

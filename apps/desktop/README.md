@@ -5,7 +5,7 @@
 [![License](https://shieldcn.dev/badge/License-Proprietary-71717A.svg)](./LICENSE)
 [![Stack](https://shieldcn.dev/badge/Tauri-React-24C8DB.svg?logo=tauri&logoColor=white)](../../README.md)
 
-A Tauri v2 + React desktop app that is Ryu's flagship product. It chats with agents through Core's ACP plane, runs council/team chat (@mention multi-agent), one-page agent creation, onboarding, and multi-node routing. Roughly 17+ route pages cover Gateway, engines, spaces, memory, tools, workflows, automations, monitors, models, and skills.
+A Tauri v2 + React desktop app that chats with agents through Core's ACP plane, runs council/team chat (@mention multi-agent), and handles one-page agent creation, onboarding, and multi-node routing. 17+ route pages cover Gateway, engines, spaces, memory, tools, workflows, automations, monitors, models, and skills.
 
 **Tier:** Closed, proprietary (A Major Pte. Ltd.)
 

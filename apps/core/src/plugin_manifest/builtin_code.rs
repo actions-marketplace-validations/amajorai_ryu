@@ -215,6 +215,12 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "hooks/loop.js",
         include_str!("../../../../plugins-store/plan-continue/hooks/loop.js"),
     ),
+    // auto-continue
+    (
+        "@ryu/auto-continue",
+        "hooks/loop.js",
+        include_str!("../../../../plugins-store/auto-continue/hooks/loop.js"),
+    ),
     // proof
     (
         "@ryu/proof",
@@ -306,6 +312,12 @@ pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[
         "@ryu/pi-subagent",
         "pi-extensions/ryu-subagent.ts",
         include_str!("../../../../plugins-store/pi-subagent/pi-extensions/ryu-subagent.ts"),
+    ),
+    // pi-monitor
+    (
+        "@ryu/pi-monitor",
+        "pi-extensions/ryu-monitor.ts",
+        include_str!("../../../../plugins-store/pi-monitor/pi-extensions/ryu-monitor.ts"),
     ),
 ];
 

@@ -2,8 +2,11 @@
 //!
 //! Anyone can publish a Ryu app or plugin by pushing a public GitHub repo and
 //! tagging it with the `ryu-app` / `ryu-plugin` topic. This source turns those
-//! two topics into a browsable catalog. It is deliberately the *least trusted*
-//! Plugin source in the registry, and its shape encodes that:
+//! two topics into a browsable catalog. A THIRD topic, `ryu-marketplace`,
+//! discovers community MARKETPLACES — repos hosting a `marketplace.json` whose
+//! `plugins` are individual listings; each is rendered grouped under the
+//! marketplace's own heading. It is deliberately the *least trusted* Plugin
+//! source in the registry, and its shape encodes that:
 //!
 //! - **No `raw.manifest` in the install descriptor.** `resolve_plugin_from_catalog`
 //!   parses `descriptor.raw["manifest"]` into a `PluginManifest` and skips a source
@@ -43,6 +46,20 @@ const GITHUB_TOPIC_APP: &str = "ryu-app";
 const GITHUB_TOPIC_PLUGIN: &str = "ryu-plugin";
 const GITHUB_TOPIC_APP_ENV: &str = "RYU_GITHUB_TOPIC_APP";
 const GITHUB_TOPIC_PLUGIN_ENV: &str = "RYU_GITHUB_TOPIC_PLUGIN";
+
+/// The third discovery topic: a community MARKETPLACE. A repo tagged
+/// `ryu-marketplace` is a collection, not a single plugin — it hosts a
+/// `marketplace.json` whose `plugins` are the individual listings. The store
+/// renders its entries grouped under the marketplace's own heading (see
+/// [`GithubMarketplace`]).
+const GITHUB_TOPIC_MARKETPLACE: &str = "ryu-marketplace";
+const GITHUB_TOPIC_MARKETPLACE_ENV: &str = "RYU_GITHUB_TOPIC_MARKETPLACE";
+
+/// The `ghmp:` id namespace for a marketplace ENTRY:
+/// `ghmp:<mkt-owner>/<mkt-repo>:<entry-name>`. Distinct from `gh:` so a
+/// marketplace entry can never collide with (or masquerade as) a single-plugin
+/// listing, and foreign-id rejection stays O(1) before any network call.
+const GHMP_ID_PREFIX: &str = "ghmp:";
 
 const GITHUB_TOPIC_TTL_ENV: &str = "RYU_GITHUB_TOPIC_CACHE_TTL_SECS";
 /// 6h. One refresh costs 2 Search API calls; the unauthenticated Search budget is
@@ -86,6 +103,16 @@ const REPO_MANIFEST_PATHS: [&str; 5] = [
     "ryu.json",
     ".ryu-plugin/manifest.json",
     ".ryu-plugin/plugin.json",
+];
+
+/// Marketplace manifest paths tried (in order) when hydrating a `ryu-marketplace`
+/// repo. First hit wins; all missing is NOT an error — a repo may tag the topic
+/// before it adds a manifest, and it then degrades to a single repo listing.
+const REPO_MARKETPLACE_PATHS: [&str; 4] = [
+    ".ryu-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    ".cursor-plugin/marketplace.json",
 ];
 
 /// Display fields lifted from a third-party manifest. Everything outside this
@@ -170,6 +197,20 @@ pub(crate) struct GithubTopicRecord {
     /// Which topic query produced this row — the ground truth for app-vs-plugin.
     /// The repo's own `topics` array is publisher-controlled and is NOT trusted here.
     is_app: bool,
+    /// True when this row was discovered under the `ryu-marketplace` topic — i.e.
+    /// it is a COLLECTION, not a single plugin. Its entries render grouped under
+    /// the marketplace's heading (see [`GithubMarketplace`]) instead of the repo
+    /// appearing as one bare listing.
+    #[serde(default)]
+    is_marketplace: bool,
+    /// The parsed `marketplace.json` (name + entries) when the repo hosts one.
+    /// `None` = probed and absent, or not probed yet — the two are distinguished
+    /// by [`marketplace_probed_at`](GithubTopicRecord::marketplace_probed_at).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marketplace: Option<GithubMarketplace>,
+    /// Unix seconds of the last marketplace.json probe; `0` = never probed.
+    #[serde(default)]
+    marketplace_probed_at: u64,
     /// What the repo's own `manifest.json` declares about how it should be
     /// presented. `None` = probed and absent, or not probed yet — the two are
     /// distinguished by [`manifest_probed_at`](GithubTopicRecord::manifest_probed_at).
@@ -315,6 +356,179 @@ impl RepoManifestDisplay {
         };
         (out != Self::default()).then_some(out)
     }
+}
+
+/// A community marketplace: a `ryu-marketplace` repo's parsed `marketplace.json`.
+///
+/// Identity rules mirror [`RepoManifestDisplay`]'s: the marketplace supplies the
+/// heading NAME, GitHub supplies `owner` / `repo` (the identity of who published
+/// it). Everything is display-only and scrubbed — an unsigned source must never
+/// move code or permission claims.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GithubMarketplace {
+    /// The marketplace's display name for its sub-heading: marketplace.json
+    /// `displayName` → `name`, falling back to the repo slug. Scrub-bounded.
+    name: String,
+    /// The parsed plugin entries. `from_manifest` returns `None` when nothing
+    /// survives, so `Some` here always has at least one entry.
+    entries: Vec<GithubMarketplaceEntry>,
+}
+
+/// One plugin listing declared by a community marketplace's `marketplace.json`.
+///
+/// Every field is scrubbed exactly like [`RepoManifestDisplay`] because it comes
+/// from the same class of untrusted input. The load-bearing field is
+/// `source_repo` — where the plugin actually lives — because it drives the
+/// link-out CTA / install-from-URL for an unreviewed listing.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct GithubMarketplaceEntry {
+    /// The entry's `name` (kebab-case identity within the marketplace). The
+    /// stable part of the synthetic `ghmp:` id; never the card's title on its
+    /// own (`display_name` wins for that).
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tagline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_dither: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon_background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    banner: Option<Value>,
+    /// True when the entry ships a Companion UI surface — classified as an "app".
+    #[serde(default)]
+    has_companion: bool,
+    /// The plugin's OWN repository as an https URL (`source_repo`), or `None`
+    /// when `source` was absent or did not resolve to a GitHub repo / http(s) URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homepage: Option<String>,
+}
+
+impl GithubMarketplace {
+    /// Parse a loosely-typed `marketplace.json` into the display allowlist.
+    /// `None` when the manifest declares no entries worth showing (which also
+    /// covers a repo that tags the topic but has not added a manifest yet — it
+    /// degrades to a single repo listing).
+    fn from_manifest(manifest: &Value, repo_full_name: &str) -> Option<Self> {
+        let obj = manifest.as_object()?;
+        let text = |key: &str, max: usize| {
+            obj.get(key)
+                .and_then(|v| v.as_str())
+                .and_then(|s| scrub_text(s, max))
+        };
+        // `displayName` is the pretty form; `name` is the kebab-case identity.
+        // The repo slug is the fallback so an unnamed marketplace still reads as
+        // who owns it.
+        let name = text("displayName", MAX_NAME_CHARS)
+            .or_else(|| text("name", MAX_NAME_CHARS))
+            .unwrap_or_else(|| repo_full_name.to_string());
+        let mut entries = Vec::new();
+        if let Some(plugins) = obj.get("plugins").and_then(|v| v.as_array()) {
+            for plugin in plugins {
+                if let Some(entry) = GithubMarketplaceEntry::from_manifest(plugin) {
+                    entries.push(entry);
+                }
+            }
+        }
+        (!entries.is_empty()).then_some(Self { name, entries })
+    }
+}
+
+impl GithubMarketplaceEntry {
+    /// Lift the display allowlist off one `plugins[]` entry. `None` when the
+    /// entry declares no `name` — the one field the synthetic id cannot do
+    /// without.
+    fn from_manifest(plugin: &Value) -> Option<Self> {
+        let obj = plugin.as_object()?;
+        let text = |key: &str, max: usize| {
+            obj.get(key)
+                .and_then(|v| v.as_str())
+                .and_then(|s| scrub_text(s, max))
+        };
+        let name = text("name", MAX_NAME_CHARS)?;
+        let display_name = text("displayName", MAX_NAME_CHARS)
+            .or_else(|| text("display_name", MAX_NAME_CHARS));
+        let out = Self {
+            name,
+            display_name,
+            description: text("description", MAX_DESCRIPTION_CHARS),
+            category: text("category", MAX_CATEGORY_CHARS),
+            version: obj
+                .get("version")
+                .and_then(|v| v.as_str())
+                .and_then(scrub_version),
+            tagline: text("tagline", MAX_TAGLINE_CHARS),
+            icon: obj
+                .get("icon")
+                .and_then(|v| v.as_str())
+                .and_then(scrub_icon_id),
+            icon_url: obj
+                .get("iconUrl")
+                .or_else(|| obj.get("icon_url"))
+                .and_then(|v| v.as_str())
+                .and_then(sanitize_url),
+            // Both spellings on the way in, like `RepoManifestDisplay` — a
+            // manifest is authored in camelCase and read back in snake_case.
+            icon_dither: obj
+                .get("iconDither")
+                .or_else(|| obj.get("icon_dither"))
+                .and_then(scrub_icon_dither),
+            icon_background: obj
+                .get("iconBackground")
+                .or_else(|| obj.get("icon_background"))
+                .and_then(|v| v.as_str())
+                .and_then(scrub_css_color),
+            banner: obj.get("banner").and_then(scrub_banner),
+            has_companion: obj
+                .get("hasCompanion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            source_repo: resolve_entry_source(obj.get("source")),
+            homepage: obj
+                .get("homepage")
+                .and_then(|v| v.as_str())
+                .and_then(sanitize_url),
+        };
+        (out != Self::default()).then_some(out)
+    }
+}
+
+/// The repo a marketplace entry actually lives in, reduced to an https URL for
+/// the link-out CTA. `source` may be a bare `owner/repo` slug, a git URL, or the
+/// Claude "source object" form (`{ "repo": "owner/repo" }` / `{ "url": … }`).
+/// Anything that is not a GitHub repo or an http(s) URL is dropped.
+fn resolve_entry_source(value: Option<&Value>) -> Option<String> {
+    let raw = match value? {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(map) => map
+            .get("repo")
+            .or_else(|| map.get("url"))
+            .and_then(|v| v.as_str()),
+        _ => None,
+    }?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // A bare `owner/repo` slug (or a github URL / SSH form) → canonical URL.
+    if let Some((owner, repo)) = super::split_github_repo(trimmed) {
+        return Some(format!("https://github.com/{owner}/{repo}"));
+    }
+    // Otherwise only an explicit http(s) URL travels.
+    sanitize_url(trimmed)
 }
 
 /// Strip control characters (a newline in a card title reflows the whole row) and
@@ -774,6 +988,15 @@ impl GithubTopicSource {
             .unwrap_or_else(|| default.to_string())
     }
 
+    /// The `ryu-marketplace` topic string, env-overridable like the other two.
+    fn marketplace_topic() -> String {
+        std::env::var(GITHUB_TOPIC_MARKETPLACE_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| GITHUB_TOPIC_MARKETPLACE.to_string())
+    }
+
     fn cache_ttl() -> std::time::Duration {
         let secs = std::env::var(GITHUB_TOPIC_TTL_ENV)
             .ok()
@@ -821,6 +1044,23 @@ impl GithubTopicSource {
             .collect())
     }
 
+    /// Fetch the `ryu-marketplace` topic — the community MARKETPLACE population.
+    /// One extra Search call in the same rate-limit budget as the two below.
+    async fn fetch_topic_marketplace(&self) -> Result<Vec<GithubTopicRecord>> {
+        let topic = Self::marketplace_topic();
+        let url = self.search_url(&topic);
+        let bytes = crate::server::guarded_get_bytes_with_headers(&url, &self.request_headers())
+            .await
+            .map_err(|e| anyhow::anyhow!("fetching GitHub topic `{topic}`: {e}"))?;
+        let envelope: GithubSearchEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("parsing GitHub topic `{topic}` results: {e}"))?;
+        Ok(envelope
+            .items
+            .iter()
+            .filter_map(repo_item_to_marketplace_record)
+            .collect())
+    }
+
     async fn fetch_records(&self, previous: Option<&GithubTopicCache>) -> Result<GithubTopicCache> {
         // Apps first, then plugins, so a repo carrying BOTH topics survives the
         // first-writer-wins dedupe below as ONE row. Which tab that row belongs in
@@ -829,10 +1069,18 @@ impl GithubTopicSource {
         // the evidence is the repo's own manifest.
         let apps = self.fetch_topic(true).await?;
         let plugins = self.fetch_topic(false).await?;
+        let marketplaces = self.fetch_topic_marketplace().await?;
         let dual_topic = dual_topic_names(&apps, &plugins);
-        let mut records = dedupe_records(vec![apps, plugins]);
+        // A repo tagged `ryu-marketplace` (often ALSO `ryu-app`/`ryu-plugin` for
+        // discoverability) is a COLLECTION, not a single listing: the marketplace
+        // classification wins, so its entries render grouped under the marketplace
+        // heading instead of the repo appearing twice — once expanded and once as a
+        // bare single-plugin row.
+        let mut records =
+            merge_marketplace_records(dedupe_records(vec![apps, plugins]), marketplaces);
         carry_manifests(&mut records, previous.map(|c| c.records.as_slice()));
         self.hydrate_manifests(&mut records).await;
+        self.hydrate_marketplaces(&mut records).await;
         resolve_dual_topic_classification(&mut records, &dual_topic);
         Ok(GithubTopicCache {
             fetched_at: std::time::Instant::now(),
@@ -897,6 +1145,48 @@ impl GithubTopicSource {
             tracing::debug!(
                 pending = pending.len(),
                 "github-topic: manifest hydration hit its deadline; unhydrated listings retry on the next refresh"
+            );
+        }
+    }
+
+    /// Fill in each marketplace record's [`GithubMarketplace`] from the repo's own
+    /// `marketplace.json`, so its entries can render grouped under the
+    /// marketplace's name. Same cost story as [`Self::hydrate_manifests`]: raw CDN
+    /// fetches, a positive/negative cross-refresh memory, and a deadline bound —
+    /// what it does not reach degrades to a single repo listing on the next card.
+    async fn hydrate_marketplaces(&self, records: &mut [GithubTopicRecord]) {
+        let now = unix_now();
+        let pending: Vec<usize> = records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_marketplace && r.marketplace_probe_is_due(now))
+            .map(|(i, _)| i)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let probe = async {
+            for chunk in pending.chunks(MANIFEST_HYDRATE_CONCURRENCY) {
+                let batch: Vec<(usize, GithubTopicRecord)> =
+                    chunk.iter().map(|&i| (i, records[i].clone())).collect();
+                let probed = futures_util::future::join_all(batch.into_iter().map(
+                    |(i, record)| async move { (i, self.fetch_repo_marketplace(&record).await) },
+                ))
+                .await;
+                for (i, hit) in probed {
+                    records[i].marketplace = hit;
+                    // Stamped on a MISS too — that is the negative cache.
+                    records[i].marketplace_probed_at = now;
+                }
+            }
+        };
+        if tokio::time::timeout(MANIFEST_HYDRATE_DEADLINE, probe)
+            .await
+            .is_err()
+        {
+            tracing::debug!(
+                pending = pending.len(),
+                "github-topic: marketplace hydration hit its deadline; unhydrated marketplaces retry on the next refresh"
             );
         }
     }
@@ -1010,7 +1300,12 @@ impl GithubTopicSource {
     /// Best-effort manifest enrichment over `raw.githubusercontent.com` (a CDN — not
     /// on the Search API's rate-limit budget). Returns `(manifest_value, raw_url)`.
     async fn fetch_repo_manifest(&self, record: &GithubTopicRecord) -> Option<(Value, String)> {
-        for path in REPO_MANIFEST_PATHS {
+        fetch_repo_manifest_for(&record.owner, &record.repo).await
+    }
+
+    /// Best-effort `marketplace.json` enrichment for a `ryu-marketplace` repo.
+    async fn fetch_repo_marketplace(&self, record: &GithubTopicRecord) -> Option<GithubMarketplace> {
+        for path in REPO_MARKETPLACE_PATHS {
             let url = format!(
                 "https://raw.githubusercontent.com/{}/{}/HEAD/{}",
                 record.owner, record.repo, path
@@ -1018,16 +1313,38 @@ impl GithubTopicSource {
             let Ok(bytes) = crate::server::guarded_get_bytes(&url).await else {
                 continue;
             };
-            // Parsed as a loose `Value`, never as `PluginManifest`: a strict parse
-            // would reject a slightly-off third-party manifest and lose the card.
             if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                if value.is_object() {
-                    return Some((value, url));
+                if let Some(marketplace) =
+                    GithubMarketplace::from_manifest(&value, &record.full_name)
+                {
+                    return Some(marketplace);
                 }
             }
         }
         None
     }
+}
+
+/// Probe one repo's manifest paths over the raw CDN. First hit wins; all missing
+/// is not an error. Shared by the single-repo path and the marketplace-entry
+/// detail path (which probes the entry's OWN plugin repo).
+async fn fetch_repo_manifest_for(owner: &str, repo: &str) -> Option<(Value, String)> {
+    for path in REPO_MANIFEST_PATHS {
+        let url = format!(
+            "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
+        );
+        let Ok(bytes) = crate::server::guarded_get_bytes(&url).await else {
+            continue;
+        };
+        // Parsed as a loose `Value`, never as `PluginManifest`: a strict parse
+        // would reject a slightly-off third-party manifest and lose the card.
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            if value.is_object() {
+                return Some((value, url));
+            }
+        }
+    }
+    None
 }
 
 const OFFLINE_NOTE: &str = "Showing cached community listings — GitHub is unreachable.";
@@ -1084,7 +1401,21 @@ fn repo_item_to_record(item: &GithubRepoItem, is_app: bool) -> Option<GithubTopi
         // repo's manifest. See `hydrate_manifests`.
         manifest: None,
         manifest_probed_at: 0,
+        is_marketplace: false,
+        // Hydrated separately too: see `hydrate_marketplaces`.
+        marketplace: None,
+        marketplace_probed_at: 0,
     })
+}
+
+/// A record discovered under the `ryu-marketplace` topic — the same normalization
+/// as [`repo_item_to_record`], flagged as a collection. App-vs-plugin is decided
+/// per ENTRY (from its `hasCompanion`), not from the query: the marketplace topic
+/// says nothing about it, and a repo can collect both kinds.
+fn repo_item_to_marketplace_record(item: &GithubRepoItem) -> Option<GithubTopicRecord> {
+    let mut record = repo_item_to_record(item, false)?;
+    record.is_marketplace = true;
+    Some(record)
 }
 
 /// Repo descriptions are attacker-controlled free text; bound them before they
@@ -1124,6 +1455,13 @@ impl GithubTopicRecord {
         self.manifest_probed_at == 0
             || now.saturating_sub(self.manifest_probed_at) >= MANIFEST_PROBE_TTL_SECS
     }
+
+    /// Same TTL as the manifest probe: a repo that ADDS a `marketplace.json`
+    /// later (or fills an existing one) is picked up on the next re-probe.
+    fn marketplace_probe_is_due(&self, now: u64) -> bool {
+        self.marketplace_probed_at == 0
+            || now.saturating_sub(self.marketplace_probed_at) >= MANIFEST_PROBE_TTL_SECS
+    }
 }
 
 /// Carry already-probed manifests from the previous record set onto a freshly
@@ -1148,6 +1486,8 @@ pub(crate) fn carry_manifests(
         if let Some(prior) = known.get(&record.full_name.to_ascii_lowercase()) {
             record.manifest = prior.manifest.clone();
             record.manifest_probed_at = prior.manifest_probed_at;
+            record.marketplace = prior.marketplace.clone();
+            record.marketplace_probed_at = prior.marketplace_probed_at;
         }
     }
 }
@@ -1194,6 +1534,11 @@ pub(crate) fn resolve_dual_topic_classification(
         return;
     }
     for record in records.iter_mut() {
+        // Marketplace records classify per ENTRY (from `hasCompanion`), never from
+        // the marketplace repo's own manifest — a collection can hold both kinds.
+        if record.is_marketplace {
+            continue;
+        }
         if !dual_topic.contains(&record.full_name.to_ascii_lowercase()) {
             continue;
         }
@@ -1220,6 +1565,32 @@ pub(crate) fn dedupe_records(groups: Vec<Vec<GithubTopicRecord>>) -> Vec<GithubT
     out
 }
 
+/// Fold `ryu-marketplace` records into the app/plugin record set, matched by
+/// lowercased `full_name`.
+///
+/// A repo tagged `ryu-marketplace` — often ALSO `ryu-app`/`ryu-plugin` for
+/// discoverability — is a COLLECTION, so the marketplace record REPLACES a
+/// single-listing record of the same repo (it expands to its entries under the
+/// marketplace heading instead of rendering once as a bare plugin). Pure, so the
+/// precedence is unit-testable without a live fetch.
+pub(crate) fn merge_marketplace_records(
+    mut records: Vec<GithubTopicRecord>,
+    marketplaces: Vec<GithubTopicRecord>,
+) -> Vec<GithubTopicRecord> {
+    for marketplace in marketplaces {
+        let key = marketplace.full_name.to_ascii_lowercase();
+        if let Some(pos) = records
+            .iter()
+            .position(|r| r.full_name.to_ascii_lowercase() == key)
+        {
+            records[pos] = marketplace;
+        } else {
+            records.push(marketplace);
+        }
+    }
+    records
+}
+
 /// Split a `gh:<owner>/<repo>` id. Returns `None` for any foreign id — checked
 /// before any network call, so the install-by-id probe loop never touches GitHub
 /// for an unrelated plugin.
@@ -1231,6 +1602,87 @@ pub(crate) fn parse_gh_id(id: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner.to_string(), repo.to_string()))
+}
+
+/// Split a `ghmp:<mkt-owner>/<mkt-repo>:<entry-name>` id into its three parts.
+/// Returns `None` for any foreign id — checked before any network call, so a
+/// marketplace-entry id is rejected in O(1) exactly like a foreign `gh:` one.
+/// An entry name must be a single path segment (no `/`), since it becomes part
+/// of the id and must never be confused with a repo path.
+pub(crate) fn parse_ghmp_id(id: &str) -> Option<(String, String, String)> {
+    let rest = id.trim().strip_prefix(GHMP_ID_PREFIX)?;
+    let (mkt, entry) = rest.split_once(':')?;
+    let (owner, repo) = mkt.split_once('/')?;
+    let (owner, repo, entry) = (owner.trim(), repo.trim(), entry.trim());
+    if owner.is_empty()
+        || repo.is_empty()
+        || repo.contains('/')
+        || entry.is_empty()
+        || entry.contains('/')
+    {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string(), entry.to_string()))
+}
+
+/// Project one marketplace entry onto the Plugin-kind card shape that
+/// `plugin_marketplace_item_to_entry` reads.
+///
+/// Same trust posture as [`record_to_item`]: presentation (name, icon, banner)
+/// comes from the marketplace's OWN `marketplace.json`, identity (id, owner,
+/// developer) from GitHub, and the trust triple (`origin` / `reviewed` /
+/// `descriptor_only`) is Core's. Two additions for the grouped shelf:
+///
+/// - `catalog_source_id` / `catalog_source_name` name the MARKETPLACE this entry
+///   came from, so the client renders one sub-heading per marketplace under the
+///   "Community Marketplaces" section (the `all` view overwrites these with the
+///   browsed source's meta, so the stamp is only meaningful on this feed).
+/// - `repo_url` / `install_source` point at the plugin's OWN repository (the
+///   entry's `source`), which is what the browse-only link-out / install-from-URL
+///   handoff uses — the marketplace repo itself is a collection, not the plugin.
+pub(crate) fn marketplace_entry_to_item(
+    record: &GithubTopicRecord,
+    marketplace: &GithubMarketplace,
+    entry: &GithubMarketplaceEntry,
+) -> Value {
+    let repo_url = entry
+        .source_repo
+        .clone()
+        .unwrap_or_else(|| record.html_url.clone());
+    serde_json::json!({
+        "id": format!("{GHMP_ID_PREFIX}{}/{}:{}", record.owner, record.repo, entry.name),
+        "name": entry.display_name.clone().unwrap_or_else(|| entry.name.clone()),
+        "description": entry.description.clone().unwrap_or_default(),
+        "version": entry.version.clone().unwrap_or_default(),
+        "install_source": repo_url,
+        "url": repo_url,
+        "repo_url": repo_url,
+        "installed": false,
+        "type": if entry.has_companion { "app" } else { "plugin" },
+        "has_companion": entry.has_companion,
+        "developer": record.owner,
+        "owner": record.owner,
+        "icon": entry.icon.clone(),
+        "icon_url": entry.icon_url.clone(),
+        "icon_dither": entry.icon_dither.clone(),
+        "icon_background": entry.icon_background.clone(),
+        "banner": entry.banner.clone(),
+        "category": entry.category.clone().unwrap_or_else(|| "Community".to_string()),
+        "tagline": entry.tagline.clone().or_else(|| entry.description.clone()),
+        "stars": record.stars,
+        "license": record.license,
+        "pushed_at": record.pushed_at,
+        "topics": record.topics,
+        // The grouping stamp — the client files this row under the marketplace's
+        // heading. Same keys the `all` view stamps per source.
+        "catalog_source_id": record.full_name,
+        "catalog_source_name": marketplace.name.clone(),
+        // The trust triple — identical to any community listing.
+        "origin": COMMUNITY_ORIGIN,
+        "reviewed": false,
+        "provenance": GITHUB_TOPIC_SOURCE_ID,
+        "descriptor_only": true,
+    })
 }
 
 /// Project one record onto the Plugin-kind card shape that
@@ -1420,27 +1872,55 @@ impl CatalogSource for GithubTopicSource {
             Ok(cache) => {
                 let needle = q.query.trim().to_ascii_lowercase();
                 let type_filter = q.extra_str("github_topic_type").to_ascii_lowercase();
-                let filtered: Vec<Value> = cache
+                // Expand marketplace records into their entries FIRST, then apply
+                // the filters at the item level. A `ryu-marketplace` repo with a
+                // parsed `marketplace.json` contributes one row per entry; one
+                // without (or not yet hydrated) degrades to a single repo listing.
+                let expanded: Vec<Value> = cache
                     .records
                     .iter()
-                    .filter(|record| match type_filter.as_str() {
-                        "app" => record.is_app,
-                        "plugin" => !record.is_app,
+                    .flat_map(|record| match record.marketplace.as_ref() {
+                        Some(marketplace) if !marketplace.entries.is_empty() => marketplace
+                            .entries
+                            .iter()
+                            .map(|entry| marketplace_entry_to_item(record, marketplace, entry))
+                            .collect::<Vec<Value>>(),
+                        _ => vec![record_to_item(record)],
+                    })
+                    .collect();
+                let item_matches = |item: &Value| {
+                    if needle.is_empty() {
+                        return true;
+                    }
+                    let hay = [
+                        item.get("name").and_then(Value::as_str).unwrap_or(""),
+                        item.get("description").and_then(Value::as_str).unwrap_or(""),
+                        item.get("id").and_then(Value::as_str).unwrap_or(""),
+                    ];
+                    if hay
+                        .iter()
+                        .any(|s| s.to_ascii_lowercase().contains(&needle))
+                    {
+                        return true;
+                    }
+                    // Topics were matched before the filter moved to the item level
+                    // (a repo tagged `ryu-plugin` + `ai` used to answer a search for
+                    // "ai"); keep that so the move is not a search regression.
+                    item.get("topics").and_then(Value::as_array).is_some_and(|topics| {
+                        topics.iter().any(|t| {
+                            t.as_str()
+                                .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                        })
+                    })
+                };
+                let filtered: Vec<Value> = expanded
+                    .into_iter()
+                    .filter(|item| match type_filter.as_str() {
+                        "app" => item.get("type").and_then(Value::as_str) == Some("app"),
+                        "plugin" => item.get("type").and_then(Value::as_str) != Some("app"),
                         _ => true,
                     })
-                    .filter(|record| {
-                        needle.is_empty()
-                            || record.full_name.to_ascii_lowercase().contains(&needle)
-                            || record
-                                .description
-                                .as_deref()
-                                .is_some_and(|d| d.to_ascii_lowercase().contains(&needle))
-                            || record
-                                .topics
-                                .iter()
-                                .any(|t| t.to_ascii_lowercase().contains(&needle))
-                    })
-                    .map(record_to_item)
+                    .filter(item_matches)
                     .collect();
                 let total = filtered.len();
                 let next_cursor = (offset + limit < total).then(|| (offset + limit).to_string());
@@ -1459,7 +1939,12 @@ impl CatalogSource for GithubTopicSource {
     }
 
     async fn detail(&self, _client: &reqwest::Client, id: &str) -> Result<Value> {
-        // Foreign ids are rejected before any egress (the install probe loop).
+        // Marketplace entries are a distinct id namespace (`ghmp:`), handled by
+        // their own detail path. Foreign ids are rejected before any egress (the
+        // install probe loop).
+        if let Some((owner, repo, entry_name)) = parse_ghmp_id(id) {
+            return detail_marketplace_entry(self, &owner, &repo, &entry_name).await;
+        }
         if parse_gh_id(id).is_none() {
             anyhow::bail!("`{id}` is not a GitHub-topic catalog id");
         }
@@ -1559,6 +2044,48 @@ impl CatalogSource for GithubTopicSource {
         _client: &reqwest::Client,
         id: &str,
     ) -> Result<InstallDescriptor> {
+        // A marketplace entry installs from the plugin's OWN repo, never the
+        // marketplace's. Same descriptor-only posture as a `gh:` listing: no
+        // `raw.manifest`, so install-by-id stays fail-closed for this unsigned
+        // source and a real install goes through `POST /api/plugins/install` on
+        // the repo URL.
+        if let Some((owner, repo, entry_name)) = parse_ghmp_id(id) {
+            let cache = self.records().await?;
+            let record = cache
+                .records
+                .iter()
+                .find(|r| r.owner == owner && r.repo == repo)
+                .ok_or_else(|| anyhow::anyhow!("community marketplace `{owner}/{repo}` not found"))?;
+            let marketplace = record.marketplace.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("community marketplace `{owner}/{repo}` has no listings")
+            })?;
+            let entry = marketplace
+                .entries
+                .iter()
+                .find(|e| e.name == entry_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "listing `{entry_name}` not found in marketplace `{owner}/{repo}`"
+                    )
+                })?;
+            let repo_url = entry
+                .source_repo
+                .clone()
+                .unwrap_or_else(|| record.html_url.clone());
+            return Ok(InstallDescriptor {
+                kind: CatalogKind::Plugin,
+                source_id: self.id.clone(),
+                repo_id: id.to_string(),
+                files: Vec::new(),
+                raw: serde_json::json!({
+                    "install_source": repo_url,
+                    "repo_url": repo_url,
+                    "origin": COMMUNITY_ORIGIN,
+                    "reviewed": false,
+                    "provenance": GITHUB_TOPIC_SOURCE_ID,
+                }),
+            });
+        }
         let (owner, repo) =
             parse_gh_id(id).ok_or_else(|| anyhow::anyhow!("`{id}` is not a GitHub-topic id"))?;
         // DESCRIPTOR-ONLY, and deliberately so: no `raw.manifest` key. That is what
@@ -1580,6 +2107,111 @@ impl CatalogSource for GithubTopicSource {
             }),
         })
     }
+}
+
+/// Detail for a marketplace ENTRY (`ghmp:` id): the marketplace's parsed
+/// `marketplace.json` entry, attributed to the marketplace it came from and
+/// enriched from the plugin's OWN repository when that is a GitHub repo.
+///
+/// A free function (not a trait method) because it is a helper of the
+/// `CatalogSource` impl's `detail` — a trait impl may only contain trait methods.
+async fn detail_marketplace_entry(
+    source: &GithubTopicSource,
+    owner: &str,
+    repo: &str,
+    entry_name: &str,
+) -> Result<Value> {
+    let cache = source.records().await?;
+    let record = cache
+        .records
+        .iter()
+        .find(|r| r.owner == owner && r.repo == repo)
+        .ok_or_else(|| anyhow::anyhow!("community marketplace `{owner}/{repo}` not found"))?;
+    let marketplace = record.marketplace.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("community marketplace `{owner}/{repo}` has no listings")
+    })?;
+    let entry = marketplace
+        .entries
+        .iter()
+        .find(|e| e.name == entry_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!("listing `{entry_name}` not found in marketplace `{owner}/{repo}`")
+        })?;
+
+    let repo_url = entry
+        .source_repo
+        .clone()
+        .unwrap_or_else(|| record.html_url.clone());
+    let mut detail = serde_json::json!({
+        "id": format!("{GHMP_ID_PREFIX}{owner}/{repo}:{entry_name}"),
+        "name": entry.display_name.clone().unwrap_or_else(|| entry.name.clone()),
+        "description": entry.description.clone().or_else(|| record.description.clone()),
+        "icon": entry.icon.clone(),
+        "iconUrl": entry.icon_url.clone(),
+        "developer": record.owner,
+        "homepage": entry.homepage.clone(),
+        "repositoryUrl": repo_url,
+        "license": record.license,
+        "stars": record.stars,
+        "topics": record.topics,
+        "updatedAt": record.pushed_at,
+        "type": if entry.has_companion { "app" } else { "plugin" },
+        "source": source.display_name,
+        "sourceUrl": cache.source_url,
+        "origin": COMMUNITY_ORIGIN,
+        "reviewed": false,
+        "provenance": GITHUB_TOPIC_SOURCE_ID,
+        "descriptorOnly": true,
+        "discoveredFrom": {
+            "topic": GithubTopicSource::marketplace_topic(),
+            "repositoryUrl": record.html_url,
+        },
+    });
+
+    // Enrich from the plugin's OWN repo (the entry's `source`) when it is a
+    // GitHub repo — the same README / releases / manifest lift a normal
+    // community listing gets. The marketplace repo is a collection; the code
+    // and the README live where `source` points.
+    let entry_id = detail["id"].as_str().unwrap_or("").to_string();
+    if let Some((src_owner, src_repo)) = super::split_github_repo(&repo_url) {
+        if let Some(obj) = detail.as_object_mut() {
+            let enrichment = super::github_enrich::enrich_repo(
+                &entry_id,
+                &source.resolve_api_base(),
+                &source.request_headers(),
+                &src_owner,
+                &src_repo,
+            )
+            .await;
+            if let Some(fields) = enrichment.as_object() {
+                for (k, v) in fields {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        match fetch_repo_manifest_for(&src_owner, &src_repo).await {
+            Some((manifest, url)) => {
+                if let Some(obj) = detail.as_object_mut() {
+                    for (k, v) in manifest_display_fields(&manifest) {
+                        obj.insert(k, v);
+                    }
+                    for (k, v) in super::manifest_surface::project_manifest(&manifest) {
+                        obj.insert(k, v);
+                    }
+                    obj.insert("manifestUrl".to_string(), Value::String(url));
+                }
+            }
+            None => {
+                if let Some(obj) = detail.as_object_mut() {
+                    obj.insert(
+                        "enrichmentError".to_string(),
+                        Value::String("No plugin manifest found at the repository root.".to_string()),
+                    );
+                }
+            }
+        }
+    }
+    Ok(detail)
 }
 
 #[cfg(test)]
@@ -2323,5 +2955,263 @@ mod tests {
         // this merge lands ON TOP of the card's sanitized values.
         assert!(lifted.get("icon").is_none());
         assert!(lifted.get("version").is_none());
+    }
+
+    // ── Community marketplaces (`ryu-marketplace` topic) ──────────────────────
+
+    fn marketplace_repo(full_name: &str) -> GithubTopicRecord {
+        let mut record = repo_item_to_marketplace_record(&repo(full_name, 6)).unwrap();
+        record.marketplace = GithubMarketplace::from_manifest(
+            &serde_json::json!({
+                "name": "The Bazaar",
+                "plugins": [
+                    {
+                        "name": "thing-tool",
+                        "displayName": "Thing Tool",
+                        "description": "Does the thing.",
+                        "version": "1.2.0",
+                        "source": "acme/thing-tool",
+                        "icon": "lucide:brain",
+                        "category": "Productivity",
+                        "hasCompanion": false,
+                    },
+                    {
+                        "name": "canvas",
+                        "displayName": "Canvas",
+                        "source": { "repo": "acme/canvas" },
+                        "hasCompanion": true,
+                    },
+                ],
+            }),
+            full_name,
+        );
+        record.marketplace_probed_at = unix_now();
+        record
+    }
+
+    #[test]
+    fn ghmp_ids_parse_and_foreign_ids_are_rejected() {
+        assert_eq!(
+            parse_ghmp_id("ghmp:acme/bazaar:thing-tool"),
+            Some((
+                "acme".to_string(),
+                "bazaar".to_string(),
+                "thing-tool".to_string()
+            ))
+        );
+        for foreign in [
+            "gh:acme/bazaar",
+            "acme/bazaar:thing-tool",
+            "ghmp:acme",
+            "ghmp:acme/",
+            "ghmp:acme/bazaar:",
+            "ghmp:acme/bazaar:a/b",
+            "ghmp:acme/a/b:thing",
+            "",
+        ] {
+            assert!(
+                parse_ghmp_id(foreign).is_none(),
+                "`{foreign}` must not parse as a marketplace-entry id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_marketplace_entry_card_is_grouped_and_trust_stamped() {
+        let record = marketplace_repo("acme/bazaar");
+        let marketplace = record.marketplace.as_ref().unwrap();
+        let entry = &marketplace.entries[0];
+        let item = marketplace_entry_to_item(&record, marketplace, entry);
+
+        assert_eq!(
+            item["id"],
+            "ghmp:acme/bazaar:thing-tool",
+            "the id is namespaced so it can never collide with a single-listing id"
+        );
+        assert_eq!(item["name"], "Thing Tool", "displayName wins over name");
+        assert_eq!(item["type"], "plugin");
+        // The grouping stamp is what the client files the row under.
+        assert_eq!(item["catalog_source_id"], "acme/bazaar");
+        assert_eq!(item["catalog_source_name"], "The Bazaar");
+        // The repo the row points at is the PLUGIN's, never the marketplace's.
+        assert_eq!(item["repo_url"], "https://github.com/acme/thing-tool");
+        assert_eq!(item["install_source"], "https://github.com/acme/thing-tool");
+        // Same trust triple as any community listing.
+        assert_eq!(item["origin"], COMMUNITY_ORIGIN);
+        assert_eq!(item["reviewed"], false);
+        assert_eq!(item["provenance"], GITHUB_TOPIC_SOURCE_ID);
+        assert_eq!(item["descriptor_only"], true);
+        // And a card is never a manifest carrier.
+        assert!(item.get("manifest").is_none());
+    }
+
+    #[test]
+    fn a_marketplace_entry_classifies_as_an_app_from_has_companion() {
+        let record = marketplace_repo("acme/bazaar");
+        let marketplace = record.marketplace.as_ref().unwrap();
+        let canvas = &marketplace.entries[1];
+        let item = marketplace_entry_to_item(&record, marketplace, canvas);
+        assert_eq!(item["type"], "app");
+        assert_eq!(item["has_companion"], true);
+        // The source-object form resolves to the plugin's repo too.
+        assert_eq!(item["repo_url"], "https://github.com/acme/canvas");
+    }
+
+    #[test]
+    fn a_marketplace_manifest_scrubs_hostile_fields_and_requires_a_name() {
+        // A hostile entry keeps what the allowlist lets through and drops the rest.
+        let parsed = GithubMarketplace::from_manifest(
+            &serde_json::json!({
+                "name": "Bazaar",
+                "plugins": [
+                    {
+                        "name": "ok",
+                        "displayName": "OK",
+                        "icon": "https://evil.example/x.svg",
+                        "version": "1.0.0 && curl evil",
+                        "description": "line\nbreak",
+                        "source": "javascript:alert(1)",
+                        "ui_code": "<script>alert(1)</script>",
+                    }
+                ],
+            }),
+            "acme/bazaar",
+        )
+        .expect("an entry with a name parses");
+        let entry = &parsed.entries[0];
+        assert_eq!(entry.name, "ok");
+        assert_eq!(entry.display_name.as_deref(), Some("OK"));
+        // The icon slot only accepts glyph ids; a URL in it is dropped.
+        assert!(entry.icon.is_none());
+        // Version alphabet is closed; the hostile source repo is dropped, so the
+        // card falls back to the marketplace repo's URL.
+        assert!(entry.version.is_none());
+        assert!(entry.source_repo.is_none());
+        // Control characters are stripped from free text.
+        assert_eq!(entry.description.as_deref(), Some("linebreak"));
+
+        // An entry without a name cannot form a stable id → the whole marketplace
+        // is treated as "nothing to show" and degrades to a single repo listing.
+        assert!(GithubMarketplace::from_manifest(
+            &serde_json::json!({ "plugins": [{ "displayName": "No Name" }] }),
+            "acme/bazaar",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_marketplace_wins_the_dedupe_over_a_single_listing_of_the_same_repo() {
+        // The same repo tagged `ryu-app` AND `ryu-marketplace`: the marketplace
+        // classification must replace the single listing, not sit beside it.
+        let app = repo_item_to_record(&repo("acme/bazaar", 6), true).unwrap();
+        let marketplace = marketplace_repo("acme/bazaar");
+        let merged = merge_marketplace_records(vec![app], vec![marketplace]);
+
+        assert_eq!(merged.len(), 1, "one repo, one record");
+        assert!(merged[0].is_marketplace);
+        assert!(merged[0].marketplace.is_some());
+    }
+
+    #[test]
+    fn an_unhydrated_marketplace_degrades_to_a_single_repo_listing() {
+        // A `ryu-marketplace` repo whose marketplace.json has not been probed yet
+        // (or carries no entries) still renders — as the repo itself.
+        let record = repo_item_to_marketplace_record(&repo("acme/bazaar", 3)).unwrap();
+        assert!(record.marketplace.is_none());
+        let item = record_to_item(&record);
+        assert_eq!(item["id"], "gh:acme/bazaar");
+        assert_eq!(item["name"], "bazaar");
+        // Still a community listing under the trust notice.
+        assert_eq!(item["origin"], COMMUNITY_ORIGIN);
+        assert_eq!(item["reviewed"], false);
+    }
+
+    #[test]
+    fn a_marketplace_probe_is_carried_across_refreshes_and_expires() {
+        let now = unix_now();
+        let mut marketplace = marketplace_repo("acme/bazaar");
+        let fresh = repo_item_to_marketplace_record(&repo("acme/bazaar", 9)).unwrap();
+        // A fresh record has never been probed.
+        assert!(fresh.marketplace_probe_is_due(now));
+
+        // The probe (a HIT here) carries over on a case-insensitive full_name match.
+        let mut target = repo_item_to_marketplace_record(&repo("ACME/Bazaar", 9)).unwrap();
+        carry_manifests(std::slice::from_mut(&mut target), Some(&[marketplace.clone()]));
+        assert!(target.marketplace.is_some());
+        assert_eq!(
+            target.marketplace.as_ref().unwrap().name,
+            "The Bazaar",
+            "the parsed marketplace carries over, not just the probe timestamp"
+        );
+
+        // And a remembered probe expires, so a repo that later ADDS a marketplace
+        // is picked up.
+        marketplace.marketplace_probed_at = now;
+        assert!(!marketplace.marketplace_probe_is_due(now));
+        assert!(marketplace.marketplace_probe_is_due(now + MANIFEST_PROBE_TTL_SECS));
+    }
+
+    #[test]
+    fn marketplace_search_matches_entry_names_and_respects_the_type_filter() {
+        let record = marketplace_repo("acme/bazaar");
+        // Build a small cache and run the item-level filtering that `search` does
+        // after expanding records, without touching the network.
+        let expanded: Vec<Value> = match record.marketplace.as_ref() {
+            Some(marketplace) => marketplace
+                .entries
+                .iter()
+                .map(|entry| marketplace_entry_to_item(&record, marketplace, entry))
+                .collect(),
+            None => vec![record_to_item(&record)],
+        };
+        let filter = |type_filter: &str, needle: &str| -> Vec<Value> {
+            let needle = needle.trim().to_ascii_lowercase();
+            expanded
+                .iter()
+                .filter(|item| match type_filter {
+                    "app" => item.get("type").and_then(Value::as_str) == Some("app"),
+                    "plugin" => item.get("type").and_then(Value::as_str) != Some("app"),
+                    _ => true,
+                })
+                .filter(|item| {
+                    if needle.is_empty() {
+                        return true;
+                    }
+                    let hay = [
+                        item.get("name").and_then(Value::as_str).unwrap_or(""),
+                        item.get("description").and_then(Value::as_str).unwrap_or(""),
+                        item.get("id").and_then(Value::as_str).unwrap_or(""),
+                    ];
+                    if hay
+                        .iter()
+                        .any(|s| s.to_ascii_lowercase().contains(&needle))
+                    {
+                        return true;
+                    }
+                    item.get("topics").and_then(Value::as_array).is_some_and(|topics| {
+                        topics.iter().any(|t| {
+                            t.as_str()
+                                .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                        })
+                    })
+                })
+                .cloned()
+                .collect()
+        };
+
+        assert_eq!(filter("", "").len(), 2);
+        let apps = filter("app", "");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0]["id"], "ghmp:acme/bazaar:canvas");
+        let plugins = filter("plugin", "");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["id"], "ghmp:acme/bazaar:thing-tool");
+        // Searching "thing" finds the ENTRY by its display name, not just the repo.
+        assert_eq!(filter("", "thing").len(), 1);
+        // Searching the marketplace repo finds the entries too (the id carries it).
+        assert_eq!(filter("", "bazaar").len(), 2);
+        // A repo topic still matches its entries, as it did before the filter
+        // moved from the record to the expanded item level.
+        assert_eq!(filter("", "ryu-plugin").len(), 2);
     }
 }

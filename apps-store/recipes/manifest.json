@@ -1,7 +1,7 @@
 {
   "id": "@ryu/recipes",
   "name": "Recipes",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Automation",
   "description": "Desktop-automation recipes: record → save → replay UI action sequences. Backed by Ghost's RecipeStore, so it declares Ghost as a dependency and the graph refuses to disable Ghost out from under it.",
   "tagline": "Record a UI sequence once, replay it forever",
@@ -26,7 +26,7 @@
     "apps": [
       {
         "id": "ghost",
-        "min_version": "1.0.0"
+        "min_version": "0.1.14"
       }
     ]
   },

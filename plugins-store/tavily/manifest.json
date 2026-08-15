@@ -1,7 +1,7 @@
 {
   "id": "@ryu/tavily",
   "name": "Tavily Search",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Search-and-extract for agents via the Tavily API (https://tavily.com), exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Tavily without changing what agents call. Requires a BYOK Tavily API key.",
   "iconUrl": "https://www.tavily.com/favicon.ico",
   "iconPadding": "md",

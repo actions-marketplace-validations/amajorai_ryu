@@ -54,6 +54,11 @@ export type WorkflowTrigger =
 
 /** A persisted workflow definition as returned by Core. */
 export interface Workflow {
+	/** Whether this workflow can be driven from a chat composer — it has a root
+	 *  `Input` node, so a typed message is consumed as the run's initial input.
+	 *  Server-computed (`GET /workflows` stamps it); `false` for definitions
+	 *  that were never fetched from the list (e.g. freshly created). */
+	chatInput: boolean;
 	createdAt?: string | null;
 	description?: string | null;
 	edges: WorkflowEdge[];
@@ -65,6 +70,7 @@ export interface Workflow {
 }
 
 interface WorkflowWire {
+	chat_input?: boolean | null;
 	created_at?: string | null;
 	description?: string | null;
 	edges?: WorkflowEdge[];
@@ -83,6 +89,7 @@ function toWorkflow(w: WorkflowWire): Workflow {
 		nodes: w.nodes ?? [],
 		edges: w.edges ?? [],
 		triggers: w.triggers ?? [],
+		chatInput: w.chat_input ?? false,
 		createdAt: w.created_at ?? null,
 		updatedAt: w.updated_at ?? null,
 	};

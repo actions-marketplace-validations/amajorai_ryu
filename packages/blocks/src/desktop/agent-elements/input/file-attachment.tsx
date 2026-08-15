@@ -7,7 +7,7 @@ import {
 	IconPhoto as ImageIcon,
 	IconX as X,
 } from "@tabler/icons-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ImageLightbox } from "../image-lightbox.tsx";
 
 export interface FileAttachmentProps {
@@ -102,12 +102,14 @@ export function FileAttachment({
 }: FileAttachmentProps) {
 	const [isHovered, setIsHovered] = useState(false);
 	const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+	const lightboxOriginRef = useRef<HTMLElement | null>(null);
 	const iconName = getFileIconName(filename, isImage);
 	const isImageOnly = display === "image-only" && isImage && !!url;
 	const canPreview = Boolean(enableImagePreview && isImage && url);
 
 	const openLightbox = (event: React.MouseEvent) => {
 		event.stopPropagation();
+		lightboxOriginRef.current = event.currentTarget as HTMLElement;
 		setIsLightboxOpen(true);
 	};
 
@@ -198,6 +200,7 @@ export function FileAttachment({
 					images={[{ id, url, filename }]}
 					onClose={() => setIsLightboxOpen(false)}
 					open={isLightboxOpen}
+					originRef={lightboxOriginRef}
 				/>
 			)}
 		</div>

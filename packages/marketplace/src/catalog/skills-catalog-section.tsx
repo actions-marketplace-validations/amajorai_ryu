@@ -506,9 +506,10 @@ function SkillsFilterPanel({
 
 /**
  * Source dropdown (skills.sh + any custom Claude plugin marketplaces) plus an
- * "Add marketplace" popover. A marketplace is just a repo/URL pointing at a
- * `.claude-plugin/marketplace.json`. The dropdown only shows when there is a real
- * choice; the add control is always available.
+ * "Add marketplace" popover. A marketplace is a repo/URL/local directory
+ * pointing at a `marketplace.json` (`.claude-plugin/`, `.ryu-plugin/`, …). The
+ * dropdown only shows when there is a real choice; the add control is always
+ * available.
  */
 function SkillSourcePicker({
 	sources,
@@ -538,7 +539,7 @@ function SkillSourcePicker({
 	const submit = async () => {
 		const trimmedRepo = repo.trim();
 		if (!trimmedRepo) {
-			setAddError("Enter a repo or marketplace.json URL");
+			setAddError("Enter a repo, git URL, or local path");
 			return;
 		}
 		const displayName = name.trim() || trimmedRepo;
@@ -600,11 +601,11 @@ function SkillSourcePicker({
 				<PopoverContent className="w-80">
 					<div className="flex flex-col gap-3">
 						<div className="flex flex-col gap-1">
-							<Label htmlFor="mp-repo">Repo or marketplace.json URL</Label>
+							<Label htmlFor="mp-repo">Repo, git URL, or local path</Label>
 							<Input
 								id="mp-repo"
 								onChange={(e) => setRepo(e.target.value)}
-								placeholder="owner/repo or https://…/marketplace.json"
+								placeholder="owner/repo, https://…/marketplace.json, or /path/to/marketplace"
 								value={repo}
 							/>
 						</div>

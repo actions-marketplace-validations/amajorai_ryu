@@ -6,6 +6,11 @@ import type {
 	StreamedAcpConfig,
 } from "@ryu/blocks/composer/composer-acp-sections.ts";
 import { handleComposerSettingsShortcut } from "@ryu/blocks/composer/composer-shortcuts.ts";
+import {
+	ArtifactHostContext,
+	type ArtifactHostValue,
+	type HostArtifact,
+} from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge";
 import {
@@ -58,6 +63,7 @@ import {
 	type BtwState,
 } from "@/src/components/chat/BtwOverlay.tsx";
 import { DiffReviewPane } from "@/src/components/chat/DiffReviewPane.tsx";
+import { InlineArtifact } from "@/src/components/chat/InlineArtifact.tsx";
 import { MentionMenu } from "@/src/components/chat/MentionMenu.tsx";
 import { MergedThreadPicker } from "@/src/components/chat/MergedThreadPicker.tsx";
 import {
@@ -117,6 +123,7 @@ import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
 import { useSpaces } from "@/src/hooks/useSpaces.ts";
 import { useTeams } from "@/src/hooks/useTeams.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
+import { useWorkflows } from "@/src/hooks/useWorkflows.ts";
 import {
 	AgentAvatar,
 	AgentLogo,
@@ -142,6 +149,7 @@ import {
 	fetchNextPromptSuggestions,
 } from "@/src/lib/api/chat.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
+import { apiUrl, makeHeaders } from "@/src/lib/api/client.ts";
 import { generateImage } from "@/src/lib/api/images.ts";
 import {
 	getModelContextWindow,
@@ -165,6 +173,9 @@ import {
 	widgetFollowUp,
 	widgetSetState,
 } from "@/src/lib/api/widgets.ts";
+import type { Workflow } from "@/src/lib/api/workflows.ts";
+import type { Artifact } from "@/src/lib/artifacts.ts";
+import { artifactFromPayload } from "@/src/lib/artifacts.ts";
 import { hydrateHistoryMessage } from "@/src/lib/chat-history-hydrate.ts";
 import {
 	conversationTargetDecision,
@@ -189,6 +200,7 @@ import {
 import { getRealtimeJwt, getRealtimeUserId } from "@/src/lib/realtime/jwt.ts";
 import { useRealtimeRoom } from "@/src/lib/realtime/use-realtime-room.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
+import { useArtifactStore } from "@/src/store/useArtifactStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useCreateAgentDialog } from "@/src/store/useCreateAgentDialog.ts";
 import { useMeetingRecordingStore } from "@/src/store/useMeetingRecordingStore.ts";
@@ -410,6 +422,25 @@ function resolveFirstTeamMention(text: string, teams: Team[]): string | null {
 	return found?.id ?? null;
 }
 
+/** Scan message text for the first "@Name" that matches a chat-triggerable
+ *  workflow, returning its id. A workflow mention is the most specific target
+ *  of all — the message becomes the run's input, so it wins over agent/team.
+ *
+ *  Unlike agents/teams (matched on a `@word` token), workflow names are
+ *  arbitrary ("Plan → Implement → Verify"), so the check is an exact
+ *  `@Name` substring match — the same form the composer inserts when you pick a
+ *  workflow from the mention menu. */
+function resolveFirstWorkflowMention(
+	text: string,
+	workflows: Workflow[]
+): string | null {
+	const lower = text.toLowerCase();
+	const found = workflows.find((w) =>
+		lower.includes(`@${w.name.toLowerCase()}`)
+	);
+	return found?.id ?? null;
+}
+
 // ---------------------------------------------------------------------------
 /**
  * Build the per-request `plugin_flags` map from the plugin composer toggles that
@@ -442,11 +473,13 @@ export function buildPluginFlags(
 interface CouncilInputBarProps extends InputBarProps {
 	allAgents: AgentSummary[];
 	allTeams: Team[];
+	/** Chat-triggerable workflows (a root Input node), for @workflow mentions. */
+	allWorkflows: Workflow[];
 	/** Slash commands offered in the "/" popover (agent-advertised + local). */
 	availableCommands: SlashCommand[];
 	composerSections: ComposerSettingsSection[];
-	/** Sources for the grouped "@" mention menu (agents/teams/spaces/skills/mcp/
-	 *  folders/plugins). Agents/teams here also drive the council target. */
+	/** Sources for the grouped "@" mention menu (agents/teams/workflows/spaces/
+	 *  skills/mcp/folders/plugins). Agents/teams/workflows also drive the target. */
 	mentionSources: MentionSources;
 	onRespondPermission?: (optionId: string | null) => void;
 	onTargetAgentChange: (agentId: string | null) => void;
@@ -454,6 +487,7 @@ interface CouncilInputBarProps extends InputBarProps {
 	/** Fired on each composer keystroke so the surface can broadcast a debounced
 	 * "typing" presence delta to the conversation room (multi-user collaboration). */
 	onTyping?: () => void;
+	onWorkflowChange: (workflowId: string | null) => void;
 	/** Active interactive ACP tool-permission prompt, rendered above the composer. */
 	permission?: ActivePermission | null;
 }
@@ -461,11 +495,13 @@ interface CouncilInputBarProps extends InputBarProps {
 function CouncilInputBar({
 	allAgents,
 	allTeams,
+	allWorkflows,
 	availableCommands,
 	composerSections,
 	mentionSources,
 	onTargetAgentChange,
 	onTeamChange,
+	onWorkflowChange,
 	onTyping,
 	permission,
 	onRespondPermission,
@@ -505,18 +541,24 @@ function CouncilInputBar({
 			if (query === null) {
 				onTargetAgentChange(null);
 				onTeamChange(null);
+				onWorkflowChange(null);
 			}
 			setSlashQuery(parseSlashQuery(next));
 		},
-		[onChange, onTyping, onTargetAgentChange, onTeamChange]
+		[onChange, onTyping, onTargetAgentChange, onTeamChange, onWorkflowChange]
 	);
 
 	const handleSelectSlash = useCallback(
 		(command: SlashCommand) => {
-			// Insert "/name " and leave the cursor for the argument; the hint is
-			// shown as guidance in the popover. Commands with no argument can just
-			// be sent as-is. Matches Zed / the @-mention insert convention.
-			onChange?.(`/${command.name} `);
+			// An imported user command (Codex prompt) expands straight into its
+			// template body — the "prompt fills the box, then send" convention
+			// Cursor/Codex use. Everything else inserts "/name " and leaves the
+			// cursor for the argument.
+			if (command.body) {
+				onChange?.(command.body);
+			} else {
+				onChange?.(`/${command.name} `);
+			}
 			setSlashQuery(null);
 		},
 		[onChange]
@@ -524,46 +566,75 @@ function CouncilInputBar({
 
 	const handleSelect = useCallback(
 		(item: MentionItem) => {
-			// Picking a team enters council (multi-agent). Block it behind the Pro
-			// gate before inserting the mention or setting the target.
-			if (item.kind === "team" && !canUse("council")) {
+			// Picking a team or a workflow enters council (multi-agent). Block it
+			// behind the Pro gate before inserting the mention or setting the
+			// target. Never silently downgrade a council send to single-agent.
+			if (
+				(item.kind === "team" || item.kind === "workflow") &&
+				!canUse("council")
+			) {
 				setMentionQuery(null);
 				requestUpgrade();
 				return;
 			}
 			onChange?.(applyMention(value ?? "", item));
 			setMentionQuery(null);
-			// Agents/teams set the council target directly from the picked id;
+			// Agents/teams/workflows set the target directly from the picked id;
 			// spaces/skills/mcp/folders are plain reference tokens and plugins
 			// rewrite the composer — none of those set a target.
-			if (item.kind === "team") {
+			if (item.kind === "workflow") {
+				onWorkflowChange(item.id);
+				onTeamChange(null);
+				onTargetAgentChange(null);
+			} else if (item.kind === "team") {
 				onTeamChange(item.id);
 				onTargetAgentChange(null);
+				onWorkflowChange(null);
 			} else if (item.kind === "agent") {
 				onTargetAgentChange(item.id);
 				onTeamChange(null);
+				onWorkflowChange(null);
 			}
 		},
-		[value, onChange, onTargetAgentChange, onTeamChange, canUse, requestUpgrade]
+		[
+			value,
+			onChange,
+			onTargetAgentChange,
+			onTeamChange,
+			onWorkflowChange,
+			canUse,
+			requestUpgrade,
+		]
 	);
 
 	const handleSend = useCallback(
 		(msg: { role: "user"; content: string }) => {
+			// A workflow mention is the most specific target — the message becomes
+			// the run's input — so it wins over a team mention, which wins over an
+			// agent mention.
+			const workflowId = resolveFirstWorkflowMention(msg.content, allWorkflows);
 			const teamId = resolveFirstTeamMention(msg.content, allTeams);
-			// A team mention dispatches a council turn. Gate it behind Pro; block the
-			// whole send (rather than silently sending single-agent) so the user
-			// understands why nothing happened, then upsell.
-			if (teamId && !canUse("council")) {
+			const blockedCouncil = (workflowId || teamId) && !canUse("council");
+			// A council mention dispatches a multi-agent turn. Gate it behind Pro;
+			// block the whole send (rather than silently sending single-agent) so
+			// the user understands why nothing happened, then upsell.
+			if (blockedCouncil) {
 				setMentionQuery(null);
 				setSlashQuery(null);
 				requestUpgrade();
 				return;
 			}
-			if (teamId) {
+			if (workflowId) {
+				onWorkflowChange(workflowId);
+				onTeamChange(null);
+				onTargetAgentChange(null);
+			} else if (teamId) {
 				onTeamChange(teamId);
 				onTargetAgentChange(null);
+				onWorkflowChange(null);
 			} else {
 				onTeamChange(null);
+				onWorkflowChange(null);
 				onTargetAgentChange(resolveFirstMention(msg.content, allAgents));
 			}
 			setMentionQuery(null);
@@ -574,8 +645,10 @@ function CouncilInputBar({
 			onSend,
 			allAgents,
 			allTeams,
+			allWorkflows,
 			onTargetAgentChange,
 			onTeamChange,
+			onWorkflowChange,
 			canUse,
 			requestUpgrade,
 		]
@@ -629,6 +702,26 @@ function CouncilInputBar({
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
+/** Fetch a created artifact's blob as text through the node API (best-effort:
+ *  a failed fetch yields null, and the surface falls back to the download/open
+ *  affordance rather than an error state). */
+async function fetchArtifactContent(
+	target: ApiTarget,
+	url: string
+): Promise<string | null> {
+	try {
+		const res = await fetch(apiUrl(target, url), {
+			headers: makeHeaders(target.token),
+		});
+		if (!res.ok) {
+			return null;
+		}
+		return await res.text();
+	} catch {
+		return null;
+	}
+}
+
 export default function ChatPage({
 	tabConversationId,
 	initialPrompt,
@@ -791,6 +884,11 @@ export default function ChatPage({
 	const composerTeamIdRef = useRef<string | null>(null);
 	composerTeamIdRef.current = teamId;
 
+	// workflow_id for @workflow mentions — when set, Core runs the workflow with
+	// the message as its chat input (takes precedence over agent/team targets).
+	// Reset after each send, mirroring teamIdRef.
+	const workflowIdRef = useRef<string | null>(null);
+
 	// #415: Current participants list for labelling assistant messages per-agent.
 	const [participants, setParticipants] = useState<ConversationParticipant[]>(
 		[]
@@ -803,6 +901,10 @@ export default function ChatPage({
 	const { agents } = useAgents();
 	// Load teams so @team mentions resolve in the composer autocomplete.
 	const { teams } = useTeams();
+	// Load workflows so @workflow mentions resolve in the composer autocomplete.
+	// Only chat-triggerable ones (a root Input node, per Core) surface in the
+	// mention menu; the rest can still be run from the Workflows app.
+	const { workflows } = useWorkflows();
 	// Extra "@" mention sources: spaces, installed skills, MCP servers, and
 	// recent project folders. Composer plugins (goal/proof/double-check) come
 	// from the client-side registry. See docs/rfc-mention-composer.md.
@@ -1432,6 +1534,11 @@ export default function ChatPage({
 					// The transient mention wins for one send; otherwise the persistent
 					// composer team pick applies.
 					team_id: teamIdRef.current ?? composerTeamIdRef.current ?? undefined,
+					// When the user @-mentioned a workflow, Core runs it with this
+					// message as its chat input. Resets after each send. A workflow
+					// target is the most specific intent, so it is sent alongside
+					// (Core's `workflow_id` branch ignores agent/team).
+					workflow_id: workflowIdRef.current ?? undefined,
 					// Composer model picker selection (per-agent). Core routes honour it
 					// where the transport supports a model override; otherwise ignored.
 					model: selectedModelRef.current ?? undefined,
@@ -1872,6 +1979,7 @@ export default function ChatPage({
 			const rec = entry as {
 				command?: unknown;
 				description?: unknown;
+				body?: unknown;
 			};
 			if (typeof rec.command !== "string") {
 				continue;
@@ -1880,11 +1988,16 @@ export default function ChatPage({
 			if (!name) {
 				continue;
 			}
+			// A `body` marks an imported user command (a Codex prompt): it expands
+			// into the prompt template when selected, instead of inserting "/name ".
+			const body =
+				typeof rec.body === "string" && rec.body.trim() ? rec.body : undefined;
 			out.push({
 				name,
 				description: typeof rec.description === "string" ? rec.description : "",
 				hint: null,
-				source: "plugin",
+				source: body ? "user" : "plugin",
+				body,
 			});
 		}
 		return out;
@@ -3225,6 +3338,7 @@ export default function ChatPage({
 			// Reset after send so the next message starts fresh.
 			targetAgentIdRef.current = null;
 			teamIdRef.current = null;
+			workflowIdRef.current = null;
 			// Our turn is sent — clear any lingering "typing" presence immediately.
 			stopTyping();
 		},
@@ -3303,6 +3417,21 @@ export default function ChatPage({
 			label: subagent.label,
 			nonce: subagentNonce.current,
 		});
+		setRightPanelOpen(true);
+	}, []);
+
+	// Open a rendered/canvas artifact in the right panel — the same nonce flow as
+	// the subagent, but WorkspacePanels opens ONE DEDICATED TAB per artifact (no
+	// one-at-a-time limit), so clicking a second artifact stacks it alongside the
+	// first rather than replacing it.
+	const [artifactReq, setArtifactReq] = useState<{
+		artifact: Artifact;
+		nonce: number;
+	} | null>(null);
+	const artifactNonce = useRef(0);
+	const handleOpenArtifact = useCallback((artifact: Artifact) => {
+		artifactNonce.current += 1;
+		setArtifactReq({ artifact, nonce: artifactNonce.current });
 		setRightPanelOpen(true);
 	}, []);
 
@@ -4120,20 +4249,36 @@ export default function ChatPage({
 	agentsStableRef.current = agents;
 	const teamsStableRef = useRef(teams);
 	teamsStableRef.current = teams;
-	// Aggregate the seven "@" mention sources into one object, held in a ref so
+	const workflowsStableRef = useRef(workflows);
+	workflowsStableRef.current = workflows;
+	// Aggregate the "@" mention sources into one object, held in a ref so
 	// the memoized composer slot stays stable (same pattern as the agent/team
 	// refs above). buildMentionGroups filters this per keystroke.
 	const mentionSources = useMemo<MentionSources>(
 		() => ({
 			agents: agents.map((a) => ({ id: a.id, name: a.name })),
 			teams: teams.map((t) => ({ id: t.id, name: t.name })),
+			// Only chat-triggerable workflows (a root Input node, per Core) are
+			// offered — a workflow that never reads the typed message would
+			// silently ignore it.
+			workflows: workflows
+				.filter((w) => w.chatInput)
+				.map((w) => ({ id: w.id, name: w.name, description: w.description })),
 			spaces: spaces.map((s) => ({ id: s.id, name: s.name })),
 			skills: installedSkills.map((s) => ({ id: s.id, name: s.name })),
 			mcp: mcpServers.map((m) => ({ id: m.id, name: m.name })),
 			folders: recentFolders,
 			plugins: getComposerPlugins(),
 		}),
-		[agents, teams, spaces, installedSkills, mcpServers, recentFolders]
+		[
+			agents,
+			teams,
+			workflows,
+			spaces,
+			installedSkills,
+			mcpServers,
+			recentFolders,
+		]
 	);
 	const mentionSourcesRef = useRef(mentionSources);
 	mentionSourcesRef.current = mentionSources;
@@ -4451,6 +4596,7 @@ export default function ChatPage({
 					{...props}
 					allAgents={agentsStableRef.current}
 					allTeams={teamsStableRef.current}
+					allWorkflows={workflowsStableRef.current}
 					availableCommands={commandsRef.current}
 					// Single-row compact composer once the chat has history (read from a
 					// ref so the memoized slot flips without rebuilding — same pattern as
@@ -4478,6 +4624,9 @@ export default function ChatPage({
 						teamIdRef.current = id;
 					}}
 					onTyping={handleTypingActivity}
+					onWorkflowChange={(id) => {
+						workflowIdRef.current = id;
+					}}
 					permission={permissionRef.current.permission}
 					pluginControls={pluginComposerControlsRef.current}
 					queueBar={queueBarRef.current}
@@ -4525,10 +4674,53 @@ export default function ChatPage({
 		runId: convId,
 		target: chatTarget,
 		chatStatus: status,
+		onOpenArtifact: handleOpenArtifact,
 		onOpenSideChat: handleOpenSideChat,
 		onOpenSubagent: handleOpenSubagent,
 		sideChatsRefreshKey,
 	};
+
+	// The desktop half of the artifact host: `@ryu/blocks` renders an inline
+	// artifact card through this context (openInPanel / openInTab / fetchContent /
+	// submitFollowUp), and the Renderer is our InlineArtifact card. `openInTab`
+	// resolves a created artifact's blob BEFORE the tab opens so the window-tab
+	// page (which has no host) renders content rather than an empty view.
+	const artifactHostValue = useMemo<ArtifactHostValue>(() => {
+		const openArtifactTab = (payload: HostArtifact, id: string) => {
+			const artifact = artifactFromPayload(payload, id, "tool");
+			const openTabNow = (resolved: Artifact) => {
+				useArtifactStore.getState().put(resolved);
+				openTab(`/artifact/${id}`, {
+					title: resolved.title,
+					icon: { kind: "icon", id: "hugeicons:browser" },
+				});
+			};
+			if (!artifact.content && artifact.url) {
+				Promise.resolve(fetchArtifactContent(chatTarget, artifact.url))
+					.then((content) =>
+						openTabNow(content ? { ...artifact, content } : artifact)
+					)
+					.catch(() => openTabNow(artifact));
+				return;
+			}
+			openTabNow(artifact);
+		};
+		return {
+			openInPanel: (payload, id) =>
+				handleOpenArtifact(artifactFromPayload(payload, id, "tool")),
+			openInTab: openArtifactTab,
+			fetchContent: (payload) =>
+				payload.url
+					? fetchArtifactContent(chatTarget, payload.url)
+					: Promise.resolve(null),
+			submitFollowUp: (text) => {
+				Promise.resolve(
+					handleComposerSubmit({ role: "user", content: text })
+				).catch(() => undefined);
+			},
+			Renderer: InlineArtifact,
+		};
+	}, [chatTarget, handleOpenArtifact, openTab, handleComposerSubmit]);
 
 	// A ghost thread has no store-backed title (it's never persisted), so label it
 	// "Temporary chat" to reinforce that this conversation won't be saved.
@@ -4616,210 +4808,217 @@ export default function ChatPage({
 	useTitleBar(hasThread ? conversationTitle : null, titlebarActions);
 
 	return (
-		<WorkspacePanels
-			bottomOpen={bottomPanelOpen}
-			contextRequest={contextReq}
-			contextView={{
-				conversationId: activeConversationId ?? draftConvId.current,
-				target: chatTarget,
-				usage: contextUsage,
-			}}
-			cowork={coworkData}
-			folder={folder}
-			onBottomOpenChange={setBottomPanelOpen}
-			onRightOpenChange={setRightPanelOpen}
-			renderPinnedSummary={
-				pinnedSummaryVisible
-					? ({ floating }) => (
-							<PinnedSummaryPanel
-								conversationId={activeConversationId ?? draftConvId.current}
-								cowork={coworkData}
-								folder={folder}
-								onDismiss={floating ? dismissPinnedSummary : undefined}
-								target={chatTarget}
-							/>
-						)
-					: null
-			}
-			rightOpen={rightPanelOpen}
-			subagentRequest={subagentReq}
-		>
-			<div className="flex h-full flex-col overflow-hidden">
-				{voiceMode.active && <VoiceModeOverlay voice={voiceMode} />}
-				{/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: custom drag/resize interaction */}
-				<div
-					className="relative flex-1 overflow-hidden"
-					onDragLeave={handleDragLeave}
-					onDragOver={handleDragOver}
-					onDrop={handleDrop}
-				>
-					<WidgetHostContext.Provider value={widgetHostValue}>
-						<AgentChat
-							assistantAvatar={assistantIdentity.avatar}
-							assistantName={assistantIdentity.name}
-							assistantPlanningAvatars={assistantPlanningAvatars}
-							attachments={{
-								images: attachedImages,
-								onAttach: handleAttach,
-								onRemoveImage: handleRemoveImage,
-								onPaste: handlePaste,
-								isDragOver,
-							}}
-							// Pad the message list down by the titlebar height so the
-							// conversation rests below the frosted bar yet scrolls under it.
-							classNames={{ messageList: "pt-12" }}
-							contextSize={contextSize}
-							// Opening this thread jumps the transcript to the newest
-							// message; the id is what makes that fire once per
-							// conversation rather than on every history rewrite.
-							conversationKey={convId ?? undefined}
-							currentUser={{
-								avatar: oidcUser?.picture,
-								id: myUserId ?? undefined,
-								name: oidcUser?.name || oidcUser?.email,
-							}}
-							// Launchpad: every openable app as a grid of icon tiles under
-							// the composer, on the start page only. Renders nothing when no
-							// enabled app contributes a UI surface.
-							emptyStateFooter={<AppLaunchpad />}
-							emptyStateHeader={
-								<EmptyStateHeader
-									logo={emptyStateLogo}
-									// The full Agent · Model · Thinking dropdown from the shared
-									// composer factory — the logo opens the identical menu the
-									// composer's settings trigger does, not just an agent list.
-									renderBody={composerRenderBody}
-									// The narrowed list: this logo IS a settings trigger, so it
-									// summarises exactly what the composer's own trigger does.
-									sections={composerTriggerSections}
-									// Ghost (temporary) chat: the empty-state greeting whispers
-									// "secretly" so it's obvious this thread won't be saved.
-									title={ghostMode ? "What are we secretly doing?" : undefined}
+		<ArtifactHostContext.Provider value={artifactHostValue}>
+			<WorkspacePanels
+				artifactRequest={artifactReq}
+				bottomOpen={bottomPanelOpen}
+				contextRequest={contextReq}
+				contextView={{
+					conversationId: activeConversationId ?? draftConvId.current,
+					target: chatTarget,
+					usage: contextUsage,
+				}}
+				cowork={coworkData}
+				folder={folder}
+				onBottomOpenChange={setBottomPanelOpen}
+				onRightOpenChange={setRightPanelOpen}
+				renderPinnedSummary={
+					pinnedSummaryVisible
+						? ({ floating }) => (
+								<PinnedSummaryPanel
+									conversationId={activeConversationId ?? draftConvId.current}
+									cowork={coworkData}
+									folder={folder}
+									onDismiss={floating ? dismissPinnedSummary : undefined}
+									target={chatTarget}
 								/>
-							}
-							emptyStatePosition="center"
-							error={error ?? undefined}
-							feedback={feedback}
-							followUps={{
-								items: followUps.map((text, i) => ({
-									id: `followup-${i}`,
-									label: text,
-									value: text,
-								})),
-								// One click runs the suggested next prompt straight away.
-								onSelect: (item) => {
-									setFollowUps([]);
-									handleComposerSubmit({
-										role: "user",
-										content: item.value ?? item.label,
-									});
-								},
-							}}
-							// A restored tab must say "loading this conversation", never
-							// paint the new-chat greeting — that is what reads as "all my
-							// chats are gone" at boot. Both flags are false for a genuinely
-							// new chat (no conversation id), so the greeting is untouched
-							// there.
-							historyError={
-								historyFailed
-									? {
-											title: "Couldn't load this conversation",
-											description:
-												"This node didn't answer. Your messages are still on it — nothing has been lost.",
-											onRetry: retryHistoryLoad,
+							)
+						: null
+				}
+				rightOpen={rightPanelOpen}
+				subagentRequest={subagentReq}
+			>
+				<div className="flex h-full flex-col overflow-hidden">
+					{voiceMode.active && <VoiceModeOverlay voice={voiceMode} />}
+					{/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: custom drag/resize interaction */}
+					<div
+						className="relative flex-1 overflow-hidden"
+						onDragLeave={handleDragLeave}
+						onDragOver={handleDragOver}
+						onDrop={handleDrop}
+					>
+						<WidgetHostContext.Provider value={widgetHostValue}>
+							<AgentChat
+								assistantAvatar={assistantIdentity.avatar}
+								assistantName={assistantIdentity.name}
+								assistantPlanningAvatars={assistantPlanningAvatars}
+								attachments={{
+									images: attachedImages,
+									onAttach: handleAttach,
+									onRemoveImage: handleRemoveImage,
+									onPaste: handlePaste,
+									isDragOver,
+								}}
+								// Pad the message list down by the titlebar height so the
+								// conversation rests below the frosted bar yet scrolls under it.
+								classNames={{ messageList: "pt-12" }}
+								contextSize={contextSize}
+								// Opening this thread jumps the transcript to the newest
+								// message; the id is what makes that fire once per
+								// conversation rather than on every history rewrite.
+								conversationKey={convId ?? undefined}
+								currentUser={{
+									avatar: oidcUser?.picture,
+									id: myUserId ?? undefined,
+									name: oidcUser?.name || oidcUser?.email,
+								}}
+								// Launchpad: every openable app as a grid of icon tiles under
+								// the composer, on the start page only. Renders nothing when no
+								// enabled app contributes a UI surface.
+								emptyStateFooter={<AppLaunchpad />}
+								emptyStateHeader={
+									<EmptyStateHeader
+										logo={emptyStateLogo}
+										// The full Agent · Model · Thinking dropdown from the shared
+										// composer factory — the logo opens the identical menu the
+										// composer's settings trigger does, not just an agent list.
+										renderBody={composerRenderBody}
+										// The narrowed list: this logo IS a settings trigger, so it
+										// summarises exactly what the composer's own trigger does.
+										sections={composerTriggerSections}
+										// Ghost (temporary) chat: the empty-state greeting whispers
+										// "secretly" so it's obvious this thread won't be saved.
+										title={
+											ghostMode ? "What are we secretly doing?" : undefined
 										}
-									: undefined
-							}
-							historyLoading={historyLoading}
-							key={`${activeNode.url}-${chatId}`}
-							messageActions={contributedMessageActions}
-							messages={renderedMessages}
-							onBranch={activeConversationId ? handleBranch : undefined}
-							onClearQuote={() => setQuote(null)}
-							onContributedMessageAction={
-								activeConversationId
-									? handleContributedMessageAction
-									: undefined
-							}
-							onDraftChange={autosaveDraft}
-							onEditMessage={
-								activeConversationId ? handleEditMessage : undefined
-							}
-							onFeedback={activeConversationId ? handleFeedback : undefined}
-							onOpenContext={handleOpenContext}
-							onQuote={setQuote}
-							onRegenerateMessage={
-								activeConversationId ? handleRegenerateMessage : undefined
-							}
-							// Unconditional: a generation part is client-only, so retrying
-							// one needs no persisted conversation (unlike regenerate above).
-							onRetryGeneration={handleRetryGeneration}
-							onSelectVersion={
-								activeConversationId ? handleSelectVersion : undefined
-							}
-							onSend={handleComposerSubmit}
-							onSpeak={handleSpeak}
-							onStop={handleStop}
-							// Reactions need a persisted conversation to attach to and a
-							// realtime room to fan out over; a ghost chat has neither.
-							onToggleReaction={
-								activeConversationId && !ghostMode ? toggleReaction : undefined
-							}
-							quote={quote}
-							reactionsByMessage={reactionsByMessage}
-							seedDraft={initialSubmit ? undefined : initialPrompt}
-							showCopyToolbar
-							slots={{ InputBar: councilInputBar }}
-							status={effectiveStatus}
-							toolRenderers={EMPTY_TOOL_RENDERERS}
-							versions={versions}
-						/>
-					</WidgetHostContext.Provider>
-					{/* The Pinned summary sidebar (project ▸ branch ▸ worktree + git
+									/>
+								}
+								emptyStatePosition="center"
+								error={error ?? undefined}
+								feedback={feedback}
+								followUps={{
+									items: followUps.map((text, i) => ({
+										id: `followup-${i}`,
+										label: text,
+										value: text,
+									})),
+									// One click runs the suggested next prompt straight away.
+									onSelect: (item) => {
+										setFollowUps([]);
+										handleComposerSubmit({
+											role: "user",
+											content: item.value ?? item.label,
+										});
+									},
+								}}
+								// A restored tab must say "loading this conversation", never
+								// paint the new-chat greeting — that is what reads as "all my
+								// chats are gone" at boot. Both flags are false for a genuinely
+								// new chat (no conversation id), so the greeting is untouched
+								// there.
+								historyError={
+									historyFailed
+										? {
+												title: "Couldn't load this conversation",
+												description:
+													"This node didn't answer. Your messages are still on it — nothing has been lost.",
+												onRetry: retryHistoryLoad,
+											}
+										: undefined
+								}
+								historyLoading={historyLoading}
+								key={`${activeNode.url}-${chatId}`}
+								messageActions={contributedMessageActions}
+								messages={renderedMessages}
+								onBranch={activeConversationId ? handleBranch : undefined}
+								onClearQuote={() => setQuote(null)}
+								onContributedMessageAction={
+									activeConversationId
+										? handleContributedMessageAction
+										: undefined
+								}
+								onDraftChange={autosaveDraft}
+								onEditMessage={
+									activeConversationId ? handleEditMessage : undefined
+								}
+								onFeedback={activeConversationId ? handleFeedback : undefined}
+								onOpenContext={handleOpenContext}
+								onQuote={setQuote}
+								onRegenerateMessage={
+									activeConversationId ? handleRegenerateMessage : undefined
+								}
+								// Unconditional: a generation part is client-only, so retrying
+								// one needs no persisted conversation (unlike regenerate above).
+								onRetryGeneration={handleRetryGeneration}
+								onSelectVersion={
+									activeConversationId ? handleSelectVersion : undefined
+								}
+								onSend={handleComposerSubmit}
+								onSpeak={handleSpeak}
+								onStop={handleStop}
+								// Reactions need a persisted conversation to attach to and a
+								// realtime room to fan out over; a ghost chat has neither.
+								onToggleReaction={
+									activeConversationId && !ghostMode
+										? toggleReaction
+										: undefined
+								}
+								quote={quote}
+								reactionsByMessage={reactionsByMessage}
+								seedDraft={initialSubmit ? undefined : initialPrompt}
+								showCopyToolbar
+								slots={{ InputBar: councilInputBar }}
+								status={effectiveStatus}
+								toolRenderers={EMPTY_TOOL_RENDERERS}
+								versions={versions}
+							/>
+						</WidgetHostContext.Provider>
+						{/* The Pinned summary sidebar (project ▸ branch ▸ worktree + git
 					    changes + commit & push) is rendered by WorkspacePanels via
 					    renderPinnedSummary — docked column stacked with the right panel,
 					    auto-demoted to a floating overlay when the chat gets narrow. */}
-					{/* Multi-user presence: who else is in this conversation, and whether
+						{/* Multi-user presence: who else is in this conversation, and whether
 					    they are typing. Hidden when alone (single-user flow unchanged). */}
-					{presenceLabel && (
-						<div
-							aria-live="polite"
-							className="absolute top-14 left-1/2 z-10 -translate-x-1/2 rounded-full bg-popover/90 px-3 py-1 text-muted-foreground text-xs shadow-sm backdrop-blur"
-						>
-							{presenceLabel}
+						{presenceLabel && (
+							<div
+								aria-live="polite"
+								className="absolute top-14 left-1/2 z-10 -translate-x-1/2 rounded-full bg-popover/90 px-3 py-1 text-muted-foreground text-xs shadow-sm backdrop-blur"
+							>
+								{presenceLabel}
+							</div>
+						)}
+					</div>
+					{diffConvId && (
+						<div className="shrink-0 px-4 pb-3">
+							<DiffReviewPane runId={diffConvId} target={chatTarget} />
 						</div>
 					)}
 				</div>
-				{diffConvId && (
-					<div className="shrink-0 px-4 pb-3">
-						<DiffReviewPane runId={diffConvId} target={chatTarget} />
+				<BtwOverlay onClose={() => setBtwState(null)} state={btwState} />
+				{activePluginNote && (
+					<div className="fixed bottom-28 left-1/2 z-50 w-[min(40rem,90vw)] -translate-x-1/2 rounded-lg bg-popover p-3 text-popover-foreground text-sm shadow-lg">
+						<div className="mb-1 flex items-center justify-between">
+							<span className="font-medium text-muted-foreground text-xs">
+								Double-check
+							</span>
+							<button
+								className="text-muted-foreground text-xs hover:text-foreground"
+								onClick={() =>
+									setDismissedPluginNotes((prev) => {
+										const next = new Set(prev);
+										next.add(activePluginNote.id);
+										return next;
+									})
+								}
+								type="button"
+							>
+								Dismiss
+							</button>
+						</div>
+						<p className="whitespace-pre-wrap">{activePluginNote.text}</p>
 					</div>
 				)}
-			</div>
-			<BtwOverlay onClose={() => setBtwState(null)} state={btwState} />
-			{activePluginNote && (
-				<div className="fixed bottom-28 left-1/2 z-50 w-[min(40rem,90vw)] -translate-x-1/2 rounded-lg bg-popover p-3 text-popover-foreground text-sm shadow-lg">
-					<div className="mb-1 flex items-center justify-between">
-						<span className="font-medium text-muted-foreground text-xs">
-							Double-check
-						</span>
-						<button
-							className="text-muted-foreground text-xs hover:text-foreground"
-							onClick={() =>
-								setDismissedPluginNotes((prev) => {
-									const next = new Set(prev);
-									next.add(activePluginNote.id);
-									return next;
-								})
-							}
-							type="button"
-						>
-							Dismiss
-						</button>
-					</div>
-					<p className="whitespace-pre-wrap">{activePluginNote.text}</p>
-				</div>
-			)}
-		</WorkspacePanels>
+			</WorkspacePanels>
+		</ArtifactHostContext.Provider>
 	);
 }

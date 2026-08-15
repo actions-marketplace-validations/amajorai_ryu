@@ -19,6 +19,12 @@ import {
 } from "@ryu/ui/components/item";
 import { Label } from "@ryu/ui/components/label";
 import PageHeader from "@ryu/ui/components/page-header";
+import {
+	ActivityArea,
+	FeatureMixBar,
+	RankedList,
+	TransportDonut,
+} from "@ryu/ui/components/profile-charts";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Switch } from "@ryu/ui/components/switch";
 import {
@@ -36,9 +42,8 @@ import {
 	Cpu,
 	Gauge,
 	Globe2,
-	Layers,
 	Lock,
-	MessageSquare,
+	Network,
 	Plug,
 	Sparkles,
 	Trophy,
@@ -75,7 +80,6 @@ export type ProfileTab =
 	| "profile"
 	| "stats"
 	| "account"
-	| "billing"
 	| "referrals"
 	| "notifications"
 	| "connections"
@@ -231,13 +235,11 @@ export interface ProfileStatsPanelProps {
 
 function HeroStat({ label, value }: { label: string; value: string }) {
 	return (
-		<div className="min-w-0 flex-1 border-border/70 border-r px-4 py-3 text-center last:border-r-0">
-			<div className="truncate font-semibold text-foreground text-sm">
+		<div className="flex flex-col gap-1 rounded-4xl bg-card p-3 text-card-foreground shadow-sm">
+			<span className="truncate font-heading font-semibold text-foreground text-lg tabular-nums">
 				{value}
-			</div>
-			<div className="mt-0.5 truncate text-muted-foreground text-xs">
-				{label}
-			</div>
+			</span>
+			<span className="truncate text-muted-foreground text-xs">{label}</span>
 		</div>
 	);
 }
@@ -247,44 +249,6 @@ function InsightRow({ label, value }: { label: string; value: string }) {
 		<div className="flex items-center justify-between gap-4 text-sm">
 			<span className="text-muted-foreground">{label}</span>
 			<span className="truncate font-medium text-foreground">{value}</span>
-		</div>
-	);
-}
-
-function TopList({
-	empty,
-	icon,
-	items,
-	title,
-}: {
-	empty: string;
-	icon: ReactNode;
-	items: RankedProfileStat[];
-	title: string;
-}) {
-	return (
-		<div className="rounded-lg border bg-card p-4">
-			<div className="mb-3 flex items-center gap-2 font-medium text-sm">
-				{icon}
-				{title}
-			</div>
-			{items.length > 0 ? (
-				<div className="space-y-2">
-					{items.map((item) => (
-						<div
-							className="flex items-center justify-between gap-3 text-sm"
-							key={item.id}
-						>
-							<span className="truncate font-medium">{item.id}</span>
-							<span className="shrink-0 text-muted-foreground">
-								{formatCompact(item.count)} runs
-							</span>
-						</div>
-					))}
-				</div>
-			) : (
-				<p className="text-muted-foreground text-sm">{empty}</p>
-			)}
 		</div>
 	);
 }
@@ -307,7 +271,7 @@ function UnlockCard({
 	const isProgressive = feature.tier === "progressive";
 
 	return (
-		<div className="flex flex-col gap-2 rounded-lg border bg-card p-4 text-card-foreground">
+		<div className="flex flex-col gap-2 rounded-4xl bg-card p-4 text-card-foreground shadow-sm">
 			<div className="flex items-start justify-between gap-2">
 				<p className="font-medium text-sm">{feature.title}</p>
 				<Badge variant={tierBadgeVariant(feature.tier)}>
@@ -405,12 +369,6 @@ export function ProfileStatsPanel({
 	const joined = formatJoined(summary?.joinedAt);
 	const balance = pointsBalance ?? summary?.pointsBalance ?? 0;
 	const unlocked = new Set(unlockedKeys);
-	const chatRuns = featureTotals?.chat ?? 0;
-	const transportTotal =
-		(insights?.transport.acp ?? 0) +
-		(insights?.transport.gateway ?? 0) +
-		(insights?.transport.openAiCompat ?? 0) +
-		(insights?.transport.other ?? 0);
 
 	return (
 		<div className="space-y-6">
@@ -438,30 +396,25 @@ export function ProfileStatsPanel({
 				</div>
 			</section>
 
-			<div className="overflow-hidden rounded-lg border bg-card">
-				<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
-					<HeroStat
-						label="Lifetime tokens"
-						value={formatCompact(totalTokens)}
-					/>
-					<HeroStat
-						label="Total spend"
-						value={formatCost(totals?.costMicroUsd ?? 0)}
-					/>
-					<HeroStat label="Agent hours" value={agentHours.toFixed(1)} />
-					<HeroStat
-						label="Active days"
-						value={formatCompact(insights?.activeDays ?? 0)}
-					/>
-					<HeroStat
-						label="Current streak"
-						value={`${summary?.streak.current ?? 0} days`}
-					/>
-					<HeroStat
-						label="Longest streak"
-						value={`${summary?.streak.longest ?? 0} days`}
-					/>
-				</div>
+			<div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+				<HeroStat label="Lifetime tokens" value={formatCompact(totalTokens)} />
+				<HeroStat
+					label="Total spend"
+					value={formatCost(totals?.costMicroUsd ?? 0)}
+				/>
+				<HeroStat label="Agent hours" value={agentHours.toFixed(1)} />
+				<HeroStat
+					label="Active days"
+					value={formatCompact(insights?.activeDays ?? 0)}
+				/>
+				<HeroStat
+					label="Current streak"
+					value={`${summary?.streak.current ?? 0} days`}
+				/>
+				<HeroStat
+					label="Longest streak"
+					value={`${summary?.streak.longest ?? 0} days`}
+				/>
 			</div>
 
 			<Card>
@@ -470,7 +423,56 @@ export function ProfileStatsPanel({
 				</CardContent>
 			</Card>
 
-			<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+			<div className="grid gap-3 lg:grid-cols-3">
+				<Card>
+					<CardContent>
+						<div className="mb-2 flex items-center gap-2 font-medium text-sm">
+							<Activity className="size-4" />
+							Recent activity
+						</div>
+						<ActivityArea data={usage} days={30} formatCount={formatCompact} />
+					</CardContent>
+				</Card>
+				<Card>
+					<CardContent>
+						<div className="mb-2 flex items-center gap-2 font-medium text-sm">
+							<Network className="size-4" />
+							Where your usage comes from
+						</div>
+						<TransportDonut
+							formatCount={formatCompact}
+							transport={
+								insights?.transport ?? {
+									acp: 0,
+									gateway: 0,
+									openAiCompat: 0,
+									other: 0,
+								}
+							}
+						/>
+					</CardContent>
+				</Card>
+				<Card>
+					<CardContent>
+						<div className="mb-2 flex items-center gap-2 font-medium text-sm">
+							<Cpu className="size-4" />
+							Usage by feature
+						</div>
+						<FeatureMixBar
+							featureTotals={
+								featureTotals ?? {
+									agentSeconds: 0,
+									chat: 0,
+									island: 0,
+									predictAccepted: 0,
+								}
+							}
+						/>
+					</CardContent>
+				</Card>
+			</div>
+
+			<div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 				<StatCard
 					icon={<Zap className="size-4" />}
 					sub="avg / active day"
@@ -496,31 +498,20 @@ export function ProfileStatsPanel({
 					value={insights?.favoriteModel ?? "Not enough data"}
 				/>
 				<StatCard
-					icon={<MessageSquare className="size-4" />}
-					title="Chat runs"
-					value={formatCompact(chatRuns)}
-				/>
-				<StatCard
 					icon={<Activity className="size-4" />}
 					title="Sessions"
 					value={formatCompact(totals?.sessionCount ?? 0)}
 				/>
 				<StatCard
-					icon={<Cpu className="size-4" />}
-					sub="accepted"
-					title="Autocomplete"
-					value={formatCompact(featureTotals?.predictAccepted ?? 0)}
-				/>
-				<StatCard
-					icon={<Layers className="size-4" />}
-					sub="Gateway + ACP + app"
-					title="Observed runs"
-					value={formatCompact(transportTotal)}
+					icon={<Coins className="size-4" />}
+					sub="lifetime"
+					title="Requests"
+					value={formatCompact(totals?.requestCount ?? 0)}
 				/>
 			</div>
 
 			<div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-				<div className="rounded-lg border bg-card p-4">
+				<div className="rounded-4xl bg-card p-4 shadow-sm">
 					<div className="mb-3 flex items-center gap-2 font-medium text-sm">
 						<CalendarDays className="size-4" />
 						Activity insights
@@ -548,8 +539,9 @@ export function ProfileStatsPanel({
 						/>
 					</div>
 				</div>
-				<TopList
+				<RankedList
 					empty="No model usage recorded yet."
+					formatCount={formatCompact}
 					icon={<Bot className="size-4" />}
 					items={insights?.topModels ?? []}
 					title="Most used models"
@@ -557,14 +549,16 @@ export function ProfileStatsPanel({
 			</div>
 
 			<div className="grid gap-4 lg:grid-cols-2">
-				<TopList
+				<RankedList
 					empty="No skill usage recorded yet."
+					formatCount={formatCompact}
 					icon={<Sparkles className="size-4" />}
 					items={insights?.topSkills ?? []}
 					title="Most used skills"
 				/>
-				<TopList
+				<RankedList
 					empty="No plugin usage recorded yet."
+					formatCount={formatCompact}
 					icon={<Plug className="size-4" />}
 					items={insights?.topPlugins ?? []}
 					title="Most used plugins"
@@ -632,7 +626,6 @@ export interface ProfileSettingsProps {
 	emailChangeStatusSlot?: ReactNode;
 	/** Connections tab. */
 	googleConnected?: boolean;
-	hasProSubscription?: boolean;
 	isLoadingSubscription?: boolean;
 	isPasswordStatusLoading?: boolean;
 	isProfilePublic?: boolean;
@@ -651,15 +644,6 @@ export interface ProfileSettingsProps {
 	mergeStatusSlot?: ReactNode;
 	/** Profile tab. */
 	name?: string;
-	onBillingAction?: () => void;
-	/**
-	 * Cancellation, separated from {@link ProfileSettingsProps.onBillingAction}
-	 * because they are not the same act: the billing action opens the portal for
-	 * routine management (seats, payment method, plan changes), while this one is
-	 * gated behind a destructive confirmation on the surfaces that have one.
-	 * Omitted — by a surface with no cancel flow — renders no second button.
-	 */
-	onCancelPlan?: () => void;
 	onConnectGoogle?: () => void;
 	onDeleteAccount?: () => void;
 	onNameChange?: (name: string) => void;
@@ -670,8 +654,6 @@ export interface ProfileSettingsProps {
 	onTabChange?: (tab: string) => void;
 	onUnlinkGoogle?: () => void;
 	onUsernameChange?: (username: string) => void;
-	/** Billing tab. */
-	planLabel?: string;
 	publicProfileHref?: string;
 	referralsSlot?: ReactNode;
 	/** App-local Better-Auth tabs (injected by the live page). */
@@ -720,10 +702,6 @@ export default function ProfileSettings({
 	changePasswordSlot,
 	twoFactorSlot,
 	onDeleteAccount = noop,
-	planLabel = "Free",
-	hasProSubscription = false,
-	onBillingAction = noop,
-	onCancelPlan,
 	referralsSlot,
 	isSubscribed = true,
 	isLoadingSubscription = false,
@@ -748,7 +726,6 @@ export default function ProfileSettings({
 					<TabsTrigger value="profile">Profile</TabsTrigger>
 					{statsSlot ? <TabsTrigger value="stats">Stats</TabsTrigger> : null}
 					<TabsTrigger value="account">Account</TabsTrigger>
-					<TabsTrigger value="billing">Billing</TabsTrigger>
 					<TabsTrigger value="referrals">Referrals</TabsTrigger>
 					<TabsTrigger value="notifications">Notifications</TabsTrigger>
 					<TabsTrigger value="connections">Connections</TabsTrigger>
@@ -836,7 +813,7 @@ export default function ProfileSettings({
 								</div>
 							</div>
 
-							<div className="rounded-lg border bg-card p-4">
+							<div className="rounded-4xl bg-card p-4 shadow-sm">
 								<div className="flex items-start justify-between gap-4">
 									<div className="flex gap-3">
 										<div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
@@ -973,36 +950,6 @@ export default function ProfileSettings({
 									</ItemActions>
 								</Item>
 							</ItemGroup>
-						</CardContent>
-					</Card>
-				</TabsContent>
-
-				<TabsContent className="mt-6 space-y-6" value="billing">
-					<Card>
-						<CardContent className="space-y-4">
-							<div className="flex items-center justify-between">
-								<div className="space-y-1">
-									<p className="font-medium">Current Plan</p>
-									<p className="text-muted-foreground text-sm">{planLabel}</p>
-								</div>
-								{/* Two buttons on the paid branch, not one. "Manage
-								    Subscription" opens the portal directly; cancelling is
-								    its own control because the surface that owns it puts a
-								    destructive confirmation in front of it, and that ritual
-								    must not stand in front of updating a card. */}
-								<div className="flex items-center gap-2">
-									{hasProSubscription && onCancelPlan ? (
-										<Button onClick={onCancelPlan} variant="ghost">
-											Cancel plan
-										</Button>
-									) : null}
-									<Button onClick={onBillingAction}>
-										{hasProSubscription
-											? "Manage Subscription"
-											: "Upgrade to Pro"}
-									</Button>
-								</div>
-							</div>
 						</CardContent>
 					</Card>
 				</TabsContent>

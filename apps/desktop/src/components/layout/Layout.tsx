@@ -67,6 +67,7 @@ import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
 import { usePluginThemeSync } from "@/src/hooks/useContributedThemes.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
+import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
 import { useMeetingStream } from "@/src/hooks/useMeetingStream.ts";
 import { useMonitorAlertsStream } from "@/src/hooks/useMonitorAlertsStream.ts";
@@ -264,6 +265,11 @@ function LayoutContent({
 	// One app-wide subscription to Core's download SSE stream → downloads store,
 	// powering the global DownloadCenter overlay below.
 	useDownloadsStream();
+
+	// One app-wide feed of live activities (agent runs / downloads / approvals /
+	// meetings / contributed) → the shared live-activity store that powers the
+	// empty-shell "Dynamic Island" dock and the sidebar Live section.
+	useLiveActivities();
 
 	// One app-wide subscription to Core's monitor-alert SSE stream → in-app toast
 	// + native OS notification when a watched site changes.

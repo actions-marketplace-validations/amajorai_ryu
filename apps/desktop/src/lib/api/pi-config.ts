@@ -32,6 +32,9 @@ export interface PiProvider {
 	active?: boolean;
 	/** Pi `api` type (openai-completions / anthropic-messages / ...). */
 	api: string;
+	/** Every account this provider holds in the sealed vault (labels only —
+	 *  never a credential). Lets the picker list + switch sign-ins. */
+	accounts?: PiAccount[];
 	/** Environment variable Pi reads for this provider's key (may be empty). */
 	authEnv: string;
 	/** "subscription" | "api-key" | "none" (gateway). */
@@ -88,6 +91,51 @@ export function isPiModelEnabled(
 	modelId: string
 ): boolean {
 	return modelOverrides?.[modelId] !== false;
+}
+
+/** One account a Pi provider holds in the sealed vault (labels only). */
+export interface PiAccount {
+	accountId: string;
+	/** Display name (email, provider label, or "Account N"). */
+	label: string;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Whether this is the account Pi will use this turn. */
+	active: boolean;
+	/** Epoch millis of the last write. */
+	updatedAt: number;
+}
+
+/** Switch the active account for a provider. Returns the refreshed catalog. */
+export async function switchProviderAccount(
+	target: ApiTarget,
+	providerId: string,
+	accountId: string
+): Promise<PiCatalog> {
+	return await request<PiCatalog>(
+		target,
+		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/switch`,
+		{
+			method: "POST",
+			body: { accountId },
+		}
+	);
+}
+
+/** Remove an account from a provider. Returns the refreshed catalog. */
+export async function removeProviderAccount(
+	target: ApiTarget,
+	providerId: string,
+	accountId: string
+): Promise<PiCatalog> {
+	return await request<PiCatalog>(
+		target,
+		`/api/pi-config/providers/${encodeURIComponent(providerId)}/accounts/remove`,
+		{
+			method: "POST",
+			body: { accountId },
+		}
+	);
 }
 
 /**

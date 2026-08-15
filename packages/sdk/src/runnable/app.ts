@@ -223,6 +223,7 @@ export function defineApp(options: DefineAppOptions): PluginManifest {
 		sidebar_sections: [],
 		sidebar_buttons: [],
 		dock_panels: [],
+		live_activities: [],
 		// Empty for the same reason as every sibling family above: this builder
 		// synthesises `widgets` from the app's own runnables and nothing else, and
 		// takes no `contributes` passthrough. An app that wants to declare language

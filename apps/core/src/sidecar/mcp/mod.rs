@@ -1259,7 +1259,7 @@ pub struct ServerSummary {
 /// Name under which the Ghost desktop-automation MCP server (U14) is registered.
 /// Ghost declares this server under `mcp_servers` in its plugin manifest
 /// (fixtures/ghost.manifest.json) and it registers on activation. Ghost is
-/// Windows-first; on other OSes the binary may be absent and the registry degrades
+/// cross-platform; on a platform where the binary is absent the registry degrades
 /// gracefully (a failed spawn is logged-and-skipped, never hiding other servers).
 ///
 /// Canonical server-name constant. Since Ghost moved off `builtin_servers()` its

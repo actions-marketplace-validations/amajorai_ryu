@@ -15,9 +15,27 @@ import {
 	StatCard,
 } from "@ryu/ui/components/contributions-graph";
 import { EmployeeBadge } from "@ryu/ui/components/employee-badge";
+import {
+	ActivityArea,
+	FeatureMixBar,
+	RankedList,
+	TransportDonut,
+} from "@ryu/ui/components/profile-charts";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format, subDays } from "date-fns";
+import {
+	Activity,
+	Bot,
+	CalendarDays,
+	Cpu,
+	CreditCard,
+	Gauge,
+	Plug,
+	Sparkles,
+	Trophy,
+	Zap,
+} from "lucide-react";
 import { useTheme } from "next-themes";
 import { useMemo, useState } from "react";
 import { sileo } from "sileo";
@@ -165,11 +183,6 @@ export function StatsTab() {
 		(profile?.totals.inputTokens ?? 0) + (profile?.totals.outputTokens ?? 0);
 	const agentHours = (profile?.totals.agentSeconds ?? 0) / SECONDS_PER_HOUR;
 	const insights = stats?.insights;
-	const observedRuns =
-		(insights?.transport.gateway ?? 0) +
-		(insights?.transport.acp ?? 0) +
-		(insights?.transport.openAiCompat ?? 0) +
-		(insights?.transport.other ?? 0);
 
 	const handleShareWrapped = () => {
 		if (!userId) {
@@ -271,68 +284,118 @@ export function StatsTab() {
 				<SettingsCard>
 					<ContributionsGraph data={heatmapData} title="Daily usage" />
 				</SettingsCard>
+				<SettingsCard>
+					<span className="font-medium text-sm">Last 30 days</span>
+					<ActivityArea
+						data={usageDays}
+						days={30}
+						formatCount={formatNumber}
+					/>
+				</SettingsCard>
 			</SettingsSection>
 
-			<SettingsSection title="Lifetime stats">
-				<div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-					<StatCard title="Total tokens" value={formatNumber(totalTokens)} />
-					<StatCard title="Agent hours" value={agentHours.toFixed(1)} />
+			<SettingsSection title="Lifetime">
+				<div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
 					<StatCard
+						icon={<Zap className="size-4" />}
+						sub="input + output"
+						title="Total tokens"
+						value={formatNumber(totalTokens)}
+					/>
+					<StatCard
+						icon={<Cpu className="size-4" />}
+						sub="agent runtime"
+						title="Agent hours"
+						value={agentHours.toFixed(1)}
+					/>
+					<StatCard
+						icon={<CreditCard className="size-4" />}
 						title="Total spend"
 						value={formatCost(profile?.totals.costMicroUsd ?? 0)}
 					/>
 					<StatCard
+						icon={<Activity className="size-4" />}
 						title="Requests"
 						value={formatNumber(profile?.totals.requestCount ?? 0)}
 					/>
+				</div>
+
+				<div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+					<SettingsCard>
+						<span className="font-medium text-sm">Where your usage comes from</span>
+						<TransportDonut
+							formatCount={formatNumber}
+							transport={
+								stats?.insights.transport ?? {
+									acp: 0,
+									gateway: 0,
+									openAiCompat: 0,
+									other: 0,
+								}
+							}
+						/>
+					</SettingsCard>
+					<SettingsCard>
+						<span className="font-medium text-sm">Usage by feature</span>
+						<FeatureMixBar
+							featureTotals={
+								stats?.byFeatureTotals ?? {
+									agentSeconds: 0,
+									chat: 0,
+									island: 0,
+									predictAccepted: 0,
+								}
+							}
+						/>
+					</SettingsCard>
+				</div>
+
+				<div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
 					<StatCard
+						icon={<CalendarDays className="size-4" />}
 						title="Active days"
 						value={formatNumber(insights?.activeDays ?? 0)}
 					/>
 					<StatCard
+						icon={<Trophy className="size-4" />}
+						sub={insights?.peakDay?.day ?? "none yet"}
 						title="Peak day"
 						value={formatNumber(insights?.peakDay?.tokens ?? 0)}
 					/>
 					<StatCard
+						icon={<Gauge className="size-4" />}
+						sub="best effort"
 						title="Peak hour"
-						value={
-							insights?.peakHourUtc ? `${insights.peakHourUtc}:00 UTC` : "—"
-						}
+						value={insights?.peakHourUtc ? `${insights.peakHourUtc}:00 UTC` : "—"}
 					/>
 					<StatCard
+						icon={<Bot className="size-4" />}
 						title="Favourite model"
 						value={insights?.favoriteModel ?? "—"}
-					/>
-					<StatCard
-						title="Observed ACP runs"
-						value={formatNumber(insights?.transport.acp ?? 0)}
-					/>
-					<StatCard title="Observed runs" value={formatNumber(observedRuns)} />
-					<StatCard
-						title="Island interactions"
-						value={formatNumber(stats?.byFeatureTotals.island ?? 0)}
-					/>
-					<StatCard
-						title="Autocomplete accepted"
-						value={formatNumber(stats?.byFeatureTotals.predictAccepted ?? 0)}
 					/>
 				</div>
 			</SettingsSection>
 
 			<SettingsSection title="Most used">
 				<div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-					<LeaderboardCard
+					<RankedList
 						empty="No model usage recorded yet."
+						formatCount={formatNumber}
+						icon={<Bot className="size-4" />}
 						items={insights?.topModels ?? []}
 						title="Models"
 					/>
-					<LeaderboardCard
+					<RankedList
 						empty="No skill usage recorded yet."
+						formatCount={formatNumber}
+						icon={<Sparkles className="size-4" />}
 						items={insights?.topSkills ?? []}
 						title="Skills"
 					/>
-					<LeaderboardCard
+					<RankedList
 						empty="No plugin usage recorded yet."
+						formatCount={formatNumber}
+						icon={<Plug className="size-4" />}
 						items={insights?.topPlugins ?? []}
 						title="Plugins"
 					/>
@@ -435,39 +498,6 @@ function TeamBadge({ agent, onSelect, stats }: TeamBadgeProps) {
 				{ label: "Streak", value: `${stats.streak.current}d` },
 			]}
 		/>
-	);
-}
-
-function LeaderboardCard({
-	empty,
-	items,
-	title,
-}: {
-	empty: string;
-	items: Array<{ count: number; id: string }>;
-	title: string;
-}) {
-	return (
-		<SettingsCard className="flex flex-col gap-3">
-			<span className="font-medium text-sm">{title}</span>
-			{items.length > 0 ? (
-				<div className="space-y-2">
-					{items.map((item) => (
-						<div
-							className="flex items-center justify-between gap-3 text-sm"
-							key={item.id}
-						>
-							<span className="truncate font-medium">{item.id}</span>
-							<span className="shrink-0 text-muted-foreground">
-								{formatNumber(item.count)} runs
-							</span>
-						</div>
-					))}
-				</div>
-			) : (
-				<span className="text-muted-foreground text-sm">{empty}</span>
-			)}
-		</SettingsCard>
 	);
 }
 

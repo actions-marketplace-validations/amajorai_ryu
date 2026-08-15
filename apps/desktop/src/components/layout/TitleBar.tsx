@@ -119,6 +119,7 @@ import { OverflowTooltip } from "./overflow-tooltip.tsx";
 import { SeasonalParticles } from "./SeasonalEffects.tsx";
 import { SplitPresetMenuItems } from "./SplitPresetMenu.tsx";
 import { TabEntityMenuSection } from "./tab-entity-menu.tsx";
+import { TabRenameInput, useTabRename } from "./tab-rename.tsx";
 import { useTabDnd, useTabDragProps } from "./tabDnd.tsx";
 import { pathScrollsUnderTitlebar } from "./titlebarScroll.ts";
 
@@ -851,6 +852,15 @@ function RegularTab({
 	// Active tabs inside a group use a lighter fill so they read against the
 	// group's tinted bracket instead of clashing with it.
 	const activeBg = inGroup ? "bg-background/70" : "bg-muted";
+	const {
+		isEditing,
+		canRename,
+		startEditing,
+		commitEditing,
+		cancelEditing,
+		draft,
+		setDraft,
+	} = useTabRename(tab);
 
 	return (
 		<ContextMenu>
@@ -911,48 +921,62 @@ function RegularTab({
 						/>
 					</button>
 
-					{/* Title — activates the tab (and reloads it if unloaded) */}
+					{/* Title — activates the tab (and reloads it if unloaded); a
+					    double-click starts an inline rename for a renamable tab. */}
 					<button
 						className={cn(
 							"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
 							isActive ? "text-foreground" : "text-muted-foreground"
 						)}
 						onClick={() => activateTab(tab.id)}
+						onDoubleClick={canRename ? startEditing : undefined}
 						type="button"
 					>
-						{hasNodeOverride && (
-							<Tooltip>
-								<TooltipTrigger
-									render={
-										<span
-											aria-hidden
-											className="mr-1.5 size-1.5 shrink-0 rounded-full bg-success"
+						{isEditing ? (
+							<TabRenameInput
+								className="text-xs leading-none"
+								onCancel={cancelEditing}
+								onChange={setDraft}
+								onCommit={commitEditing}
+								value={draft}
+							/>
+						) : (
+							<>
+								{hasNodeOverride && (
+									<Tooltip>
+										<TooltipTrigger
+											render={
+												<span
+													aria-hidden
+													className="mr-1.5 size-1.5 shrink-0 rounded-full bg-success"
+												/>
+											}
 										/>
+										<TooltipContent>
+											Connected to {capitalize(overrideName)}
+										</TooltipContent>
+									</Tooltip>
+								)}
+								{/* One label in both states: a streaming title shimmers on the
+								    SAME clipped line, so an over-long busy title dissolves at the
+								    edge exactly like a resting one instead of losing the fade. */}
+								<OverflowTooltip
+									className={cn(
+										"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
+										tab.unloaded && "italic"
+									)}
+									fade
+									forceShow={tab.unloaded}
+									shimmer={busy && !tab.unloaded}
+									text={tab.title}
+									tooltip={
+										tab.unloaded
+											? `${tab.title} (unloaded — click to reload)`
+											: undefined
 									}
 								/>
-								<TooltipContent>
-									Connected to {capitalize(overrideName)}
-								</TooltipContent>
-							</Tooltip>
+							</>
 						)}
-						{/* One label in both states: a streaming title shimmers on the
-						    SAME clipped line, so an over-long busy title dissolves at the
-						    edge exactly like a resting one instead of losing the fade. */}
-						<OverflowTooltip
-							className={cn(
-								"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
-								tab.unloaded && "italic"
-							)}
-							fade
-							forceShow={tab.unloaded}
-							shimmer={busy && !tab.unloaded}
-							text={tab.title}
-							tooltip={
-								tab.unloaded
-									? `${tab.title} (unloaded — click to reload)`
-									: undefined
-							}
-						/>
 					</button>
 				</div>
 			</ContextMenuTrigger>

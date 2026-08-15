@@ -1,6 +1,9 @@
 //! stable-diffusion.cpp downloader: fetches the prebuilt server binary (plus the
-//! `stable-diffusion.dll` it links against) and a default, CPU-friendly diffusion
-//! model so image generation works right after install.
+//! `stable-diffusion.dll` it links against) and the default diffusion model(s)
+//! so image generation works right after install. The image default is SDXL
+//! base (multi-file: UNet GGUF + CLIP-L + CLIP-G + VAE); the video default is
+//! Wan2.1 T2V 1.3B (multi-file: transformer GGUF + umt5-xxl + VAE), fetched
+//! lazily on first use because it is ~5 GB and GPU-preferred.
 //!
 //! Like whisper.cpp, stable-diffusion.cpp only publishes prebuilt **Windows**
 //! binaries in its GitHub releases. The `sd-*-bin-win-avx2-x64.zip` archive
@@ -42,14 +45,56 @@ const PLATFORM_ASSET: &str = "sd-master-c2df4e1-bin-Darwin-macOS-15.7.7-arm64.zi
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PLATFORM_ASSET: &str = "sd-master-c2df4e1-bin-Linux-Ubuntu-24.04-x86_64.zip";
 
-/// Default diffusion model: Stable Diffusion v1.4, Q8_0-quantized GGUF (~1.76 GB).
-/// The smallest mainstream text-to-image checkpoint that runs on CPU — a sensible
-/// default, not a lock. Override with `RYU_SD_MODEL` or install another via the
-/// model catalog.
-const DEFAULT_MODEL_FILE: &str = "stable-diffusion-v1-4-Q8_0.gguf";
+/// Default diffusion model: SDXL base, Q8_0-quantized UNet GGUF (~2.8 GB) plus
+/// its standalone CLIP-L / CLIP-G text encoders and VAE. SDXL is the quality
+/// bar Unsloth ships as a baseline and runs on the same engine. It is multi-file
+/// because the canonical single-file SDXL GGUF (second-state) is auth-gated on
+/// Hugging Face; this non-gated mirror publishes the UNet GGUF next to fp16
+/// CLIPs + VAE. `sd-server` loads it with `--clip_l --clip_g --vae`.
+/// A sensible default, not a lock — override with `RYU_SD_MODEL` or install
+/// another diffusion GGUF via the model catalog.
+const DEFAULT_MODEL_FILE: &str = "sdxl_base_1.0_Q8_0.gguf";
 const DEFAULT_MODEL_URL: &str =
-    "https://huggingface.co/second-state/stable-diffusion-v-1-4-GGUF/resolve/main/stable-diffusion-v1-4-Q8_0.gguf";
-const MODEL_STORE_KEY: &str = "sd-model:stable-diffusion-v1-4-q8_0";
+    "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/sdxl_base_1.0_Q8_0.gguf";
+const DEFAULT_CLIP_L_FILE: &str = "sdxl_clip_l.safetensors";
+const DEFAULT_CLIP_L_URL: &str =
+    "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/clip/sdxl_clip_l.safetensors";
+const DEFAULT_CLIP_G_FILE: &str = "sdxl_clip_g.safetensors";
+const DEFAULT_CLIP_G_URL: &str =
+    "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/clip/sdxl_clip_g.safetensors";
+const DEFAULT_VAE_FILE: &str = "sdxl_vae.safetensors";
+const DEFAULT_VAE_URL: &str =
+    "https://huggingface.co/HyperX-Sentience/SDXL-GGUF/resolve/main/vae/sdxl_vae.safetensors";
+const MODEL_STORE_KEY: &str = "sd-model:sdxl-base-1.0-q8_0";
+const CLIP_L_STORE_KEY: &str = "sd-model:sdxl-clip-l-fp16";
+const CLIP_G_STORE_KEY: &str = "sd-model:sdxl-clip-g-fp16";
+const VAE_STORE_KEY: &str = "sd-model:sdxl-vae-fp16";
+
+/// Default video model: Wan2.1 T2V 1.3B — the smallest real text-to-video model
+/// stable-diffusion.cpp supports (Apache-2.0). Like the image default it is
+/// multi-file: the diffusion transformer GGUF (Q8_0, ~1.5 GB) plus the umt5-xxl
+/// text encoder (~3.7 GB Q5_K_M) and the Wan 2.1 VAE (~0.35 GB). Video is
+/// GPU-preferred and ~5 GB in total, so it is NOT bundled at onboarding — it is
+/// downloaded lazily the first time the active diffusion model is a video model
+/// (see `StableDiffusionManager::start`). `sd-server` loads it with
+/// `--t5xxl --vae`.
+pub const VIDEO_MODEL_FILE: &str = "wan2.1_t2v_1.3b-q8_0.gguf";
+const VIDEO_MODEL_URL: &str =
+    "https://huggingface.co/calcuis/wan-1.3b-gguf/resolve/main/wan2.1_t2v_1.3b-q8_0.gguf";
+pub const VIDEO_T5XXL_FILE: &str = "umt5-xxl-encoder-Q5_K_M.gguf";
+const VIDEO_T5XXL_URL: &str =
+    "https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q5_K_M.gguf";
+pub const VIDEO_VAE_FILE: &str = "wan_2.1_vae.safetensors";
+const VIDEO_VAE_URL: &str = "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors";
+const VIDEO_MODEL_STORE_KEY: &str = "sd-video:wan2.1-t2v-1.3b-q8_0";
+const VIDEO_T5XXL_STORE_KEY: &str = "sd-video:umt5-xxl-q5-k-m";
+const VIDEO_VAE_STORE_KEY: &str = "sd-video:wan2.1-vae";
+
+/// Local stems (GGUF filename minus `.gguf`) of the default image and video
+/// models. These are the values the `local-diffusion-model` preference stores,
+/// and what the spawn side matches against to attach companion files.
+pub const IMAGE_DEFAULT_STEM: &str = "sdxl_base_1.0_Q8_0";
+pub const VIDEO_DEFAULT_STEM: &str = "wan2.1_t2v_1.3b-q8_0";
 
 fn server_binary_path() -> PathBuf {
     let name = if cfg!(target_os = "windows") {
@@ -62,6 +107,30 @@ fn server_binary_path() -> PathBuf {
 
 pub fn default_model_path() -> PathBuf {
     ryu_dir().join("models").join(DEFAULT_MODEL_FILE)
+}
+
+pub fn clip_l_path() -> PathBuf {
+    ryu_dir().join("models").join(DEFAULT_CLIP_L_FILE)
+}
+
+pub fn clip_g_path() -> PathBuf {
+    ryu_dir().join("models").join(DEFAULT_CLIP_G_FILE)
+}
+
+pub fn vae_path() -> PathBuf {
+    ryu_dir().join("models").join(DEFAULT_VAE_FILE)
+}
+
+pub fn video_model_path() -> PathBuf {
+    ryu_dir().join("models").join(VIDEO_MODEL_FILE)
+}
+
+pub fn video_t5xxl_path() -> PathBuf {
+    ryu_dir().join("models").join(VIDEO_T5XXL_FILE)
+}
+
+pub fn video_vae_path() -> PathBuf {
+    ryu_dir().join("models").join(VIDEO_VAE_FILE)
 }
 
 /// URL of the prebuilt sd-server archive for this platform (CPU build — no CUDA,
@@ -96,14 +165,15 @@ impl StableDiffusionDownloader {
         self
     }
 
-    /// Ensure both the sd-server binary and the default model are present.
-    /// Returns the installed version string on success.
+    /// Ensure both the sd-server binary and the default image model are present.
+    /// Returns the installed version string on success. The video model is NOT
+    /// fetched here — see [`Self::ensure_video_default`] (lazy, on first use).
     pub async fn ensure_installed(
         &self,
         downloads: &crate::downloads::DownloadCenter,
     ) -> Result<String> {
         self.ensure_binary(downloads).await?;
-        self.ensure_model(downloads).await?;
+        self.ensure_default_model(downloads).await?;
         Ok(TARGET_VERSION.to_string())
     }
 
@@ -220,9 +290,14 @@ impl StableDiffusionDownloader {
         );
     }
 
-    /// Download the default diffusion model into ~/.ryu/models if absent. Honors a
-    /// `RYU_SD_MODEL` override pointing at an existing file.
-    async fn ensure_model(&self, downloads: &crate::downloads::DownloadCenter) -> Result<()> {
+    /// Download the default image model into ~/.ryu/models if absent: the SDXL
+    /// UNet GGUF plus its CLIP-L / CLIP-G text encoders and VAE. Honors a
+    /// `RYU_SD_MODEL` override pointing at an existing file (companions are then
+    /// unknown to the engine, so it is spawned with `-m` alone).
+    async fn ensure_default_model(
+        &self,
+        downloads: &crate::downloads::DownloadCenter,
+    ) -> Result<()> {
         if let Ok(custom) = std::env::var("RYU_SD_MODEL") {
             if PathBuf::from(&custom).exists() {
                 tracing::info!("RYU_SD_MODEL set to existing {custom} — skipping model download");
@@ -230,39 +305,148 @@ impl StableDiffusionDownloader {
             }
         }
 
-        let dest = default_model_path();
-        if dest.exists() && VersionStore::load().checksums.contains_key(MODEL_STORE_KEY) {
-            tracing::info!("stable diffusion model already installed — skipping");
-            return Ok(());
-        }
-
-        tracing::info!("downloading stable diffusion model from {DEFAULT_MODEL_URL}");
         let models_dir = ryu_dir().join("models");
         tokio::fs::create_dir_all(&models_dir)
             .await
             .context("creating ~/.ryu/models")?;
 
-        // The model is a single file placed directly at its final path (no
-        // extraction). The center writes it atomically and records the
-        // `(MODEL_STORE_KEY, DEFAULT_MODEL_FILE)` version on completion with the
-        // computed checksum — the same fast-path key the skip above checks.
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::ImageModel,
+            "SDXL base (UNet Q8_0)",
+            DEFAULT_MODEL_URL,
+            default_model_path(),
+            MODEL_STORE_KEY,
+            DEFAULT_MODEL_FILE,
+        )
+        .await?;
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::ImageModel,
+            "SDXL CLIP-L text encoder",
+            DEFAULT_CLIP_L_URL,
+            clip_l_path(),
+            CLIP_L_STORE_KEY,
+            DEFAULT_CLIP_L_FILE,
+        )
+        .await?;
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::ImageModel,
+            "SDXL CLIP-G text encoder",
+            DEFAULT_CLIP_G_URL,
+            clip_g_path(),
+            CLIP_G_STORE_KEY,
+            DEFAULT_CLIP_G_FILE,
+        )
+        .await?;
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::ImageModel,
+            "SDXL VAE",
+            DEFAULT_VAE_URL,
+            vae_path(),
+            VAE_STORE_KEY,
+            DEFAULT_VAE_FILE,
+        )
+        .await?;
+
+        tracing::info!("stable diffusion model installed");
+        Ok(())
+    }
+
+    /// Download the default video model into ~/.ryu/models if absent: the Wan2.1
+    /// T2V 1.3B diffusion transformer plus the umt5-xxl text encoder and Wan VAE.
+    /// Called lazily by [`StableDiffusionManager`](crate::sidecar::providers::sdcpp::StableDiffusionManager)
+    /// when a video model is the active diffusion model. Each file that already
+    /// exists (e.g. the transformer GGUF installed via the model catalog) is
+    /// skipped individually.
+    pub async fn ensure_video_default(
+        &self,
+        downloads: &crate::downloads::DownloadCenter,
+    ) -> Result<()> {
+        let models_dir = ryu_dir().join("models");
+        tokio::fs::create_dir_all(&models_dir)
+            .await
+            .context("creating ~/.ryu/models")?;
+
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::VideoModel,
+            "Wan2.1 T2V 1.3B video model (Q8_0)",
+            VIDEO_MODEL_URL,
+            video_model_path(),
+            VIDEO_MODEL_STORE_KEY,
+            VIDEO_MODEL_FILE,
+        )
+        .await?;
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::VideoModel,
+            "umt5-xxl text encoder (Q5_K_M)",
+            VIDEO_T5XXL_URL,
+            video_t5xxl_path(),
+            VIDEO_T5XXL_STORE_KEY,
+            VIDEO_T5XXL_FILE,
+        )
+        .await?;
+        self.ensure_file(
+            downloads,
+            crate::downloads::DownloadKind::Media,
+            crate::downloads::DownloadRole::VideoModel,
+            "Wan 2.1 VAE",
+            VIDEO_VAE_URL,
+            video_vae_path(),
+            VIDEO_VAE_STORE_KEY,
+            VIDEO_VAE_FILE,
+        )
+        .await?;
+
+        tracing::info!("Wan2.1 video model installed");
+        Ok(())
+    }
+
+    /// Download one diffusion weight file unless it is already installed (file
+    /// present AND recorded in the version store). Each file carries its own
+    /// store key so the fast-path skip works per artifact.
+    async fn ensure_file(
+        &self,
+        downloads: &crate::downloads::DownloadCenter,
+        kind: crate::downloads::DownloadKind,
+        role: crate::downloads::DownloadRole,
+        label: &str,
+        url: &str,
+        dest: PathBuf,
+        store_key: &str,
+        version: &str,
+    ) -> Result<()> {
+        if dest.exists() && VersionStore::load().checksums.contains_key(store_key) {
+            tracing::info!("{label} already installed — skipping");
+            return Ok(());
+        }
+
+        tracing::info!("downloading {label} from {url}");
         downloads
             .download_blocking(crate::downloads::DownloadSpec {
-                kind: crate::downloads::DownloadKind::Media,
-                role: crate::downloads::DownloadRole::ImageModel,
-                label: "stable-diffusion.cpp model".to_string(),
-                url: DEFAULT_MODEL_URL.to_string(),
+                kind,
+                role,
+                label: label.to_string(),
+                url: url.to_string(),
                 dest,
                 sha256: None,
                 version_record: Some(crate::downloads::VersionRecord {
-                    store_key: MODEL_STORE_KEY.to_string(),
-                    version: DEFAULT_MODEL_FILE.to_string(),
+                    store_key: store_key.to_string(),
+                    version: version.to_string(),
                 }),
             })
             .await
-            .context("downloading stable diffusion model")?;
-
-        tracing::info!("stable diffusion model installed");
+            .context(format!("downloading {label}"))?;
         Ok(())
     }
 }

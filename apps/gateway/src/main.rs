@@ -4,6 +4,7 @@ mod budget;
 mod cache;
 mod channels_host;
 mod circuit_breaker;
+mod compat;
 mod composio;
 mod compression;
 mod concurrency;
@@ -32,6 +33,7 @@ mod skills;
 mod state;
 mod telemetry;
 mod tools;
+mod traffic;
 mod untrusted;
 mod wasm_policy;
 

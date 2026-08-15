@@ -1,7 +1,7 @@
 {
   "id": "@ryu/monitors",
   "name": "Monitors",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Developer Tools",
   "description": "Website monitors: price, stock, keyword, content, and uptime watches with cross-device notification fan-out.",
   "tagline": "Watch a page and get told when it changes",

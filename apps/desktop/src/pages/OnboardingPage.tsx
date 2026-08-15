@@ -558,6 +558,17 @@ const SUGGESTED_AGENTS: readonly {
 	{ id: "acp:cline", name: "Cline", registryId: "cline" },
 	{ id: "hermes", name: "Hermes", registryId: null },
 	{ id: "openclaw", name: "OpenClaw", registryId: null },
+	{ id: "acp:prime", name: "Prime Agent", registryId: null },
+	{ id: "acp:openhands", name: "OpenHands", registryId: null },
+	{ id: "acp:blackbox", name: "Blackbox CLI", registryId: null },
+	{ id: "acp:code-assistant", name: "Code Assistant", registryId: null },
+	{ id: "acp:construct", name: "Construct", registryId: null },
+	{ id: "acp:bub", name: "Bub", registryId: null },
+	{ id: "acp:raxol", name: "Raxol", registryId: null },
+	{ id: "acp:localharness", name: "localharness", registryId: null },
+	{ id: "acp:kaagum", name: "Kaagum", registryId: null },
+	{ id: "acp:docker-agent", name: "Docker Agent", registryId: null },
+	{ id: "acp:agentpool", name: "AgentPool", registryId: null },
 ];
 
 /**

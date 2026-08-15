@@ -322,7 +322,7 @@ pub async fn ingest_exec_audit(
                 body.session_id,
                 body.error,
             );
-            state.audit.log(record);
+            state.log_audit(record);
         }
         return Ok(Json(json!({ "ok": true })));
     }
@@ -341,7 +341,7 @@ pub async fn ingest_exec_audit(
             body.session_id,
             body.error,
         );
-        state.audit.log(record);
+        state.log_audit(record);
     }
 
     Ok(Json(json!({
@@ -707,7 +707,7 @@ mod tests {
     async fn query_audit_returns_rows_with_derived_cost() {
         let state = state_with(true);
         // Log one model_call row, then let the background writer flush.
-        state.audit.log(AuditRecord {
+        state.log_audit(AuditRecord {
             request_id: "r1".to_string(),
             api_key: "sk-master".to_string(),
             user_name: None,

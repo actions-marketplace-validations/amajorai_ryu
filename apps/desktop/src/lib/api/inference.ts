@@ -115,6 +115,14 @@ export interface LaunchConfig {
 	// RoPE / YaRN.
 	rope_scaling?: string;
 	/**
+	 * Idle timeout (seconds) before llama-server unloads the model + KV cache
+	 * (`--sleep-idle-seconds`). Auto-reloads on the next request. This is a
+	 * node-level lifecycle policy, not a per-model tuning knob, so it is
+	 * normally resolved from the `engine.llamacpp.sleep-idle-seconds` preference
+	 * at spawn rather than persisted here.
+	 */
+	sleep_idle_secs?: number;
+	/**
 	 * llama.cpp `--spec-type`: "draft-mtp" (multi-token prediction) or an n-gram
 	 * variant (ngram-cache | ngram-simple | ngram-map-k | ngram-map-k4v | ngram-mod).
 	 */

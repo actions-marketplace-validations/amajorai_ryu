@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod budget;
 pub mod chat;
+pub mod compat;
 pub mod config;
 pub mod evals;
 pub mod evaluators;
@@ -12,6 +13,7 @@ pub mod models;
 pub mod multimodal;
 pub mod sandbox;
 pub mod tools;
+pub mod traffic;
 
 use axum::{
     http::HeaderValue,
@@ -41,6 +43,15 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         // OpenAI-compatible chat endpoint
         .route("/v1/chat/completions", post(chat::chat_completions))
+        // Anthropic Messages inbound (protocol-compat): lets Claude Code and other
+        // Anthropic-dialect clients point their base_url here and get the governed
+        // pipeline. Also reachable at /v1/messages with any client.
+        .route("/v1/messages", post(compat::anthropic_messages))
+        // Google Gemini inbound (protocol-compat): generateContent + streaming.
+        // The model + operation suffix share ONE path segment
+        // (`gemini-2.0-flash:generateContent`), so a single `:spec` capture
+        // dispatches on the `:streamGenerateContent` suffix in the handler.
+        .route("/v1beta/models/:spec", post(compat::gemini_generate))
         // Cursor alias (#7). Cursor's "Override OpenAI Base URL" already emits the
         // OpenAI `/v1/chat/completions` shape, so this is a labelled alias to the
         // same governed pipeline — point Cursor at `<gateway>/v1/cursor`. Leaves a
@@ -73,6 +84,9 @@ pub fn router(state: SharedState) -> Router {
         // Metrics
         .route("/metrics", get(metrics::get_metrics))
         .route("/v1/metrics", get(metrics::get_metrics))
+        // Live request traffic (SSE). Admin-gated like /v1/audit; feeds the
+        // desktop's live-traffic dashboard through Core's proxy.
+        .route("/v1/traffic", get(traffic::live_traffic))
         // Community savings — public, ungated anonymous aggregate (opt-in beacon
         // source). Mirrors /metrics registration; NO admin gate.
         .route("/v1/savings", get(metrics::community_savings))
@@ -156,7 +170,6 @@ pub fn router(state: SharedState) -> Router {
 mod stamp_tests {
     use super::*;
     use crate::config::AlertTier;
-
     /// F1-twin guard: the Ok-path writer stamps the header when a handler stashed
     /// a `PolicyAlert` on the response extensions.
     #[tokio::test]
@@ -181,5 +194,69 @@ mod stamp_tests {
         let resp = Response::new(axum::body::Body::empty());
         let stamped = stamp_policy_alert(resp).await;
         assert!(stamped.headers().get(POLICY_ALERT_HEADER).is_none());
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use crate::state::AppState;
+
+    /// The compat routes and the live-traffic feed are registered on the router
+    /// (and therefore reachable). A route that is missing — or whose path
+    /// doesn't match what a client sends — would 404 in production; this guard
+    /// catches that at build time.
+    #[tokio::test]
+    async fn compat_and_traffic_routes_are_registered() {
+        let state = std::sync::Arc::new(AppState::new_for_test_default());
+        let app = router(state);
+        // Anthropic Messages dialect.
+        assert!(
+            route_accepts_post(&app, "/v1/messages").await,
+            "POST /v1/messages must route to the Anthropic compat handler"
+        );
+        // Gemini: the model + operation suffix share one path segment.
+        assert!(
+            route_accepts_post(&app, "/v1beta/models/gemini-2.0-flash:generateContent").await,
+            "POST /v1beta/models/:spec must route to the Gemini handler"
+        );
+        assert!(
+            route_accepts_post(&app, "/v1beta/models/gemini-2.0-flash:streamGenerateContent").await,
+            "POST streamGenerateContent must route to the Gemini streaming handler"
+        );
+        // Live traffic SSE.
+        assert!(
+            route_accepts_get(&app, "/v1/traffic").await,
+            "GET /v1/traffic must route to the SSE handler"
+        );
+    }
+
+    async fn route_accepts_post(app: &Router, path: &str) -> bool {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        // 404 means no route matched; anything else (200/400/401/415) means a
+        // handler owns the path.
+        resp.status() != axum::http::StatusCode::NOT_FOUND
+    }
+
+    async fn route_accepts_get(app: &Router, path: &str) -> bool {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        resp.status() != axum::http::StatusCode::NOT_FOUND
     }
 }

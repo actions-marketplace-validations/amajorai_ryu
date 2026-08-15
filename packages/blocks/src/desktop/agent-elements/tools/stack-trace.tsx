@@ -1,11 +1,6 @@
-import {
-	Collapsible,
-	CollapsibleContent,
-	CollapsibleTrigger,
-} from "@ryu/ui/components/collapsible";
+import { ToolResult } from "@ryu/ui/components/agents/tool-result";
 import { cn } from "@ryu/ui/lib/utils";
-import { IconCheck, IconChevronRight, IconCopy } from "@tabler/icons-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
 import { parseStackTrace, type StackFrame } from "./stack-trace-parse.ts";
 
 export {
@@ -14,29 +9,6 @@ export {
 	parseStackTrace,
 	type StackFrame,
 } from "./stack-trace-parse.ts";
-
-function CopyButton({ text }: { text: string }) {
-	const [copied, setCopied] = useState(false);
-	return (
-		<button
-			aria-label="Copy stack trace"
-			className="flex size-5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-foreground/5 hover:text-foreground"
-			onClick={(event) => {
-				event.stopPropagation();
-				navigator.clipboard.writeText(text);
-				setCopied(true);
-				window.setTimeout(() => setCopied(false), 2000);
-			}}
-			type="button"
-		>
-			{copied ? (
-				<IconCheck className="size-3.5" />
-			) : (
-				<IconCopy className="size-3.5" />
-			)}
-		</button>
-	);
-}
 
 function FrameRow({
 	frame,
@@ -98,49 +70,37 @@ export const StackTrace = memo(function StackTrace({
 		[parsed.frames, showInternalFrames]
 	);
 
+	const header = (
+		<div className="flex flex-wrap items-baseline gap-x-2">
+			{parsed.errorType ? (
+				<span className="font-mono font-semibold text-[13px] text-destructive">
+					{parsed.errorType}
+				</span>
+			) : null}
+			<span className="min-w-0 break-words text-[13px] text-foreground/90">
+				{parsed.errorMessage}
+			</span>
+		</div>
+	);
+
 	return (
-		<Collapsible
+		<div
 			className={cn(
-				"w-full overflow-hidden rounded-[var(--radius)] border border-destructive/25 bg-destructive/5",
+				"overflow-hidden rounded-2xl border border-destructive/25 bg-destructive/5",
 				className
 			)}
-			defaultOpen={defaultOpen}
 		>
-			<div className="flex items-start gap-2 px-3 py-2">
-				<div className="min-w-0 flex-1">
-					<div className="flex flex-wrap items-baseline gap-x-2">
-						{parsed.errorType ? (
-							<span className="font-mono font-semibold text-[13px] text-destructive">
-								{parsed.errorType}
-							</span>
-						) : null}
-						<span className="min-w-0 break-words text-[13px] text-foreground/90">
-							{parsed.errorMessage}
-						</span>
-					</div>
-				</div>
-				<div className="flex shrink-0 items-center gap-0.5">
-					<CopyButton text={trace} />
-					{frames.length > 0 ? (
-						<CollapsibleTrigger
-							aria-label="Toggle stack frames"
-							className="group flex size-5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-foreground/5 hover:text-foreground"
-						>
-							<IconChevronRight className="size-3.5 transition-transform duration-150 group-data-panel-open:rotate-90" />
-						</CollapsibleTrigger>
-					) : null}
-				</div>
-			</div>
-			{frames.length > 0 ? (
-				<CollapsibleContent
-					className={cn(
-						"overflow-hidden",
-						"transition-all duration-150 ease-out",
-						"data-ending-style:h-0 data-starting-style:h-0",
-						"[&[hidden]:not([hidden='until-found'])]:hidden"
-					)}
-				>
-					<div className="max-h-[340px] overflow-y-auto border-destructive/15 border-t px-3 py-2">
+			<ToolResult
+				collapseOnComplete={false}
+				copyText={trace}
+				defaultOpen={defaultOpen}
+				kind="custom"
+				status="error"
+				title={header}
+				tool="stack-trace"
+			>
+				{frames.length > 0 ? (
+					<div className="max-h-[340px] overflow-y-auto">
 						{frames.map((frame, index) => (
 							<FrameRow
 								frame={frame}
@@ -149,8 +109,8 @@ export const StackTrace = memo(function StackTrace({
 							/>
 						))}
 					</div>
-				</CollapsibleContent>
-			) : null}
-		</Collapsible>
+				) : null}
+			</ToolResult>
+		</div>
 	);
 });

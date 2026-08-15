@@ -622,7 +622,7 @@ function SpendControlsSection() {
 								Your org's spendable credit.
 							</p>
 						</div>
-						<span className="font-medium text-sm tabular-nums">
+						<span className="font-heading font-medium text-sm tabular-nums">
 							{balanceLabel}
 						</span>
 					</div>
@@ -953,7 +953,7 @@ export function BillingTab() {
 						{invoicesData.invoices.map((invoice) => (
 							<SettingsItem
 								actions={
-									<span className="font-medium text-sm">
+									<span className="font-heading font-medium text-sm tabular-nums">
 										{(invoice.amount / 100).toLocaleString(undefined, {
 											style: "currency",
 											currency: invoice.currency.toUpperCase(),

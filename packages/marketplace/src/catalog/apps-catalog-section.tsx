@@ -278,6 +278,46 @@ export function groupByCatalogSource(
 	return [...sections.values()];
 }
 
+/** One community marketplace's slice of the community feed, for the
+ *  "Community Marketplaces" section — see {@link groupCommunityMarketplaces}. */
+export interface CommunityMarketplaceSection {
+	id: string;
+	items: AppCatalogItem[];
+	name: string;
+}
+
+/**
+ * Group community listings into marketplaces, splitting out the standalone ones.
+ *
+ * A community MARKETPLACE entry carries a grouping stamp (`catalog_source_id` /
+ * `catalog_source_name` — the `ryu-marketplace` repo it was discovered from), so
+ * it renders under its marketplace's sub-heading inside the "Community
+ * Marketplaces" section. A standalone topic-discovered repo carries no stamp and
+ * keeps the flat "From the community" shelf. Exported for unit tests.
+ */
+export function groupCommunityMarketplaces(items: readonly AppCatalogItem[]): {
+	marketplaces: CommunityMarketplaceSection[];
+	standalone: AppCatalogItem[];
+} {
+	const marketplaces = new Map<string, CommunityMarketplaceSection>();
+	const standalone: AppCatalogItem[] = [];
+	for (const item of items) {
+		const id = item.entry.catalog_source_id;
+		const name = item.entry.catalog_source_name;
+		if (!(id && name)) {
+			standalone.push(item);
+			continue;
+		}
+		const existing = marketplaces.get(id);
+		if (existing) {
+			existing.items.push(item);
+			continue;
+		}
+		marketplaces.set(id, { id, name, items: [item] });
+	}
+	return { marketplaces: [...marketplaces.values()], standalone };
+}
+
 const VARIANT_COPY: Record<
 	AppsCatalogVariant,
 	{ noun: string; nounPlural: string; searchPlaceholder: string }
@@ -646,8 +686,8 @@ export default function AppsCatalogSection({
 
 /**
  * Source dropdown (Ryu Marketplace + any custom Claude plugin marketplaces) plus
- * an "Add marketplace" popover. A marketplace is just a repo/URL pointing at a
- * `.claude-plugin/marketplace.json`.
+ * an "Add marketplace" popover. A marketplace is a repo/URL/local directory
+ * pointing at a `marketplace.json` (`.claude-plugin/`, `.ryu-plugin/`, …).
  */
 function PluginSourcePicker({
 	sources,
@@ -682,7 +722,7 @@ function PluginSourcePicker({
 	const submit = async () => {
 		const trimmedRepo = repo.trim();
 		if (!trimmedRepo) {
-			setAddError("Enter a repo or marketplace.json URL");
+			setAddError("Enter a repo, git URL, or local path");
 			return;
 		}
 		const displayName = name.trim() || trimmedRepo;
@@ -752,12 +792,12 @@ function PluginSourcePicker({
 					<div className="flex flex-col gap-3">
 						<div className="flex flex-col gap-1">
 							<Label htmlFor="plugin-mp-repo">
-								Repo or marketplace.json URL
+								Repo, git URL, or local path
 							</Label>
 							<Input
 								id="plugin-mp-repo"
 								onChange={(e) => setRepo(e.target.value)}
-								placeholder="owner/repo or https://…/marketplace.json"
+								placeholder="owner/repo, https://…/marketplace.json, or /path/to/marketplace"
 								value={repo}
 							/>
 						</div>
@@ -992,6 +1032,7 @@ function AppList({
 			seedId={it.entry.id}
 			selected={it.entry.id === selectedId}
 			stability={it.entry.stability}
+			themePreview={it.entry.theme_preview}
 		/>
 	);
 
@@ -1172,80 +1213,122 @@ function CommunityShelf({
 	if (items.length === 0) {
 		return null;
 	}
+	// Community MARKETPLACE entries (tagged `ryu-marketplace`, hosting a
+	// `marketplace.json`) render grouped under their own sub-headings inside the
+	// "Community Marketplaces" section; standalone topic-discovered repos keep the
+	// flat "From the community" shelf. Both are unreviewed, so ONE trust notice
+	// sits at the top of the whole community area — see `groupCommunityMarketplaces`.
+	const { marketplaces, standalone } = groupCommunityMarketplaces(items);
+
+	// One card renderer for every grid in this section: a marketplace entry and a
+	// standalone repo are the SAME kind of row (unreviewed, install via its own
+	// repo URL), so the card must not differ between the two shelves.
+	const card = (it: AppCatalogItem) => (
+		<StoreCatalogCard
+			action={
+				// Install, like every other card in the store. A community row is
+				// not a different KIND of listing — it is an app or plugin nobody
+				// at Ryu reviewed — so giving it a "Details" button while its
+				// neighbours say "Install" made provenance look like a capability
+				// difference, and left the shelf's one useful action two clicks
+				// away behind a preview.
+				//
+				// It routes through `installFromUrl` (the listing's repository)
+				// rather than the catalog install path, because Core will not
+				// install an unreviewed listing BY ID. That is not a way around
+				// the gate: it is the same request the store's own "Install from
+				// URL" field already makes, with the URL filled in from the row
+				// the user is looking at instead of pasted by hand. The
+				// unreviewed-code disclosure is unchanged — every row here still
+				// sits under the trust notice at the top of the section.
+				//
+				// A row Core gave no repository for keeps the old browse-only
+				// affordance: there is nothing to install from.
+				<AppCardAction
+					canInstall={Boolean(communityInstallUrl(it))}
+					item={it}
+					onDisable={() => undefined}
+					onInstall={() => onInstallCommunity(it)}
+					onOpen={() => onSelect(it.entry.id)}
+					pending={installingId === it.entry.id}
+				/>
+			}
+			description={it.entry.description}
+			dither={it.entry.icon_dither}
+			icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
+			iconBackground={it.entry.icon_background ?? undefined}
+			iconId={it.entry.icon}
+			iconPadding={it.entry.icon_padding}
+			iconUrl={it.entry.icon_url}
+			key={it.entry.id}
+			// A community listing has no marketplace document — the namespace
+			// key is the whole reason it can be liked at all. See the model.
+			likeNamespace={it.entry.id}
+			name={it.entry.name}
+			onClick={() => onSelect(it.entry.id)}
+			// The check rides on the COMMUNITY shelf too, and that is exactly
+			// why publisher identity and listing review are kept as separate
+			// axes rather than one "trusted" flag: these rows sit under a "Not
+			// reviewed by Ryu" alert (nobody read the code) and a verified
+			// publisher among them is still a verified publisher (we know who
+			// to hold responsible). Wiring only the first-party grid would
+			// leave the one case the split exists to express unmarked.
+			orgVerified={it.entry.org_verified}
+			orgVerifiedTier={it.entry.org_verified_tier}
+			seedId={it.entry.id}
+			// A GitHub repo rarely declares a wash, so without this its card
+			// was a bare glyph on flat `bg-muted` in a grid of painted plates.
+			seedPlate
+			selected={it.entry.id === selectedId}
+			stability={it.entry.stability}
+			themePreview={it.entry.theme_preview}
+		/>
+	);
+
 	return (
 		<section className="mt-6 flex flex-col gap-3 border-t pt-6">
-			{/* The SHARED shelf heading, not a hand-rolled copy of its markup — the
-			    same primitive the Agents tab's community shelf and every category
-			    shelf above use, so the two community shelves read as one system. */}
-			<StoreShelfHeading
-				className="mb-0"
-				description="Discovered from public GitHub topics."
-			>
-				From the community
-			</StoreShelfHeading>
-			<CommunityTrustNotice tone="banner" />
-			<StoreCardGrid>
-				{items.map((it) => (
-					<StoreCatalogCard
-						action={
-							// Install, like every other card in the store. A community row is
-							// not a different KIND of listing — it is an app or plugin nobody
-							// at Ryu reviewed — so giving it a "Details" button while its
-							// neighbours say "Install" made provenance look like a capability
-							// difference, and left the shelf's one useful action two clicks
-							// away behind a preview.
-							//
-							// It routes through `installFromUrl` (the listing's repository)
-							// rather than the catalog install path, because Core will not
-							// install an unreviewed listing BY ID. That is not a way around
-							// the gate: it is the same request the store's own "Install from
-							// URL" field already makes, with the URL filled in from the row
-							// the user is looking at instead of pasted by hand. The
-							// unreviewed-code disclosure is unchanged — every row here still
-							// sits under the trust notice at the top of the shelf.
-							//
-							// A row Core gave no repository for keeps the old browse-only
-							// affordance: there is nothing to install from.
-							<AppCardAction
-								canInstall={Boolean(communityInstallUrl(it))}
-								item={it}
-								onDisable={() => undefined}
-								onInstall={() => onInstallCommunity(it)}
-								onOpen={() => onSelect(it.entry.id)}
-								pending={installingId === it.entry.id}
-							/>
-						}
-						description={it.entry.description}
-						dither={it.entry.icon_dither}
-						icon={<HugeiconsIcon className="size-5" icon={fallbackIcon} />}
-						iconBackground={it.entry.icon_background ?? undefined}
-						iconId={it.entry.icon}
-						iconPadding={it.entry.icon_padding}
-						iconUrl={it.entry.icon_url}
-						key={it.entry.id}
-						// A community listing has no marketplace document — the namespace
-						// key is the whole reason it can be liked at all. See the model.
-						likeNamespace={it.entry.id}
-						name={it.entry.name}
-						onClick={() => onSelect(it.entry.id)}
-						// The check rides on the COMMUNITY shelf too, and that is exactly
-						// why publisher identity and listing review are kept as separate
-						// axes rather than one "trusted" flag: these rows sit under a "Not
-						// reviewed by Ryu" alert (nobody read the code) and a verified
-						// publisher among them is still a verified publisher (we know who
-						// to hold responsible). Wiring only the first-party grid would
-						// leave the one case the split exists to express unmarked.
-						orgVerified={it.entry.org_verified}
-						orgVerifiedTier={it.entry.org_verified_tier}
-						seedId={it.entry.id}
-						// A GitHub repo rarely declares a wash, so without this its card
-						// was a bare glyph on flat `bg-muted` in a grid of painted plates.
-						seedPlate
-						selected={it.entry.id === selectedId}
-						stability={it.entry.stability}
-					/>
-				))}
-			</StoreCardGrid>
+			{marketplaces.length > 0 ? (
+				<>
+					{/* The section's BIG header. The SHARED shelf heading primitive,
+					    not a hand-rolled copy — the same one the Agents tab's
+					    community shelf and every category shelf above use. */}
+					<StoreShelfHeading
+						className="mb-0"
+						description="Community-maintained marketplaces discovered from the ryu-marketplace GitHub topic."
+					>
+						Community Marketplaces
+					</StoreShelfHeading>
+					<CommunityTrustNotice tone="banner" />
+					{marketplaces.map((marketplace) => (
+						<div className="flex flex-col gap-3" key={marketplace.id}>
+							{/* Each marketplace's SMALLER sub-heading — the category
+							    treatment at one size down, so it reads as nested under
+							    "Community Marketplaces". */}
+							<h3 className="px-1 font-semibold text-sm tracking-tight">
+								{marketplace.name}
+							</h3>
+							<StoreCardGrid>{marketplace.items.map(card)}</StoreCardGrid>
+						</div>
+					))}
+				</>
+			) : null}
+			{standalone.length > 0 ? (
+				<>
+					<StoreShelfHeading
+						className="mb-0"
+						description="Discovered from public GitHub topics."
+					>
+						From the community
+					</StoreShelfHeading>
+					{/* One notice for the whole community area: when marketplaces are
+					    present it already sits above them, so the standalone shelf
+					    does not repeat it. */}
+					{marketplaces.length === 0 ? (
+						<CommunityTrustNotice tone="banner" />
+					) : null}
+					<StoreCardGrid>{standalone.map(card)}</StoreCardGrid>
+				</>
+			) : null}
 			<InfiniteSentinel
 				hasMore={hasNextPage}
 				loading={loading}
@@ -1451,7 +1534,10 @@ function PriceBadge({ entry }: { entry: CatalogEntry }) {
 		return null;
 	}
 	return (
-		<Badge className="shrink-0 text-xs" variant="outline">
+		<Badge
+			className="shrink-0 font-heading text-xs tabular-nums"
+			variant="outline"
+		>
 			{label}
 		</Badge>
 	);

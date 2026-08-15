@@ -27,6 +27,7 @@ import { useNavigate } from "react-router-dom";
 import { TAB_UNLOAD_MINUTES_KEY } from "@/src/contexts/TabsContext.tsx";
 import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
+import { useAutoSetupImportSetting } from "@/src/hooks/useAutoSetupImportSetting.ts";
 import {
 	setNodeTabOverride,
 	useNodeTabOverride,
@@ -125,6 +126,7 @@ export function GeneralTab() {
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
 	const setTerminalShell = useWorkspaceStore((s) => s.setTerminalShell);
 	const [autoImportThreads, setAutoImportThreads] = useAutoImportThreads();
+	const [autoImportSetup, setAutoImportSetup] = useAutoSetupImportSetting();
 	const [tabUnloadMinutes, setTabUnloadMinutes] = usePersistedNumber(
 		TAB_UNLOAD_MINUTES_KEY,
 		0
@@ -433,6 +435,17 @@ export function GeneralTab() {
 						}
 						description="Automatically import threads from your agents' own on-disk history (Claude Code, Codex…) into Ryu and keep them in sync. New threads appear on their own, each filed under the project folder it ran in. Ryu rescans on launch, on a timer, and when the window regains focus. You can always import manually from the Chats section or the launchpad."
 						title="Auto-import agent threads"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
+								checked={autoImportSetup}
+								id="auto-import-setup-toggle"
+								onCheckedChange={setAutoImportSetup}
+							/>
+						}
+						description="Automatically import agent setup instructions (AGENTS.md / CLAUDE.md) from your Claude Code, Cursor, and Codex config folders, so imported projects stay in sync. Only instructions are auto-imported — skills, MCP servers, and plugins are always imported explicitly from the Import setup dialog."
+						title="Auto-import agent setup"
 					/>
 					<SettingsItem
 						actions={

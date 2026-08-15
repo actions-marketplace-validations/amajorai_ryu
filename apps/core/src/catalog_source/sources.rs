@@ -6,8 +6,9 @@
 //! [`Source`] enum and match-dispatch each call. Custom model sources collapse
 //! into `Hf` with a `base_url` override — no new variant needed.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::github_topic::GithubTopicSource;
@@ -656,6 +657,13 @@ struct MarketplacePlugin {
     /// layer validates + falls back.
     #[serde(default, rename = "iconDither")]
     icon_dither: Option<serde_json::Value>,
+    /// A theme listing's own palette (Ryu ext: `themePreview`), when the card
+    /// declares one — the same swatch the desktop Appearance tab paints. Pure
+    /// colour strings, untrusted like every card field; the render layer validates
+    /// + falls back. Lets a theme marketplace author declare its swatch without
+    /// shipping an image.
+    #[serde(default, rename = "themePreview")]
+    theme_preview: Option<serde_json::Value>,
     /// True when this entry ships a Companion UI surface, so the browse client
     /// classifies it as an "app" (not a plugin). A git marketplace card carries no
     /// runnables, so this explicit flag is how a remote card discloses app-ness that
@@ -719,6 +727,7 @@ struct MarketplaceItemMeta {
     icon_dither: Option<serde_json::Value>,
     has_companion: bool,
     icon_background: Option<String>,
+    theme_preview: Option<serde_json::Value>,
     accent_color: Option<String>,
     banner: Option<serde_json::Value>,
     developer: Option<String>,
@@ -749,6 +758,7 @@ impl MarketplacePlugin {
             icon_dither: self.icon_dither.clone(),
             has_companion: self.has_companion,
             icon_background: self.icon_background.clone(),
+            theme_preview: self.theme_preview.clone(),
             accent_color: self.accent_color.clone(),
             banner: self.banner.clone(),
             developer: self.developer.clone(),
@@ -846,48 +856,72 @@ impl MarketplaceSource {
     ///   *inside* the plugin, they are not separate installables. Flattening here
     ///   would wrongly advertise a skill leaf as a plugin and install the subdir.
     async fn fetch_items(&self, _client: &reqwest::Client) -> Result<Vec<MarketplaceItem>> {
-        // The repo reference is user-supplied (custom source / startup load), so
-        // SSRF-guard EVERY candidate fetch: resolve + screen IPs, pin the client,
-        // disable redirects. (The passed `client` is unused; the guard builds its
-        // own pinned client.) A fetch or parse failure falls through to the next
-        // candidate path; only when all candidates fail do we surface the error.
-        let urls = marketplace_manifest_urls(&self.repo_url);
-        // Resolve private-marketplace auth headers ONCE, before any fetch. A
-        // referenced-but-unset `${ENV}` fails closed here (no candidate is
-        // fetched) rather than sending an unresolved/empty credential.
-        let headers = match &self.auth {
-            Some(auth) => Some(auth.resolve_headers()?),
-            None => None,
-        };
-        let mut last_err: Option<anyhow::Error> = None;
-        for url in &urls {
-            let fetched = match &headers {
-                Some(h) => crate::server::guarded_get_bytes_with_headers(url, h).await,
-                None => crate::server::guarded_get_bytes(url).await,
-            };
-            match fetched {
-                Ok(body) => match parse_marketplace(&body) {
-                    Ok(manifest) => {
-                        // Pass the marketplace repo as item-resolution context so a
-                        // Cursor repo-local `source` (a bare subfolder) resolves as a
-                        // git-subdir of THIS repo (Phase 5d), not a standalone repo.
-                        return Ok(match self.kind {
-                            CatalogKind::Skill => flatten_plugins(&manifest, &self.repo_url),
-                            _ => plugins_as_items(&manifest, &self.repo_url),
-                        });
-                    }
-                    Err(e) => {
-                        last_err = Some(anyhow::anyhow!("parsing marketplace manifest {url}: {e}"));
-                    }
-                },
-                Err(e) => {
-                    last_err = Some(anyhow::anyhow!("fetching marketplace manifest {url}: {e}"));
-                }
+        // Classify the repo reference into where its `marketplace.json` lives
+        // ([`marketplace_location`]): local path (read from disk), github
+        // shorthand/URL or direct `.json` URL (https candidates), or any other
+        // git URL (clone). Every REMOTE fetch stays behind the SSRF guard +
+        // clone screen; a local path is user-local and reads straight from disk.
+        let location = marketplace_location(&self.repo_url)
+            .map_err(|e| anyhow::anyhow!("marketplace `{}`: {e}", self.repo_url))?;
+        let manifest = match location {
+            MarketplaceLocation::Local(dir) => {
+                let bytes = read_marketplace_from_dir(&dir)?;
+                parse_marketplace(&bytes).map_err(|e| {
+                    anyhow::anyhow!("parsing marketplace manifest {}: {e}", dir.display())
+                })?
             }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            anyhow::anyhow!("no marketplace manifest found for {}", self.repo_url)
-        }))
+            MarketplaceLocation::Http(urls) => {
+                // Resolve private-marketplace auth headers ONCE, before any fetch. A
+                // referenced-but-unset `${ENV}` fails closed here (no candidate is
+                // fetched) rather than sending an unresolved/empty credential.
+                let headers = match &self.auth {
+                    Some(auth) => Some(auth.resolve_headers()?),
+                    None => None,
+                };
+                let mut last_err: Option<anyhow::Error> = None;
+                let mut manifest: Option<MarketplaceManifest> = None;
+                for url in &urls {
+                    let fetched = match &headers {
+                        Some(h) => crate::server::guarded_get_bytes_with_headers(url, h).await,
+                        None => crate::server::guarded_get_bytes(url).await,
+                    };
+                    match fetched {
+                        Ok(body) => match parse_marketplace(&body) {
+                            Ok(m) => {
+                                manifest = Some(m);
+                                break;
+                            }
+                            Err(e) => {
+                                last_err = Some(anyhow::anyhow!(
+                                    "parsing marketplace manifest {url}: {e}"
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            last_err =
+                                Some(anyhow::anyhow!("fetching marketplace manifest {url}: {e}"));
+                        }
+                    }
+                }
+                manifest.ok_or_else(|| {
+                    last_err.unwrap_or_else(|| {
+                        anyhow::anyhow!("no marketplace manifest found for {}", self.repo_url)
+                    })
+                })?
+            }
+            MarketplaceLocation::Git(url) => {
+                let bytes = clone_marketplace_manifest(&url).await?;
+                parse_marketplace(&bytes)
+                    .map_err(|e| anyhow::anyhow!("parsing marketplace manifest {url}: {e}"))?
+            }
+        };
+        // Pass the marketplace repo as item-resolution context so a relative
+        // `./` source or a Cursor repo-local bare subfolder resolves within THIS
+        // marketplace (a git-subdir / local path), not as a standalone repo.
+        Ok(match self.kind {
+            CatalogKind::Skill => flatten_plugins(&manifest, &self.repo_url),
+            _ => plugins_as_items(&manifest, &self.repo_url),
+        })
     }
 
     /// Map one flattened item into the per-kind card JSON the matching desktop
@@ -937,6 +971,10 @@ impl MarketplaceSource {
                     }
                     if let Some(dither) = &item.meta.icon_dither {
                         obj.insert("icon_dither".to_owned(), dither.clone());
+                    }
+                    // A theme listing's palette — see `MarketplacePlugin::theme_preview`.
+                    if let Some(preview) = &item.meta.theme_preview {
+                        obj.insert("theme_preview".to_owned(), preview.clone());
                     }
                     // App-ness signal: emitted only when true so the browse client can
                     // classify a Companion-shipping remote card as an "app".
@@ -1197,6 +1235,180 @@ fn marketplace_manifest_urls(repo: &str) -> Vec<String> {
         .collect()
 }
 
+/// Where a custom marketplace's `marketplace.json` lives, resolved from the
+/// user-supplied repo reference.
+#[derive(Debug)]
+pub(crate) enum MarketplaceLocation {
+    /// Candidate https URLs, fetched in order (github raw / direct `.json` URL).
+    Http(Vec<String>),
+    /// A local directory (or a direct `.json` file) read from disk.
+    Local(PathBuf),
+    /// A git repo cloned to a temp checkout (any host); the manifest is read
+    /// from the checkout. A private repo works through the user's own git
+    /// credentials (SSH keys, credential helpers) — no token is embedded.
+    Git(String),
+}
+
+/// Resolve a local marketplace path: expand a leading `~/` to the user's home
+/// directory and resolve a relative reference against the process CWD.
+pub(crate) fn expand_local_path(repo: &str) -> PathBuf {
+    let trimmed = repo.trim();
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+/// True when a marketplace repo reference names a local filesystem path rather
+/// than a git repo/URL: an existing directory or `.json` file, or a path-shaped
+/// string (`/…`, `./…`, `../…`, `~/…`). Local paths are user-local, so they
+/// carry no outbound-fetch / SSRF surface.
+pub(crate) fn is_local_marketplace_ref(repo: &str) -> bool {
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return false;
+    }
+    if repo.starts_with('/')
+        || repo.starts_with("./")
+        || repo.starts_with("../")
+        || repo.starts_with("~/")
+    {
+        return true;
+    }
+    let path = expand_local_path(repo);
+    path.is_dir() || (path.is_file() && repo.to_ascii_lowercase().ends_with(".json"))
+}
+
+/// Classify a user-supplied marketplace repo reference into where its
+/// `marketplace.json` lives:
+/// - a local filesystem path → read from disk,
+/// - a github `owner/repo` shorthand or `github.com` URL → raw https candidates,
+/// - a direct `.json` URL → the URL itself (verbatim),
+/// - any other git URL (`https://` on gitlab/bitbucket/self-hosted hosts, plus
+///   `git@` / `ssh://`) → `git clone` (matching how Claude treats a non-github
+///   URL as a git repo; a web-hosted manifest needs the direct `.json` form).
+pub(crate) fn marketplace_location(repo: &str) -> Result<MarketplaceLocation> {
+    let repo = repo.trim();
+    if repo.is_empty() {
+        anyhow::bail!("marketplace reference must not be empty");
+    }
+    // git@ / ssh:// — any host, clone it.
+    if repo.starts_with("git@") || repo.starts_with("ssh://") {
+        return Ok(MarketplaceLocation::Git(repo.to_string()));
+    }
+    // Explicit http(s) URL.
+    if repo.starts_with("https://") || repo.starts_with("http://") {
+        // A direct .json URL is used verbatim (a single candidate).
+        if repo.to_ascii_lowercase().ends_with(".json") {
+            return Ok(MarketplaceLocation::Http(vec![repo.to_string()]));
+        }
+        // A github URL → raw.githubusercontent.com candidates over HTTP (works
+        // with the private-marketplace auth headers).
+        if github_raw_head_base(repo).is_some() {
+            return Ok(MarketplaceLocation::Http(marketplace_manifest_urls(repo)));
+        }
+        // Any other git host → clone (git speaks every host).
+        return Ok(MarketplaceLocation::Git(repo.to_string()));
+    }
+    // Local filesystem path forms (existing dir, or a path-shaped string).
+    if is_local_marketplace_ref(repo) {
+        return Ok(MarketplaceLocation::Local(expand_local_path(repo)));
+    }
+    // owner/repo shorthand → github raw candidates.
+    if github_raw_head_base(repo).is_some() {
+        return Ok(MarketplaceLocation::Http(marketplace_manifest_urls(repo)));
+    }
+    anyhow::bail!(
+        "unrecognized marketplace reference `{repo}` (expected owner/repo, a https git URL, a git@/ssh URL, or a local path)"
+    )
+}
+
+/// Read `marketplace.json` from a local directory or `.json` file, in
+/// [`MANIFEST_PATHS`] order (first hit wins) when reading a directory. A direct
+/// `.json` file path is read verbatim.
+fn read_marketplace_from_dir(dir: &Path) -> Result<Vec<u8>> {
+    if dir.is_file() {
+        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if name.to_ascii_lowercase().ends_with(".json") {
+            return std::fs::read(dir).with_context(|| format!("reading {}", dir.display()));
+        }
+        anyhow::bail!(
+            "local marketplace path is not a directory: {}",
+            dir.display()
+        );
+    }
+    for path in MANIFEST_PATHS {
+        let candidate = dir.join(path);
+        if candidate.is_file() {
+            return std::fs::read(&candidate)
+                .with_context(|| format!("reading {}", candidate.display()));
+        }
+    }
+    anyhow::bail!(
+        "no marketplace.json under {} (looked for {})",
+        dir.display(),
+        MANIFEST_PATHS.join(", ")
+    )
+}
+
+/// Clone a git marketplace repo and read its `marketplace.json` from the
+/// checkout. Reuses the install path's SSRF-screened, env-scrubbed, no-prompt
+/// `git clone`; private repos work through the user's own git credentials (SSH
+/// keys, credential helpers). The temp checkout is removed after reading.
+async fn clone_marketplace_manifest(url: &str) -> Result<Vec<u8>> {
+    let work = crate::skills_catalog::from_source::temp_workdir()?;
+    let checkout = crate::skills_catalog::from_source::git_clone(url, &work).await?;
+    let result = read_marketplace_from_dir(&checkout);
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Extract `(host, project_path)` from a gitlab repo URL (`gitlab.com`,
+/// `www.gitlab.com`, or a `<group>.gitlab.com` self-hosted instance). The
+/// project path keeps its subgroup slashes and a trailing `.git` is stripped.
+/// Returns `None` for a non-gitlab host or a path without `group/repo`.
+fn gitlab_host_project(repo: &str) -> Option<(String, String)> {
+    let url = url::Url::parse(repo.trim()).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let is_gitlab =
+        host == "gitlab.com" || host == "www.gitlab.com" || host.ends_with(".gitlab.com");
+    if !is_gitlab {
+        return None;
+    }
+    let segments: Vec<String> = url
+        .path_segments()
+        .map(|it| {
+            it.filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    // gitlab project paths may include subgroups and a `-` marker before a
+    // `/tree/` / `/blob/` segment; the project is everything before that marker.
+    let project_segs: Vec<String> = segments
+        .iter()
+        .take_while(|s| s.as_str() != "-")
+        .cloned()
+        .collect();
+    if project_segs.len() < 2 {
+        return None;
+    }
+    let mut project = project_segs.join("/");
+    if let Some(stripped) = project.strip_suffix(".git") {
+        project = stripped.to_string();
+    }
+    Some((host, project))
+}
+
 /// Parse a marketplace manifest from raw bytes (never panics on bad input).
 fn parse_marketplace(bytes: &[u8]) -> Result<MarketplaceManifest> {
     Ok(serde_json::from_slice(bytes)?)
@@ -1302,6 +1514,13 @@ fn flatten_plugins(manifest: &MarketplaceManifest, repo_context: &str) -> Vec<Ma
 /// directory walker locates the skill).
 fn scoped_source(repo: &str, subdir: &str) -> String {
     let r = repo.trim();
+    // Local-path marketplace → a subdirectory of the local checkout.
+    if is_local_marketplace_ref(r) {
+        return expand_local_path(r)
+            .join(subdir)
+            .to_string_lossy()
+            .to_string();
+    }
     // github URL.
     if let Some(rest) = r
         .strip_prefix("https://github.com/")
@@ -1318,6 +1537,10 @@ fn scoped_source(repo: &str, subdir: &str) -> String {
     if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() && !r.contains(' ') {
         let name = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
         return format!("https://github.com/{}/{name}/tree/HEAD/{subdir}", parts[0]);
+    }
+    // gitlab URL → the `/-/tree/HEAD/<subdir>` archive form.
+    if let Some((host, project)) = gitlab_host_project(r) {
+        return format!("https://{host}/{project}/-/tree/HEAD/{subdir}");
     }
     r.to_string()
 }
@@ -1368,22 +1591,41 @@ fn is_local_subdir_source(source: &str) -> bool {
 }
 
 /// Resolve a plugin `source` value in the context of the marketplace `repo`.
-/// A Cursor repo-local subfolder ([`is_local_subdir_source`]) resolves to a
-/// github `tree/HEAD/<subfolder>` URL of the marketplace repo; if the marketplace
-/// repo isn't a github repo (e.g. a direct `.json` URL host) it degrades to the
-/// bare source string (current behaviour). An `owner/repo`, a URL, or `"builtin"`
-/// is returned unchanged.
+/// A marketplace-relative source — a Claude/Codex `./` path, or a Cursor
+/// repo-local bare subfolder (`is_local_subdir_source`) — resolves within the
+/// marketplace repo itself:
+/// - a local-path marketplace → a path inside the local checkout,
+/// - a github marketplace → a github `tree/HEAD/<path>` URL,
+/// - a gitlab marketplace → a gitlab `/-/tree/HEAD/<path>` URL,
+/// - any other git host → the bare source (the installer's walker finds it).
+/// An `owner/repo`, an absolute URL, or `"builtin"` is returned unchanged.
 fn resolve_marketplace_source(source: &str, repo_context: &str) -> String {
-    if is_local_subdir_source(source) {
-        if let Some((owner, name)) = github_owner_repo(repo_context) {
-            return format!(
-                "https://github.com/{owner}/{name}/tree/HEAD/{}",
-                source.trim()
-            );
-        }
-        // Repo context is not a github repo → degrade to the bare source string.
-        return source.trim().to_string();
+    let source = source.trim();
+    if source.is_empty() {
+        return source.to_string();
     }
+    let is_relative = source.starts_with("./") || is_local_subdir_source(source);
+    if !is_relative {
+        return source.to_string();
+    }
+    let rel = source.trim_start_matches("./");
+    // Local-path marketplace → a path inside the local checkout.
+    if is_local_marketplace_ref(repo_context) {
+        return expand_local_path(repo_context)
+            .join(rel)
+            .to_string_lossy()
+            .to_string();
+    }
+    // github marketplace → a `tree/HEAD/<path>` URL of the marketplace repo.
+    if let Some((owner, name)) = github_owner_repo(repo_context) {
+        return format!("https://github.com/{owner}/{name}/tree/HEAD/{rel}");
+    }
+    // gitlab marketplace → the `/-/tree/HEAD/<path>` archive form.
+    if let Some((host, project)) = gitlab_host_project(repo_context) {
+        return format!("https://{host}/{project}/-/tree/HEAD/{rel}");
+    }
+    // Some other git host → degrade to the bare source string; the directory
+    // walker locates the skill in the cloned checkout.
     source.to_string()
 }
 
@@ -2179,6 +2421,13 @@ struct MarketplaceCard {
     /// `{ from, to?, direction? }`, validated + fallback-guarded at render time.
     #[serde(default, rename = "iconDither")]
     icon_dither: Option<Value>,
+    /// A theme listing's own palette (Ryu ext: `themePreview`), projected by the
+    /// marketplace server from the stored manifest's `contributes.themes[0].preview`
+    /// — the same swatch the desktop Appearance tab paints. Carried onto the card
+    /// so a theme's icon square is its palette, not a dither avatar. Pure colour
+    /// strings; validated + fallback-guarded at render time.
+    #[serde(default, rename = "themePreview")]
+    theme_preview: Option<Value>,
     /// True when the item ships a Companion UI surface — the browse client's signal
     /// to classify it as an "app" rather than a plugin.
     #[serde(default, rename = "hasCompanion")]
@@ -2633,6 +2882,10 @@ impl RyuMarketplaceSource {
                     }
                     if let Some(dither) = card.icon_dither.clone().filter(|v| !v.is_null()) {
                         obj.insert("icon_dither".to_owned(), dither);
+                    }
+                    // A theme listing's palette — see `MarketplaceCard::theme_preview`.
+                    if let Some(preview) = card.theme_preview.clone().filter(|v| !v.is_null()) {
+                        obj.insert("theme_preview".to_owned(), preview);
                     }
                     if card.has_companion {
                         obj.insert("has_companion".to_owned(), serde_json::json!(true));
@@ -4435,6 +4688,173 @@ mod tests {
             marketplace_manifest_urls("https://example.com/custom/marketplace.json"),
             vec!["https://example.com/custom/marketplace.json"]
         );
+    }
+
+    #[test]
+    fn marketplace_location_classifies_local_git_and_urls() {
+        use MarketplaceLocation as L;
+        // owner/repo shorthand → github raw https candidates.
+        match marketplace_location("owner/repo").expect("shorthand") {
+            L::Http(urls) => {
+                assert_eq!(urls.len(), MANIFEST_PATHS.len());
+                assert!(urls[0].starts_with("https://raw.githubusercontent.com/owner/repo/HEAD/"));
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        // github URL → raw candidates.
+        match marketplace_location("https://github.com/owner/repo").expect("github url") {
+            L::Http(urls) => {
+                assert!(urls[0].starts_with("https://raw.githubusercontent.com/owner/repo/HEAD/"))
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        // Direct .json URL → the verbatim single candidate.
+        match marketplace_location("https://example.com/marketplace.json").expect("json url") {
+            L::Http(urls) => {
+                assert_eq!(
+                    urls,
+                    vec!["https://example.com/marketplace.json".to_string()]
+                )
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        // A non-github https URL is a git clone (Claude-aligned).
+        match marketplace_location("https://gitlab.com/company/plugins").expect("gitlab") {
+            L::Git(url) => assert_eq!(url, "https://gitlab.com/company/plugins"),
+            other => panic!("expected Git, got {other:?}"),
+        }
+        // git@ / ssh:// → clone.
+        match marketplace_location("git@gitlab.com:company/plugins.git").expect("git@") {
+            L::Git(url) => assert_eq!(url, "git@gitlab.com:company/plugins.git"),
+            other => panic!("expected Git, got {other:?}"),
+        }
+        // An existing local directory → Local.
+        let dir = std::env::temp_dir().join("ryu-mp-test-location-dir");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        match marketplace_location(dir.to_str().expect("utf8")).expect("local dir") {
+            L::Local(p) => assert_eq!(p, dir),
+            other => panic!("expected Local, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        // A path-shaped string that does not exist → Local (fails at read time).
+        let missing = std::env::temp_dir().join("ryu-mp-test-does-not-exist");
+        match marketplace_location(missing.to_str().expect("utf8")).expect("path-shaped") {
+            L::Local(_) => {}
+            other => panic!("expected Local, got {other:?}"),
+        }
+        // A bare single segment that is neither a path nor owner/repo → error.
+        assert!(marketplace_location("nonsense").is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_items_reads_local_path_marketplace() {
+        // A local marketplace directory with a `.ryu-plugin/marketplace.json`;
+        // its `./`-relative plugin source resolves to a path inside the checkout.
+        let dir = std::env::temp_dir().join(format!("ryu-mp-test-local-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".ryu-plugin")).expect("create .ryu-plugin");
+        std::fs::write(
+            dir.join(".ryu-plugin/marketplace.json"),
+            r#"{
+                "name": "local-mp",
+                "owner": { "name": "Local" },
+                "plugins": [
+                    { "name": "local-tool", "source": "./plugins/local-tool", "description": "A local tool" }
+                ]
+            }"#,
+        )
+        .expect("write manifest");
+        let source = MarketplaceSource::new(
+            "local-mp",
+            "Local MP",
+            dir.to_string_lossy().to_string(),
+            CatalogKind::Plugin,
+        );
+        let client = reqwest::Client::new();
+        let items = source
+            .fetch_items(&client)
+            .await
+            .expect("fetch local marketplace");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "local-tool");
+        assert_eq!(
+            items[0].install_source,
+            dir.join("plugins/local-tool").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoped_source_handles_gitlab_and_local_paths() {
+        // gitlab URL → the `/-/tree/HEAD/<subdir>` archive form, `.git` stripped.
+        assert_eq!(
+            scoped_source("https://gitlab.com/acme/tools.git", "skills/lint"),
+            "https://gitlab.com/acme/tools/-/tree/HEAD/skills/lint"
+        );
+        // Subgroups keep their slashes.
+        assert_eq!(
+            scoped_source("https://gitlab.com/acme/sub/tools", "skills/lint"),
+            "https://gitlab.com/acme/sub/tools/-/tree/HEAD/skills/lint"
+        );
+        // A local path → a joined subdirectory.
+        let dir = std::env::temp_dir().join("ryu-mp-test-scoped-local");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        assert_eq!(
+            scoped_source(dir.to_str().expect("utf8"), "skills/lint"),
+            dir.join("skills/lint").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // A non-github, non-gitlab URL keeps its bare source (walker finds it).
+        assert_eq!(
+            scoped_source("https://bitbucket.org/acme/tools", "skills/lint"),
+            "https://bitbucket.org/acme/tools"
+        );
+    }
+
+    #[test]
+    fn resolve_marketplace_source_resolves_relative_against_context() {
+        // A `./` source in a local-path marketplace → a path inside the checkout.
+        let dir = std::env::temp_dir().join("ryu-mp-test-resolve-local");
+        std::fs::create_dir_all(&dir).expect("create dir");
+        assert_eq!(
+            resolve_marketplace_source("./plugins/foo", dir.to_str().expect("utf8")),
+            dir.join("plugins/foo").to_string_lossy()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // A bare repo-local subfolder in a gitlab marketplace → gitlab tree URL.
+        assert_eq!(
+            resolve_marketplace_source("teaching", "https://gitlab.com/acme/mp.git"),
+            "https://gitlab.com/acme/mp/-/tree/HEAD/teaching"
+        );
+        // An owner/repo source is returned unchanged (github shorthand).
+        assert_eq!(
+            resolve_marketplace_source("owner/repo", "https://gitlab.com/acme/mp.git"),
+            "owner/repo"
+        );
+    }
+
+    #[test]
+    fn gitlab_host_project_parses() {
+        assert_eq!(
+            gitlab_host_project("https://gitlab.com/acme/tools.git"),
+            Some(("gitlab.com".into(), "acme/tools".into()))
+        );
+        assert_eq!(
+            gitlab_host_project("https://www.gitlab.com/group/sub/repo"),
+            Some(("www.gitlab.com".into(), "group/sub/repo".into()))
+        );
+        // A self-hosted `*.gitlab.com` instance.
+        assert_eq!(
+            gitlab_host_project("https://git.gitlab.com/group/repo"),
+            Some(("git.gitlab.com".into(), "group/repo".into()))
+        );
+        // A `-` marker (tree/blob) splits the project from the ref, like the
+        // install path's parser.
+        assert_eq!(
+            gitlab_host_project("https://gitlab.com/acme/mp/-/tree/main/skills"),
+            Some(("gitlab.com".into(), "acme/mp".into()))
+        );
+        // github is not gitlab.
+        assert_eq!(gitlab_host_project("https://github.com/owner/repo"), None);
     }
 
     #[test]

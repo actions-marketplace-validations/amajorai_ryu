@@ -6,6 +6,7 @@
 import {
 	IconDatabase,
 	IconFolder,
+	IconGitBranch,
 	IconPlug,
 	IconRobot,
 	IconSparkles,
@@ -67,6 +68,19 @@ export function buildMentionGroups(
 		sources.teams
 			.filter((t) => matches(t.name))
 			.map((t) => ({ kind: "team", id: t.id, label: t.name, icon: IconUsers }))
+	);
+	add(
+		"workflow",
+		"Workflows",
+		sources.workflows
+			.filter((w) => matches(w.name))
+			.map((w) => ({
+				kind: "workflow",
+				id: w.id,
+				label: w.name,
+				description: w.description ?? undefined,
+				icon: IconGitBranch,
+			}))
 	);
 	add(
 		"plugin",

@@ -206,8 +206,16 @@ is the contributor-facing one and may name internals the docs page must not.
   proves the two agree on every run. It is exempt by construction until `ToolConfig`
   gains a `code_file` field, at which point the example converts and the exemption
   goes away with `sync` itself.
-- **`ryu_self_build`** (`apps/core/src/runnable/self_build.rs`) already lets an
-  agent write and hot-install a manifest, but it writes *manifests only* — there
-  is no path for a tool body and no gate at all. Wiring `verify` in front of
-  `install_app` is the natural next step; see the skill for the manual procedure
-  that stands in for it today.
+- **The runtime gate is now the twin of this CLI.** `ryu_self_build` gained
+  `write_tool` / `verify_tool` / `install_tool`
+  (`apps/core/src/runnable/self_build.rs` + `tool_build.rs`): an agent in chat
+  can author a body + case table, run the SAME four checks here — purity,
+  contract, drift, cases — with the cases executed **inside Core's deny-all Deno
+  sandbox** (`ryu_tool_exec::run_eval_js`) instead of this Node process, and
+  only a passing tool is ever hot-installed. No Node on the user's machine, no
+  `tools/` directory shipped. `verify` (CLI) and `verify_tool` (runtime) are the
+  two gates that must stay in lockstep; this README is the contract for both.
+- **`ToolConfig` has no `code_file`.** Adding one (plus `"tools"` to
+  `CODE_FILE_DIRS`, hydration, the `builtin_code` table and the
+  `mirror-public.sh` step-1c glob) would delete `sync` entirely. Until then the
+  seal + drift check is the substitute.

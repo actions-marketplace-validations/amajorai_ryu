@@ -1,18 +1,25 @@
-//! Built-in artifact-creation tool (`artifact__create`).
+//! Built-in artifact tools (`artifact__create` / `artifact__render`).
 //!
-//! An agent-callable tool that writes a generated file (pptx, xlsx, csv, pdf,
-//! html, png, …) into a Space as a first-class `kind='file'` document. When no
-//! `space_id` is given the file lands in the default, undeletable **Artifacts**
-//! system space. This is what lets the flagship `ryu` agent and any ACP agent
-//! "create artifacts" — the bytes go to the content-addressed blob store and the
-//! doc becomes retrievable via RAG and downloadable at
+//! `artifact__create` writes a generated file (pptx, xlsx, csv, pdf, html, png,
+//! …) into a Space as a first-class `kind='file'` document. When no `space_id`
+//! is given the file lands in the default, undeletable **Artifacts** system
+//! space. This is what lets the flagship `ryu` agent and any ACP agent "create
+//! artifacts" — the bytes go to the content-addressed blob store and the doc
+//! becomes retrievable via RAG and downloadable at
 //! `/api/spaces/{space}/documents/{doc}/blob`.
+//!
+//! `artifact__render` is the **client-rendered, no-op** half (mirroring
+//! `ui__render`): the agent sends a small artifact payload (code file, page,
+//! database, space doc, …) and the desktop renders it as a live card inline in
+//! the chat, with "Open" (right dock) / "Open in tab" (workspace tab)
+//! affordances. Core does not execute anything — dispatch only sanity-checks the
+//! shape and acknowledges.
 //!
 //! Registered as a reserved registry server (`artifact`) like `notify`/`ui`, so
 //! the `<server>__<tool>` id scheme, per-agent allowlist, and single `call_tool`
 //! entry all work for free. Content is provided as `data_base64` (binary) or
 //! `text` (utf-8). A bare built-in cannot serve a `ui://` widget preview, so the
-//! result carries a blob URL + a markdown link/image instead.
+//! create result carries a blob URL + a markdown link/image instead.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -29,6 +36,14 @@ const ARTIFACTS_SPACE_NAME: &str = "Artifacts";
 /// Upper bound on a single artifact's decoded size (200 MiB). Mirrors the HTTP
 /// `create_file` route's cap so the tool and the API agree.
 const MAX_ARTIFACT_BYTES: usize = 200 * 1024 * 1024;
+
+/// The kinds `artifact__render` accepts. Must stay in sync with the desktop's
+/// `ArtifactKind` union (`apps/desktop/src/lib/artifacts.ts`); anything unknown
+/// collapses to a code card on the client, so the allowlist here is the
+/// contract the model is trained against.
+const RENDER_KINDS: &[&str] = &[
+    "html", "svg", "mermaid", "code", "file", "space", "database",
+];
 
 fn create_schema() -> Value {
     json!({
@@ -60,21 +75,61 @@ fn create_schema() -> Value {
     })
 }
 
+fn render_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "artifact": {
+                "type": "object",
+                "description": "The artifact to render inline in the chat: \
+                    { kind, title, content, language?, filePath?, actions? }. \
+                    `kind` is one of html/svg/mermaid/code/file/space/database; \
+                    `content` is the body (HTML/SVG source, mermaid DSL, code, \
+                    markdown, or tabular JSON/CSV); `actions` is an optional \
+                    list of { id, label, tone? } approval-style choices rendered \
+                    with the app's own approval component."
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional heading shown above the rendered artifact card."
+            }
+        },
+        "required": ["artifact"]
+    })
+}
+
 /// The artifact tools exposed through the registry.
 pub fn tools() -> Vec<RegistryTool> {
-    vec![RegistryTool {
-        id: format!("{SERVER_NAME}__create"),
-        server: SERVER_NAME.to_owned(),
-        name: "create".to_owned(),
-        description: Some(
-            "Create a file artifact (pptx, xlsx, csv, pdf, html, png, …) and save it into a \
-             Space (defaults to the Artifacts space). Provide bytes via `data_base64` or text \
-             via `text`. Returns the document id and a download URL."
-                .to_owned(),
-        ),
-        input_schema: Some(create_schema()),
-        ..Default::default()
-    }]
+    vec![
+        RegistryTool {
+            id: format!("{SERVER_NAME}__create"),
+            server: SERVER_NAME.to_owned(),
+            name: "create".to_owned(),
+            description: Some(
+                "Create a file artifact (pptx, xlsx, csv, pdf, html, png, …) and save it into a \
+                 Space (defaults to the Artifacts space). Provide bytes via `data_base64` or text \
+                 via `text`. Returns the document id and a download URL."
+                    .to_owned(),
+            ),
+            input_schema: Some(create_schema()),
+            ..Default::default()
+        },
+        RegistryTool {
+            id: format!("{SERVER_NAME}__render"),
+            server: SERVER_NAME.to_owned(),
+            name: "render".to_owned(),
+            description: Some(
+                "Render an artifact inline in the chat (a code file, a web page, a diagram, a \
+                 Space document, or a database table). Pass the payload as `artifact` \
+                 ({ kind, title, content, language?, filePath?, actions? }); the client draws it \
+                 as a card the user can open in the side panel or a workspace tab. This tool \
+                 stores nothing — for a persisted file artifact use `artifact__create`."
+                    .to_owned(),
+            ),
+            input_schema: Some(render_schema()),
+            ..Default::default()
+        },
+    ]
 }
 
 /// Dispatch an artifact tool call. `spaces` is `None` in test/CLI contexts that
@@ -180,8 +235,36 @@ pub async fn dispatch(tool: &str, arguments: Value, spaces: Option<&SpaceStore>)
                 "content": [{ "type": "text", "text": markdown }],
             }))
         }
+        "render" => render_dispatch(arguments).await,
         other => Err(anyhow::anyhow!("unknown artifact tool '{other}'")),
     }
+}
+
+/// Dispatch an `artifact__render` call. Client-rendered by design — the desktop
+/// draws the card from the tool input, so Core only sanity-checks the payload and
+/// acknowledges, giving the model useful feedback for an obviously malformed call.
+async fn render_dispatch(arguments: Value) -> Result<Value> {
+    let artifact = arguments
+        .get("artifact")
+        .ok_or_else(|| anyhow::anyhow!("missing required object argument 'artifact'"))?;
+    let obj = artifact
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("'artifact' must be an object"))?;
+    let kind = obj
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("'artifact.kind' must be a string"))?;
+    if !RENDER_KINDS.contains(&kind) {
+        return Err(anyhow::anyhow!(
+            "'artifact.kind' must be one of {RENDER_KINDS:?}, got '{kind}'"
+        ));
+    }
+    if !obj.get("content").is_some_and(Value::is_string) {
+        return Err(anyhow::anyhow!(
+            "'artifact.content' must be a string (the artifact body)"
+        ));
+    }
+    Ok(json!({ "ok": true, "rendered": true }))
 }
 
 #[cfg(test)]
@@ -191,10 +274,13 @@ mod tests {
     #[test]
     fn lists_create_tool_with_qualified_id() {
         let tools = tools();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].id, "artifact__create");
         assert_eq!(tools[0].server, SERVER_NAME);
         assert!(tools[0].input_schema.is_some());
+        assert_eq!(tools[1].id, "artifact__render");
+        assert_eq!(tools[1].server, SERVER_NAME);
+        assert!(tools[1].input_schema.is_some());
     }
 
     #[tokio::test]
@@ -275,5 +361,54 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("!["));
+    }
+
+    #[tokio::test]
+    async fn render_acknowledges_a_valid_payload() {
+        let out = dispatch(
+            "render",
+            json!({
+                "artifact": {
+                    "kind": "database",
+                    "title": "Q3 numbers",
+                    "content": "[{\"a\":1,\"b\":2}]",
+                    "language": "json",
+                    "actions": [{ "id": "ok", "label": "Looks good", "tone": "primary" }]
+                }
+            }),
+            None,
+        )
+        .await
+        .expect("dispatch ok");
+        assert_eq!(out.get("ok").and_then(Value::as_bool), Some(true));
+    }
+
+    #[tokio::test]
+    async fn render_missing_artifact_is_an_error() {
+        assert!(dispatch("render", json!({ "title": "x" }), None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn render_unknown_kind_is_an_error() {
+        assert!(dispatch(
+            "render",
+            json!({ "artifact": { "kind": "banana", "content": "x" } }),
+            None
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn render_non_string_content_is_an_error() {
+        assert!(dispatch(
+            "render",
+            json!({ "artifact": { "kind": "code", "content": 42 } }),
+            None
+        )
+        .await
+        .is_err());
     }
 }

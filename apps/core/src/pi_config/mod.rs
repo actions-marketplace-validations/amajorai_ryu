@@ -32,6 +32,7 @@ pub(crate) mod models_dev;
 
 /// Plugin-contributed Pi extensions (`contributes.pi_extensions`) — the resolver
 /// and privilege gate behind [`sync_app_pi_extensions`].
+pub mod accounts;
 pub mod app_extensions;
 pub mod oauth_login;
 
@@ -616,9 +617,12 @@ const PI_QUIET_STARTUP_LEGACY: &str = "quietStart";
 /// 4. **The Gateway provider pin** — [`ensure_gateway_models_json`], declaring
 ///    the model so Pi actually sends it over chat-completions.
 pub fn ensure_managed_defaults() -> Result<()> {
+    // Reflect the active account into Pi's auth.json / models.json before every
+    // spawn so the files Pi reads always carry the SELECTED account, never a
+    // stale one from a switch or a removed account.
+    materialize_active_accounts();
     let mut settings = read_settings();
     let mut dirty = false;
-
     if !settings.extra.contains_key("skills") {
         settings
             .extra
@@ -866,15 +870,16 @@ pub fn plan_mode_sentinel(on: bool) -> &'static str {
     }
 }
 
-// `ryu-subagent.ts` and `ryu-shell.ts` used to be embedded here and shipped
-// unconditionally by the chain above. They now live in their own packages
-// (`plugins-store/pi-subagent`, `plugins-store/pi-shell`) as
+// `ryu-subagent.ts`, `ryu-shell.ts` and `ryu-monitor.ts` used to be (or, for
+// the monitor, would have been) embedded here and shipped unconditionally by the
+// chain above. They now live in their own packages (`plugins-store/pi-subagent`,
+// `plugins-store/pi-shell`, `plugins-store/pi-monitor`) as
 // `contributes.pi_extensions` rows, and reach the managed Pi dir through
-// [`sync_app_pi_extensions`] instead. Both are Core-tier + default-on, so the
-// out-of-the-box agent is unchanged; what is new is that a user can turn either
-// off. Do NOT re-add an `ensure_pi_*_extension` for them: the plugin path is the
-// one with a removal half, and a compiled-in copy would win the file back on the
-// next spawn after a disable.
+// [`sync_app_pi_extensions`] instead. All three are Core-tier + default-on, so
+// the out-of-the-box agent is unchanged; what is new is that a user can turn any
+// of them off. Do NOT re-add an `ensure_pi_*_extension` for them: the plugin path
+// is the one with a removal half, and a compiled-in copy would win the file back
+// on the next spawn after a disable.
 
 /// Write `src` to `ext_path` and register that absolute path in the managed
 /// `settings.json`'s `extensions` array — the shared body of every Ryu-owned Pi
@@ -1438,7 +1443,9 @@ fn read_auth() -> Map<String, Value> {
 
 /// Store an api-key credential for a built-in provider in `auth.json`, using the
 /// `{ "type": "api_key", "key": ... }` shape Pi expects. The file is written
-/// with `0600` permissions on Unix to match Pi's own convention.
+/// with `0600` permissions on Unix to match Pi's own convention. Also records
+/// the key as an account in the sealed vault, so the provider can hold several
+/// keys side by side and switch between them.
 fn set_auth_key(auth_key: &str, key: &str) -> Result<()> {
     ensure_dir()?;
     let mut auth = read_auth();
@@ -1447,7 +1454,14 @@ fn set_auth_key(auth_key: &str, key: &str) -> Result<()> {
         json!({ "type": "api_key", "key": key }),
     );
     let body = serde_json::to_string_pretty(&auth).context("serialize auth.json")?;
-    write_secret_file(&auth_path(), &body)
+    write_secret_file(&auth_path(), &body)?;
+    vault_upsert_credential(
+        &accounts::provider_scope(auth_key),
+        "API key",
+        accounts::KIND_API_KEY,
+        json!({ "type": "api_key", "key": key }),
+    );
+    Ok(())
 }
 
 fn auth_has_key(auth_key: &str) -> bool {
@@ -1506,6 +1520,224 @@ fn clear_auth_key(auth_key: &str) -> Result<()> {
         write_secret_file(&auth_path(), &body)?;
     }
     Ok(())
+}
+
+// ── Sealed account vault (multi-account, the system locker) ───────────────────
+//
+// `auth.json` / `models.json` hold the ACTIVE credential per provider, in Pi's
+// native shape, so Pi's reading path never changes. The master-key-sealed vault
+// (`~/.ryu/pi-accounts.db`, see [`accounts`]) is the multi-account store: every
+// credential is sealed there, and the active one is *materialized* into Pi's
+// files. Writes here never fail the primary file write when the vault has not
+// been published (early boot / unit tests) — the credential still lands in the
+// active slot, it just is not yet part of the multi-account vault.
+
+/// Run `f` with the process-global account vault. Errors when it has not been
+/// published yet, so account-management routes fail loudly rather than silently
+/// pretending nothing exists.
+pub(crate) fn with_account_vault<T>(
+    f: impl FnOnce(&accounts::AccountVault) -> Result<T>,
+) -> Result<T> {
+    let vault = accounts::global()
+        .ok_or_else(|| anyhow::anyhow!("the pi-accounts vault is not initialized"))?;
+    f(vault)
+}
+
+/// A unique, human-friendly label for a new account in `scope`, disambiguating
+/// a repeat login (the second ChatGPT login is "ChatGPT · 2").
+fn vault_account_label(vault: &accounts::AccountVault, scope: &str, base: &str) -> String {
+    let existing: std::collections::HashSet<String> = vault
+        .list(scope)
+        .map(|rows| rows.into_iter().map(|r| r.label).collect())
+        .unwrap_or_default();
+    if !existing.contains(base) {
+        return base.to_owned();
+    }
+    let mut n = 2;
+    while existing.contains(&format!("{base} · {n}")) {
+        n += 1;
+    }
+    format!("{base} · {n}")
+}
+
+/// Best-effort vault write: store `credential` as a NEW account in `scope` and
+/// make it active. Never fails the primary write when the vault is unavailable —
+/// the credential still lands in the active slot. `label` is the base display
+/// name; duplicates get a " · N" suffix.
+fn vault_upsert_credential(scope: &str, base_label: &str, kind: &str, credential: Value) {
+    let Some(vault) = accounts::global() else {
+        return;
+    };
+    let account_id = format!("acct_{}", uuid::Uuid::new_v4().simple());
+    let label = vault_account_label(vault, scope, base_label);
+    if let Err(e) = vault.upsert(scope, &account_id, &label, kind, Some(credential)) {
+        tracing::warn!(
+            scope,
+            error = %e,
+            "account vault write failed (credential kept in the active slot only)"
+        );
+    }
+}
+
+/// Sealed-vault fallback for "does `scope` have any usable credential". The
+/// vault is additive to `auth.json`, so a provider that was configured before
+/// the vault existed — or whose active slot was cleared without removing its
+/// accounts — still reads as configured off the vault alone.
+fn vault_has_any(scope: &str) -> bool {
+    match accounts::global() {
+        Some(vault) => vault
+            .list(scope)
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Migrate credentials already sitting in Pi's plaintext files (`auth.json`
+/// api-key + oauth entries, `models.json` custom-provider `apiKey`s) into the
+/// sealed vault, one account per slot, active. Idempotent: a slot the vault
+/// already holds is left alone, so re-running after a partial failure only
+/// imports what is missing. Called at boot and before materialization.
+pub(crate) fn sync_plaintext_into_vault() {
+    let Some(vault) = accounts::global() else {
+        return;
+    };
+    for (auth_key, entry) in read_auth() {
+        let Some(credential) = usable_credential(&entry) else {
+            continue;
+        };
+        let scope = accounts::provider_scope(&auth_key);
+        let already = vault.count(&scope).unwrap_or(0) > 0;
+        if already {
+            continue;
+        }
+        let base = match credential.get("type").and_then(Value::as_str) {
+            Some("oauth") => "Login",
+            _ => "API key",
+        };
+        if let Err(e) = vault.upsert(&scope, &new_account_id(), base, credential_kind(&entry), Some(credential)) {
+            tracing::warn!(scope, error = %e, "could not import legacy credential into the account vault");
+        }
+    }
+    // Custom-provider apiKeys in models.json.
+    let models = read_models();
+    if let Some(providers) = models["providers"].as_object() {
+        for (id, provider) in providers {
+            let Some(key) = provider.get("apiKey").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let scope = accounts::provider_scope(id);
+            if vault.count(&scope).unwrap_or(0) > 0 {
+                continue;
+            }
+            if let Err(e) = vault.upsert(
+                &scope,
+                &new_account_id(),
+                "API key",
+                accounts::KIND_API_KEY,
+                Some(Value::String(key.to_owned())),
+            ) {
+                tracing::warn!(scope, error = %e, "could not import custom-provider key into the account vault");
+            }
+        }
+    }
+}
+
+fn new_account_id() -> String {
+    format!("acct_{}", uuid::Uuid::new_v4().simple())
+}
+
+/// Extract a credential object worth vaulting from an `auth.json` entry — the
+/// api-key shape (`{type:"api_key", key}`) or the oauth shape (any usable
+/// `access`/`refresh`). Returns `None` for empty/degenerate entries.
+fn usable_credential(entry: &Value) -> Option<Value> {
+    if entry
+        .get("key")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Some(entry.clone());
+    }
+    let has_token = ["access", "refresh"].iter().any(|f| {
+        entry
+            .get(*f)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    });
+    has_token.then(|| entry.clone())
+}
+
+/// Classify an `auth.json` entry for the vault `kind` column.
+fn credential_kind(entry: &Value) -> &'static str {
+    match entry.get("type").and_then(Value::as_str) {
+        Some("oauth") => accounts::KIND_OAUTH,
+        _ => accounts::KIND_API_KEY,
+    }
+}
+
+/// Materialize every provider scope's ACTIVE account into Pi's `auth.json` /
+/// `models.json`, so the files Pi reads on spawn always carry the selected
+/// account. A scope whose active account was removed has its slot cleared,
+/// rather than leaving a stale credential Pi would silently use. Call this at
+/// spawn (`ensure_managed_defaults`) and after any account switch.
+pub(crate) fn materialize_active_accounts() {
+    // Import first so a fresh install's plaintext files seed the vault before it
+    // is the source of truth for what goes back into them.
+    sync_plaintext_into_vault();
+    let Some(vault) = accounts::global() else {
+        return;
+    };
+    let Ok(scopes) = vault.scopes() else {
+        return;
+    };
+    let mut auth = read_auth();
+    let mut models = read_models();
+    let mut auth_dirty = false;
+    let mut models_dirty = false;
+    for scope in scopes {
+        if !accounts::is_provider_scope(&scope) {
+            continue;
+        }
+        let auth_key = accounts::scope_key(&scope);
+        match vault.active_credential(&scope) {
+            Ok(Some((_account_id, credential))) => {
+                // Custom-provider scopes store a bare key string; everything else
+                // stores the Pi entry object verbatim.
+                if let Some(key) = credential.as_str() {
+                    if let Some(providers) = models["providers"].as_object_mut() {
+                        if let Some(entry) = providers.get_mut(auth_key) {
+                            if let Some(obj) = entry.as_object_mut() {
+                                obj.insert("apiKey".to_owned(), Value::String(key.to_owned()));
+                                models_dirty = true;
+                            }
+                        }
+                    }
+                } else {
+                    auth.insert(auth_key.to_owned(), credential);
+                    auth_dirty = true;
+                }
+            }
+            Ok(None) => {
+                // No active account for the scope → clear its Pi slot.
+                if auth.remove(auth_key).is_some() {
+                    auth_dirty = true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(scope, error = %e, "materialize: could not read active account credential");
+            }
+        }
+    }
+    if auth_dirty {
+        if let Err(e) = write_secret_file(&auth_path(), &serde_json::to_string_pretty(&auth).unwrap_or_default()) {
+            tracing::warn!(error = %e, "materialize: could not write auth.json");
+        }
+    }
+    if models_dirty {
+        if let Err(e) = write_models(&models) {
+            tracing::warn!(error = %e, "materialize: could not write models.json");
+        }
+    }
 }
 
 // ── OAuth subscription token refresh ──────────────────────────────────────────
@@ -1629,7 +1861,9 @@ fn oauth_needs_refresh(entry: &Value) -> bool {
 /// Merge a refreshed `{access, refresh?, expires_at}` back into the provider's
 /// oauth entry and persist the whole `auth.json` (`0600` on Unix), leaving every
 /// other field (`type`, account id, scopes, …) intact — mirroring
-/// [`clear_auth_key`]'s read-modify-write of the same file.
+/// [`clear_auth_key`]'s read-modify-write of the same file. The refreshed entry
+/// is also written back into the sealed vault's active account, so the vault
+/// copy never goes stale.
 fn persist_oauth_refresh(
     auth_key: &str,
     access: &str,
@@ -1651,8 +1885,31 @@ fn persist_oauth_refresh(
     if let Some(expires_at) = expires_at {
         obj.insert("expires_at".to_owned(), json!(expires_at));
     }
-    let body = serde_json::to_string_pretty(&auth).context("serialize auth.json")?;
-    write_secret_file(&auth_path(), &body)
+    drop(obj);
+    let refreshed_entry = entry.clone();
+    let kind = credential_kind(&refreshed_entry);
+    let body = serde_json::to_string_pretty(&auth).context("serialize auth.json")?;    write_secret_file(&auth_path(), &body)?;
+    // Keep the vault's active copy fresh so switching away and back does not
+    // resurrect an expired token.
+    if let Some(vault) = accounts::global() {
+        let scope = accounts::provider_scope(auth_key);
+        if let Ok(Some(info)) = vault.active_info(&scope) {
+            if let Err(e) = vault.upsert(
+                &scope,
+                &info.account_id,
+                &info.label,
+                kind,
+                Some(refreshed_entry),
+            ) {
+                tracing::warn!(
+                    auth_key,
+                    error = %e,
+                    "could not sync refreshed tokens into the account vault"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refresh the OAuth access token for a Pi subscription login stored in
@@ -2191,11 +2448,15 @@ fn provider_configured(meta: &ProviderMeta) -> bool {
         return true;
     }
     // Login-based subscription providers (ChatGPT/Claude/Copilot): "configured" =
-    // Pi has a stored OAuth login for them (auth.json `{type:"oauth", …}`).
+    // Pi has a stored OAuth login for them (auth.json `{type:"oauth", …}`), or
+    // the sealed vault holds an account.
     if meta.auth_kind == "subscription" {
-        return !meta.auth_key.is_empty() && auth_has_any(meta.auth_key);
+        return !meta.auth_key.is_empty()
+            && (auth_has_any(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key)));
     }
-    if !meta.auth_key.is_empty() && auth_has_key(meta.auth_key) {
+    if !meta.auth_key.is_empty()
+        && (auth_has_key(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key)))
+    {
         return true;
     }
     if !meta.auth_env.is_empty()
@@ -2224,7 +2485,237 @@ pub fn subscription_login_present(provider_id: &str) -> Option<bool> {
     if meta.auth_kind != "subscription" {
         return None;
     }
-    Some(!meta.auth_key.is_empty() && auth_has_any(meta.auth_key))
+    Some(
+        !meta.auth_key.is_empty()
+            && (auth_has_any(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key))),
+    )
+}
+
+// ── Account management (multi-account switch/remove, backed by the vault) ─────
+
+/// The vault scope for a provider id: its `auth.json` key for a built-in, its
+/// `models.json` id for a custom provider. `None` for managed/gateway rows that
+/// hold no credential.
+pub fn provider_account_scope(provider_id: &str) -> Option<String> {
+    let meta = provider_meta(provider_id)?;
+    if is_managed_or_gateway(provider_id) {
+        return None;
+    }
+    let key = if meta.auth_key.is_empty() {
+        provider_id.to_owned()
+    } else {
+        meta.auth_key.to_owned()
+    };
+    Some(accounts::provider_scope(&key))
+}
+
+/// The accounts a provider holds, labels only. `[]` when it holds none.
+pub fn list_provider_accounts(provider_id: &str) -> Vec<accounts::AccountInfo> {
+    let Some(scope) = provider_account_scope(provider_id) else {
+        return Vec::new();
+    };
+    match accounts::global() {
+        Some(vault) => vault.list(&scope).unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Make `account_id` the active account for a provider and materialize it into
+/// Pi's files. Returns the refreshed catalog. Errors when the provider has no
+/// such account.
+pub fn switch_provider_account(provider_id: &str, account_id: &str) -> Result<Value> {
+    let scope = provider_account_scope(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' holds no accounts"))?;
+    let switched = with_account_vault(|vault| vault.set_active(&scope, account_id))?;
+    if !switched {
+        anyhow::bail!("no account with id '{account_id}' for provider '{provider_id}'");
+    }
+    materialize_active_accounts();
+    Ok(catalog())
+}
+
+/// Remove `account_id` from a provider. If it was active, the newest remaining
+/// account becomes active and is materialized (the slot is cleared otherwise).
+/// Returns the refreshed catalog.
+pub fn remove_provider_account(provider_id: &str, account_id: &str) -> Result<Value> {
+    let scope = provider_account_scope(provider_id)
+        .ok_or_else(|| anyhow::anyhow!("provider '{provider_id}' holds no accounts"))?;
+    let removed = with_account_vault(|vault| vault.remove(&scope, account_id))?;
+    if !removed {
+        anyhow::bail!("no account with id '{account_id}' for provider '{provider_id}'");
+    }
+    // Promote a remaining account so a removed active login does not leave the
+    // provider with a cleared slot it cannot use.
+    let remaining = with_account_vault(|vault| vault.list(&scope))?;
+    if !remaining.is_empty() && !remaining.iter().any(|a| a.active) {
+        if let Some(next) = remaining.first() {
+            let _ = with_account_vault(|vault| vault.set_active(&scope, &next.account_id));
+        }
+    }
+    materialize_active_accounts();
+    Ok(catalog())
+}
+
+/// Snapshot every usable credential currently in Pi's `auth.json` into the
+/// sealed vault as an account (deduped by credential content), for the managed
+/// Pi's ACP login path — after `authenticate` the agent subprocess writes the
+/// credential itself, and this is how Ryu captures it as a switchable account.
+/// Called on a successful managed-Pi `authenticate` and at boot.
+pub fn capture_pi_auth_into_vault() {
+    let Some(vault) = accounts::global() else {
+        return;
+    };
+    for (auth_key, entry) in read_auth() {
+        let Some(credential) = usable_credential(&entry) else {
+            continue;
+        };
+        let scope = accounts::provider_scope(&auth_key);
+        if vault.has_credential(&scope, &credential).unwrap_or(false) {
+            continue;
+        }
+        let base = provider_label_for_auth_key(&auth_key);
+        if let Err(e) = vault.upsert(
+            &scope,
+            &new_account_id(),
+            &vault_account_label(vault, &scope, base),
+            credential_kind(&entry),
+            Some(credential),
+        ) {
+            tracing::warn!(
+                auth_key,
+                error = %e,
+                "could not capture Pi login into the account vault"
+            );
+        }
+    }
+    materialize_active_accounts();
+}
+
+/// A human label for an `auth.json` key: the first built-in provider whose
+/// `auth_key` it names, else "Account".
+fn provider_label_for_auth_key(auth_key: &str) -> &'static str {
+    PROVIDERS
+        .iter()
+        .find(|p| p.auth_key == auth_key)
+        .map(|p| p.label)
+        .unwrap_or("Account")
+}
+
+fn rows_to_values(rows: Vec<accounts::AccountInfo>) -> Vec<Value> {
+    rows.into_iter()
+        .map(|info| serde_json::to_value(info).unwrap_or_default())
+        .collect()
+}
+
+/// List an ACP agent's accounts (labels only). For the managed Pi this is the
+/// aggregate of its provider accounts, each tagged with the provider it belongs
+/// to; for every other agent it is its opaque sign-ins.
+pub fn list_acp_accounts(spawn_cmd: &str) -> Vec<Value> {
+    let Some(vault) = accounts::global() else {
+        return Vec::new();
+    };
+    let scope = accounts::acp_scope(spawn_cmd);
+    // Managed Pi: aggregate the provider scopes, tagged by provider.
+    if spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        let mut out = Vec::new();
+        for meta in PROVIDERS {
+            if meta.auth_key.is_empty() {
+                continue;
+            }
+            let provider_scope = accounts::provider_scope(meta.auth_key);
+            if let Ok(accounts) = vault.list(&provider_scope) {
+                for info in accounts {
+                    let mut v = serde_json::to_value(&info).unwrap_or_default();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("provider".to_owned(), Value::String(meta.id.to_owned()));
+                    }
+                    out.push(v);
+                }
+            }
+        }
+        return out;
+    }
+    // Any other agent: its own opaque scope.
+    vault.list(&scope).map(rows_to_values).unwrap_or_default()
+}
+
+/// Record a successful ACP `authenticate` in the vault. Managed Pi → snapshot
+/// Pi's `auth.json` (real, switchable credentials); any other agent → an opaque
+/// account under its scope (its own auth files are not Ryu's to read), deduped
+/// by label so a re-login refreshes the existing sign-in rather than stacking.
+pub fn record_acp_account(spawn_cmd: &str, provider_id: Option<&str>) {
+    let Some(vault) = accounts::global() else {
+        return;
+    };
+    if spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        capture_pi_auth_into_vault();
+        return;
+    }
+    let scope = accounts::acp_scope(spawn_cmd);
+    let base = provider_id
+        .and_then(provider_meta)
+        .map(|m| m.label)
+        .unwrap_or("Signed-in account");
+    // Re-login to the same agent = refresh that account, not a duplicate row.
+    if let Ok(Some(existing)) = vault.find_by_label(&scope, base) {
+        if let Err(e) = vault.set_active(&scope, &existing.account_id) {
+            tracing::warn!(error = %e, "could not refresh ACP account in the vault");
+        }
+        return;
+    }
+    if let Err(e) = vault.upsert(&scope, &new_account_id(), base, accounts::KIND_OPAQUE, None) {
+        tracing::warn!(error = %e, "could not record ACP account in the vault");
+    }
+}
+
+/// Make `account_id` the active account for an ACP agent. For the managed Pi the
+/// account carries a `provider` tag naming the provider scope to switch; for any
+/// other agent switching means re-running the agent's own login (the route's
+/// job), so this only acknowledges.
+pub fn switch_acp_account(spawn_cmd: &str, account_id: &str, provider: Option<&str>) -> Result<bool> {
+    let Some(vault) = accounts::global() else {
+        return Ok(false);
+    };
+    if spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        let provider = provider.ok_or_else(|| {
+            anyhow::anyhow!("the managed Pi account needs its provider to switch")
+        })?;
+        let scope = provider_account_scope(provider)
+            .ok_or_else(|| anyhow::anyhow!("provider '{provider}' holds no accounts"))?;
+        let switched = vault.set_active(&scope, account_id)?;
+        if switched {
+            materialize_active_accounts();
+        }
+        return Ok(switched);
+    }
+    Ok(true)
+}
+
+/// Remove an account from an ACP agent. Managed Pi → remove from its provider
+/// scope (and materialize); any other agent → remove the opaque account.
+pub fn remove_acp_account(spawn_cmd: &str, account_id: &str) -> Result<bool> {
+    let Some(vault) = accounts::global() else {
+        return Ok(false);
+    };
+    if spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        let mut removed = false;
+        for meta in PROVIDERS {
+            if meta.auth_key.is_empty() {
+                continue;
+            }
+            let provider_scope = accounts::provider_scope(meta.auth_key);
+            if vault.remove(&provider_scope, account_id)? {
+                removed = true;
+                break;
+            }
+        }
+        if removed {
+            materialize_active_accounts();
+        }
+        return Ok(removed);
+    }
+    let scope = accounts::acp_scope(spawn_cmd);
+    vault.remove(&scope, account_id)
 }
 
 // ── Public API (consumed by the HTTP handlers) ────────────────────────────────
@@ -2368,6 +2859,22 @@ pub fn provider_api_key(id: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The account listing a provider row carries — labels, kinds, active flag and
+/// timestamps, NEVER a credential. `[]` when the vault is not published.
+fn provider_accounts(scope: &str) -> Vec<Value> {
+    match accounts::global() {
+        Some(vault) => vault
+            .list(scope)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|info| serde_json::to_value(info).unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
 pub fn catalog() -> Value {
     let custom_ids = custom_provider_ids();
     let active = active_provider_id_from(&read_settings());
@@ -2400,6 +2907,9 @@ pub fn catalog() -> Value {
                 // Per-model enabled overrides (absent id ⇒ enabled). Lets the
                 // desktop render each model's on/off toggle.
                 "modelOverrides": model_overrides(&models_value, p.id),
+                // Every account the provider holds in the sealed vault (labels
+                // only — never a credential). Lets the picker list + switch.
+                "accounts": provider_accounts(&accounts::provider_scope(p.auth_key)),
             })
         })
         .collect();
@@ -2419,13 +2929,14 @@ pub fn catalog() -> Value {
             "routing": provider_routing(&id),
             "routingLocked": false,
             "managed": false,
-            "configured": custom_provider_has_key(&id),
+            "configured": custom_provider_has_key(&id) || vault_has_any(&accounts::provider_scope(&id)),
             "active": is_active(&id),
             "custom": true,
             "suggestedModels": [],
             // Custom providers discover against their own baseUrl + /models.
             "supportsDiscovery": true,
             "modelOverrides": model_overrides(&models_value, &id),
+            "accounts": provider_accounts(&accounts::provider_scope(&id)),
         }));
     }
 
@@ -2590,6 +3101,12 @@ pub fn apply(input: PiConfigInput) -> Result<PiConfigView> {
         );
         if let Some(key) = &api_key {
             patch.insert("apiKey".to_owned(), Value::String(key.clone()));
+            vault_upsert_credential(
+                &accounts::provider_scope(&provider),
+                "API key",
+                accounts::KIND_API_KEY,
+                Value::String(key.clone()),
+            );
         }
         if let Some(model_id) = &model {
             patch.insert("models".to_owned(), json!([{ "id": model_id }]));
@@ -2660,6 +3177,12 @@ pub fn configure_provider(input: ProviderConfigInput) -> Result<Value> {
         );
         if let Some(key) = &api_key {
             patch.insert("apiKey".to_owned(), Value::String(key.clone()));
+            vault_upsert_credential(
+                &accounts::provider_scope(&provider),
+                "API key",
+                accounts::KIND_API_KEY,
+                Value::String(key.clone()),
+            );
         }
         upsert_provider(&provider, patch)?;
     } else if let (Some(meta), Some(key)) = (provider_meta(&provider), &api_key) {

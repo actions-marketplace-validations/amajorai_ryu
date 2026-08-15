@@ -437,7 +437,7 @@ function ComparisonBars({
 			<div>
 				<div className="mb-1 flex justify-between text-xs">
 					<span className="text-muted-foreground">Your current tools</span>
-					<span className="font-medium tabular-nums">
+					<span className="font-heading font-medium tabular-nums">
 						{usd.format(stackAnnual)}/yr
 					</span>
 				</div>
@@ -451,7 +451,7 @@ function ComparisonBars({
 			<div>
 				<div className="mb-1 flex justify-between text-xs">
 					<span className="text-muted-foreground">Ryu</span>
-					<span className="font-medium tabular-nums">
+					<span className="font-heading font-medium tabular-nums">
 						{usd.format(ryuAnnual)}/yr
 					</span>
 				</div>
@@ -495,12 +495,21 @@ function ToolRow({
 				</span>
 			</label>
 			<span className="shrink-0 text-right">
-				<span className="block font-medium text-sm tabular-nums">
+				<span className="block font-heading font-medium text-sm tabular-nums">
 					{usd.format(monthly)}
 					<span className="text-muted-foreground text-xs">/mo</span>
 				</span>
 				<span className="block text-muted-foreground text-xs">
-					{tool.perSeat ? `${usd.format(tool.monthlyUsd)}/seat` : "flat rate"}
+					{tool.perSeat ? (
+						<>
+							<span className="font-heading tabular-nums">
+								{usd.format(tool.monthlyUsd)}
+							</span>
+							/seat
+						</>
+					) : (
+						"flat rate"
+					)}
 				</span>
 			</span>
 		</div>
@@ -545,9 +554,9 @@ function DisplacedCostRow({
 					Monthly cost of {cost.name} in US dollars
 				</label>
 				<span className="flex items-center justify-end gap-1">
-					<span className="text-muted-foreground text-sm">$</span>
+					<span className="font-heading text-muted-foreground text-sm">$</span>
 					<Input
-						className="h-8 w-24 text-right text-sm tabular-nums"
+						className="font-heading h-8 w-24 text-right text-sm tabular-nums"
 						id={amountId}
 						inputMode="numeric"
 						max={MAX_DISPLACED_MONTHLY_USD}
@@ -815,7 +824,10 @@ export function PricingSavingsCalculator({
 						<CardHeader>
 							<CardTitle className="text-lg">Your savings</CardTitle>
 							<CardDescription>
-								Against Ryu {planName} at {usd.format(ryuMonthlyPerSeat)}
+								Against Ryu {planName} at{" "}
+								<span className="font-heading tabular-nums">
+									{usd.format(ryuMonthlyPerSeat)}
+								</span>
 								{seatControl ? "/seat" : ""}/mo
 								{isYearly ? ", billed yearly" : ""}.
 							</CardDescription>
@@ -857,7 +869,7 @@ export function PricingSavingsCalculator({
 								<>
 									<div className="mt-6 flex items-baseline">
 										<NumberTicker
-											className="font-semibold text-4xl"
+											className="font-heading font-semibold text-4xl tabular-nums"
 											prefix={savings < 0 ? "-$" : "$"}
 											value={Math.abs(savings)}
 										/>
@@ -880,7 +892,9 @@ export function PricingSavingsCalculator({
 							</Button>
 							<p className="mt-3 text-muted-foreground text-xs">
 								Ryu {planName} also includes{" "}
-								{usdWithCents.format(includedPerSeatUsd)}
+								<span className="font-heading tabular-nums">
+									{usdWithCents.format(includedPerSeatUsd)}
+								</span>
 								{seatControl ? "/seat" : ""}/mo of AI usage, so the model bills
 								the tools above charge you for are already in the number.
 							</p>

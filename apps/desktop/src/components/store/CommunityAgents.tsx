@@ -99,7 +99,7 @@ function CommunityAgentAction({
 				variant="ghost"
 			>
 				<HugeiconsIcon className="size-4" icon={ShoppingCart01Icon} />
-				{priceLabel(card)}
+				<span className="font-heading tabular-nums">{priceLabel(card)}</span>
 			</Button>
 		);
 	}
@@ -279,7 +279,14 @@ export function CommunityAgentDetail({
 							{ label: "Publisher", value: card.author ?? "Unknown" },
 							{ label: "Version", value: card.version },
 							{ label: "Listing ID", value: card.id },
-							{ label: "Price", value: priceLabel(card) },
+							{
+								label: "Price",
+								value: (
+									<span className="font-heading tabular-nums">
+										{priceLabel(card)}
+									</span>
+								),
+							},
 							{ label: "Provenance", value: verification ?? "Unknown" },
 							{
 								label: "Reviews",

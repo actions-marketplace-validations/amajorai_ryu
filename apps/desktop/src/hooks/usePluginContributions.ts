@@ -50,6 +50,7 @@ const EMPTY: PluginContributions = {
 	sidebar_buttons: [],
 	themes: [],
 	dock_panels: [],
+	live_activities: [],
 	store_tabs: [],
 	channels: [],
 	companions: [],

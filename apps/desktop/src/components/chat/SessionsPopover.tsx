@@ -157,7 +157,10 @@ export function SessionsPopover({
 								{costSummary.callCount} call
 								{costSummary.callCount === 1 ? "" : "s"}
 							</span>
-							<span title="Estimated cost across this conversation's model calls">
+							<span
+								className="font-heading"
+								title="Estimated cost across this conversation's model calls"
+							>
 								{costSummary.costMicroUsd == null
 									? "—"
 									: formatCost(costSummary.costMicroUsd)}

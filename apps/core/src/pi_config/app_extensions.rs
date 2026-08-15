@@ -480,7 +480,11 @@ mod tests {
         let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
         let resolution = resolve_pi_extensions(
             &manifests,
-            &enabled(&[("@ryu/pi-shell", &[]), ("@ryu/pi-subagent", &[])]),
+            &enabled(&[
+                ("@ryu/pi-shell", &[]),
+                ("@ryu/pi-subagent", &[]),
+                ("@ryu/pi-monitor", &[]),
+            ]),
             read_source,
         );
         assert!(
@@ -497,6 +501,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "ext-@ryu+pi-monitor-monitor.ts",
                 "ext-@ryu+pi-shell-shell.ts",
                 "ext-@ryu+pi-subagent-subagent.ts"
             ]

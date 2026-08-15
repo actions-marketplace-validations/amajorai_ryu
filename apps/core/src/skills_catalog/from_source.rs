@@ -253,7 +253,7 @@ fn parse_http_url(source: &str) -> Result<ParsedSource> {
 // ── Fetch ────────────────────────────────────────────────────────────────────
 
 /// A unique temp working directory for one install. Created under the OS temp dir.
-fn temp_workdir() -> Result<PathBuf> {
+pub(crate) fn temp_workdir() -> Result<PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -318,7 +318,7 @@ async fn fetch_tarball(client: &reqwest::Client, url: &str, dest: &Path) -> Resu
 /// Extract the host from a clone URL for SSRF screening. Handles the three forms
 /// `git_clone` is reached with: `https://host/...`, `ssh://[user@]host[:port]/...`,
 /// and the scp-like `git@host:owner/repo.git`. Returns `(host, port)`.
-fn clone_host_port(url: &str) -> Result<(String, u16)> {
+pub(crate) fn clone_host_port(url: &str) -> Result<(String, u16)> {
     if url.starts_with("https://") || url.starts_with("ssh://") {
         let parsed = url::Url::parse(url).with_context(|| format!("invalid clone URL: {url}"))?;
         let host = parsed
@@ -374,8 +374,8 @@ const GIT_UNSAFE_ENV: &[&str] = &[
 /// host is SSRF-screened before the clone so a `git@`/`ssh://` or non-github/gitlab
 /// https source can't be aimed at an internal address. Command-execution env vars
 /// are stripped and credential prompts disabled so the clone can't be coerced into
-/// running a helper or hanging on input.
-async fn git_clone(url: &str, dest: &Path) -> Result<PathBuf> {
+/// running a helper or hanging on input. Returns the checkout directory.
+pub(crate) async fn git_clone(url: &str, dest: &Path) -> Result<PathBuf> {
     guard_clone_url(url).await?;
     let target = dest.join("repo");
     let target_str = target.to_string_lossy().to_string();
@@ -751,7 +751,11 @@ fn resolve_subdir(extract_root: &Path, subdir: Option<&str>) -> Result<PathBuf> 
 /// Install the first skill found under `dir` into the universal skills directory.
 /// `root_name_hint` is the tarball/clone top-dir name, used when SKILL.md is at the
 /// search root so the install name isn't the raw `repo-ref` directory.
-fn install_from_dir(dir: &Path, root_name_hint: Option<String>) -> Result<InstallResult> {
+///
+/// `pub(crate)`: the setup-import engine (`crate::import`) reuses this exact
+/// copy + activate path when importing a skill found in a scanned folder, so an
+/// imported skill is byte-for-byte the same install a URL/source install produces.
+pub(crate) fn install_from_dir(dir: &Path, root_name_hint: Option<String>) -> Result<InstallResult> {
     let mut found = find_skills(dir);
     if found.is_empty() {
         anyhow::bail!("no SKILL.md found in source (looked for SKILL.md, skills/<name>/, skills/<category>/<name>/)");

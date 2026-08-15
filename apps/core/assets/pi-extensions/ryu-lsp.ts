@@ -189,6 +189,21 @@ const MAX_HOVER_CHARS = 1200;
 /** Cap on locations listed by lsp_definition / lsp_references. */
 const MAX_LOCATIONS_LISTED = 50;
 
+/** Cap on symbols listed by `lsp_symbols`, so a huge generated file can't flood context. */
+const MAX_SYMBOLS_LISTED = 200;
+
+/** Cap on matches returned by `lsp_symbol_search`. */
+const MAX_SYMBOL_MATCHES = 50;
+
+/** Cap on nodes in a rendered call hierarchy, which can explode on hot call sites. */
+const MAX_CALL_HIERARCHY_NODES = 40;
+
+/** Cap on the depth of a rendered call hierarchy. */
+const MAX_CALL_HIERARCHY_DEPTH = 4;
+
+/** Cap on a symbol's `detail` field, which some servers fill with a whole signature. */
+const MAX_SYMBOL_DETAIL_CHARS = 100;
+
 /** JSON-RPC "method not found", the correct reply to a server request we do not service. */
 const JSONRPC_METHOD_NOT_FOUND = -32_601;
 
@@ -199,6 +214,42 @@ const SEVERITY_LABELS: Record<number, string> = {
 	3: "info",
 	4: "hint",
 };
+
+/** LSP SymbolKind -> label. Index is the wire value; the spec numbers start at 1. */
+const SYMBOL_KIND_LABELS: Record<number, string> = {
+	1: "file",
+	2: "module",
+	3: "namespace",
+	4: "package",
+	5: "class",
+	6: "method",
+	7: "property",
+	8: "field",
+	9: "constructor",
+	10: "enum",
+	11: "interface",
+	12: "function",
+	13: "variable",
+	14: "constant",
+	15: "string",
+	16: "number",
+	17: "boolean",
+	18: "array",
+	19: "object",
+	20: "key",
+	21: "null",
+	22: "enumMember",
+	23: "struct",
+	24: "event",
+	25: "operator",
+	26: "typeParameter",
+};
+
+/** Every wire value 1..26, advertised as the client's supported SymbolKind set. */
+const SYMBOL_KIND_VALUES = [
+	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+	23, 24, 25, 26,
+];
 
 // ── Wire types ──────────────────────────────────────────────────────────────
 
@@ -237,6 +288,44 @@ interface PublishDiagnosticsParams {
 	diagnostics?: LspDiagnostic[];
 	uri: string;
 	version?: number;
+}
+
+/** One entry of `textDocument/documentSymbol`'s `DocumentSymbol[]` form. */
+interface DocumentSymbolLike {
+	children?: DocumentSymbolLike[];
+	detail?: string;
+	kind?: number;
+	name?: string;
+	range?: LspRange;
+	selectionRange?: LspRange;
+}
+
+/** One entry of `workspace/symbol`'s `WorkspaceSymbol` / `SymbolInformation` forms. */
+interface WorkspaceSymbolLike {
+	containerName?: string;
+	kind?: number;
+	location?: { range?: LspRange; uri?: string };
+	name?: string;
+}
+
+/**
+ * One `CallHierarchyItem`, the node type of both `prepareCallHierarchy` and the
+ * call graph.
+ *
+ * `raw` is the VERBATIM record the server sent, held so a `callHierarchy/*`
+ * request can echo it back untouched. This is load-bearing, not bookkeeping:
+ * servers identify a symbol by opaque fields like clangd's `data`, which the
+ * spec never names — strip them and the server answers the next hop with an
+ * empty list. The LSP rule is "send back the same item you received".
+ */
+interface CallHierarchyItemLike {
+	detail?: string;
+	kind?: number;
+	name?: string;
+	range?: LspRange;
+	raw: Record<string, unknown>;
+	selectionRange?: LspRange;
+	uri?: string;
 }
 
 // ── Config types ────────────────────────────────────────────────────────────
@@ -419,6 +508,17 @@ function asPositiveNumber(value: unknown, fallback: number): number {
 
 function asBoolean(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
+}
+
+/**
+ * Whether a ready server advertised a capability. Server capabilities hold
+ * `true` or an options object for each supported feature, and nothing at all
+ * for an unsupported one — so a plain Boolean coercion answers the question.
+ * Gating a request on it turns "method not found" into a readable message and,
+ * for workspace-wide queries, skips servers that would only error out.
+ */
+function serverSupports(runtime: ServerRuntime, capability: string): boolean {
+	return Boolean(runtime.serverCapabilities[capability]);
 }
 
 /**
@@ -1099,6 +1199,11 @@ function clientCapabilities(): Record<string, unknown> {
 			workspaceFolders: true,
 			configuration: true,
 			didChangeConfiguration: { dynamicRegistration: false },
+			symbol: {
+				dynamicRegistration: false,
+				hierarchicalWorkspaceSymbolSupport: true,
+				symbolKind: { valueSet: SYMBOL_KIND_VALUES },
+			},
 		},
 		textDocument: {
 			synchronization: {
@@ -1121,6 +1226,13 @@ function clientCapabilities(): Record<string, unknown> {
 				dynamicRegistration: false,
 				contentFormat: ["markdown", "plaintext"],
 			},
+			implementation: { dynamicRegistration: false, linkSupport: true },
+			documentSymbol: {
+				dynamicRegistration: false,
+				hierarchicalDocumentSymbolSupport: true,
+				symbolKind: { valueSet: SYMBOL_KIND_VALUES },
+			},
+			callHierarchy: { dynamicRegistration: false },
 		},
 	};
 }
@@ -1784,6 +1896,309 @@ function renderHoverContents(contents: unknown): string {
 	return "";
 }
 
+// ── Symbol & call-hierarchy rendering ───────────────────────────────────────
+
+/** Wire SymbolKind -> short label, with a safe fallback for a value the spec does not name. */
+function symbolKindLabel(kind: unknown): string {
+	return typeof kind === "number"
+		? (SYMBOL_KIND_LABELS[kind] ?? "symbol")
+		: "symbol";
+}
+
+/**
+ * Render one `DocumentSymbol`, nested by its `children`, into `lines`.
+ *
+ * The outline uses `selectionRange` for the position (the range of the name,
+ * not the whole symbol including its body), so the reader lands where the
+ * symbol starts reading. `detail` is where servers put the signature, and is
+ * capped so a whole generic signature cannot blow up the outline.
+ */
+function pushDocumentSymbol(
+	cwd: string,
+	fsPath: string,
+	item: unknown,
+	depth: number,
+	lines: string[]
+): void {
+	if (lines.length >= MAX_SYMBOLS_LISTED) {
+		return;
+	}
+	const record = asRecord(item);
+	if (!record) {
+		return;
+	}
+	const range = (asRecord(record.selectionRange) ?? asRecord(record.range)) as
+		| LspRange
+		| undefined;
+	const line = (range?.start?.line ?? 0) + 1;
+	const column = (range?.start?.character ?? 0) + 1;
+	const name = typeof record.name === "string" ? record.name : "?";
+	const detail =
+		typeof record.detail === "string" && record.detail.trim()
+			? ` — ${record.detail.trim().slice(0, MAX_SYMBOL_DETAIL_CHARS)}`
+			: "";
+	const indent = "  ".repeat(depth);
+	lines.push(
+		`${indent}${displayPath(cwd, fsPath)}:${line}:${column} [${symbolKindLabel(record.kind)}] ${name}${detail}`
+	);
+	if (Array.isArray(record.children)) {
+		for (const child of record.children) {
+			pushDocumentSymbol(cwd, fsPath, child, depth + 1, lines);
+		}
+	}
+}
+
+/**
+ * Render the answer to `textDocument/documentSymbol`, which is either the
+ * hierarchical `DocumentSymbol[]` form or the flat `SymbolInformation[]` form.
+ * The two are told apart by `selectionRange`: only `DocumentSymbol` has one.
+ */
+function renderDocumentSymbols(
+	cwd: string,
+	fsPath: string,
+	raw: unknown
+): string {
+	if (!Array.isArray(raw) || raw.length === 0) {
+		return "No symbols in this file.";
+	}
+	const hierarchical = asRecord(raw[0])?.selectionRange !== undefined;
+	const lines: string[] = [];
+	if (hierarchical) {
+		for (const item of raw) {
+			pushDocumentSymbol(cwd, fsPath, item, 0, lines);
+		}
+	} else {
+		for (const item of raw) {
+			const record = asRecord(item);
+			if (!record) {
+				continue;
+			}
+			const range = asRecord(asRecord(record.location)?.range) as
+				| LspRange
+				| undefined;
+			const line = (range?.start?.line ?? 0) + 1;
+			const column = (range?.start?.character ?? 0) + 1;
+			const name = typeof record.name === "string" ? record.name : "?";
+			const container =
+				typeof record.containerName === "string" && record.containerName
+					? `${record.containerName}.`
+					: "";
+			lines.push(
+				`${displayPath(cwd, fsPath)}:${line}:${column} [${symbolKindLabel(record.kind)}] ${container}${name}`
+			);
+			if (lines.length >= MAX_SYMBOLS_LISTED) {
+				break;
+			}
+		}
+	}
+	if (lines.length >= MAX_SYMBOLS_LISTED) {
+		lines.push(`…and more symbols (capped at ${MAX_SYMBOLS_LISTED})`);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Normalize the answer to `workspace/symbol`, which is `WorkspaceSymbol[]` or
+ * `SymbolInformation[]`. A 3.17 `WorkspaceSymbol` may carry a bare `{ uri }`
+ * as its `location` when the server expects a follow-up resolve we do not do,
+ * so `range` is optional and renders as line 1.
+ */
+function toWorkspaceSymbols(raw: unknown): WorkspaceSymbolLike[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const out: WorkspaceSymbolLike[] = [];
+	for (const item of raw) {
+		const record = asRecord(item);
+		if (!record || typeof record.name !== "string") {
+			continue;
+		}
+		const location = asRecord(record.location);
+		out.push({
+			name: record.name,
+			kind: typeof record.kind === "number" ? record.kind : undefined,
+			containerName:
+				typeof record.containerName === "string"
+					? record.containerName
+					: undefined,
+			location: {
+				uri: typeof location?.uri === "string" ? location.uri : undefined,
+				range: asRecord(location?.range) as LspRange | undefined,
+			},
+		});
+	}
+	return out;
+}
+
+function renderWorkspaceSymbols(
+	cwd: string,
+	perServer: Array<{ serverId: string; symbols: WorkspaceSymbolLike[] }>
+): string {
+	const flat = perServer.flatMap((entry) =>
+		entry.symbols.map((symbol) => ({ serverId: entry.serverId, symbol }))
+	);
+	if (flat.length === 0) {
+		return "No matching symbols.";
+	}
+	// The server id only earns its place on the line when the query spanned
+	// more than one server; a single-server search would be pure noise.
+	const multiple = perServer.length > 1;
+	const lines = flat
+		.slice(0, MAX_SYMBOL_MATCHES)
+		.map(({ serverId, symbol }) => {
+			const uri = symbol.location?.uri;
+			const fsPath = uri ? (diagnosticsKey(uri) ?? uri) : "";
+			const line = (symbol.location?.range?.start?.line ?? 0) + 1;
+			const column = (symbol.location?.range?.start?.character ?? 0) + 1;
+			const container = symbol.containerName ? `${symbol.containerName}.` : "";
+			const location = fsPath
+				? `${displayPath(cwd, fsPath)}:${line}:${column}`
+				: "workspace";
+			const owner = multiple ? `(${serverId}) ` : "";
+			return `${owner}${location} [${symbolKindLabel(symbol.kind)}] ${container}${symbol.name}`;
+		});
+	if (flat.length > MAX_SYMBOL_MATCHES) {
+		lines.push(`…and ${flat.length - MAX_SYMBOL_MATCHES} more`);
+	}
+	return lines.join("\n");
+}
+
+function toCallHierarchyItem(raw: unknown): CallHierarchyItemLike | undefined {
+	const record = asRecord(raw);
+	if (!record) {
+		return;
+	}
+	return {
+		name: typeof record.name === "string" ? record.name : "?",
+		kind: typeof record.kind === "number" ? record.kind : undefined,
+		uri: typeof record.uri === "string" ? record.uri : undefined,
+		detail: typeof record.detail === "string" ? record.detail : undefined,
+		selectionRange: asRecord(record.selectionRange) as LspRange | undefined,
+		range: asRecord(record.range) as LspRange | undefined,
+		raw: record,
+	};
+}
+
+/** `prepareCallHierarchy` answers one item or an array of them. */
+function toCallHierarchyItems(raw: unknown): CallHierarchyItemLike[] {
+	const records = Array.isArray(raw) ? raw : [raw];
+	const out: CallHierarchyItemLike[] = [];
+	for (const record of records) {
+		const item = toCallHierarchyItem(record);
+		if (item) {
+			out.push(item);
+		}
+	}
+	return out;
+}
+
+function renderCallHierarchyItem(
+	cwd: string,
+	item: CallHierarchyItemLike
+): string {
+	const uri = item.uri;
+	const fsPath = uri ? (diagnosticsKey(uri) ?? uri) : "";
+	const range = item.selectionRange ?? item.range;
+	const line = (range?.start?.line ?? 0) + 1;
+	const column = (range?.start?.character ?? 0) + 1;
+	const detail =
+		typeof item.detail === "string" && item.detail.trim()
+			? ` — ${item.detail.trim().slice(0, MAX_SYMBOL_DETAIL_CHARS)}`
+			: "";
+	const location = fsPath
+		? `${displayPath(cwd, fsPath)}:${line}:${column}: `
+		: "";
+	return `${location}${item.name}${detail} [${symbolKindLabel(item.kind)}]`;
+}
+
+/**
+ * Walk one direction of the call graph from `item`, returning rendered,
+ * indented lines. `incoming` lists the functions that call `item` (marked
+ * `←`), `outgoing` the functions `item` calls (marked `→`); the marker is
+ * what keeps a deep tree readable without re-reading the direction label.
+ *
+ * Every level pays one `request`, so the node budget is what keeps a hot call
+ * site from turning into dozens of sequential round trips. The graph can also
+ * contain cycles (direct recursion shows up immediately), and walking to a
+ * bounded depth is what stops those from looping forever.
+ */
+async function renderCallHierarchyTree(
+	runtime: ServerRuntime,
+	direction: "incoming" | "outgoing",
+	item: CallHierarchyItemLike,
+	cwd: string,
+	depth: number,
+	budget: { nodes: number; truncated: boolean }
+): Promise<string[]> {
+	if (depth <= 0 || budget.nodes <= 0) {
+		return [];
+	}
+	const method =
+		direction === "incoming"
+			? "callHierarchy/incomingCalls"
+			: "callHierarchy/outgoingCalls";
+	const marker = direction === "incoming" ? "←" : "→";
+	let raw: unknown;
+	try {
+		// The params carry the VERBATIM item received (its `raw`), never a
+		// re-derived copy — see the note on `CallHierarchyItemLike.raw`.
+		raw = await request(
+			runtime,
+			method,
+			{ item: item.raw },
+			NAVIGATION_TIMEOUT_MS
+		);
+	} catch (err) {
+		// One broken edge must not fail the whole tree; the caller still sees
+		// the levels that did resolve.
+		log(`call hierarchy on "${runtime.config.id}" failed (${errorText(err)}).`);
+		return [];
+	}
+	const children: Array<{ item: CallHierarchyItemLike; label: string }> = [];
+	for (const record of Array.isArray(raw) ? raw : []) {
+		const entry = asRecord(record);
+		if (!entry) {
+			continue;
+		}
+		const child = toCallHierarchyItem(
+			direction === "incoming" ? entry.from : entry.to
+		);
+		if (!child) {
+			continue;
+		}
+		children.push({
+			item: child,
+			label: `${marker} ${renderCallHierarchyItem(cwd, child)}`,
+		});
+	}
+	if (children.length === 0) {
+		return [];
+	}
+	const lines: string[] = [];
+	for (const child of children) {
+		if (budget.nodes <= 0) {
+			// Set only on an actual cutoff: a tree that ends exactly at the cap
+			// with nothing left to walk is complete, not truncated.
+			budget.truncated = true;
+			break;
+		}
+		budget.nodes -= 1;
+		lines.push(`  ${child.label}`);
+		const nested = await renderCallHierarchyTree(
+			runtime,
+			direction,
+			child.item,
+			cwd,
+			depth - 1,
+			budget
+		);
+		for (const line of nested) {
+			lines.push(`  ${line}`);
+		}
+	}
+	return lines;
+}
+
 const POSITION_PARAMS = {
 	path: Type.String({
 		description: "File path, absolute or relative to the working directory.",
@@ -1932,6 +2347,295 @@ function registerNavigationTools(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "lsp_symbols",
+		label: "List Symbols",
+		description:
+			"List every symbol (function, class, field) in one file as an indented " +
+			"outline, using the project's language server. Use it to map a file " +
+			"before editing it instead of grepping it twice.",
+		promptSnippet: "List a file's symbols via the language server",
+		parameters: Type.Object({
+			path: Type.String({
+				description:
+					"File path, absolute or relative to the working directory.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const prepared = await prepareRequest(
+				(params as { path?: unknown }).path,
+				ctx
+			);
+			if ("message" in prepared) {
+				return {
+					content: [{ type: "text", text: prepared.message }],
+					details: {},
+				};
+			}
+			const runtime = prepared.target.runtime;
+			if (!serverSupports(runtime, "documentSymbolProvider")) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `The "${runtime.config.id}" language server does not support document symbols.`,
+						},
+					],
+					details: {},
+				};
+			}
+			const raw = await request(
+				runtime,
+				"textDocument/documentSymbol",
+				{ textDocument: { uri: prepared.uri } },
+				NAVIGATION_TIMEOUT_MS
+			);
+			return {
+				content: [
+					{
+						type: "text",
+						text: renderDocumentSymbols(ctx.cwd, prepared.target.fsPath, raw),
+					},
+				],
+				details: {},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "lsp_symbol_search",
+		label: "Search Symbols",
+		description:
+			"Find every symbol whose name matches a query across the workspace, " +
+			"using the running language servers. Use it to locate a definition when " +
+			"you only remember its name. Pass `path` to scope the search to the " +
+			"server that owns that file; without it, every running server is searched.",
+		promptSnippet: "Search the workspace for a symbol by name",
+		parameters: Type.Object({
+			query: Type.String({
+				description: "Symbol name to search for, e.g. createClient or Router.",
+			}),
+			path: Type.Optional(
+				Type.String({
+					description:
+						"Optional file path; scopes the search to the language server that owns that file's extension.",
+				})
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const query = (params as { query?: unknown }).query;
+			if (typeof query !== "string" || !query.trim()) {
+				return {
+					content: [{ type: "text", text: "`query` is required." }],
+					details: {},
+				};
+			}
+			const resolved = await symbolSearchServers(
+				(params as { path?: unknown }).path,
+				ctx
+			);
+			if ("message" in resolved) {
+				return {
+					content: [{ type: "text", text: resolved.message }],
+					details: {},
+				};
+			}
+			const perServer: Array<{
+				serverId: string;
+				symbols: WorkspaceSymbolLike[];
+			}> = [];
+			for (const runtime of resolved.servers) {
+				try {
+					const raw = await request(
+						runtime,
+						"workspace/symbol",
+						{ query: query.trim() },
+						NAVIGATION_TIMEOUT_MS
+					);
+					const symbols = toWorkspaceSymbols(raw);
+					if (symbols.length) {
+						perServer.push({ serverId: runtime.config.id, symbols });
+					}
+				} catch (err) {
+					// One dead server must not hide the others' answers.
+					log(
+						`workspace/symbol on "${runtime.config.id}" failed (${errorText(err)}).`
+					);
+				}
+			}
+			return {
+				content: [
+					{ type: "text", text: renderWorkspaceSymbols(ctx.cwd, perServer) },
+				],
+				details: {
+					count: perServer.reduce(
+						(sum, entry) => sum + entry.symbols.length,
+						0
+					),
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "lsp_implementations",
+		label: "Find Implementations",
+		description:
+			"List every concrete implementation of the interface or class at a " +
+			"position, using the project's language server. Use it to find " +
+			"everything that inherits or implements a type before changing its " +
+			"contract.",
+		promptSnippet: "Find implementations of a type via the language server",
+		parameters: Type.Object(POSITION_PARAMS),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const prepared = await prepareRequest(
+				(params as { path?: unknown }).path,
+				ctx
+			);
+			if ("message" in prepared) {
+				return {
+					content: [{ type: "text", text: prepared.message }],
+					details: {},
+				};
+			}
+			const runtime = prepared.target.runtime;
+			if (!serverSupports(runtime, "implementationProvider")) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `The "${runtime.config.id}" language server does not support implementations.`,
+						},
+					],
+					details: {},
+				};
+			}
+			const raw = await request(
+				runtime,
+				"textDocument/implementation",
+				{
+					textDocument: { uri: prepared.uri },
+					position: toPosition(
+						(params as { line?: unknown }).line,
+						(params as { column?: unknown }).column
+					),
+				},
+				NAVIGATION_TIMEOUT_MS
+			);
+			const locations = toLocations(raw);
+			return {
+				content: [{ type: "text", text: renderLocations(ctx.cwd, locations) }],
+				details: { count: locations.length },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "lsp_call_hierarchy",
+		label: "Call Hierarchy",
+		description:
+			"Trace who calls a function or what a function calls, as an indented " +
+			"tree, using the project's language server. `direction` picks callers " +
+			"(incoming) or callees (outgoing), and `depth` bounds how many levels " +
+			"are walked.",
+		promptSnippet:
+			"Trace a function's callers or callees via the language server",
+		parameters: Type.Object({
+			...POSITION_PARAMS,
+			direction: Type.Optional(
+				Type.Union([Type.Literal("incoming"), Type.Literal("outgoing")], {
+					description:
+						"incoming lists the functions that call this one, outgoing lists the functions it calls. Defaults to outgoing.",
+				})
+			),
+			depth: Type.Optional(
+				Type.Number({
+					description:
+						"Levels of the call graph to walk. Defaults to 2, max 4.",
+				})
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const prepared = await prepareRequest(
+				(params as { path?: unknown }).path,
+				ctx
+			);
+			if ("message" in prepared) {
+				return {
+					content: [{ type: "text", text: prepared.message }],
+					details: {},
+				};
+			}
+			const runtime = prepared.target.runtime;
+			if (!serverSupports(runtime, "callHierarchyProvider")) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `The "${runtime.config.id}" language server does not support call hierarchies.`,
+						},
+					],
+					details: {},
+				};
+			}
+			const direction =
+				(params as { direction?: unknown }).direction === "incoming"
+					? "incoming"
+					: "outgoing";
+			const requestedDepth =
+				typeof (params as { depth?: unknown }).depth === "number"
+					? ((params as { depth?: unknown }).depth as number)
+					: 2;
+			const depth = Math.min(
+				Math.max(Math.floor(requestedDepth), 1),
+				MAX_CALL_HIERARCHY_DEPTH
+			);
+			const raw = await request(
+				runtime,
+				"textDocument/prepareCallHierarchy",
+				{
+					textDocument: { uri: prepared.uri },
+					position: toPosition(
+						(params as { line?: unknown }).line,
+						(params as { column?: unknown }).column
+					),
+				},
+				NAVIGATION_TIMEOUT_MS
+			);
+			const items = toCallHierarchyItems(raw);
+			if (items.length === 0) {
+				return {
+					content: [
+						{ type: "text", text: "No call hierarchy at this position." },
+					],
+					details: {},
+				};
+			}
+			const budget = { nodes: MAX_CALL_HIERARCHY_NODES, truncated: false };
+			const tree = await renderCallHierarchyTree(
+				runtime,
+				direction,
+				items[0],
+				ctx.cwd,
+				depth,
+				budget
+			);
+			const lines = [
+				`${renderCallHierarchyItem(ctx.cwd, items[0])} (${direction})`,
+				...tree,
+			];
+			if (budget.truncated) {
+				lines.push(
+					`…call graph truncated (capped at ${MAX_CALL_HIERARCHY_NODES} nodes)`
+				);
+			}
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				details: {},
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "lsp_diagnostics",
 		label: "Diagnostics",
 		description:
@@ -2026,6 +2730,58 @@ function diagnoseWorkspace(ctx: ExtensionContext): {
 		? formatDiagnosticsBlock(ctx.cwd, entries, MAX_DIAGNOSTICS_REPORTED)
 		: "No diagnostics have been reported by the running language servers.";
 	return { content: [{ type: "text", text }], details: { count: total } };
+}
+
+/**
+ * Resolve which servers a `workspace/symbol` query should hit.
+ *
+ * A `path` scopes the search to the server that owns that file's extension and
+ * warms it if it is cold — the same contract as every other navigation tool.
+ * Without one, every ALREADY-READY server that advertises workspace symbols is
+ * asked; nothing is spawned, so a cold server you have never touched does not
+ * pay an `initialize` for a query you did not point at it.
+ */
+async function symbolSearchServers(
+	rawPath: unknown,
+	ctx: ExtensionContext
+): Promise<{ servers: ServerRuntime[] } | { message: string }> {
+	if (typeof rawPath === "string" && rawPath.trim()) {
+		const fsPath = path.resolve(ctx.cwd, rawPath.trim());
+		const target = targetFor(fsPath);
+		if (!target) {
+			const covered = [...extensionOwners.keys()].join(", ") || "none";
+			return {
+				message: `No language server is configured for ${path.extname(fsPath) || "this file type"} (configured: ${covered}).`,
+			};
+		}
+		if (!(await ensureServer(target.runtime, ctx.cwd))) {
+			return {
+				message: `The "${target.runtime.config.id}" language server is unavailable; see the Ryu logs for the reason.`,
+			};
+		}
+		if (!serverSupports(target.runtime, "workspaceSymbolProvider")) {
+			return {
+				message: `The "${target.runtime.config.id}" language server does not support workspace symbol search.`,
+			};
+		}
+		return { servers: [target.runtime] };
+	}
+	const available: ServerRuntime[] = [];
+	for (const runtime of servers.values()) {
+		if (
+			runtime.status === "ready" &&
+			serverSupports(runtime, "workspaceSymbolProvider")
+		) {
+			available.push(runtime);
+		}
+	}
+	if (available.length === 0) {
+		return {
+			message:
+				"No running language server supports workspace symbol search. Edit or touch a file in a supported language first, which starts its server.",
+		};
+	}
+	return { servers: available };
 }
 
 export default async function (pi: ExtensionAPI) {

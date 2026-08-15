@@ -1,7 +1,7 @@
 {
   "id": "@ryu/receipts",
   "name": "Receipts",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Verify work with visual evidence: `/receipt <goal>` makes the agent capture a screenshot or screen recording of the thing actually working, then an INDEPENDENT verifier agent opens that artifact and judges what it can SEE against the goal. Where `/proof` verifies by re-reading the workspace, this one requires a durable artifact a human can look at afterwards. Resubmitting an old capture does not count. `/receipt clear` stops the loop.",
   "tagline": "No claim ships without a screenshot",
   "keywords": [

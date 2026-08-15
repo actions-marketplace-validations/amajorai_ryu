@@ -83,7 +83,6 @@ import {
 	parseModelSize,
 	parsePipelineModalities,
 	QUANT_QUALITY_MAX,
-	quantVariantRank,
 } from "./friendly.ts";
 import { type CatalogInstallButtonProps, useCatalogHost } from "./host.tsx";
 import { useSyncInstalledOnly } from "./installed-filter.tsx";
@@ -1567,6 +1566,7 @@ function ModelDetailPanel({
 			{installLayer &&
 				(format === "gguf" ? (
 					<FileSections
+						deviceOs={device.os}
 						files={files}
 						fitStyle={host.fitStyle}
 						friendly={friendly}
@@ -1624,7 +1624,8 @@ function StatsBlock({
 	const items: {
 		icon: typeof AiBrain01Icon;
 		label: string;
-		value: string | null;
+		money?: boolean;
+		value: ReactNode;
 	}[] = [
 		{
 			icon: AiBrain01Icon,
@@ -1657,6 +1658,7 @@ function StatsBlock({
 				stats.priceUsdPer1m === null
 					? null
 					: `$${stats.priceUsdPer1m.toFixed(2)}`,
+			money: true,
 		},
 	];
 
@@ -1675,7 +1677,13 @@ function StatsBlock({
 							<HugeiconsIcon className="size-3.5" icon={it.icon} />
 							{it.label}
 						</span>
-						<span className="font-semibold text-sm">{it.value ?? "—"}</span>
+						<span
+							className={`font-semibold text-sm ${
+								it.money ? "font-heading tabular-nums" : ""
+							}`}
+						>
+							{it.value ?? "—"}
+						</span>
 					</div>
 				))}
 			</div>
@@ -1807,6 +1815,8 @@ function SnapshotInstall({
 }
 
 interface FileSectionsProps {
+	/** Detected OS (e.g. "macos", "windows", "linux") for the recommendation badge. */
+	deviceOs: string;
 	files: ModelFile[];
 	fitStyle: FitStyle;
 	friendly: boolean;
@@ -1817,7 +1827,7 @@ interface FileSectionsProps {
 	uninstalling: string | null;
 }
 
-/** Device-fit rank for the canonical-variant tie-break — lower is a better fit. */
+/** Device-fit rank for the recommended-quant pick — lower is a better fit. */
 const FIT_RANK: Record<FitVerdict, number> = {
 	great: 0,
 	ok: 1,
@@ -1827,141 +1837,212 @@ const FIT_RANK: Record<FitVerdict, number> = {
 	unknown: 5,
 };
 
-/** One friendly compression tier with the single variant shown by default and
- *  the others stashed behind a "show more" disclosure. */
-interface QuantTierGroup {
-	/** The representative variant surfaced for this tier. */
-	canonical: ModelFile;
-	/** Friendly tier label, also the grouping + React key. */
-	key: string;
-	quality: number | null;
-	/** The remaining variants in the same tier, hidden until expanded. */
-	rest: ModelFile[];
-}
-
-/** Order two variants of the same tier; the first is the canonical pick. Prefers
- *  the standard quant variant (Q*_K_M …), then the better device fit, then the
- *  smaller file. */
-function compareVariants(a: ModelFile, b: ModelFile): number {
-	const rankDelta = quantVariantRank(a.quant) - quantVariantRank(b.quant);
-	if (rankDelta !== 0) {
-		return rankDelta;
+/** Badge text for the recommended quant, matched to the detected OS. */
+function recommendedBadgeText(os: string): string {
+	if (os === "macos") {
+		return "Recommended for your Mac";
 	}
-	const fitDelta = (FIT_RANK[a.fit] ?? 9) - (FIT_RANK[b.fit] ?? 9);
-	if (fitDelta !== 0) {
-		return fitDelta;
+	if (os === "windows" || os === "linux") {
+		return "Recommended for your PC";
 	}
-	return (
-		(a.sizeBytes ?? Number.POSITIVE_INFINITY) -
-		(b.sizeBytes ?? Number.POSITIVE_INFINITY)
-	);
+	return "Recommended for your device";
 }
 
 /**
- * Group GGUF download files by their friendly compression tier, choosing one
- * canonical variant per tier and stashing the rest. Used only in friendly mode.
+ * Pick the quantization to preselect in the download dropdown: the best device
+ * fit, breaking ties toward the smaller file (more likely to actually run).
+ * `null` only when there are no files at all. Mirrors the desktop deep-link
+ * recommendation (`pickRecommendedQuant`) minus its installed-file preference —
+ * the picker only ever lists not-installed downloads.
  */
-function groupFilesByTier(files: ModelFile[]): QuantTierGroup[] {
-	const order: string[] = [];
-	const byKey = new Map<string, ModelFile[]>();
-	for (const f of files) {
-		const key = friendlyQuant(f.quant).label;
-		const bucket = byKey.get(key);
-		if (bucket) {
-			bucket.push(f);
-		} else {
-			byKey.set(key, [f]);
-			order.push(key);
+function pickRecommendedFile(files: ModelFile[]): ModelFile | null {
+	return files.reduce<ModelFile | null>((best, f) => {
+		if (!best) {
+			return f;
 		}
-	}
-	const groups: QuantTierGroup[] = [];
-	for (const key of order) {
-		const [canonical, ...rest] = [...(byKey.get(key) ?? [])].sort(
-			compareVariants
-		);
-		// Every key in `order` was seeded with at least one file, so `canonical` is
-		// always present; the guard only satisfies noUncheckedIndexedAccess.
-		if (!canonical) {
-			continue;
+		const fitDelta = (FIT_RANK[f.fit] ?? 9) - (FIT_RANK[best.fit] ?? 9);
+		if (fitDelta !== 0) {
+			return fitDelta < 0 ? f : best;
 		}
-		groups.push({
-			key,
-			quality: friendlyQuant(canonical.quant).quality,
-			canonical,
-			rest,
-		});
-	}
-	// Stable sort climbs by quality; equal/unknown qualities keep insertion order.
-	return groups.sort(
-		(a, b) =>
-			(a.quality ?? Number.POSITIVE_INFINITY) -
-			(b.quality ?? Number.POSITIVE_INFINITY)
-	);
+		const fSize = f.sizeBytes ?? Number.POSITIVE_INFINITY;
+		const bestSize = best.sizeBytes ?? Number.POSITIVE_INFINITY;
+		return fSize < bestSize ? f : best;
+	}, null);
 }
 
 /**
- * One friendly quant tier: the canonical variant, plus a "show N more variants"
- * disclosure that reveals the rest. Only rendered in friendly mode.
+ * The "Download options" read, collapsed into one dropdown: every available
+ * quantization is an option, defaulting to the best device fit for this machine
+ * (badged "Recommended"). The selected quant's fit line renders under the select
+ * and the Add button installs whatever is currently selected — no more scanning
+ * a full list of quants to find the one that runs.
  */
-function QuantTierGroupRows({
-	group,
+function QuantizationPicker({
+	files,
+	friendly,
+	deviceOs,
 	install,
 	installing,
-	uninstall,
-	uninstalling,
 	InstallButton,
 	fitStyle,
 }: {
-	group: QuantTierGroup;
+	files: ModelFile[];
+	friendly: boolean;
+	deviceOs: string;
 	install: (file: string) => Promise<void>;
 	installing: string | null;
-	uninstall: (file: string) => Promise<void>;
-	uninstalling: string | null;
 	InstallButton: InstallButton;
 	fitStyle: FitStyle;
 }) {
-	const [expanded, setExpanded] = useState(false);
-	const moreCount = group.rest.length;
+	const recommended = useMemo(() => pickRecommendedFile(files), [files]);
+	const recommendedFilename = recommended?.filename ?? null;
+	const [selected, setSelected] = useState<string | null>(recommendedFilename);
+
+	// A different model (or a post-install file list) means a new recommendation:
+	// reset the dropdown to it.
+	useEffect(() => {
+		setSelected(recommendedFilename);
+	}, [recommendedFilename]);
+
+	const selectedFile =
+		files.find((f) => f.filename === selected) ?? recommended ?? null;
+	const isRecommended = selectedFile?.filename === recommendedFilename;
+	const fit = selectedFile ? fitStyle(selectedFile.fit) : null;
+	const compression = selectedFile ? friendlyQuant(selectedFile.quant) : null;
+	const tooBig = selectedFile?.fit === "too_big";
+	const isInstalling =
+		selectedFile !== null && installing === selectedFile.filename;
+
+	const installSelected = () => {
+		if (selectedFile) {
+			install(selectedFile.filename).catch(() => undefined);
+		}
+	};
+
+	const triggerLabel = () => {
+		if (!selectedFile) {
+			return "Pick a compression level";
+		}
+		return (
+			<span className="flex min-w-0 items-center gap-2">
+				<span className="truncate">
+					{friendly && compression?.label
+						? compression.label
+						: (selectedFile.quant ?? "GGUF")}
+				</span>
+				{friendly && selectedFile.quant && (
+					<span className="shrink-0 text-muted-foreground text-xs">
+						{selectedFile.quant}
+					</span>
+				)}
+				{selectedFile.sizeHuman && (
+					<span className="shrink-0 text-muted-foreground text-xs">
+						{selectedFile.sizeHuman}
+					</span>
+				)}
+			</span>
+		);
+	};
+
 	return (
-		<>
-			<FileRow
-				file={group.canonical}
-				fitStyle={fitStyle}
-				friendly
-				InstallButton={InstallButton}
-				install={install}
-				installing={installing}
-				uninstall={uninstall}
-				uninstalling={uninstalling}
-			/>
-			{moreCount > 0 && !expanded && (
-				<li>
-					<Button
-						className="h-auto px-1 py-0.5 text-muted-foreground text-xs"
-						onClick={() => setExpanded(true)}
-						size="sm"
-						variant="ghost"
-					>
-						Show {moreCount} more {moreCount === 1 ? "variant" : "variants"}
-					</Button>
-				</li>
+		<section className="flex flex-col gap-2">
+			<div className="flex items-center justify-between gap-2">
+				<h3 className="font-medium text-sm">Download options</h3>
+				{isRecommended && (
+					<Badge variant="secondary">{recommendedBadgeText(deviceOs)}</Badge>
+				)}
+			</div>
+			<div className="flex items-center gap-2">
+				<Select
+					onValueChange={(v) => setSelected(v)}
+					value={selectedFile?.filename ?? null}
+				>
+					<SelectTrigger className="min-w-0 flex-1" size="default">
+						<SelectValue placeholder="Pick a compression level">
+							{() => triggerLabel()}
+						</SelectValue>
+					</SelectTrigger>
+					<SelectContent>
+						{files.map((f) => {
+							const fFit = fitStyle(f.fit);
+							const fComp = friendlyQuant(f.quant);
+							const fLabel =
+								friendly && fComp.quality !== null
+									? fComp.label
+									: (f.quant ?? "GGUF");
+							return (
+								<SelectItem
+									key={f.filename}
+									textValue={`${f.quant ?? ""} ${f.sizeHuman ?? ""} ${f.fitLabel}`}
+									value={f.filename}
+								>
+									<span className="flex w-full items-center gap-2">
+										<span
+											className={`size-1.5 shrink-0 rounded-full ${fFit.dot}`}
+										/>
+										{friendly && fComp.quality !== null && (
+											<QualityMeter
+												label={fComp.label}
+												quality={fComp.quality}
+											/>
+										)}
+										<span className="truncate">{fLabel}</span>
+										{friendly && f.quant && (
+											<span className="shrink-0 text-muted-foreground text-xs">
+												{f.quant}
+											</span>
+										)}
+										<span className="ml-auto shrink-0 text-muted-foreground text-xs">
+											{f.sizeHuman}
+										</span>
+									</span>
+								</SelectItem>
+							);
+						})}
+					</SelectContent>
+				</Select>
+				{selectedFile &&
+					(tooBig ? (
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<InstallButton
+										idleVariant="outline"
+										installing={isInstalling}
+										onClick={installSelected}
+										progress={{
+											kinds: ["model"],
+											name: selectedFile.filename,
+										}}
+									>
+										<HugeiconsIcon className="size-4" icon={Download01Icon} />
+										Add
+									</InstallButton>
+								}
+							/>
+							<TooltipContent>
+								This may not fit in your device's memory
+							</TooltipContent>
+						</Tooltip>
+					) : (
+						<InstallButton
+							idleVariant="outline"
+							installing={isInstalling}
+							onClick={installSelected}
+							progress={{ kinds: ["model"], name: selectedFile.filename }}
+						>
+							<HugeiconsIcon className="size-4" icon={Download01Icon} />
+							Add
+						</InstallButton>
+					))}
+			</div>
+			{selectedFile && fit && (
+				<div className={`flex items-center gap-1.5 text-xs ${fit.className}`}>
+					<span className={`size-1.5 rounded-full ${fit.dot}`} />
+					{selectedFile.fitLabel}
+				</div>
 			)}
-			{expanded &&
-				group.rest.map((f) => (
-					<FileRow
-						disambiguate
-						file={f}
-						fitStyle={fitStyle}
-						friendly
-						InstallButton={InstallButton}
-						install={install}
-						installing={installing}
-						key={f.filename}
-						uninstall={uninstall}
-						uninstalling={uninstalling}
-					/>
-				))}
-		</>
+		</section>
 	);
 }
 
@@ -1970,13 +2051,14 @@ function QuantTierGroupRows({
  * "Download options" (the model's own quantizations), and "Add-ons" — auxiliary
  * files like vision adapters and draft/MTP heads that pair with a base model.
  *
- * In friendly mode the download options are further grouped by compression tier
- * (one canonical row each, the rest behind "show more"). Technical mode keeps the
- * full flat list.
+ * The download options are collapsed into a single select that preselects the
+ * best-fitting quantization for this device; installed quants and add-ons keep
+ * their flat per-file rows.
  */
 function FileSections({
 	files,
 	friendly,
+	deviceOs,
 	install,
 	installing,
 	uninstall,
@@ -2036,25 +2118,15 @@ function FileSections({
 				</section>
 			)}
 			{downloads.length > 0 && (
-				<section className="flex flex-col gap-2">
-					<h3 className="font-medium text-sm">Download options</h3>
-					<ul className="flex flex-col gap-2">
-						{friendly
-							? groupFilesByTier(downloads).map((g) => (
-									<QuantTierGroupRows
-										fitStyle={fitStyle}
-										group={g}
-										InstallButton={InstallButton}
-										install={install}
-										installing={installing}
-										key={g.key}
-										uninstall={uninstall}
-										uninstalling={uninstalling}
-									/>
-								))
-							: downloads.map(renderRow)}
-					</ul>
-				</section>
+				<QuantizationPicker
+					deviceOs={deviceOs}
+					files={downloads}
+					fitStyle={fitStyle}
+					friendly={friendly}
+					InstallButton={InstallButton}
+					install={install}
+					installing={installing}
+				/>
 			)}
 			{addons.length > 0 && (
 				<section className="flex flex-col gap-2">
@@ -2102,7 +2174,6 @@ function FileRow({
 	uninstalling,
 	friendly,
 	role,
-	disambiguate = false,
 	InstallButton,
 	fitStyle,
 }: {
@@ -2113,10 +2184,6 @@ function FileRow({
 	uninstalling: string | null;
 	friendly: boolean;
 	role?: GgufRole | null;
-	// In friendly mode, several variants share one tier label; when this row is
-	// one of the "show more" variants, append the raw quant so the otherwise
-	// identical rows are still distinguishable.
-	disambiguate?: boolean;
 	InstallButton: InstallButton;
 	fitStyle: FitStyle;
 }) {
@@ -2158,11 +2225,6 @@ function FileRow({
 									/>
 								)}
 								<span className="font-medium text-sm">{compression.label}</span>
-								{disambiguate && file.quant && (
-									<span className="text-muted-foreground text-xs">
-										{file.quant}
-									</span>
-								)}
 							</span>
 						}
 					/>

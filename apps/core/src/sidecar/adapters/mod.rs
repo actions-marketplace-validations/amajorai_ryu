@@ -373,6 +373,16 @@ pub struct ChatStreamRequest {
     /// when this is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// Route this message to a **workflow** (a DAG of typed nodes). When set,
+    /// the turn is dispatched to [`route_workflow_chat_stream`] instead of the
+    /// single-agent / team paths: the workflow runs with the user message as its
+    /// initial input, per-node progress streams back as `data-ryu-workflow`
+    /// parts, and the run's output is delivered as the assistant reply. Only
+    /// workflows that accept a chat input (`crate::workflow::accepts_chat_input`)
+    /// are runnable here — anything else is rejected with an error stream.
+    /// `agent_id` / `target_agent_id` / `team_id` are ignored when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
     /// Whether this turn should be persisted to the conversation store. Defaults
     /// to `true` (every normal chat turn is recorded). The team orchestrator sets
     /// this to `false` on its per-member sub-requests so each member's reply is
@@ -847,6 +857,16 @@ fn acp_tool_ui_name(kind: &str, title: &str, input: &Value) -> (String, bool) {
         "edit" => ("Edit".to_owned(), false),
         "fetch" => ("WebFetch".to_owned(), false),
         "search" => ("WebSearch".to_owned(), false),
+        // Built-in artifact surface (`artifact__render`). ACP exposes no stable
+        // machine tool name either, so detect it by its unique payload shape — a
+        // nested `artifact` object, or a top-level `kind` + `content` pair — and
+        // emit a stable name the desktop matches to render the inline card.
+        _ if input.get("artifact").is_some_and(Value::is_object)
+            || (input.get("kind").is_some_and(Value::is_string)
+                && input.get("content").is_some_and(Value::is_string)) =>
+        {
+            ("artifact__render".to_owned(), true)
+        }
         // Built-in generative-UI tool (`ui__render`). ACP exposes no stable machine
         // tool name (the `title` is humanized per-adapter), so detect it by its
         // unique spec-shaped input and emit a stable name the desktop matches to
@@ -1169,13 +1189,7 @@ impl PartsAccumulator {
     /// Patch a tool part with its terminal `output` + state. Mirrors
     /// [`ui_tool_output`]: `error` sets `output-error`, else `output-available`. A
     /// bare output with no matching input part is dropped (not renderable).
-    fn tool_output(
-        &mut self,
-        id: &str,
-        output: &Value,
-        error: bool,
-        timing: Option<(i64, i64)>,
-    ) {
+    fn tool_output(&mut self, id: &str, output: &Value, error: bool, timing: Option<(i64, i64)>) {
         if let Some(&i) = self.tool_idx.get(id) {
             let state = if error {
                 "output-error"
@@ -1185,8 +1199,7 @@ impl PartsAccumulator {
             self.parts[i]["state"] = Value::String(state.to_owned());
             self.parts[i]["output"] = output.clone();
             if let Some((started, completed)) = timing {
-                self.parts[i]["callProviderMetadata"] =
-                    tool_timing_meta(started, Some(completed));
+                self.parts[i]["callProviderMetadata"] = tool_timing_meta(started, Some(completed));
             }
         }
     }
@@ -2541,6 +2554,29 @@ fn ryu_docs_hint_when(safe_mode: bool) -> Option<String> {
     Some(RYU_DOCS_HINT.to_owned())
 }
 
+// ── Project instructions (AGENTS.md / CLAUDE.md) ─────────────────────────────
+//
+// The runtime half of "import agent setup": an imported (or merely opened)
+// project folder's instruction file is injected into the turn's system block so
+// the agent actually follows it. `crate::import::project_instructions` owns the
+// read + bounds; this thin wrapper formats the block and applies the same
+// Safe Mode rule as `RYU_DOCS_HINT`.
+
+/// The `## Project instructions` block for `cwd`, or `None` when Safe Mode is
+/// active or the folder has no instruction file.
+fn project_instructions_hint(cwd: Option<&str>) -> Option<String> {
+    project_instructions_hint_when(crate::safe_mode::is_active(), cwd)
+}
+
+/// The gate itself, Safe Mode as an argument so a test can pin both answers.
+fn project_instructions_hint_when(safe_mode: bool, cwd: Option<&str>) -> Option<String> {
+    if safe_mode {
+        return None;
+    }
+    let (file, content) = crate::import::project_instructions(cwd?)?;
+    Some(format!("## Project instructions ({file})\n{content}"))
+}
+
 // ── Output styles (docs/output-styles.md §5) ──────────────────────────────────
 //
 // A style changes HOW the agent answers by editing the system prompt for the turn.
@@ -3680,6 +3716,7 @@ pub(crate) async fn run_text_turn_in(
         companion_source: false,
         target_agent_id: None,
         team_id: None,
+        workflow_id: None,
         persist,
         skip_user_append: false,
         inference: None,
@@ -3786,6 +3823,7 @@ pub(crate) async fn run_text_turn_stream(
         companion_source: false,
         target_agent_id: None,
         team_id: None,
+        workflow_id: None,
         persist,
         skip_user_append: false,
         inference: None,
@@ -4003,6 +4041,7 @@ async fn run_member_text(
         companion_source: false,
         target_agent_id: Some(member_id.to_owned()),
         team_id: None,
+        workflow_id: None,
         persist: false,
         skip_user_append: false,
         inference: None,
@@ -4374,6 +4413,302 @@ pub async fn route_team_chat_stream(
     sse_response(Body::from_stream(stream))
 }
 
+/// Run a workflow as a chat turn: the user's message becomes the workflow's
+/// initial input, per-node progress streams back as `data-ryu-workflow` parts,
+/// and the run's output is delivered as the assistant reply.
+///
+/// The chat-input rule is enforced by the caller (`chat_stream` in
+/// `crate::server`): only workflows for which
+/// [`crate::workflow::accepts_chat_input`] holds are routed here, so a message
+/// can never be silently swallowed by a workflow with no entry `Input` node.
+/// This is the workflow analog of [`route_team_chat_stream`] — it persists the
+/// user turn once, decides *what runs* (Core), and streams the outcome into the
+/// same conversation.
+///
+/// # Streaming model
+///
+/// The executor runs the whole DAG in one `await` (persisting per-node state to
+/// the file-backed run store after every node), so progress is observed by
+/// POLLING [`crate::workflow::store::load_run`] while the run executes in a
+/// spawned task — no executor changes needed. A `data-ryu-workflow` part is
+/// re-emitted on every observed status change, sharing a stable `id`
+/// (`"workflow-run"`), so the AI SDK client reconciles it in place: the desktop
+/// shows ONE live checklist that updates as steps complete, not a stack of
+/// snapshots. An `AwaitingInput` (Awakeable) gate ends the stream with the
+/// gate's prompt as the reply text; the run is resumable from the existing
+/// `/workflows/runs/:run_id/resume` endpoint.
+#[allow(clippy::too_many_lines)]
+pub async fn route_workflow_chat_stream(
+    req: ChatStreamRequest,
+    workflow: crate::workflow::Workflow,
+    conversations: ConversationStore,
+) -> Response {
+    use crate::workflow::store::{load_run, RunStatus};
+
+    let user_text = last_user_message(&req.messages);
+
+    // Persist the user turn once, exactly like the team path, so the thread
+    // keeps the input that drove the run even if the connection drops mid-run.
+    if req.persist {
+        if let Some(ref conv_id) = req.conversation_id {
+            if !user_text.is_empty() {
+                if let Err(e) = conversations
+                    .append_message_as(
+                        conv_id,
+                        "user",
+                        &user_text,
+                        None,
+                        req.author_user_id.as_deref(),
+                        req.author_name.as_deref(),
+                        Tenancy::Unattributed,
+                    )
+                    .await
+                {
+                    tracing::warn!("failed to persist workflow-chat user message: {e:#}");
+                }
+            }
+        }
+    }
+
+    // Fire the run in the background; the stream below polls its persisted state.
+    // The oneshot carries the executor's verdict so a refusal to run (invalid
+    // graph, nesting depth — no record is ever written to the store) is
+    // reported instead of polling forever.
+    let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+    let mut input = std::collections::HashMap::new();
+    input.insert("input".to_string(), user_text.clone());
+    let (outcome_tx, mut outcome_rx) = tokio::sync::oneshot::channel();
+    let wf = workflow.clone();
+    let spawn_run_id = run_id.clone();
+    tokio::spawn(async move {
+        let result = crate::workflow::executor::run_workflow(&wf, input, spawn_run_id).await;
+        let _ = outcome_tx.send(result);
+    });
+
+    // Node kind labels keyed by node id, so the progress part can show what
+    // each step IS (agent / prompt / tool / …), not just its opaque id.
+    let kind_by_id: std::collections::HashMap<String, String> = workflow
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            serde_json::to_value(&n.kind).ok().and_then(|v| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|s| (n.id.clone(), s.to_string()))
+            })
+        })
+        .collect();
+
+    let workflow_id = workflow.id.clone();
+    let workflow_name = workflow.name.clone();
+    let conversation_id = req.conversation_id.clone();
+    let persist = req.persist;
+
+    let stream = async_stream::stream! {
+        yield Ok::<_, std::convert::Infallible>(ui_start());
+
+        let mut last_nodes: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+        let mut terminal = false;
+        let mut reply_text = String::new();
+        // Set once the spawned task's outcome has been received via the oneshot,
+        // so the `is_closed` fallback below can't misread a consumed channel.
+        let mut outcome_received = false;
+
+        while !terminal {
+            let run = load_run(&run_id).ok();
+            if let Some(run) = run {
+                // Emit a fresh progress part only when the node statuses moved.
+                let changed = run.nodes.len() != last_nodes.len()
+                    || run.nodes.iter().any(|(id, s)| {
+                        last_nodes
+                            .get(id)
+                            .map(|p| *p != node_status_code(s.status))
+                            .unwrap_or(true)
+                    });
+                if changed {
+                    let nodes: Vec<Value> = run
+                        .nodes
+                        .iter()
+                        .map(|(id, s)| {
+                            serde_json::json!({
+                                "id": id,
+                                "kind": kind_by_id.get(id),
+                                "status": node_status_str(s.status),
+                                "output": s.output,
+                                "error": s.error,
+                            })
+                        })
+                        .collect();
+                    last_nodes = run
+                        .nodes
+                        .iter()
+                        .map(|(id, s)| (id.clone(), node_status_code(s.status)))
+                        .collect();
+                    let frame = serde_json::json!({
+                        "id": "workflow-run",
+                        "workflowId": workflow_id,
+                        "workflowName": workflow_name,
+                        "runId": run_id,
+                        "status": run_status_str(run.status),
+                        "nodes": nodes,
+                    });
+                    yield Ok(ui_data("ryu-workflow", &frame));
+                }
+
+                match run.status {
+                    RunStatus::Completed => {
+                        reply_text = workflow_output_text(&run);
+                        terminal = true;
+                    }
+                    RunStatus::Failed => {
+                        let detail = run.error.clone().unwrap_or_else(|| "unknown error".into());
+                        reply_text = format!("_Workflow failed: {detail}_");
+                        terminal = true;
+                    }
+                    RunStatus::AwaitingInput => {
+                        let prompt = run
+                            .awaiting_node
+                            .as_deref()
+                            .and_then(|id| workflow_awaiting_prompt(&workflow, id));
+                        reply_text = match prompt {
+                            Some(p) if !p.trim().is_empty() => {
+                                format!("**Workflow paused — waiting for input.**\n\n{p}")
+                            }
+                            _ => "**Workflow paused — waiting for input.**".to_string(),
+                        };
+                        terminal = true;
+                    }
+                    RunStatus::Running => {}
+                }
+            } else {
+                // No run record on disk yet. The executor either is still
+                // creating it (first poll) or refused to run at all (invalid
+                // graph / nesting depth — no record is ever written). The
+                // oneshot reports the latter; otherwise keep polling.
+                match outcome_rx.try_recv() {
+                    Ok(Err(e)) => {
+                        reply_text = format!("_Workflow failed to start: {e}_");
+                        terminal = true;
+                    }
+                    Ok(Ok(_)) => {
+                        // The run finished between polls; its final record is
+                        // written before the oneshot delivers, so the next
+                        // iteration's `load_run` finds it.
+                        outcome_received = true;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                        if !outcome_received =>
+                    {
+                        reply_text = "_Workflow failed to start — the executor task terminated unexpectedly._".to_string();
+                        terminal = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            if !terminal {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        }
+
+        for frame in synthetic_assistant_frames(&reply_text) {
+            yield Ok(frame);
+        }
+        yield Ok(ui_finish());
+        yield Ok(done_sse_frame());
+
+        // Persist the assistant reply once the stream has been produced, so a
+        // reload of the conversation re-renders the workflow's answer.
+        if persist {
+            if let Some(conv_id) = conversation_id {
+                if !reply_text.trim().is_empty() {
+                    if let Err(e) = conversations
+                        .append_message_as(
+                            &conv_id,
+                            "assistant",
+                            &reply_text,
+                            None,
+                            None,
+                            None,
+                            Tenancy::Unattributed,
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to persist workflow-chat assistant message: {e:#}");
+                    }
+                }
+            }
+        }
+    };
+
+    sse_response(Body::from_stream(stream))
+}
+
+/// The node status as the compact wire string the desktop renders.
+fn node_status_str(s: crate::workflow::store::NodeStatus) -> &'static str {
+    use crate::workflow::store::NodeStatus;
+    match s {
+        NodeStatus::Pending => "pending",
+        NodeStatus::Running => "running",
+        NodeStatus::Completed => "completed",
+        NodeStatus::Failed => "failed",
+        NodeStatus::Skipped => "skipped",
+    }
+}
+
+/// A small integer code for diffing node statuses (comparable, no string churn).
+fn node_status_code(s: crate::workflow::store::NodeStatus) -> u8 {
+    use crate::workflow::store::NodeStatus;
+    match s {
+        NodeStatus::Pending => 0,
+        NodeStatus::Running => 1,
+        NodeStatus::Completed => 2,
+        NodeStatus::Failed => 3,
+        NodeStatus::Skipped => 4,
+    }
+}
+
+/// The run status as the wire string the desktop renders.
+fn run_status_str(s: crate::workflow::store::RunStatus) -> &'static str {
+    use crate::workflow::store::RunStatus;
+    match s {
+        RunStatus::Running => "running",
+        RunStatus::Completed => "completed",
+        RunStatus::Failed => "failed",
+        RunStatus::AwaitingInput => "awaiting_input",
+    }
+}
+
+/// The value an `Awakeable` gate is waiting on, for the reply text. Mirrors
+/// what the resume endpoint surfaces via the run's `awaiting_node`.
+fn workflow_awaiting_prompt(
+    workflow: &crate::workflow::Workflow,
+    awaiting_node: &str,
+) -> Option<String> {
+    use crate::workflow::NodeKind;
+    workflow.nodes.iter().find_map(|n| {
+        if n.id == awaiting_node {
+            if let NodeKind::Awakeable { prompt } = &n.kind {
+                return prompt.clone();
+            }
+        }
+        None
+    })
+}
+
+/// The run's output rendered as the assistant reply: the single output value
+/// verbatim, a JSON block for a multi-key output map, or a quiet note when the
+/// workflow produced no output at all.
+fn workflow_output_text(run: &crate::workflow::store::WorkflowRun) -> String {
+    if run.output.is_empty() {
+        return "_(Workflow completed with no output.)_".to_string();
+    }
+    if run.output.len() == 1 {
+        return run.output.values().next().cloned().unwrap_or_default();
+    }
+    serde_json::to_string_pretty(&run.output).unwrap_or_default()
+}
+
 ///
 /// `conversations` persists chat history server-side (U10): the inbound user
 /// message is written before streaming begins, and the streamed assistant reply
@@ -4708,6 +5043,24 @@ pub async fn route_chat_stream(
     // and the long-term memory block are injected as a leading system message.
     // Persona prefix comes first so the model reads the persona before the facts.
     let long_term_system = merge_system_prompt(long_term_system, persona_prefix);
+
+    // Project instructions (AGENTS.md / CLAUDE.md) from the active workspace
+    // folder — the RUNTIME half of "import agent setup": the import flow
+    // registers a folder as a project, and every turn that runs in that folder
+    // picks the file up here, live (edits apply immediately). Read from the
+    // folder rather than the import snapshot so a project the user just opened
+    // (never imported) gets its instructions too, matching Claude Code / Cursor.
+    // Suppressed under Safe Mode on the same rule the docs hint follows — a
+    // baseline turn carries nothing extra. Merged with `merge_system_prompt`
+    // (which prepends its second argument) so the assembled block reads: agent
+    // base instructions, project rules, persona, memory, docs hint.
+    let project_instructions = project_instructions_hint(req.cwd.as_deref());
+    breakdown.add_text(
+        "project",
+        "Project instructions",
+        project_instructions.as_deref(),
+    );
+    let long_term_system = merge_system_prompt(long_term_system, project_instructions);
 
     // The standing docs pointer (see `RYU_DOCS_HINT`). Merged HERE, before the
     // plane branch, because this is the one seam every caller shares: desktop
@@ -9295,7 +9648,9 @@ mod tests {
             "persona still leads the block: {merged}"
         );
         assert!(
-            merged.trim_end().ends_with("rather than inventing the answer."),
+            merged
+                .trim_end()
+                .ends_with("rather than inventing the answer."),
             "the docs hint is last: {merged}"
         );
         assert!(merged.contains("https://docs.ryuhq.com/llms.txt"));
@@ -9304,7 +9659,9 @@ mod tests {
         let with_skills =
             merge_system_prompt(Some(merged), Some("## Skill: Greeter".to_owned())).unwrap();
         assert!(with_skills.starts_with("## Skill: Greeter"));
-        assert!(with_skills.trim_end().ends_with("rather than inventing the answer."));
+        assert!(with_skills
+            .trim_end()
+            .ends_with("rather than inventing the answer."));
     }
 
     #[test]
@@ -9328,6 +9685,44 @@ mod tests {
             merge_system_prompt(ryu_docs_hint_when(true), long_term_system.clone()),
             long_term_system
         );
+    }
+
+    // ── Project instructions (AGENTS.md / CLAUDE.md) ───────────────────────────
+    // `route_chat_stream` merges `project_instructions_hint()` (when a workspace
+    // folder is active) as the SECOND argument so it LEADS the assembled block,
+    // and suppresses it under Safe Mode exactly like the docs hint.
+
+    fn temp_project_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ryu-pi-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# Repo rules\nbuild with bun\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn project_instructions_block_is_formed_and_leads() {
+        let dir = temp_project_dir();
+        let block = project_instructions_hint_when(false, Some(&dir.to_string_lossy()))
+            .expect("a project with AGENTS.md yields a block");
+        assert!(
+            block.starts_with("## Project instructions (AGENTS.md)"),
+            "{block}"
+        );
+        assert!(block.contains("build with bun"));
+        // Merged as the second argument it lands on TOP of the user's block.
+        let merged = merge_system_prompt(
+            Some("Your name is Ada.".to_owned()),
+            project_instructions_hint_when(false, Some(&dir.to_string_lossy())),
+        )
+        .unwrap();
+        assert!(merged.starts_with("## Project instructions"), "{merged}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_instructions_absent_without_folder_or_in_safe_mode() {
+        assert!(project_instructions_hint_when(false, None).is_none());
+        assert!(project_instructions_hint_when(true, Some("/tmp")).is_none());
     }
 
     // ── Output-style injection (docs/output-styles.md §5) ──────────────────────
@@ -9772,6 +10167,39 @@ mod tests {
         let (name, dynamic, _) = acp_tool_frame("other", "AskUserQuestion", &question, &[]);
         assert_eq!(name, "Question");
         assert!(!dynamic);
+    }
+
+    #[test]
+    fn tool_frame_detects_an_artifact_render_payload() {
+        // Nested `artifact` object.
+        let (name, dynamic, _) = acp_tool_frame(
+            "other",
+            "RenderArtifact",
+            &serde_json::json!({
+                "artifact": { "kind": "database", "title": "Q3", "content": "[{\"a\":1}]" }
+            }),
+            &[],
+        );
+        assert_eq!(name, "artifact__render");
+        assert!(dynamic);
+
+        // Flat `kind` + `content` pair.
+        let (name2, _, _) = acp_tool_frame(
+            "other",
+            "CreateArtifact",
+            &serde_json::json!({ "kind": "code", "title": "main.rs", "content": "fn main(){}" }),
+            &[],
+        );
+        assert_eq!(name2, "artifact__render");
+
+        // A generic tool whose input is a stringified file shape is untouched.
+        let (name3, _, _) = acp_tool_frame(
+            "other",
+            "Something",
+            &serde_json::json!({ "query": "hello" }),
+            &[],
+        );
+        assert_ne!(name3, "artifact__render");
     }
 
     #[test]
@@ -10773,8 +11201,20 @@ mod tests {
     #[test]
     fn parts_tool_input_opens_static_vs_dynamic_shape() {
         let mut acc = PartsAccumulator::default();
-        acc.tool_input("call-a", "search", &serde_json::json!({ "q": "x" }), false, None);
-        acc.tool_input("call-b", "custom", &serde_json::json!({ "n": 1 }), true, None);
+        acc.tool_input(
+            "call-a",
+            "search",
+            &serde_json::json!({ "q": "x" }),
+            false,
+            None,
+        );
+        acc.tool_input(
+            "call-b",
+            "custom",
+            &serde_json::json!({ "n": 1 }),
+            true,
+            None,
+        );
 
         // Static tool → `tool-<name>` type, no `toolName` field.
         assert_eq!(acc.parts[0]["type"], serde_json::json!("tool-search"));
@@ -10851,8 +11291,14 @@ mod tests {
             "ryu-acp-config-options",
             &serde_json::json!({ "configOptions": options }),
         ));
-        assert_eq!(frame["type"], serde_json::json!("data-ryu-acp-config-options"));
-        assert_eq!(frame["data"]["configOptions"][0]["id"], serde_json::json!("effort"));
+        assert_eq!(
+            frame["type"],
+            serde_json::json!("data-ryu-acp-config-options")
+        );
+        assert_eq!(
+            frame["data"]["configOptions"][0]["id"],
+            serde_json::json!("effort")
+        );
     }
 
     // ── Per-tool-call timing ────────────────────────────────────────────────

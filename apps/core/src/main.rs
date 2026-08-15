@@ -44,6 +44,10 @@ mod healing_client;
 mod hf_auth;
 mod identity;
 mod identity_verify;
+/// Scan a user-picked local folder and import the *setup* it contains (agent
+/// instructions, skills, MCP servers, plugins, Claude project memories) into
+/// Ryu's own stores — the setup-side companion to [`native_history`].
+mod import;
 mod image_host;
 mod inference;
 mod learning;
@@ -1556,6 +1560,22 @@ async fn main() {
         Ok(store) => crate::plugin_secrets::set_global(store),
         Err(e) => tracing::warn!("plugin secret store unavailable: {e:#}"),
     }
+    // Pi provider / ACP agent account vault: the sealed multi-account store for
+    // provider logins, BYOK keys and ACP sign-ins. Best-effort — if the at-rest
+    // master key can't be resolved the vault stays unpublished and credentials
+    // fall back to the active slot in `auth.json` alone (single-account, exactly
+    // as before this vault existed). Publish AFTER the master key resolves (the
+    // plugin-secret store above is that same latch).
+    match crate::pi_config::accounts::open_default() {
+        Ok(vault) => {
+            crate::pi_config::accounts::set_global(vault);
+            // Import anything the user configured before this vault existed, then
+            // make auth.json/models.json mirror the active accounts.
+            crate::pi_config::sync_plaintext_into_vault();
+            crate::pi_config::materialize_active_accounts();
+        }
+        Err(e) => tracing::warn!("pi accounts vault unavailable: {e:#}"),
+    }
     // Composio event-trigger store: registers trigger instances with Composio and
     // fires the bound agent when the webhook arrives. Published as a process-global
     // so the webhook + CRUD handlers reach it without threading through ServerState.
@@ -1595,6 +1615,10 @@ async fn main() {
     // Clone the preferences handle for the opt-in anonymous community-savings
     // beacon (OFF by default) before `preferences` moves into ServerState below.
     let stats_preferences = preferences.clone();
+    // Clone the preferences handle for the local-model auto-unload reactor (restarts
+    // the resident engine when the idle timeout changes) before `preferences` moves
+    // into ServerState below.
+    let reactor_preferences = preferences.clone();
 
     // NOTE: chat auto-rename is NOT wired here. Core titles a conversation from
     // its first user message when it persists the turn, and the LLM rename on top
@@ -2141,6 +2165,40 @@ async fn main() {
     // on demand. A pure no-op when unset — the task isn't even spawned — so the
     // default holds all lazy-started sidecars resident exactly as before.
     sidecars.spawn_idle_reaper();
+
+    // React to the local-model auto-unload setting at runtime: when the user
+    // changes `engine.llamacpp.sleep-idle-seconds` in settings, restart the
+    // resident llama.cpp engine so the new `--sleep-idle-seconds` takes effect
+    // immediately instead of waiting for the next spawn. A no-op for every other
+    // local engine (their spawn paths don't read this flag) and for a non-resident
+    // llama.cpp (a later `set_active_local_engine` applies the current value).
+    {
+        let reactor_sidecars = Arc::clone(&sidecars);
+        tokio::spawn(async move {
+            let mut rx = reactor_preferences.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(event)
+                        if event.key
+                            == crate::sidecar::providers::llamacpp::SLEEP_IDLE_SECS_PREF =>
+                    {
+                        let resident = reactor_sidecars.active_local_engine().await;
+                        if resident.as_deref() == Some("llamacpp") {
+                            if let Err(e) = reactor_sidecars.restart_sidecar("llamacpp").await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "could not restart llama.cpp after auto-unload setting change"
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 
     // Serve HTTP API. `into_make_service_with_connect_info` threads the peer
     // `SocketAddr` so `/api/realtime/ws` can distinguish a genuine loopback peer

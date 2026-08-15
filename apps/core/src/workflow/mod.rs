@@ -717,6 +717,25 @@ impl std::fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
+/// Whether a workflow can be driven from a chat composer — the "has a chat
+/// input" signal the composer filters on and the `workflow_id` chat-turn gate
+/// enforces.
+///
+/// Read off the graph rather than a schema flag: a workflow is chat-triggerable
+/// iff at least one *root* node (no incoming edges) is an [`NodeKind::Input`]
+/// node — i.e. the run consumes a value from its initial input map. A workflow
+/// whose entry point never reads the run input would silently ignore everything
+/// the user types, so offering only these keeps the chat surface honest. Derived
+/// means an author who adds an `Input` node gets the chat target for free; an
+/// un-runnable definition (invalid DAG) simply reports `false`.
+pub fn accepts_chat_input(workflow: &Workflow) -> bool {
+    let graph = match WorkflowGraph::build(workflow) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    graph.roots().iter().any(|&idx| matches!(&graph.graph[idx].kind, NodeKind::Input { .. }))
+}
+
 /// Validate, stamp, persist, and reconcile a workflow definition — the single
 /// write path shared by the REST `create_workflow` handler and the chat-driven
 /// [`crate::runnable::workflow_builder`] tools, so both behave identically
@@ -1021,5 +1040,62 @@ mod tests {
         wf.nodes.push(node("in", NodeKind::Output { key: None }));
         let err = WorkflowGraph::build(&wf).expect_err("dup must be rejected");
         assert!(matches!(err, GraphError::DuplicateNode(_)));
+    }
+
+    #[test]
+    fn accepts_chat_input_when_root_is_input_node() {
+        assert!(
+            accepts_chat_input(&linear_workflow()),
+            "a workflow rooted on an Input node is chat-triggerable"
+        );
+    }
+
+    #[test]
+    fn rejects_chat_input_without_a_root_input_node() {
+        // The Input node is fed by a root Transform, so it is not an entry
+        // point — a message sent here would never be read by the run.
+        let wf = Workflow {
+            id: "wf2".into(),
+            name: "no-entry".into(),
+            description: None,
+            nodes: vec![
+                node("src", NodeKind::Transform {
+                    op: "identity".into(),
+                    template: None,
+                }),
+                node("in", NodeKind::Input { key: None }),
+                node("out", NodeKind::Output { key: None }),
+            ],
+            edges: vec![
+                WorkflowEdge {
+                    from: "src".into(),
+                    to: "in".into(),
+                    branch: None,
+                },
+                WorkflowEdge {
+                    from: "in".into(),
+                    to: "out".into(),
+                    branch: None,
+                },
+            ],
+            triggers: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        };
+        assert!(
+            !accepts_chat_input(&wf),
+            "an Input node that is not a root does not make a workflow chat-triggerable"
+        );
+    }
+
+    #[test]
+    fn rejects_chat_input_for_broken_graph() {
+        let mut wf = linear_workflow();
+        wf.edges.push(WorkflowEdge {
+            from: "out".into(),
+            to: "in".into(),
+            branch: None,
+        });
+        assert!(!accepts_chat_input(&wf), "a cyclic workflow is not chat-triggerable");
     }
 }

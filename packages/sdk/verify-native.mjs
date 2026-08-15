@@ -39,18 +39,31 @@ check("defineModel constructs against gateway", () => {
 });
 
 // Manifest validation helpers delegate to Rust.
-check("validatePluginId (Rust) rejects non-reverse-domain", () => {
-	let threw = false;
-	try {
-		sdk.validatePluginId("nodot");
-	} catch {
-		threw = true;
+check(
+	"validatePluginId (Rust) accepts bare + reverse-domain, rejects traversal",
+	() => {
+		sdk.validatePluginId("nodot"); // bare ids are legal (Core's own ids are bare)
+		sdk.validatePluginId("io.ryu.ok"); // reverse-domain ids are legal
+		sdk.validatePluginId("data-grid-explorer"); // bare kebab ids are legal
+		for (const bad of [
+			"../evil",
+			"",
+			"@ryu+meetings",
+			".leading-dot",
+			"a..b",
+		]) {
+			let threw = false;
+			try {
+				sdk.validatePluginId(bad);
+			} catch {
+				threw = true;
+			}
+			if (!threw) {
+				throw new Error(`expected rejection of '${bad}'`);
+			}
+		}
 	}
-	if (!threw) {
-		throw new Error("expected rejection of dotless id");
-	}
-	sdk.validatePluginId("io.ryu.ok"); // should not throw
-});
+);
 
 check("validateManifestStrict (Rust) enforces per-kind config", () => {
 	// A tool runnable WITHOUT config must be rejected by Core's rules.

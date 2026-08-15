@@ -68,6 +68,7 @@ import {
 	useCallback,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
 import { sileo } from "sileo";
@@ -448,6 +449,7 @@ function ScreenshotGallery({
 	name: string;
 }) {
 	const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+	const lightboxOriginRef = useRef<HTMLElement | null>(null);
 	const images = useMemo(
 		() =>
 			screenshots.map((url, i) => ({
@@ -466,7 +468,10 @@ function ScreenshotGallery({
 					<button
 						className="shrink-0 overflow-hidden rounded-lg border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 						key={url}
-						onClick={() => setLightboxIndex(i)}
+						onClick={(event) => {
+							lightboxOriginRef.current = event.currentTarget;
+							setLightboxIndex(i);
+						}}
 						type="button"
 					>
 						<img
@@ -483,6 +488,7 @@ function ScreenshotGallery({
 				initialIndex={lightboxIndex ?? 0}
 				onClose={() => setLightboxIndex(null)}
 				open={lightboxIndex !== null}
+				originRef={lightboxOriginRef}
 			/>
 		</section>
 	);

@@ -366,6 +366,110 @@ describe("AppsCatalogSection — community shelf", () => {
 	});
 });
 
+// A community MARKETPLACE entry carries a grouping stamp (`catalog_source_id` /
+// `catalog_source_name` — the `ryu-marketplace` repo it was discovered from), so
+// the community area renders it under its marketplace's sub-heading inside a
+// bigger "Community Marketplaces" section, instead of in the flat standalone
+// shelf. Standalone topic-discovered repos carry no stamp and keep the old shelf.
+describe("AppsCatalogSection — community marketplaces", () => {
+	function makeMarketplaceEntry(
+		name: string,
+		marketplace: { id: string; name: string },
+		over: Partial<CatalogEntry> = {}
+	): AppCatalogItem {
+		return makeCommunityItem("plugin", {
+			catalog_source_id: marketplace.id,
+			catalog_source_name: marketplace.name,
+			id: `ghmp:${marketplace.id}:${name}`,
+			name,
+			...over,
+		});
+	}
+
+	test("marketplace entries render under a big 'Community Marketplaces' header with a sub-heading per marketplace", () => {
+		const html = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({
+				items: [
+					makeMarketplaceEntry("Thing Tool", {
+						id: "acme/bazaar",
+						name: "The Bazaar",
+					}),
+					makeMarketplaceEntry("Other Tool", {
+						id: "acme/bazaar",
+						name: "The Bazaar",
+					}),
+				],
+			}),
+			variant: "plugins",
+		});
+		// The bigger section header and the per-marketplace sub-heading both read.
+		expect(html).toContain("Community Marketplaces");
+		expect(html).toContain("The Bazaar");
+		// Both entries render, and the trust disclosure travels with the section.
+		expect(html).toContain("Thing Tool");
+		expect(html).toContain("Other Tool");
+		expect(html).toContain("Not reviewed by Ryu");
+		// A marketplace entry is still browse-only — Details, never Add.
+		expect(html).toContain("Details");
+		expect(html).not.toContain("From the community");
+	});
+
+	test("standalone repos keep the flat 'From the community' shelf", () => {
+		const html = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({
+				items: [makeCommunityItem("plugin")],
+			}),
+			variant: "plugins",
+		});
+		expect(html).toContain("From the community");
+		expect(html).toContain("Community Plugin");
+		expect(html).not.toContain("Community Marketplaces");
+	});
+
+	test("marketplace entries and standalone repos render side by side, one notice", () => {
+		const html = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({
+				items: [
+					makeMarketplaceEntry("Bazaar Thing", {
+						id: "acme/bazaar",
+						name: "The Bazaar",
+					}),
+					makeCommunityItem("plugin", { name: "Solo Plugin" }),
+				],
+			}),
+			variant: "plugins",
+		});
+		expect(html).toContain("Community Marketplaces");
+		expect(html).toContain("The Bazaar");
+		expect(html).toContain("Bazaar Thing");
+		expect(html).toContain("From the community");
+		expect(html).toContain("Solo Plugin");
+		// One trust notice covers the whole community area — not one per shelf.
+		expect(html.match(/Not reviewed by Ryu/g)?.length).toBe(1);
+	});
+
+	test("marketplace entries obey the tab's apps/plugins split", () => {
+		const appEntry = makeMarketplaceEntry(
+			"Bazaar App",
+			{ id: "acme/bazaar", name: "The Bazaar" },
+			{ type: "app" }
+		);
+		const pluginsHtml = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({ items: [appEntry] }),
+			variant: "plugins",
+		});
+		expect(pluginsHtml).not.toContain("Bazaar App");
+
+		const appsHtml = render(makeAppsState({ items: [] }), {
+			community: makeAppsState({ items: [appEntry] }),
+			variant: "apps",
+		});
+		expect(appsHtml).toContain("Community Marketplaces");
+		expect(appsHtml).toContain("The Bazaar");
+		expect(appsHtml).toContain("Bazaar App");
+	});
+});
+
 // The blue check on the card. Three axes live on the same row and merging any
 // two of them is the failure this block exists to catch: `reviewed` is "did Ryu
 // vet this LISTING's code" and drives the amber community notice,

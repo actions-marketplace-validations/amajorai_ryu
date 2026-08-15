@@ -476,6 +476,19 @@ pub struct LaunchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_mmap: Option<bool>,
 
+    // ── Idle scale-to-zero (llama.cpp server) ─────────────────────────────────
+    /// Idle timeout before llama-server unloads the model (and its KV cache) from
+    /// memory (`--sleep-idle-seconds N`). After the idle window elapses the model
+    /// is freed; the next request transparently reloads it (a cold start, but the
+    /// weights leave RAM/VRAM in the meantime). This is the LM Studio "eject" /
+    /// Ollama `OLLAMA_KEEP_ALIVE` equivalent, except automatic. `None` ⇒ no flag
+    /// (llama-server's default, `-1` = disabled); `Some(0)` ⇒ disabled; `Some(n)`
+    /// ⇒ sleep after `n` idle seconds. The `--sleep-idle-seconds` flag is
+    /// llama.cpp-only (Ollama uses a Modelfile/`keep_alive` knob, vLLM/SGLang/MLX
+    /// have no equivalent), so it is emitted on the llama.cpp arm only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_idle_secs: Option<u32>,
+
     // ── Concurrency / continuous batching (llama.cpp server) ──────────────────
     /// Number of server slots = the max requests llama-server batches together in
     /// one decode loop. `-np/--parallel N`. More slots ⇒ higher total throughput
@@ -674,6 +687,11 @@ impl LaunchConfig {
         // llama-server enables mmap by default; only the negative flag exists.
         if self.no_mmap == Some(true) {
             a.bare("--no-mmap");
+        }
+        // Idle scale-to-zero: only a positive value is meaningful (llama-server's
+        // default is -1 = disabled, so "disabled" simply emits nothing).
+        if let Some(n) = self.sleep_idle_secs.filter(|n| *n > 0) {
+            a.kv("--sleep-idle-seconds", Some(n));
         }
         a.flag("--cpu-moe", self.cpu_moe);
         a.kv("--n-cpu-moe", self.n_cpu_moe);
@@ -1130,6 +1148,49 @@ mod tests {
             .to_args(Engine::LlamaCpp)
             .join(" ")
             .contains("--no-cont-batching"));
+    }
+
+    #[test]
+    fn llamacpp_sleep_idle_seconds_only_emits_a_positive_value() {
+        // Unset / zero ⇒ no flag (llama-server's -1 default = disabled).
+        assert!(!LaunchConfig::default()
+            .to_args(Engine::LlamaCpp)
+            .join(" ")
+            .contains("sleep-idle-seconds"));
+        assert!(!LaunchConfig {
+            sleep_idle_secs: Some(0),
+            ..Default::default()
+        }
+        .to_args(Engine::LlamaCpp)
+        .join(" ")
+        .contains("sleep-idle-seconds"));
+        // A positive value rides along for llama.cpp.
+        assert!(LaunchConfig {
+            sleep_idle_secs: Some(300),
+            ..Default::default()
+        }
+        .to_args(Engine::LlamaCpp)
+        .join(" ")
+        .contains("--sleep-idle-seconds 300"));
+        // …but is llama.cpp-only: never emitted for other engines.
+        for e in [
+            Engine::Vllm,
+            Engine::Sglang,
+            Engine::Mlx,
+            Engine::Ollama,
+            Engine::Other,
+        ] {
+            assert!(
+                !LaunchConfig {
+                    sleep_idle_secs: Some(300),
+                    ..Default::default()
+                }
+                .to_args(e)
+                .join(" ")
+                .contains("sleep-idle-seconds"),
+                "{e:?} must not get the llama.cpp-only flag"
+            );
+        }
     }
 
     #[test]

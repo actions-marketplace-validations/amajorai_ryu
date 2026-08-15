@@ -8,7 +8,14 @@
 // the user-message skip (a user pasting HTML is input, not an artifact).
 
 import { describe, expect, it } from "bun:test";
-import { type Artifact, extractArtifacts } from "./artifacts.ts";
+import {
+	type Artifact,
+	artifactFromPayload,
+	artifactIdFromToolCall,
+	artifactKindFromMime,
+	extractArtifacts,
+	parseTabularContent,
+} from "./artifacts.ts";
 
 // Build a loose stream message from an array of text-part strings.
 const msg = (
@@ -207,5 +214,209 @@ describe("extractArtifacts — defensive shapes", () => {
 	it("strips trailing whitespace from the captured content but keeps the body", () => {
 		const [art] = extractArtifacts([msg("m1", [fence("svg", "<svg/>   ")])]);
 		expect(art?.content).toBe("<svg/>");
+	});
+});
+
+describe("extractArtifacts — tool-minted artifacts (render/create)", () => {
+	it("includes an artifact__render payload carried in a tool part input", () => {
+		const arts = extractArtifacts([
+			{
+				id: "m1",
+				role: "assistant",
+				parts: [
+					{
+						type: "tool-artifact__render",
+						toolCallId: "call_9",
+						input: {
+							artifact: {
+								kind: "database",
+								title: "Q3",
+								content: '[{"a":1}]',
+							},
+						},
+					},
+				],
+			},
+		]);
+		expect(arts).toHaveLength(1);
+		expect(arts[0]?.kind).toBe("database");
+		expect(arts[0]?.title).toBe("Q3");
+		expect(arts[0]?.id).toBe("artifact-call_9");
+		expect(arts[0]?.sourceMessageId).toBe("m1");
+	});
+
+	it("includes an artifact__create result (url/mime/ids, title from input)", () => {
+		const arts = extractArtifacts([
+			{
+				id: "m2",
+				role: "assistant",
+				parts: [
+					{
+						type: "tool-artifact__create",
+						toolCallId: "call_10",
+						input: { title: "notes.csv", mime: "text/csv" },
+						output: {
+							ok: true,
+							id: "doc-1",
+							space_id: "sp-1",
+							url: "/api/spaces/sp-1/documents/doc-1/blob",
+							mime: "text/csv",
+						},
+					},
+				],
+			},
+		]);
+		expect(arts).toHaveLength(1);
+		expect(arts[0]?.kind).toBe("database");
+		expect(arts[0]?.title).toBe("notes.csv");
+		expect(arts[0]?.url).toContain("/blob");
+		expect(arts[0]?.spaceId).toBe("sp-1");
+		expect(arts[0]?.docId).toBe("doc-1");
+	});
+
+	it("skips a dynamic-tool artifact part that is not a render/create", () => {
+		const arts = extractArtifacts([
+			{
+				id: "m3",
+				role: "assistant",
+				parts: [
+					{
+						type: "dynamic-tool",
+						toolName: "web_search",
+						input: { query: "x" },
+					},
+				],
+			},
+		]);
+		expect(arts).toHaveLength(0);
+	});
+
+	it("ignores a create whose result has not arrived yet", () => {
+		const arts = extractArtifacts([
+			{
+				id: "m4",
+				role: "assistant",
+				parts: [{ type: "tool-artifact__create", toolCallId: "c", input: {} }],
+			},
+		]);
+		expect(arts).toHaveLength(0);
+	});
+});
+
+describe("artifactFromPayload — agent-provided artifacts", () => {
+	it("normalizes a well-formed payload into an Artifact with the given id", () => {
+		const art = artifactFromPayload(
+			{
+				kind: "database",
+				title: "Q3 numbers",
+				content: JSON.stringify([{ a: 1, b: 2 }]),
+				language: "json",
+				actions: [{ id: "ok", label: "Looks good" }],
+			},
+			"artifact-call-1",
+			"m1"
+		);
+		expect(art.id).toBe("artifact-call-1");
+		expect(art.kind).toBe("database");
+		expect(art.title).toBe("Q3 numbers");
+		expect(art.actions).toHaveLength(1);
+		expect(art.sourceMessageId).toBe("m1");
+	});
+
+	it("maps a mime to a kind when no kind is declared", () => {
+		expect(
+			artifactFromPayload({ mime: "text/html", content: "<h1>x</h1>" }, "a")
+				.kind
+		).toBe("html");
+		expect(
+			artifactFromPayload({ mime: "text/csv", content: "a,b" }, "a").kind
+		).toBe("database");
+		expect(
+			artifactFromPayload({ mime: "text/markdown", content: "# hi" }, "a").kind
+		).toBe("space");
+		expect(
+			artifactFromPayload({ mime: "text/python", content: "x=1" }, "a").kind
+		).toBe("code");
+		expect(
+			artifactFromPayload({ mime: "application/pdf", content: "" }, "a").kind
+		).toBe("file");
+	});
+
+	it("collapses an unknown declared kind to the mime-derived kind", () => {
+		const art = artifactFromPayload(
+			{ kind: "banana", mime: "text/html", content: "<p>x</p>" },
+			"a"
+		);
+		expect(art.kind).toBe("html");
+	});
+
+	it("survives a null/empty payload with a code-ish fallback title", () => {
+		const art = artifactFromPayload(null, "a");
+		expect(art.kind).toBe("file");
+		expect(art.content).toBe("");
+		expect(art.title.length).toBeGreaterThan(0);
+	});
+
+	it("clamps an overlong title to 48 chars", () => {
+		const art = artifactFromPayload(
+			{ kind: "code", title: "T".repeat(80), content: "x" },
+			"a"
+		);
+		expect(art.title.length).toBe(48);
+	});
+
+	it("derives a stable id from the tool call id", () => {
+		expect(artifactIdFromToolCall("call_abc")).toBe("artifact-call_abc");
+		expect(artifactIdFromToolCall(undefined)).toBe("artifact-artifact");
+	});
+});
+
+describe("artifactKindFromMime", () => {
+	it("classifies text families and falls back to file", () => {
+		expect(artifactKindFromMime("text/html")).toBe("html");
+		expect(artifactKindFromMime("image/svg+xml")).toBe("svg");
+		expect(artifactKindFromMime("application/json")).toBe("database");
+		expect(artifactKindFromMime("text/markdown")).toBe("space");
+		expect(artifactKindFromMime("text/javascript")).toBe("code");
+		expect(artifactKindFromMime("application/pdf")).toBe("file");
+		expect(artifactKindFromMime(undefined)).toBe("file");
+	});
+});
+
+describe("parseTabularContent — database artifacts", () => {
+	it("parses an array of row objects into a table", () => {
+		const table = parseTabularContent('[{"a":1,"b":"x"},{"a":2,"b":"y"}]');
+		expect(table?.columns).toEqual(["a", "b"]);
+		expect(table?.rows).toEqual([
+			["1", "x"],
+			["2", "y"],
+		]);
+	});
+
+	it("parses the {columns, rows} shape directly", () => {
+		const table = parseTabularContent(
+			'{"columns":["k","v"],"rows":[["a","1"],["b","2"]]}'
+		);
+		expect(table?.columns).toEqual(["k", "v"]);
+		expect(table?.rows).toEqual([
+			["a", "1"],
+			["b", "2"],
+		]);
+	});
+
+	it("parses CSV, treating the first row as the header", () => {
+		const table = parseTabularContent('"name","count"\n"a, b",2\nc,3');
+		expect(table?.columns).toEqual(["name", "count"]);
+		expect(table?.rows).toEqual([
+			["a, b", "2"],
+			["c", "3"],
+		]);
+	});
+
+	it("returns null for non-tabular content", () => {
+		expect(parseTabularContent("")).toBeNull();
+		expect(parseTabularContent("just prose")).toBeNull();
+		expect(parseTabularContent("not json {")).toBeNull();
+		expect(parseTabularContent("42")).toBeNull();
 	});
 });

@@ -19,18 +19,18 @@ import { memo } from "react";
 /**
  * One day boundary in the transcript.
  *
- * MOUNTED AS A PLAIN, SCROLLER-INVISIBLE ELEMENT, NOT A `MessageScrollerItem` —
- * do not "consistency-fix" this. Two separate reasons, both load-bearing:
+ * MOUNTED AS A PLAIN, SCROLLER-INVISIBLE ELEMENT, NOT AN ITEM ROW — do not
+ * "consistency-fix" this. Two separate reasons, both load-bearing:
  *
- *  1. `MessageScrollerItem` carries `[content-visibility:auto]` with
+ *  1. A scroller item carries `[content-visibility:auto]` with
  *     `[contain-intrinsic-size:auto_10rem]`, i.e. a 160px placeholder reserved
  *     for a ~40px row. Every separator would open a gap it never fills.
- *  2. An item with `scrollAnchor` would be picked as the scroll target when new
- *     content arrives, so a new day would scroll the SEPARATOR to the top
- *     instead of the user's new question. No `messageId` and no `scrollAnchor`
- *     keeps it invisible to the scroller: `handleContentChange` scans forward
- *     for `data-scroll-anchor="true"`, and both the visibility sweep and the
- *     prepend-restore capture `continue` on children with no `data-message-id`.
+ *  2. An item that looked like a turn could be picked as the scroll target when
+ *     new content arrives, so a new day would scroll the SEPARATOR to the top
+ *     instead of the user's new question. No `messageId` and no anchor keeps it
+ *     invisible to the scroller's follow logic: it is a bare row that only
+ *     carries the day's label, exactly like the old `MessageScrollerItem`-less
+ *     separator before it.
  *
  * `Marker` satisfies both — it renders a bare `<div>` through `useRender` with no
  * wrapper of its own, and `data-slot` passed as a prop wins over the primitive's
@@ -38,10 +38,10 @@ import { memo } from "react";
  * selector below is preserved. `chat-date-groups-story.spec.ts:111-122` asserts
  * exactly this shape and must keep passing untouched.
  *
- * It must also stay a DIRECT child of `MessageScrollerContent`: the Content's
- * MutationObserver watches `childList` with no `subtree`, so a turn appended
- * inside a per-group wrapper would fire no mutation at all and
- * scroll-new-turn-to-top would die. Interleave, never wrap.
+ * It must also stay a DIRECT child of the scroller's Content (the element with
+ * `data-slot="message-scroller-content"`): the transcript's follow logic and the
+ * date-groups spec both treat it as a plain sibling of the turn rows, never as
+ * part of one. Interleave, never wrap.
  */
 export const DateSeparator = memo(function DateSeparator({
 	className,

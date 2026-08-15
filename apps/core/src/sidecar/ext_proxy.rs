@@ -39,13 +39,16 @@
 //! Core. Sidecars SHOULD bind loopback only.
 
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{
+    ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    Path, Query, Request, State,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, post};
+use axum::routing::{any, get, post};
 use axum::{Extension, Json, Router};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::plugin_manifest::schema::{HttpProxySpec, RouteAuth, SidecarSpec};
 use crate::server::ServerState;
@@ -409,6 +412,12 @@ pub fn ext_routes(auth_token: Option<String>) -> Router<ServerState> {
         // route forwards sub_path "/", which `upstream_path_for` maps to the bare mount.
         .route("/api/ext/:plugin_id", any(ext_root_proxy))
         .route("/api/ext/:plugin_id/*rest", any(ext_proxy))
+        // WebSocket twin of the HTTP ext-proxy: `/api/ext/ws/<plugin>/<route>` upgrades
+        // the caller and bridges to the sidecar's declared WS endpoint on loopback. The
+        // desktop noVNC stream rides this (the interactive remote-desktop panel); any
+        // manifest sidecar can declare a WS route the same way it declares HTTP ones.
+        .route("/api/ext/ws/:plugin_id", get(ext_ws_root_proxy))
+        .route("/api/ext/ws/:plugin_id/*rest", get(ext_ws_proxy))
         .layer(Extension(auth_token))
 }
 
@@ -923,6 +932,318 @@ async fn forward_to_sidecar(args: ForwardArgs<'_>) -> Response {
     // content-length + transfer-encoding are stripped as hop-by-hop above, so hyper
     // re-frames the outgoing stream itself.
     (status, out, Body::from_stream(resp.bytes_stream())).into_response()
+}
+
+// ── WebSocket tunnel (/api/ext/ws/*) ──────────────────────────────────────────
+//
+// The HTTP ext-proxy (`reqwest`) cannot carry a WebSocket upgrade, so an interactive
+// sidecar stream — the desktop's live noVNC remote-desktop feed — needs its own lane.
+// This is that lane: it shares the SAME route-allowlist + auth model as the HTTP
+// proxy (a sidecar declares a `ws` route the same way it declares HTTP ones), then
+// bridges the caller's socket to the sidecar's loopback WS endpoint byte-for-byte.
+//
+// Transport rationale: noVNC speaks RFB over WebSocket, and the remote node (managed
+// cloud / self-hosted) exposes only Core's port, so the stream MUST ride through Core
+// rather than the sidecar's loopback port. Bridging WS→WS at Core keeps every app
+// (the `@ryu/desktop` sidecar) a self-contained satellite: Core is a dumb pipe that
+// knows nothing about VNC, exactly like the HTTP lane.
+
+/// Query param the client may present the node token on (browsers cannot set custom
+/// headers on a WS upgrade — mirrors `realtime_ws`/`voice_ws`).
+const WS_TOKEN_PARAM: &str = "token";
+
+/// The tungstenite message type used by the WS tunnel's upstream hop. Aliased once
+/// at module scope so both the bridge and the two converters name the same type.
+type TsMessage = tokio_tungstenite::tungstenite::Message;
+
+/// The upstream path a WS tunnel forwards to (same mount rule as the HTTP lane).
+fn ws_upstream_path(mount: &str, sub_path: &str) -> String {
+    upstream_path_for(mount, sub_path)
+}
+
+/// Handler for `/api/ext/ws/:plugin_id/*rest` — the WS twin of [`ext_proxy`]. The
+/// `WebSocketUpgrade` extractor runs the enabled-gate + route-allowlist + node-token
+/// checks BEFORE the upgrade is accepted, so an unauthenticated or undeclared socket
+/// never reaches the sidecar.
+async fn ext_ws_proxy(
+    State(state): State<ServerState>,
+    Path((plugin_id, rest)): Path<(String, String)>,
+    Extension(expected_node_token): Extension<Option<String>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let (plugin_id, rest) = split_scoped_plugin_path(plugin_id, rest);
+    ext_ws_tunnel(
+        &state,
+        &plugin_id,
+        &format!("/{rest}"),
+        expected_node_token,
+        &query,
+        &headers,
+        ws,
+    )
+    .await
+}
+
+/// Handler for the bare `/api/ext/ws/:plugin_id` root (see [`ext_root_proxy`] for why
+/// the exact route needs its own handler).
+async fn ext_ws_root_proxy(
+    State(state): State<ServerState>,
+    Path(plugin_id): Path<String>,
+    Extension(expected_node_token): Extension<Option<String>>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ext_ws_tunnel(
+        &state,
+        &plugin_id,
+        "/",
+        expected_node_token,
+        &query,
+        &headers,
+        ws,
+    )
+    .await
+}
+
+/// Shared core of the two WS handlers: enabled-gate → route-allowlist → node-token →
+/// wake → upgrade+bridge. Every refusal is a plain HTTP response that axum sends
+/// instead of accepting the upgrade.
+async fn ext_ws_tunnel(
+    state: &ServerState,
+    plugin_id: &str,
+    sub_path: &str,
+    expected_node_token: Option<String>,
+    query: &HashMap<String, String>,
+    headers: &HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    // Enabled gate (secrecy: a disabled/absent plugin's proxied surface must not exist).
+    match state.app_store.get(plugin_id).await {
+        Ok(Some(rec)) if rec.enabled => {}
+        Ok(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::warn!("ext ws proxy: app_store lookup for '{plugin_id}' failed: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    // Route allowlist (undeclared path ⇒ 404) + sidecar + mount + max_body (unused for
+    // WS, kept for parity of the resolve call).
+    let manifests = state.app_manifests.read().await;
+    let Some(manifest) = manifests.iter().find(|m| m.id == plugin_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((spec, http, route)) = resolve_route(manifest, sub_path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let auth = route.auth;
+    let mount = http
+        .mount
+        .as_deref()
+        .map(|m| m.trim_end_matches('/').to_owned())
+        .unwrap_or_default();
+    let sidecar_name = crate::sidecar::manifest_sidecar::namespaced_name(plugin_id, &spec.name);
+    drop(manifests);
+
+    // Node-token gate, mirroring `require_auth` + `realtime_ws`. A protected route
+    // requires the node bearer; browsers present it via `?token=` (the query), and
+    // non-browser clients may use the Authorization header instead. None configured
+    // (loopback dev) ⇒ allow.
+    if auth == RouteAuth::Protected {
+        if let Some(expected) = expected_node_token.as_deref() {
+            let provided = query
+                .get(WS_TOKEN_PARAM)
+                .map(String::as_str)
+                .or_else(|| {
+                    headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.strip_prefix("Bearer "))
+                });
+            if provided != Some(expected) {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        }
+    }
+
+    let wake_eligible = state.manager.is_wake_eligible(&sidecar_name);
+
+    // Registration gate + wake-on-demand — identical semantics to the HTTP lane.
+    let mut target = match state.manager.forward_target(&sidecar_name) {
+        Ok(t) => Some(t),
+        Err(denied @ ForwardDenied::NotRegistered { .. }) => return sidecar_unavailable(&denied),
+        Err(denied @ ForwardDenied::NotRunning { .. }) => {
+            if !wake_eligible {
+                return sidecar_unavailable(&denied);
+            }
+            None
+        }
+    };
+
+    let _activity = if wake_eligible {
+        if target.is_none() {
+            match state
+                .manager
+                .wake_and_await_healthy(&sidecar_name, WAKE_WARMUP_TIMEOUT)
+                .await
+            {
+                Ok(woke) => {
+                    if woke {
+                        fire_lazy_activation(state, ACTIVATION_ON_ROUTE);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("ext ws proxy: waking sidecar '{sidecar_name}' failed: {e}");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "sidecar warming up, retry shortly",
+                    )
+                        .into_response();
+                }
+            }
+            target = match state.manager.forward_target(&sidecar_name) {
+                Ok(t) => Some(t),
+                Err(denied) => return sidecar_unavailable(&denied),
+            };
+        }
+        Some(state.manager.enter_request(&sidecar_name))
+    } else {
+        None
+    };
+
+    let Some(target) = target else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sidecar unavailable, retry shortly",
+        )
+            .into_response();
+    };
+
+    let port = target.port();
+    let upstream_path = ws_upstream_path(&mount, sub_path);
+    let hop_token = ext_token(node_token().as_deref(), plugin_id);
+
+    ws.on_upgrade(move |socket| {
+        bridge_ws_to_sidecar(socket, port, upstream_path, hop_token)
+    })
+}
+
+/// Bridge one accepted client socket to the sidecar's loopback WS endpoint, pumping
+/// bytes (binary and text) both ways until either side closes. The hop bearer is
+/// re-stamped on the upstream dial, exactly like the HTTP lane.
+async fn bridge_ws_to_sidecar(
+    mut client: WebSocket,
+    port: u16,
+    upstream_path: String,
+    hop_token: String,
+) {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let url = format!("ws://127.0.0.1:{port}{upstream_path}");
+    let mut request = match url.clone().into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("ext ws tunnel: bad upstream URL '{url}': {e}");
+            let _ = client.close().await;
+            return;
+        }
+    };
+    let mut headers = request.headers_mut();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&format!("Bearer {hop_token}")) {
+        headers.insert("authorization", value);
+    }
+    headers.insert(
+        "x-ryu-plugin-id",
+        axum::http::HeaderValue::from_static("ext-proxy-ws"),
+    );
+
+    let (mut upstream, _) = match tokio_tungstenite::connect_async(request).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("ext ws tunnel: sidecar WS unreachable at {url}: {e}");
+            let _ = client.close().await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            msg = client.recv() => {
+                match msg {
+                    Some(Ok(m)) => {
+                        let converted = axum_to_tungstenite(m);
+                        let is_close = matches!(converted, TsMessage::Close(_));
+                        if upstream.send(converted).await.is_err() {
+                            break;
+                        }
+                        if is_close {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+            msg = upstream.next() => {
+                match msg {
+                    Some(Ok(m)) => {
+                        let converted = tungstenite_to_axum(m);
+                        let is_close = matches!(converted, WsMessage::Close(_));
+                        if client.send(converted).await.is_err() {
+                            break;
+                        }
+                        if is_close {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+        }
+    }
+
+    // Best-effort close propagation on the way out.
+    let _ = client.close().await;
+    let _ = upstream.close(None).await;
+}
+
+/// Convert an axum WS message to the tokio-tungstenite shape (same wire content).
+fn axum_to_tungstenite(msg: WsMessage) -> TsMessage {
+    match msg {
+        WsMessage::Text(s) => TsMessage::text(s),
+        WsMessage::Binary(b) => TsMessage::binary(b),
+        WsMessage::Ping(p) => TsMessage::Ping(p.into()),
+        WsMessage::Pong(p) => TsMessage::Pong(p.into()),
+        WsMessage::Close(Some(frame)) => TsMessage::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.into(),
+            },
+        )),
+        WsMessage::Close(None) => TsMessage::Close(None),
+    }
+}
+
+/// Convert a tokio-tungstenite WS message back to the axum shape.
+fn tungstenite_to_axum(msg: TsMessage) -> WsMessage {
+    match msg {
+        TsMessage::Text(s) => WsMessage::Text(s.to_string()),
+        TsMessage::Binary(b) => WsMessage::Binary(b.into()),
+        TsMessage::Ping(p) => WsMessage::Ping(p.into()),
+        TsMessage::Pong(p) => WsMessage::Pong(p.into()),
+        TsMessage::Close(Some(frame)) => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+            code: frame.code.into(),
+            reason: frame.reason.into(),
+        })),
+        TsMessage::Close(None) => WsMessage::Close(None),
+        // `Frame` is the fully-parsed variant tokio-tungstenite only yields when
+        // reading raw streams; a `connect_async` socket yields the typed variants
+        // above. Fall back to nothing-to-forward rather than inventing bytes.
+        TsMessage::Frame(_) => WsMessage::Ping(Vec::new()),
+    }
 }
 
 // ── Host-API callback (/api/host/*) ───────────────────────────────────────────
@@ -2945,5 +3266,51 @@ mod tests {
             "'{id}' must declare '{grant}' in permission_grants — that is the ONLY thing \
              `enable_app` can approve from, and every replay/record call 403s without it"
         );
+    }
+
+    // ── WebSocket tunnel converters ────────────────────────────────────────────
+
+    #[test]
+    fn ws_message_converters_roundtrip_payloads() {
+        use axum::extract::ws::CloseFrame as AxumClose;
+
+        // Text.
+        let text = WsMessage::Text("hello".into());
+        let ts = axum_to_tungstenite(text.clone());
+        assert!(matches!(ts, TsMessage::Text(ref s) if s.as_str() == "hello"));
+        assert_eq!(tungstenite_to_axum(ts), text);
+
+        // Binary (the RFB wire form — byte-exact is load-bearing for VNC).
+        let binary = WsMessage::Binary(vec![1u8, 2, 3, 255]);
+        let ts = axum_to_tungstenite(binary.clone());
+        assert!(matches!(&ts, TsMessage::Binary(b) if **b == [1u8, 2, 3, 255]));
+        assert_eq!(tungstenite_to_axum(ts), binary);
+
+        // Ping / Pong are forwarded verbatim.
+        let ping = WsMessage::Ping(vec![9u8]);
+        assert_eq!(tungstenite_to_axum(axum_to_tungstenite(ping.clone())), ping);
+        let pong = WsMessage::Pong(vec![8u8]);
+        assert_eq!(tungstenite_to_axum(axum_to_tungstenite(pong.clone())), pong);
+
+        // Close carries code + reason through both directions. axum's `CloseCode` is
+        // a `u16`; tungstenite's is a distinct type, and both convert via `.into()`.
+        let close = WsMessage::Close(Some(AxumClose {
+            code: 1000,
+            reason: "bye".into(),
+        }));
+        let ts = axum_to_tungstenite(close.clone());
+        assert!(matches!(&ts, TsMessage::Close(Some(c)) if u16::from(c.code) == 1000 && c.reason.as_ref() == "bye"));
+        let back = tungstenite_to_axum(ts);
+        assert!(matches!(&back, WsMessage::Close(Some(c)) if c.code == 1000 && c.reason == "bye"));
+
+        // No-reason close.
+        assert!(matches!(
+            tungstenite_to_axum(TsMessage::Close(None)),
+            WsMessage::Close(None)
+        ));
+        // A `Frame` variant (only reachable via raw streams) degrades to Ping, never
+        // invents bytes.
+        let frame = TsMessage::Frame(tokio_tungstenite::tungstenite::protocol::frame::Frame::ping(vec![]));
+        assert!(matches!(tungstenite_to_axum(frame), WsMessage::Ping(_)));
     }
 }

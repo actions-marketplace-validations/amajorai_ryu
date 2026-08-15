@@ -35,6 +35,7 @@
 import {
 	Add01Icon,
 	CheckmarkCircle02Icon,
+	Delete02Icon,
 	Download04Icon,
 	HelpCircleIcon,
 	Loading03Icon,
@@ -94,8 +95,24 @@ import {
 } from "@/src/lib/interface-level.ts";
 import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 
+/** One account a Pi provider / ACP agent holds (labels only — never a credential). */
+export interface ProviderAccount {
+	accountId: string;
+	/** Display name (email, provider label, or "Account N"). */
+	label: string;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Whether this is the account in use right now. */
+	active: boolean;
+	/** For the managed Pi agent's accounts, the provider id they belong to. */
+	provider?: string;
+}
+
 /** A Pi provider row for the Providers section (built by `useUniversalPicker`). */
 export interface ProviderEntry {
+	/** Every account this provider holds in the sealed vault (labels only). Lets
+	 * the submenu list, switch and remove sign-ins. */
+	accounts?: ProviderAccount[];
 	/** Pi auth kind: "subscription" (OAuth login) | "api-key" | "none". */
 	authKind: string;
 	/** Whether a usable credential is stored (drives the models-vs-configure body). */
@@ -221,6 +238,19 @@ export interface UniversalPickerData {
 	onSelectProviderModel: (providerId: string, modelId: string) => void;
 	onSelectProviderThinking: (providerId: string, level: string) => void;
 	onSelectTeam?: (id: string) => void;
+	/** Switch the active account for a Pi provider (sealed vault + materialize). */
+	onSwitchProviderAccount: (providerId: string, accountId: string) => void;
+	/** Remove an account from a Pi provider. */
+	onRemoveProviderAccount: (providerId: string, accountId: string) => void;
+	/** Switch an ACP agent's active account (`provider` required for the managed
+	 *  Pi's accounts, which live in a provider scope). */
+	onSwitchAgentAccount: (
+		agentId: string,
+		accountId: string,
+		provider?: string
+	) => void;
+	/** Remove an ACP agent account. */
+	onRemoveAgentAccount: (agentId: string, accountId: string) => void;
 	/** Open the subscription upgrade / paywall (managed-provider upsell). */
 	onUpgrade: () => void;
 	onUseProvider: (providerId: string) => void;
@@ -578,6 +608,95 @@ function ActionRow({
 	);
 }
 
+/** One account row: label, active checkmark, and a remove action. */
+function AccountRow({
+	account,
+	onRemove,
+	onSwitch,
+}: {
+	account: ProviderAccount;
+	onRemove: (accountId: string) => void;
+	onSwitch: (accountId: string) => void;
+}) {
+	return (
+		<div className="flex items-center gap-1">
+			<DropdownMenuItem
+				className={cn(
+					"min-w-0 flex-1",
+					account.active && "bg-foreground/10"
+				)}
+				closeOnClick={false}
+				onClick={() => onSwitch(account.accountId)}
+			>
+				<span className="min-w-0 flex-1 truncate text-[13px]">
+					{account.label}
+					{account.provider ? (
+						<span className="text-muted-foreground/60"> · {account.provider}</span>
+					) : null}
+				</span>
+				{account.active && (
+					<HugeiconsIcon
+						className="shrink-0 text-muted-foreground"
+						icon={Tick02Icon}
+						size={14}
+						strokeWidth={2}
+					/>
+				)}
+			</DropdownMenuItem>
+			<Button
+				aria-label={`Remove ${account.label}`}
+				className="h-6 w-6 shrink-0 px-0"
+				onClick={(e) => {
+					e.stopPropagation();
+					onRemove(account.accountId);
+				}}
+				size="sm"
+				type="button"
+				variant="ghost"
+			>
+				<HugeiconsIcon
+					className="text-muted-foreground/70 hover:text-foreground"
+					icon={Delete02Icon}
+					size={12}
+					strokeWidth={2}
+				/>
+			</Button>
+		</div>
+	);
+}
+
+/** The "Account" section of a provider or ACP-agent submenu: every sign-in this
+ *  target holds, switchable and removable. Renders nothing when there is no
+ *  account to show. */
+function AccountsSection({
+	accounts,
+	onRemove,
+	onSwitch,
+}: {
+	accounts: ProviderAccount[];
+	onRemove: (accountId: string) => void;
+	onSwitch: (accountId: string) => void;
+}) {
+	if (!accounts.length) {
+		return null;
+	}
+	return (
+		<div className="border-t border-border/50 pt-1">
+			<div className="px-3 pt-1 pb-0.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+				Account
+			</div>
+			{accounts.map((account) => (
+				<AccountRow
+					account={account}
+					key={account.accountId}
+					onRemove={onRemove}
+					onSwitch={onSwitch}
+				/>
+			))}
+		</div>
+	);
+}
+
 /**
  * Provider submenu body. Configured → its models (live-discovered for OpenRouter
  * and friends) + thinking. Unconfigured branches by auth kind: the managed Ryu
@@ -592,11 +711,15 @@ function ProviderSubBody({
 	onThinking,
 	onConfigure,
 	onUpgrade,
+	onSwitchAccount,
+	onRemoveAccount,
 	close,
 }: {
 	close: () => void;
 	onConfigure: () => void;
 	onModel: (modelId: string) => void;
+	onRemoveAccount: (accountId: string) => void;
+	onSwitchAccount: (accountId: string) => void;
 	onThinking: (level: string) => void;
 	onUpgrade: () => void;
 	onUse: () => void;
@@ -765,6 +888,14 @@ function ProviderSubBody({
 				label={`Use ${provider.label}`}
 				onSelect={onUse}
 			/>
+			{/* Every sign-in this provider holds, switchable/removable. Multi-account
+			    is the point of the sealed vault; the section renders only when there
+			    are accounts to show. */}
+			<AccountsSection
+				accounts={provider.accounts ?? []}
+				onRemove={onRemoveAccount}
+				onSwitch={onSwitchAccount}
+			/>
 			{/* Same interface-level gate as the external-agent body above: Simple
 			    offers the provider itself and nothing to tune inside it. */}
 			{showModelSection && <SettingSub section={modelSection} />}
@@ -872,7 +1003,7 @@ function PoolGrantBadge({
 				render={
 					<span
 						aria-label={`${label}: ${amount} of granted credit left`}
-						className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground/70 tabular-nums"
+						className="flex shrink-0 items-center gap-1 font-heading text-[10px] text-muted-foreground/70 tabular-nums"
 					/>
 				}
 			>

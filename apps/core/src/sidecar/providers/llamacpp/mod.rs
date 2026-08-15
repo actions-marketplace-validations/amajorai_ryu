@@ -111,6 +111,37 @@ pub async fn active_chat_model_present(registry: &crate::registry::ModelRegistry
     resolve_active_chat_model(registry).await.1.exists()
 }
 
+/// Preference key holding the resident chat engine's idle scale-to-zero timeout
+/// in **seconds**. Passed to llama-server as `--sleep-idle-seconds` so the loaded
+/// model unloads itself (weights + KV cache) from RAM/VRAM after this many
+/// seconds of inactivity and transparently reloads on the next request — the LM
+/// Studio "eject" / Ollama `OLLAMA_KEEP_ALIVE` behaviour, but automatic.
+pub const SLEEP_IDLE_SECS_PREF: &str = "engine.llamacpp.sleep-idle-seconds";
+
+/// The default idle timeout when the user hasn't chosen one: 5 minutes, matching
+/// Ollama's `OLLAMA_KEEP_ALIVE` default (the de-facto industry standard for local
+/// model keep-alive).
+pub const DEFAULT_SLEEP_IDLE_SECS: u32 = 300;
+
+/// Resolve the sleep-idle timeout for the resident chat engine from preferences.
+/// Absent/unparseable ⇒ [`DEFAULT_SLEEP_IDLE_SECS`]; `0` ⇒ disabled (`None`, no
+/// flag emitted); `n > 0` ⇒ `Some(n)` seconds. This is a **node-level lifecycle
+/// policy**, not a per-model tuning knob, so it is authoritative over any value a
+/// per-model launch config happens to carry for the field.
+async fn resolve_sleep_idle_secs() -> Option<u32> {
+    match crate::server::preferences::PreferencesStore::open_default() {
+        Ok(prefs) => match prefs.get(SLEEP_IDLE_SECS_PREF).await {
+            Ok(Some(raw)) => match raw.trim().parse::<u32>() {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(_) => Some(DEFAULT_SLEEP_IDLE_SECS),
+            },
+            _ => Some(DEFAULT_SLEEP_IDLE_SECS),
+        },
+        Err(_) => Some(DEFAULT_SLEEP_IDLE_SECS),
+    }
+}
+
 impl Sidecar for LlamaCppManager {
     fn name(&self) -> &'static str {
         "llamacpp"
@@ -182,6 +213,11 @@ impl Sidecar for LlamaCppManager {
             // Ryu's fan-out (delegate / threads / teams) instead of serializing.
             // Kept out of persisted config so a different machine recomputes.
             launch.apply_llamacpp_batching_defaults();
+            // Idle scale-to-zero: the resident chat model unloads itself after the
+            // configured idle window (default 5 min) and transparently reloads on
+            // the next request. Node-level policy, so it overrides the per-model
+            // field. Emitted as `--sleep-idle-seconds`; omitted when disabled.
+            launch.sleep_idle_secs = resolve_sleep_idle_secs().await;
             // A CPU build must not be asked to offload layers. On macOS this is
             // the ONLY thing separating a CPU run from a Metal one (upstream
             // ships a single Apple Silicon archive with Metal compiled in), and

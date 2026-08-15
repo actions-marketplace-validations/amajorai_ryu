@@ -1,7 +1,7 @@
 {
   "id": "@ryu/meetings",
   "name": "Meetings",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Communication",
   "description": "Meeting notes: record → live transcript → AI notes, auto-saved into the Meetings Space so they stay editable and RAG-searchable.",
   "tagline": "Record, transcribe, and write up your meetings",
@@ -82,7 +82,7 @@
     "apps": [
       {
         "id": "@ryu/spaces",
-        "min_version": "1.0.0"
+        "min_version": "0.1.14"
       }
     ],
     "grants": ["spaces:docs"]

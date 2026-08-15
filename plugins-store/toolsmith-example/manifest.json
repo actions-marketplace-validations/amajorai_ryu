@@ -1,7 +1,7 @@
 {
   "id": "@ryu/toolsmith-example",
   "name": "toolsmith-example",
-  "version": "0.1.0",
+  "version": "0.1.14",
   "description": "Worked example for tools/toolsmith — a real, verified inline_deno tool. Not registered with Core and not shipped; it exists so the scaffold → verify pipeline has an end-to-end regression test.",
   "category": "Developer Tools",
   "hidden": true,

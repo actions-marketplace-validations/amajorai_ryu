@@ -274,3 +274,100 @@ describe("ModelsCatalogSection — detail panel", () => {
 		expect(html).toContain("detail exploded");
 	});
 });
+
+describe("ModelsCatalogSection — quant download picker", () => {
+	const THREE_QUANTS: ModelDetail["files"] = [
+		{
+			filename: "gemma-4b-Q8_0.gguf",
+			fit: "partial",
+			fitLabel: "May be tight",
+			installed: false,
+			quant: "Q8_0",
+			sizeBytes: 5_000_000_000,
+			sizeHuman: "5.0 GB",
+		},
+		{
+			filename: "gemma-4b-Q4_K_M.gguf",
+			fit: "great",
+			fitLabel: "Fits your device",
+			installed: false,
+			quant: "Q4_K_M",
+			sizeBytes: 2_500_000_000,
+			sizeHuman: "2.5 GB",
+		},
+		{
+			filename: "gemma-4b-F16.gguf",
+			fit: "too_big",
+			fitLabel: "Too large for your device",
+			installed: false,
+			quant: "F16",
+			sizeBytes: 10_000_000_000,
+			sizeHuman: "10 GB",
+		},
+	];
+
+	function renderDetail(
+		files: ModelDetail["files"],
+		over: Partial<ModelDetail> = {}
+	): string {
+		return render(
+			makeModelsState({
+				models: [makeModel()],
+				selectedId: "google/gemma-4b",
+				detail: makeDetail({ files, ...over }),
+			})
+		);
+	}
+
+	test("collapses the quants into one dropdown preselected to the best fit", () => {
+		const html = renderDetail(THREE_QUANTS);
+		expect(html).toContain("Download options");
+		// The best-fitting quant (great) is preselected — the hidden input carries
+		// its filename; the trigger shows its friendly label.
+		expect(html).toContain('value="gemma-4b-Q4_K_M.gguf"');
+		expect(html).toContain("Balanced (recommended)");
+		// No per-quant Add rows — one select + one Add button instead.
+		expect(html.match(/Download options/g)).toHaveLength(1);
+		expect(html.match(/data-testid="install-button"/g)).toHaveLength(1);
+	});
+
+	test("badges the recommendation for this device's OS", () => {
+		const html = renderDetail(THREE_QUANTS, {
+			device: {
+				gpuName: "M3 Max",
+				os: "macos",
+				ramHuman: "36 GB",
+				unifiedMemory: true,
+				vramBytes: null,
+				vramHuman: "",
+			},
+		});
+		expect(html).toContain("Recommended for your Mac");
+	});
+
+	test("the recommendation badge follows the selected quant", () => {
+		// All quants fit equally well: the picker still defaults to the smallest.
+		const html = renderDetail([
+			{
+				filename: "gemma-4b-Q8_0.gguf",
+				fit: "ok",
+				fitLabel: "Fits",
+				installed: false,
+				quant: "Q8_0",
+				sizeBytes: 5_000_000_000,
+				sizeHuman: "5.0 GB",
+			},
+			{
+				filename: "gemma-4b-Q4_K_M.gguf",
+				fit: "ok",
+				fitLabel: "Fits",
+				installed: false,
+				quant: "Q4_K_M",
+				sizeBytes: 2_500_000_000,
+				sizeHuman: "2.5 GB",
+			},
+		]);
+		expect(html).toContain('value="gemma-4b-Q4_K_M.gguf"');
+		expect(html).toContain("Recommended for your PC");
+	});
+});

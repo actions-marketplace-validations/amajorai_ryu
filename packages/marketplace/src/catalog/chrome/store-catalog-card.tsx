@@ -49,7 +49,7 @@ import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import ItemLikeButton from "../../likes/like-button.tsx";
 import { stabilityLabel } from "../stability.ts";
-import type { CardDither } from "../types.ts";
+import type { CardDither, CardThemePreview } from "../types.ts";
 import AppIcon from "./app-icon.tsx";
 import VerifiedBadge from "./verified-badge.tsx";
 
@@ -61,6 +61,7 @@ export default function StoreCatalogCard({
 	iconBackground,
 	iconPadding,
 	dither,
+	themePreview,
 	name,
 	seedId,
 	seedPlate,
@@ -108,6 +109,10 @@ export default function StoreCatalogCard({
 	 *  paint; a malformed spec is ignored and the flat/`img` path is used. Wins over
 	 *  `iconBackground` when valid. */
 	dither?: CardDither | null;
+	/** A theme listing's own palette. Painted as the icon square (bg/surface/primary
+	 *  bars) instead of a dither avatar when the item ships no art — the same swatch
+	 *  the Appearance tab's preset picker shows. */
+	themePreview?: CardThemePreview | null;
 	name: string;
 	/** Stable seed for the placeholder dither avatar — the item's unique id
 	 *  (`namespace/name`, a model/skill id, …) when available, else the name. */
@@ -228,6 +233,7 @@ export default function StoreCatalogCard({
 				name={name}
 				seedId={seedId}
 				seedPlate={seedPlate}
+				themePreview={themePreview}
 			/>
 			<span className="pointer-events-none min-w-0 flex-1">
 				<span className="flex items-center gap-1.5">

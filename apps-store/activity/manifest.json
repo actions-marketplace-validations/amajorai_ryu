@@ -1,7 +1,7 @@
 {
   "id": "@ryu/activity",
   "name": "Activity",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Productivity",
   "description": "The unified activity feed: everything happening on this node — monitor alerts, finished tasks, runs, approvals, meetings, and notes — newest first, grouped by day.",
   "tagline": "Everything happening on this node, newest first",

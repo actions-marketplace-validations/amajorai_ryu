@@ -346,6 +346,21 @@ export interface CardDither {
 	to?: string | number | null;
 }
 
+/** A theme listing's own palette, projected from its manifest's first
+ *  `contributes.themes[].preview` — the same four swatch colours the Appearance
+ *  tab's preset picker paints. The card renders it as the icon square instead of
+ *  a dither avatar or a generic glyph: for a theme, the palette IS the identity.
+ *  Loose strings on purpose (an untrusted card may declare any CSS colour); the
+ *  render layer falls back when a swatch cannot be painted. */
+export interface CardThemePreview {
+	bg: string;
+	/** The mode slot this theme fills (`"light"` | `"dark"`). */
+	mode?: string | null;
+	primary: string;
+	surface: string;
+	text: string;
+}
+
 /** One row of the Versions tab. Sourced from published releases, falling back to
  *  git tags for a repo that tags without cutting releases (`tagOnly`). */
 export interface CatalogVersion {
@@ -661,6 +676,10 @@ export interface CatalogEntry {
 	surfaces?: string[];
 	tagline?: string | null;
 	tags: string[];
+	/** A theme listing's own palette (manifest `contributes.themes[0].preview`).
+	 *  The card paints this as its icon square instead of a dither avatar or a
+	 *  generic glyph. Absent on everything that is not a theme. */
+	theme_preview?: CardThemePreview | null;
 	/** Explicit app-vs-plugin discriminator from the catalog. Preferred over the
 	 *  legacy `kinds.includes("companion")` derivation when present. */
 	type?: "app" | "plugin";

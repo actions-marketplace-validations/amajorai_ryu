@@ -20,6 +20,7 @@ import {
 	MarkdownEditor,
 } from "@/src/components/editor/MarkdownEditor.tsx";
 import { EntityIconDialog } from "@/src/components/layout/EntityIconDialog.tsx";
+import { useTabTitleSync } from "@/src/components/layout/tab-rename.tsx";
 import { BacklinksPanel } from "@/src/components/spaces/BacklinksPanel.tsx";
 import {
 	VersionHistory,
@@ -296,6 +297,17 @@ export default function SpaceDocEditorPage({
 		},
 		[scheduleSave]
 	);
+
+	// A strip double-click rename only rewrites `tab.title`; converge this
+	// editor's own title (and persist it through the normal save path) so the
+	// page header and the server document follow the strip.
+	useTabTitleSync({
+		ready: doc !== null,
+		scheduleSave,
+		setTitle,
+		tabId,
+		titleRef,
+	});
 
 	// Server-backed page version history (snapshot / diff / restore).
 	const versionSource = useMemo<VersionSource>(() => {

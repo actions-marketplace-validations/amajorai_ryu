@@ -65,9 +65,28 @@ const useIsoLayoutEffect =
 const RESTING_PILL = { width: 144, height: 40 } as const;
 // Where the island first docks: zone 6 = bottom-left.
 const DEFAULT_ZONE = 6;
+// Height of the fixed mobile bottom nav (`md:hidden` in mobile-nav.tsx). The
+// island's snap area is inset by this on small screens so it docks above the bar
+// instead of underneath/overlapping it (same collision the feedback launcher
+// had). Matches the nav's 80px (`h-20`) height and the `md:` = 768px breakpoint.
+const MOBILE_NAV_HEIGHT_PX = 80;
+const MOBILE_BREAKPOINT_PX = 768;
 // The nine snap zones, row-major (0 top-left … 8 bottom-right). Kept as an
 // explicit list so the overlay maps over stable keys, not array indices.
 const ZONES = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const;
+
+// The area the island may dock/drag within. On screens narrow enough to show the
+// fixed bottom nav the bottom is inset by the nav height so zone 6/7/8 land
+// above it.
+function workArea(v: { width: number; height: number }): Rect {
+	const navInset = v.width < MOBILE_BREAKPOINT_PX ? MOBILE_NAV_HEIGHT_PX : 0;
+	return {
+		x: 0,
+		y: 0,
+		width: v.width,
+		height: Math.max(0, v.height - navInset),
+	};
+}
 
 // Ghost/overlay corner radius: match the dragged island's shape, capped so a big
 // panel is not over-rounded (verbatim from the real overlay.ts).
@@ -468,8 +487,7 @@ function FloatingIsland({
 	// Live-resolve the nearest snap zone from the current footprint center, so the
 	// overlay highlights the zone the island would land in (mirrors resolveSnapZone).
 	const resolveActiveZone = useCallback(() => {
-		const v = viewportRef.current;
-		const area = { x: 0, y: 0, width: v.width, height: v.height };
+		const area = workArea(viewportRef.current);
 		const cur = posRef.current;
 		const center = {
 			x: cur.x + RESTING_PILL.width / 2,
@@ -496,7 +514,7 @@ function FloatingIsland({
 			return v;
 		};
 		const v = measure();
-		const area = { x: 0, y: 0, width: v.width, height: v.height };
+		const area = workArea(v);
 		const start = zoneAnchorPosition(
 			area,
 			DEFAULT_ZONE,
@@ -521,7 +539,7 @@ function FloatingIsland({
 			return;
 		}
 		const content = { width: el.offsetWidth, height: el.offsetHeight };
-		const area = { x: 0, y: 0, width: viewport.width, height: viewport.height };
+		const area = workArea(viewport);
 		const minX = area.x + EDGE_MARGIN_PX;
 		const minY = area.y + EDGE_MARGIN_PX;
 		const maxX = area.x + area.width - content.width - EDGE_MARGIN_PX;
@@ -598,7 +616,7 @@ function FloatingIsland({
 					return;
 				}
 				const v = viewportRef.current;
-				const area = { x: 0, y: 0, width: v.width, height: v.height };
+				const area = workArea(v);
 				const cur = posRef.current;
 				const center = {
 					x: cur.x + RESTING_PILL.width / 2,
@@ -651,7 +669,7 @@ function FloatingIsland({
 			<style>{ISLAND_CSS}</style>
 			<SnapZoneOverlay
 				active={activeZone}
-				area={{ x: 0, y: 0, width: viewport.width, height: viewport.height }}
+				area={workArea(viewport)}
 				shown={snapping}
 			/>
 			<div className="pointer-events-none fixed inset-0 z-[120]">

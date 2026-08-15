@@ -1,6 +1,8 @@
 import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
+	type CSSProperties,
 	type MouseEvent,
 	memo,
 	type ReactNode,
@@ -8,6 +10,21 @@ import {
 	useRef,
 	useState,
 } from "react";
+
+/**
+ * CSS var on the content box that carries the measured FULL height, so the
+ * `max-height` tween can land on the exact content height instead of a guess.
+ */
+const FULL_HEIGHT_VAR = "--collapsible-full-height";
+
+/**
+ * The app-wide morph curve (ease-out quint): opens fast, settles softly. The CSS
+ * form drives the `max-height` tween; the tuple form drives the motion fades.
+ * Both classes are written LITERALLY in the JSX below — Tailwind's scanner does
+ * not resolve template-literal candidates, so interpolating the curve here would
+ * silently drop the `ease-[...]` and `[max-height:var(...)]` utilities.
+ */
+const MORPH_CURVE_MOTION = [0.22, 1, 0.36, 1] as const;
 
 export interface CollapsibleTextProps {
 	children: ReactNode;
@@ -52,7 +69,9 @@ export const CollapsibleText = memo(function CollapsibleText({
 }: CollapsibleTextProps) {
 	const [expanded, setExpanded] = useState(false);
 	const [canCollapse, setCanCollapse] = useState(false);
+	const [fullHeight, setFullHeight] = useState(0);
 	const contentRef = useRef<HTMLDivElement>(null);
+	const reduceMotion = useReducedMotion();
 
 	useEffect(() => {
 		const el = contentRef.current;
@@ -61,6 +80,11 @@ export const CollapsibleText = memo(function CollapsibleText({
 		}
 
 		const measure = () => {
+			// `scrollHeight` reports the full content height even while the box is
+			// capped by `max-height`, so it is measurable in BOTH states and drives
+			// the expansion target. `canCollapse` compares against the capped
+			// `clientHeight`, which only differs from `scrollHeight` while collapsed.
+			setFullHeight(el.scrollHeight);
 			if (expanded) {
 				return;
 			}
@@ -70,7 +94,14 @@ export const CollapsibleText = memo(function CollapsibleText({
 		measure();
 		const ro = new ResizeObserver(measure);
 		ro.observe(el);
-		return () => ro.disconnect();
+		// While expanded the box is pinned to the measured full height, so a viewport
+		// reflow (text re-wrapping) would otherwise clip the tail; remeasure on
+		// resize so the pinned height tracks the content.
+		window.addEventListener("resize", measure);
+		return () => {
+			ro.disconnect();
+			window.removeEventListener("resize", measure);
+		};
 		// `children` is deliberately NOT a dependency: it is a fresh element on
 		// every render of the parent, so depending on it destroys and rebuilds this
 		// ResizeObserver on every render of the message list. The observer already
@@ -89,14 +120,27 @@ export const CollapsibleText = memo(function CollapsibleText({
 	};
 
 	const showControls = canCollapse || expanded;
+	// Expanding swaps the cap class for the measured full height, and the browser
+	// tweens `max-height` between the two — no manual height bookkeeping.
+	const showFullHeight = expanded && fullHeight > 0;
+
+	const controlTransition = reduceMotion
+		? { duration: 0 }
+		: { duration: 0.18, ease: MORPH_CURVE_MOTION };
 
 	return (
 		<div className={cn("relative", className)}>
 			<div
 				className={cn(
 					contentClassName,
+					"overflow-hidden",
+					// The height morph. While collapsed the box is held at the cap
+					// class; expanding swaps it for the measured full height. The fade
+					// strip and "Show less" control sit below/over the box's bottom
+					// edge, so the whole disclosure opens and closes as one surface.
+					"transition-[max-height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
 					!expanded && collapsedMaxHeightClass,
-					!expanded && "overflow-hidden",
+					showFullHeight && "[max-height:var(--collapsible-full-height)]",
 					onContentClick && "cursor-pointer"
 				)}
 				onClick={onContentClick ? handleContentClick : undefined}
@@ -112,54 +156,73 @@ export const CollapsibleText = memo(function CollapsibleText({
 				}
 				ref={contentRef}
 				role={onContentClick ? "button" : undefined}
+				style={
+					showFullHeight
+						? ({ [FULL_HEIGHT_VAR]: `${fullHeight}px` } as CSSProperties)
+						: undefined
+				}
 				tabIndex={onContentClick ? 0 : undefined}
 			>
 				{children}
 			</div>
 			{showControls ? (
-				expanded ? (
-					<div className="mt-1 flex justify-center">
-						<Button
-							className="h-6 px-2 text-muted-foreground text-xs hover:text-foreground"
-							data-collapsible-expand
-							onClick={() => setExpanded(false)}
-							size="sm"
-							type="button"
-							variant="ghost"
+				<AnimatePresence initial={false}>
+					{expanded ? (
+						<motion.div
+							animate={{ opacity: 1, y: 0 }}
+							className="mt-1 flex justify-center"
+							exit={{ opacity: 0, y: -4 }}
+							initial={{ opacity: 0, y: -4 }}
+							key="collapse"
+							transition={controlTransition}
 						>
-							{collapseLabel}
-						</Button>
-					</div>
-				) : (
-					<div
-						className={cn(
-							"pointer-events-none absolute inset-x-0 bottom-0",
-							fadeHeightClass
-						)}
-					>
-						<div
-							className={cn(
-								"absolute inset-0 bg-linear-to-b from-transparent to-50%",
-								fadeToClass
-							)}
-						/>
-						<div className="pointer-events-auto relative flex h-full items-end justify-center pb-0.5">
 							<Button
 								className="h-6 px-2 text-muted-foreground text-xs hover:text-foreground"
 								data-collapsible-expand
-								onClick={(event) => {
-									event.stopPropagation();
-									setExpanded(true);
-								}}
+								onClick={() => setExpanded(false)}
 								size="sm"
 								type="button"
 								variant="ghost"
 							>
-								{expandLabel}
+								{collapseLabel}
 							</Button>
-						</div>
-					</div>
-				)
+						</motion.div>
+					) : (
+						<motion.div
+							animate={{ opacity: 1 }}
+							className={cn(
+								"pointer-events-none absolute inset-x-0 bottom-0",
+								fadeHeightClass
+							)}
+							exit={{ opacity: 0 }}
+							initial={{ opacity: 0 }}
+							key="expand"
+							transition={controlTransition}
+						>
+							<div
+								className={cn(
+									"absolute inset-0 bg-linear-to-b from-transparent to-50%",
+									fadeToClass
+								)}
+							/>
+							<div className="pointer-events-auto relative flex h-full items-end justify-center pb-0.5">
+								<Button
+									className="h-6 px-2 text-muted-foreground text-xs hover:text-foreground"
+									data-collapsible-expand
+									onClick={(event) => {
+										event.stopPropagation();
+										setExpanded(true);
+									}}
+									size="sm"
+									type="button"
+									variant="ghost"
+								>
+									{expandLabel}
+								</Button>
+							</div>
+						</motion.div>
+					)}
+				</AnimatePresence>
 			) : null}
 		</div>
 	);

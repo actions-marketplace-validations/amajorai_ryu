@@ -1025,7 +1025,7 @@ async fn pre_process(
                         let category_names: Vec<&str> =
                             redacted_categories.iter().map(|c| c.as_str()).collect();
                         state.metrics.inc_firewall_blocked();
-                        state.audit.log(crate::audit::AuditRecord {
+                        state.log_audit(crate::audit::AuditRecord {
                             request_id: ctx.request_id.clone(),
                             api_key: ctx.api_key.clone(),
                             user_name: ctx.user_name.clone(),
@@ -1360,7 +1360,7 @@ fn audit_inline_evaluator(
     if !state.audit.is_enabled() {
         return;
     }
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: ctx.request_id.clone(),
         api_key: ctx.api_key.clone(),
         user_name: ctx.user_name.clone(),
@@ -2142,7 +2142,7 @@ pub async fn run(
                 });
 
                 // 14. Audit log (SQLite)
-                state.audit.log(AuditRecord {
+                state.log_audit(AuditRecord {
                     request_id: ctx.request_id.clone(),
                     api_key: ctx.api_key.clone(),
                     user_name: ctx.user_name.clone(),
@@ -2353,7 +2353,7 @@ fn audit_cache_hit(
     }
     let input_tokens = response["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let output_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0);
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: ctx.request_id.clone(),
         api_key: ctx.api_key.clone(),
         user_name: ctx.user_name.clone(),
@@ -2396,7 +2396,7 @@ fn audit_failure(
         return;
     }
     let redacted_error = state.with_firewall(|fw| fw.sanitize(&err.to_string()));
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: ctx.request_id.clone(),
         api_key: ctx.api_key.clone(),
         user_name: ctx.user_name.clone(),
@@ -2436,7 +2436,7 @@ fn audit_inspector_block(
     if !state.audit.is_enabled() {
         return;
     }
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: ctx.request_id.clone(),
         api_key: ctx.api_key.clone(),
         user_name: ctx.user_name.clone(),
@@ -3000,7 +3000,7 @@ pub async fn run_multimodal(
                     None
                 };
 
-                state.audit.log(AuditRecord {
+                state.log_audit(AuditRecord {
                     request_id: ctx.request_id.clone(),
                     api_key: ctx.api_key.clone(),
                     user_name: ctx.user_name.clone(),
@@ -4671,7 +4671,7 @@ fn audit_debit_failure(state: &AppState, org_id: &str, request_id: &str, error: 
         return;
     }
     let redacted_error = state.with_firewall(|fw| fw.sanitize(error));
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: request_id.to_string(),
         api_key: String::new(),
         user_name: None,
@@ -5021,7 +5021,7 @@ fn attach_stream_observer(
 
                     // Write the audit row once at stream end with real counts
                     // (defer-to-end pattern — no zero row at stream start).
-                    s.state.audit.log(AuditRecord {
+                    s.state.log_audit(AuditRecord {
                         request_id: s.ctx.request_id.clone(),
                         api_key: s.ctx.api_key.clone(),
                         user_name: s.ctx.user_name.clone(),

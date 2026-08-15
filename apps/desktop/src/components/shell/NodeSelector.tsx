@@ -3061,7 +3061,9 @@ function ManagedNodeWallet() {
 			<span className="flex-1 truncate">
 				{walletEmpty ? "Credits empty — top up" : "Cloud credits"}
 			</span>
-			<span className="shrink-0 font-medium tabular-nums">{balanceLabel}</span>
+			<span className="shrink-0 font-heading font-medium tabular-nums">
+				{balanceLabel}
+			</span>
 		</button>
 	);
 }

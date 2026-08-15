@@ -38,9 +38,9 @@ import {
 	AlertDialogFooter,
 	AlertDialogHeader,
 	AlertDialogTitle,
-} from "@ryu/ui/components/alert-dialog";
-import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
+} from "@ryu/ui/components/alert-dialog.tsx";
+import { Badge } from "@ryu/ui/components/badge.tsx";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -48,14 +48,14 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@ryu/ui/components/dialog";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
+} from "@ryu/ui/components/dialog.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
 import {
 	NativeSelect,
 	NativeSelectOption,
-} from "@ryu/ui/components/native-select";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/native-select.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import {
 	Table,
 	TableBody,
@@ -63,15 +63,15 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "@ryu/ui/components/table";
+} from "@ryu/ui/components/table.tsx";
 import {
 	Tabs,
 	TabsContent,
 	TabsList,
 	TabsTrigger,
-} from "@ryu/ui/components/tabs";
-import { Textarea } from "@ryu/ui/components/textarea";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tabs.tsx";
+import { Textarea } from "@ryu/ui/components/textarea.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -568,7 +568,9 @@ function StatTile({
 			<div className="text-[11px] text-muted-foreground uppercase tracking-wide">
 				{label}
 			</div>
-			<div className="font-medium text-sm tabular-nums">{value}</div>
+			<div className="font-heading font-medium text-sm tabular-nums">
+				{value}
+			</div>
 			{hint ? (
 				<div className="text-[11px] text-muted-foreground">{hint}</div>
 			) : null}
@@ -589,7 +591,10 @@ function SpendBar({
 	if (pct === null) {
 		return (
 			<span className="text-[11px] text-muted-foreground">
-				{formatCents(spentCents)} spent · no budget cap
+				<span className="font-heading tabular-nums">
+					{formatCents(spentCents)}
+				</span>{" "}
+				spent · no budget cap
 			</span>
 		);
 	}
@@ -604,7 +609,7 @@ function SpendBar({
 					style={{ width: `${pct}%` }}
 				/>
 			</span>
-			<span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+			<span className="shrink-0 font-heading text-[11px] text-muted-foreground tabular-nums">
 				{formatCents(spentCents)} / {formatCents(budgetCents)}
 			</span>
 		</span>
@@ -811,8 +816,14 @@ function UgcWorkspace() {
 					<span className="hidden truncate text-[11px] text-muted-foreground tabular-nums sm:inline">
 						{overview.campaigns} campaigns · {overview.creators} creators ·{" "}
 						{overview.submissions.pending} pending ·{" "}
-						{formatCents(overview.accrued_cents)} accrued ·{" "}
-						{formatCents(overview.paid_cents)} paid
+						<span className="font-heading">
+							{formatCents(overview.accrued_cents)}
+						</span>{" "}
+						accrued ·{" "}
+						<span className="font-heading">
+							{formatCents(overview.paid_cents)}
+						</span>{" "}
+						paid
 					</span>
 				) : null}
 				{/* The roster is the entry point of the whole flow — a submission binds a
@@ -1023,9 +1034,16 @@ function CampaignsView({
 										/>
 									</span>
 									<span className="mt-1 block text-[11px] text-muted-foreground">
-										{campaign.budget_cents > 0
-											? `Budget ${formatCents(campaign.budget_cents)}`
-											: "No budget cap"}
+										{campaign.budget_cents > 0 ? (
+											<>
+												Budget{" "}
+												<span className="font-heading tabular-nums">
+													{formatCents(campaign.budget_cents)}
+												</span>
+											</>
+										) : (
+											"No budget cap"
+										)}
 									</span>
 								</button>
 							</li>
@@ -1557,7 +1575,7 @@ function AccruedCell({
 	}
 	return (
 		<span className="flex items-center justify-end gap-1.5">
-			<span>{formatCents(cents)}</span>
+			<span className="font-heading tabular-nums">{formatCents(cents)}</span>
 			{status ? (
 				<StatusPill
 					label={status}
@@ -1787,10 +1805,10 @@ function LeaderboardTable({
 						<TableCell className="p-2 text-right tabular-nums">
 							{row.approved_submissions}
 						</TableCell>
-						<TableCell className="p-2 text-right tabular-nums">
+						<TableCell className="p-2 text-right font-heading tabular-nums">
 							{formatCents(row.accrued_cents)}
 						</TableCell>
-						<TableCell className="p-2 text-right tabular-nums">
+						<TableCell className="p-2 text-right font-heading tabular-nums">
 							{formatCents(row.paid_cents)}
 						</TableCell>
 					</TableRow>
@@ -1971,7 +1989,7 @@ function PayoutsTable({
 								variant={PAYOUT_STATUS_VARIANT[payout.status] ?? "outline"}
 							/>
 						</TableCell>
-						<TableCell className="p-2 text-right tabular-nums">
+						<TableCell className="p-2 text-right font-heading tabular-nums">
 							{formatCents(payout.amount_cents)}
 						</TableCell>
 						<TableCell className="p-2 text-right">
@@ -2039,15 +2057,17 @@ function ConfirmPayoutDialog({
 						{approving ? "Approve this payout?" : "Mark this payout as paid?"}
 					</AlertDialogTitle>
 					<AlertDialogDescription>
-						{action
-							? `${formatCents(action.payout.amount_cents)} to ${creatorName(
-									action.payout.creator_id
-								)}. ${
-									approving
-										? "Approving clears it for payment; it can no longer be re-priced as views grow."
-										: "Marking it paid also flips its submission to paid. This cannot be undone."
-								}`
-							: null}
+						{action ? (
+							<>
+								<span className="font-heading tabular-nums">
+									{formatCents(action.payout.amount_cents)}
+								</span>{" "}
+								to {creatorName(action.payout.creator_id)}.{" "}
+								{approving
+									? "Approving clears it for payment; it can no longer be re-priced as views grow."
+									: "Marking it paid also flips its submission to paid. This cannot be undone."}
+							</>
+						) : null}
 					</AlertDialogDescription>
 				</AlertDialogHeader>
 				<AlertDialogFooter>

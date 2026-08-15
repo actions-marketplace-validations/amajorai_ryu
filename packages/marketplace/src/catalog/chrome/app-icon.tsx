@@ -50,7 +50,7 @@ import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { useCachedIconUrl } from "../icon-cache.ts";
 import { resolveCardIcon } from "../icon-url.ts";
-import type { CardDither } from "../types.ts";
+import type { CardDither, CardThemePreview } from "../types.ts";
 import BrandOrCoverImage, { normalizeIconPadding } from "./brand-image.tsx";
 import { ditherDissolves, normalizeDither, opaqueDither } from "./dither.ts";
 import { OPPOSITE_DIRECTION } from "./dither-banner.tsx";
@@ -99,6 +99,13 @@ export interface AppIconProps {
 	/** Pixel size handed to the Icon primitive. Keep in step with `className`'s
 	 *  box: an Icon needs an explicit box, unlike a class-sized Hugeicons element. */
 	size?: number;
+	/** A theme listing's own palette (manifest `contributes.themes[0].preview`).
+	 *  When the item ships no art of its own, this is painted as the tile instead
+	 *  of the generative avatar: for a theme the swatch IS the identity, and it is
+	 *  the same icon the Appearance tab's preset picker shows. Real art (an
+	 *  `iconId`/`iconUrl`/`fallback`) still wins over it — a theme that also ships
+	 *  a logo shows the logo. */
+	themePreview?: CardThemePreview | null;
 	/** Which of the two tile treatments to paint — the small square in a grid, row,
 	 *  sidebar entry or tab strip (`card`, the default), or the large square that
 	 *  sits ON a detail hero's wash above its scrim (`hero`).
@@ -135,6 +142,7 @@ export default function AppIcon({
 	seedId,
 	seedPlate = false,
 	size = 20,
+	themePreview,
 	variant = "card",
 }: AppIconProps) {
 	const isHero = variant === "hero";
@@ -201,10 +209,14 @@ export default function AppIcon({
 	);
 
 	// No art of its own → the generative tile, which paints the whole square (so it
-	// takes neither the dither nor the flat background beneath it).
+	// takes neither the dither nor the flat background beneath it). A theme listing
+	// that carries a `themePreview` swaps that tile for the theme's own bar swatch
+	// (bg / surface / primary), so a theme reads as its palette rather than as a
+	// random-hue avatar.
 	const seed = seedId || name || "";
 	const isPlaceholder =
-		!(resolvedIconId || resolvedIconUrl || fallback) && !!seed;
+		!(resolvedIconId || resolvedIconUrl || fallback) &&
+		(!!seed || !!themePreview);
 
 	let content: ReactNode;
 	if (resolvedIconId) {
@@ -269,7 +281,29 @@ export default function AppIcon({
 			style={flatBackground}
 		>
 			{isPlaceholder ? (
-				<DitherAvatar animate={false} className="size-full" name={seed} />
+				themePreview ? (
+					// The theme's own palette as the tile: the same three stacked
+					// bars (bg / surface / primary) the Appearance tab's preset
+					// picker paints. Proportions match `PresetSwatch` (32×20 → the
+					// surface bar is a quarter, the primary a fifth), so the card
+					// and the picker agree about what a theme looks like.
+					<span className="flex size-full flex-col overflow-hidden">
+						<span
+							className="block flex-1"
+							style={{ backgroundColor: themePreview.bg }}
+						/>
+						<span
+							className="block h-[25%]"
+							style={{ backgroundColor: themePreview.surface }}
+						/>
+						<span
+							className="block h-[20%]"
+							style={{ backgroundColor: themePreview.primary }}
+						/>
+					</span>
+				) : (
+					<DitherAvatar animate={false} className="size-full" name={seed} />
+				)
 			) : (
 				<>
 					{usesSeedPlate ? (

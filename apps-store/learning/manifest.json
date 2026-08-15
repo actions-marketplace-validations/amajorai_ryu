@@ -1,7 +1,7 @@
 {
   "id": "@ryu/learning",
   "name": "Learning",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Knowledge & Memory",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
   "tagline": "Turn your chats into reusable skills",
@@ -37,7 +37,7 @@
     "apps": [
       {
         "id": "@ryu/skills",
-        "min_version": "1.0.0"
+        "min_version": "0.1.14"
       }
     ]
   },

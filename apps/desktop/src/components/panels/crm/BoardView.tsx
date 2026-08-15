@@ -261,7 +261,7 @@ export function BoardView({
 								</div>
 								<div className="flex shrink-0 items-center gap-1.5">
 									{valueField && total > 0 && (
-										<span className="text-muted-foreground text-xs tabular-nums">
+										<span className="font-heading text-muted-foreground text-xs tabular-nums">
 											{formatCents(
 												total,
 												valueField.config?.currency_code ?? "USD"

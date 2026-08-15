@@ -424,6 +424,7 @@ function MeterChip({
 	}
 	const soonest = meter.expiresAt.at(0) ?? null;
 	const reset = formatReset(meter.resetsAt);
+	const isMoney = meter.values[0]?.kind === "dollars";
 	return (
 		<Tooltip>
 			<TooltipTrigger
@@ -440,7 +441,11 @@ function MeterChip({
 						className={cn("size-1.5 rounded-full", expiryClass(soonest))}
 					/>
 				) : null}
-				<span className="text-[10px] tabular-nums">{text}</span>
+				<span
+					className={cn("text-[10px] tabular-nums", isMoney && "font-heading")}
+				>
+					{text}
+				</span>
 			</TooltipTrigger>
 			<TooltipContent>
 				<div className="flex flex-col gap-0.5 text-xs">
@@ -919,7 +924,7 @@ export const ProviderCreditsBadge = memo(function ProviderCreditsBadge({
 				render={
 					<span
 						aria-label={`${label}: ${text} of API credit left`}
-						className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums"
+						className="shrink-0 font-heading text-[10px] text-muted-foreground/70 tabular-nums"
 					/>
 				}
 			>

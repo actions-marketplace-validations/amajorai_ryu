@@ -1,7 +1,7 @@
 {
   "id": "@ryu/mail",
   "name": "Mail",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Agent Inboxes — email as a service for agents. Runs the out-of-process ryu-mail sidecar; Core proxies /api/mail/* to it. Its sandboxed companion is a per-node mail client (list inboxes, read messages, compose/send, create an inbox) driving /api/mail/* via the mail:crud bridge capability.",
   "keywords": ["email", "inbox", "communication", "agents"],
   "icon": "mail-01",

@@ -57,6 +57,7 @@ import { CrashBoundary } from "@/src/components/CrashBoundary.tsx";
 import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
+import ArtifactViewPage from "@/src/pages/ArtifactViewPage.tsx";
 import ChannelsPage from "@/src/pages/ChannelsPage.tsx";
 import ChatPage from "@/src/pages/ChatPage.tsx";
 import DownloadsPage from "@/src/pages/DownloadsPage.tsx";
@@ -127,6 +128,9 @@ const SOCIAL_DETAIL = /^\/social\/[^/]+$/;
 const TIMELINE_FOCUS = /^\/timeline\/[^/]+$/;
 // /agents/new/edit or /agents/:id/edit.
 const AGENT_EDIT = /^\/agents\/.+\/edit$/;
+// /artifact/:id — a session-local artifact surfaced by the agent, rendered
+// full-size in a workspace tab (see ArtifactViewPage + useArtifactStore).
+const ARTIFACT_VIEW = /^\/artifact\/[^/]+$/;
 // /skills/:id/edit — the SKILL.md editor for an existing skill (the `/skills/new`
 // fresh-draft entry is an exact route). Single id segment ([^/]+), deeper than the
 // `/skills` store exact, so no collision. The skill id is baked into the sandboxed
@@ -536,6 +540,11 @@ export function seedBuiltinRoutes(): void {
 			agentIdProp: tab.path.split("/")[2],
 			onClose: ctx.onClose,
 		})
+	);
+	// /artifact/:id — a workspace tab showing an artifact the agent surfaced this
+	// session (session-local store, so a restored tab renders "no longer available").
+	pattern(ARTIFACT_VIEW, (tab) =>
+		createElement(ArtifactViewPage, { artifactId: tab.path.split("/")[2] })
 	);
 	// The legacy short paths (`/calendar`, `/timeline`, `/inbox`, `/mail`, …), minted
 	// from the contributions feed instead of a hardcoded table — registered LAST so

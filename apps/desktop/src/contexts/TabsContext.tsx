@@ -51,6 +51,7 @@ import {
 	setSizesAt,
 	swapLeaves,
 } from "@/src/lib/splitTree.ts";
+import { useArtifactStore } from "@/src/store/useArtifactStore.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 export type {
@@ -137,7 +138,16 @@ export interface TabGroup {
     all kept live. The tree's leaves and the members are kept in lockstep by
     `reconcileSplits`. */
 export interface Split {
+	/** Collapsed in the tab strip: the member tabs hide behind the header pill
+	    (the same interaction as a tab group), while the tiled panes keep
+	    rendering. */
+	collapsed: boolean;
+	/** Chrome-style group color — painted as the header pill and the strip
+	    underline that spans the whole split while expanded. */
+	color: TabGroupColor;
 	id: string;
+	/** Optional display name for the strip pill; empty renders the grid glyph. */
+	name: string;
 	root: SplitBranch;
 }
 
@@ -188,7 +198,7 @@ function reconcileSplits(splits: Split[], tabs: Tab[]): Split[] {
 		if (!pruned || pruned.type === "leaf") {
 			// The tree degenerated but ≥2 members remain — rebuild flat.
 			out.push({
-				id: s.id,
+				...s,
 				root: makeBranch("columns", members.map(makeLeaf)),
 			});
 			continue;
@@ -196,7 +206,7 @@ function reconcileSplits(splits: Split[], tabs: Tab[]): Split[] {
 		const present = new Set(leafOrder(pruned));
 		const missing = members.filter((id) => !present.has(id));
 		out.push({
-			id: s.id,
+			...s,
 			root: missing.length > 0 ? appendLeaves(pruned, missing) : pruned,
 		});
 	}
@@ -294,6 +304,8 @@ interface TabsContextValue {
 	removeFromSplit: (tabId: string) => void;
 	removeTabFromGroup: (tabId: string) => void;
 	renameGroup: (groupId: string, name: string) => void;
+	/** Name a split (its strip pill label; empty shows the grid glyph). */
+	renameSplit: (splitId: string, name: string) => void;
 	/** Hand a split pane over to an already-open tab: `tabId` takes the exact
 	    position (and fractions) of `paneTabId`, which is then closed. This is
 	    how an empty placeholder pane is filled from the open-tabs list. */
@@ -302,6 +314,8 @@ interface TabsContextValue {
 	requestScrollToMessage: (conversationId: string, messageId: string) => void;
 	restoreTab: () => void;
 	setGroupColor: (groupId: string, color: TabGroupColor) => void;
+	/** Recolor a split's pill + strip underline. */
+	setSplitColor: (splitId: string, color: TabGroupColor) => void;
 	setSplitOrientation: (splitId: string, orientation: SplitOrientation) => void;
 	/** Replace the size fractions of the branch at `path` (child indexes from
 	    the root; [] targets the root itself). */
@@ -334,6 +348,9 @@ interface TabsContextValue {
 	toggleGroupCollapsed: (groupId: string) => void;
 	// Pinning
 	togglePin: (id: string) => void;
+	/** Collapse/expand a split in the strip, hiding its member tabs behind the
+	    header pill the way a group does. */
+	toggleSplitCollapsed: (splitId: string) => void;
 	ungroup: (groupId: string) => void;
 	// Unloading
 	unloadTab: (id: string) => void;
@@ -534,6 +551,7 @@ function makeSplitId(): string {
 const AGENT_EDIT_TITLE_RE = /^\/agents\/.+\/edit$/;
 const CHANNEL_DETAIL_TITLE_RE = /^\/channels\/[^/]+$/;
 const IDENTITY_PROFILE_TITLE_RE = /^\/identities\/profile\/[^/]+$/;
+const ARTIFACT_TITLE_RE = /^\/artifact\/[^/]+$/;
 
 /** Title-case a path segment (`downloads` → `Downloads`, `weekly-review` → `Weekly Review`). */
 function humanizePathSegment(segment: string): string {
@@ -555,6 +573,12 @@ function defaultTitle(path: string): string {
 	}
 	if (IDENTITY_PROFILE_TITLE_RE.test(base)) {
 		return "Identities";
+	}
+	// A session-local artifact tab is named after its artifact (the store holds it
+	// only while the session does; a restored tab falls back to "Artifact").
+	if (ARTIFACT_TITLE_RE.test(base)) {
+		const artifact = useArtifactStore.getState().get(base.split("/")[2]);
+		return artifact ? artifact.title : "Artifact";
 	}
 	// After the entity regexes (so `/agents/:id/edit` stays "Edit agent") and
 	// before the per-path map, which no longer carries the shells' routes.
@@ -612,10 +636,13 @@ function isSingleton(path: string): boolean {
 	return base !== "/chat" && base !== PANE_CHOOSER_PATH;
 }
 
-// Pick the first group color not already in use, so new groups are visually
-// distinct until the palette wraps around.
-function nextGroupColor(groups: TabGroup[]): TabGroupColor {
-	const used = new Set(groups.map((g) => g.color));
+// Pick the first color not already used by a group or a split, so new clusters
+// are visually distinct until the palette wraps around.
+function nextClusterColor(groups: TabGroup[], splits: Split[]): TabGroupColor {
+	const used = new Set([
+		...groups.map((g) => g.color),
+		...splits.map((s) => s.color),
+	]);
 	return TAB_GROUP_COLORS.find((c) => !used.has(c)) ?? TAB_GROUP_COLORS[0];
 }
 
@@ -942,7 +969,13 @@ function restoreSession(): StartupState | null {
 					t.splitId = id;
 				}
 			}
-			splits.push({ id, root: revived });
+			splits.push({
+				id,
+				root: revived,
+				collapsed: false,
+				name: "",
+				color: nextClusterColor([], splits),
+			});
 		}
 		const reconciled = reconcileSplits(splits, mapped);
 		const liveIds = new Set(reconciled.map((s) => s.id));
@@ -1051,6 +1084,11 @@ export function TabsProvider({
 	const splitsRef = useRef<Split[]>(splits);
 	splitsRef.current = splits;
 
+	// Kept in sync with `groups` so split-creation callbacks can pick a color
+	// that is distinct from every open group without a stale closure.
+	const groupsRef = useRef<TabGroup[]>(groups);
+	groupsRef.current = groups;
+
 	// Last time each tab was the active view, keyed by tab id. Held in a ref (not
 	// tab state) so stamping it on every activation doesn't churn renders; the
 	// auto-unload timer reads it directly.
@@ -1149,6 +1187,19 @@ export function TabsProvider({
 				return prev;
 			}
 			return prev.map((x) => (x.id === gid ? { ...x, collapsed: false } : x));
+		});
+		// The same for a collapsed split: activating any of its panes expands the
+		// whole split so the tab is visible in the strip.
+		setSplits((prev) => {
+			const sid = tabsRef.current.find((t) => t.id === id)?.splitId;
+			if (!sid) {
+				return prev;
+			}
+			const s = prev.find((x) => x.id === sid);
+			if (!s?.collapsed) {
+				return prev;
+			}
+			return prev.map((x) => (x.id === sid ? { ...x, collapsed: false } : x));
 		});
 	}, []);
 
@@ -1461,6 +1512,13 @@ export function TabsProvider({
 						g.id === fallbackGroupId ? { ...g, collapsed: false } : g
 					)
 			);
+			// Same for a collapsed split: reveal the member the focus falls back to.
+			const fallbackSplitId = next.find((t) => t.id === nextActive)?.splitId;
+			setSplits((prev) =>
+				prev.map((s) =>
+					s.id === fallbackSplitId ? { ...s, collapsed: false } : s
+				)
+			);
 		},
 		[syncNav]
 	);
@@ -1762,7 +1820,12 @@ export function TabsProvider({
 			const id = makeGroupId();
 			setGroups((prev) => [
 				...prev,
-				{ id, name: "Group", color: nextGroupColor(prev), collapsed: false },
+				{
+					id,
+					name: "Group",
+					color: nextClusterColor(prev, splitsRef.current),
+					collapsed: false,
+				},
 			]);
 			addTabToGroup(tabId, id);
 			return id;
@@ -1803,6 +1866,26 @@ export function TabsProvider({
 		);
 	}, []);
 
+	const renameSplit = useCallback((splitId: string, name: string) => {
+		setSplits((prev) =>
+			prev.map((s) => (s.id === splitId ? { ...s, name } : s))
+		);
+	}, []);
+
+	const setSplitColor = useCallback((splitId: string, color: TabGroupColor) => {
+		setSplits((prev) =>
+			prev.map((s) => (s.id === splitId ? { ...s, color } : s))
+		);
+	}, []);
+
+	const toggleSplitCollapsed = useCallback((splitId: string) => {
+		setSplits((prev) =>
+			prev.map((s) =>
+				s.id === splitId ? { ...s, collapsed: !s.collapsed } : s
+			)
+		);
+	}, []);
+
 	const ungroup = useCallback((groupId: string) => {
 		setTabs((prev) => {
 			const next = normalize(
@@ -1838,6 +1921,7 @@ export function TabsProvider({
 				return;
 			}
 			const id = makeSplitId();
+			const color = nextClusterColor(groupsRef.current, splitsRef.current);
 			// Assign the new splitId to every member (detaching them from pin/group —
 			// a tab is never both), and wake them here: markActive below only wakes
 			// the focused pane and reads a splitsRef this tick hasn't refreshed, so an
@@ -1866,7 +1950,13 @@ export function TabsProvider({
 			// Add the new split, then prune any prior split a member was pulled out of.
 			setSplits((prev) => [
 				...prev,
-				{ id, root: makeBranch(orientation, unique.map(makeLeaf)) },
+				{
+					id,
+					root: makeBranch(orientation, unique.map(makeLeaf)),
+					collapsed: false,
+					name: "",
+					color,
+				},
 			]);
 			pruneSplits();
 			markActive(unique[0]);
@@ -1894,6 +1984,7 @@ export function TabsProvider({
 			}
 			const members = new Set(leafOrder(tree));
 			const id = makeSplitId();
+			const color = nextClusterColor(groupsRef.current, splitsRef.current);
 			setTabs((prev) => {
 				const next = normalize(
 					prev.map((t) =>
@@ -1914,7 +2005,10 @@ export function TabsProvider({
 			setGroups((prev) =>
 				prev.filter((g) => tabsRef.current.some((t) => t.groupId === g.id))
 			);
-			setSplits((prev) => [...prev, { id, root: tree }]);
+			setSplits((prev) => [
+				...prev,
+				{ id, root: tree, collapsed: false, name: "", color },
+			]);
 			pruneSplits();
 			markActive(unique[0]);
 		},
@@ -1938,6 +2032,7 @@ export function TabsProvider({
 				return;
 			}
 			const id = makeSplitId();
+			const color = nextClusterColor(groupsRef.current, splitsRef.current);
 			// Minted here rather than through N× `openTab` on purpose: `openTab`
 			// publishes each new tab through its own `setTabs`, and only the FIRST
 			// updater in a batch is evaluated eagerly — so the second call would
@@ -1963,7 +2058,10 @@ export function TabsProvider({
 				tabsRef.current = next;
 				return next;
 			});
-			setSplits((prev) => [...prev, { id, root: tree }]);
+			setSplits((prev) => [
+				...prev,
+				{ id, root: tree, collapsed: false, name: "", color },
+			]);
 			pruneSplits();
 			markActive(created[0].id);
 			pushHistory(created[0].id);
@@ -2154,7 +2252,16 @@ export function TabsProvider({
 					if (root.type !== "branch") {
 						return prev;
 					}
-					list = [...prev, { id: splitId, root }];
+					list = [
+						...prev,
+						{
+							id: splitId,
+							root,
+							collapsed: false,
+							name: "",
+							color: nextClusterColor(groupsRef.current, splitsRef.current),
+						},
+					];
 				}
 				return reconcileSplits(list, tabsRef.current);
 			});
@@ -2473,6 +2580,9 @@ export function TabsProvider({
 				toggleGroupCollapsed,
 				ungroup,
 				closeGroup,
+				renameSplit,
+				setSplitColor,
+				toggleSplitCollapsed,
 				splitTabs,
 				splitPane,
 				swapSplitPanes,

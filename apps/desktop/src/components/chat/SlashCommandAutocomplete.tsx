@@ -10,6 +10,8 @@
 import { useEffect, useRef, useState } from "react";
 
 export interface SlashCommand {
+	/** For imported user commands: the prompt template the command expands to. */
+	body?: string;
 	/** Human-readable description of what the command does. */
 	description: string;
 	/** Optional placeholder shown for the command's argument, if it takes one. */
@@ -17,8 +19,10 @@ export interface SlashCommand {
 	/** Command name without the leading slash (e.g. "compact", "btw"). */
 	name: string;
 	/** "agent" = advertised over ACP; "local" = handled by the desktop (btw/goal);
-	 *  "plugin" = contributed by an enabled Core plugin (e.g. /proof). */
-	source: "agent" | "local" | "plugin";
+	 *  "plugin" = contributed by an enabled Core plugin (e.g. /proof);
+	 *  "user" = imported from another agent (Codex prompt) — expanding into
+	 *  `body` when selected. */
+	source: "agent" | "local" | "plugin" | "user";
 }
 
 interface SlashCommandAutocompleteProps {

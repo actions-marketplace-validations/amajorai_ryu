@@ -38,13 +38,17 @@ import {
 	ArrowUpRight,
 	Check,
 	CreditCard,
+	Database,
 	EyeOff,
 	Laptop,
 	LogOut,
 	Moon,
+	MoreHorizontal,
 	PieChart,
 	Plus,
+	ScrollText,
 	Settings,
+	Shield,
 	Sun,
 	User,
 } from "lucide-react";
@@ -77,8 +81,8 @@ import { DownloadCenter } from "../downloads/DownloadCenter.tsx";
 import { InboxCenter } from "../inbox/InboxCenter.tsx";
 import { SettingsDialog } from "../settings/SettingsDialog.tsx";
 import { CreateMenu } from "./CreateMenu.tsx";
+import { HelpSubmenu } from "./HelpSubmenu.tsx";
 import { InterfaceLevelSubmenu } from "./InterfaceLevelSubmenu.tsx";
-import { UpdatesSubmenu } from "./UpdatesSubmenu.tsx";
 
 const TRAILING_SLASH_RE = /\/$/;
 
@@ -405,6 +409,11 @@ export function NavUser({
 			`${FRONTEND_URL.replace(TRAILING_SLASH_RE, "")}/pricing`
 		).catch(() => undefined);
 	};
+	const openLegal = (path: string) => {
+		openExternal(`${FRONTEND_URL.replace(TRAILING_SLASH_RE, "")}${path}`).catch(
+			() => undefined
+		);
+	};
 	const openLifetimeCheckout = async () => {
 		try {
 			const { url } = await settingsApi.billing.createLifetimeCheckout();
@@ -496,7 +505,7 @@ export function NavUser({
 													<Settings className="mr-2 size-4" />
 													Settings
 												</DropdownMenuItem>
-												<UpdatesSubmenu />
+												<HelpSubmenu />
 											</DropdownMenuGroup>
 											{/* Sits with Theme, not under Settings: the audience the
 											    Simple level exists for is the audience that never opens
@@ -548,7 +557,7 @@ export function NavUser({
 																	<p className="text-muted-foreground text-xs">
 																		Credits left for workspace
 																	</p>
-																	<p className="font-semibold text-sm">
+																	<p className="font-heading font-semibold text-sm tabular-nums">
 																		{creditsLeft}
 																	</p>
 																</div>
@@ -579,6 +588,33 @@ export function NavUser({
 														</DropdownMenuItem>
 													</NavBeamCta>
 												)}
+											</DropdownMenuGroup>
+											<DropdownMenuSeparator />
+											<DropdownMenuGroup>
+												<DropdownMenuSub>
+													<DropdownMenuSubTrigger>
+														<MoreHorizontal className="mr-2 size-4" />
+														More
+													</DropdownMenuSubTrigger>
+													<DropdownMenuSubContent className="min-w-52">
+														<DropdownMenuItem
+															onClick={() => openLegal("/terms")}
+														>
+															<ScrollText className="mr-2 size-4" />
+															Terms of Service
+														</DropdownMenuItem>
+														<DropdownMenuItem
+															onClick={() => openLegal("/privacy")}
+														>
+															<Shield className="mr-2 size-4" />
+															Privacy
+														</DropdownMenuItem>
+														<DropdownMenuItem onClick={() => openLegal("/dpa")}>
+															<Database className="mr-2 size-4" />
+															Data Processing Agreement
+														</DropdownMenuItem>
+													</DropdownMenuSubContent>
+												</DropdownMenuSub>
 											</DropdownMenuGroup>
 										</DropdownMenuContent>
 									</DropdownMenu>

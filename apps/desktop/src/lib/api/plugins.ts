@@ -16,7 +16,12 @@ import type {
 	ViewContribution,
 	ViewSource,
 } from "@ryu/app-host/views";
-import type { CardDither, CatalogBanner } from "@ryu/marketplace/catalog/types";
+import type { LiveActivityContribution } from "@ryu/app-host/live-activity";
+import type {
+	CardDither,
+	CardThemePreview,
+	CatalogBanner,
+} from "@ryu/marketplace/catalog/types";
 import {
 	type ApiTarget,
 	apiUrl,
@@ -586,6 +591,11 @@ export interface PluginContributions {
 	 *  installed theme and a built-in one are the same object by the time the
 	 *  Appearance picker renders them. */
 	themes: PluginTheme[];
+	/** Live activities contributed by enabled plugins (`contributes.live_activities`),
+	 *  tagged with `plugin`. Each is a {@link LiveActivityContribution} the desktop's
+	 *  "Dynamic Island" dock (empty-shell launchpad + sidebar) renders: a small,
+	 *  always-live status card sourced from a declared Core `/api/` path. */
+	live_activities: PluginLiveActivity[];
 	turn_hooks: Record<string, unknown>[];
 	/** Declarative views (the Raycast tier) contributed by enabled plugins. Each is a
 	 *  {@link ViewContribution} the desktop/island renderer maps to native components,
@@ -729,6 +739,12 @@ export interface PluginSidebarButton {
  *  {@link ViewContribution} — re-exported here so contributions consumers need only
  *  the plugins API. */
 export type PluginView = ViewContribution;
+
+/** A live-activity contribution as served by Core (`contributes.live_activities[]`),
+ *  tagged with its owning `plugin`. Shape-identical to the shared
+ *  `@ryu/app-host/live-activity` {@link LiveActivityContribution} — re-exported here
+ *  so contributions consumers need only the plugins API. */
+export type PluginLiveActivity = LiveActivityContribution;
 
 /** Which dock a {@link PluginDockPanel} opens in. Mirrors the Rust
  *  `DockPanelPlacement`; `"both"` offers the panel in each dock's new-tab menu. */
@@ -999,6 +1015,7 @@ export async function getPluginContributions(
 		sidebar_buttons: json.sidebar_buttons ?? [],
 		themes: json.themes ?? [],
 		dock_panels: json.dock_panels ?? [],
+		live_activities: json.live_activities ?? [],
 		store_tabs: json.store_tabs ?? [],
 		channels: json.channels ?? [],
 		companions: (json.companions ?? []).map(toPluginCompanion),
@@ -1557,6 +1574,10 @@ export interface CatalogEntry {
 	/** Short one-line pitch shown under the name. */
 	tagline?: string | null;
 	tags: string[];
+	/** A theme listing's own palette (manifest `contributes.themes[0].preview`).
+	 *  The Store paints this as its icon square instead of a dither avatar or a
+	 *  generic glyph. Absent on everything that is not a theme. */
+	theme_preview?: CardThemePreview | null;
 	/** Explicit app-vs-plugin discriminator (preferred over the kinds derivation). */
 	type?: "app" | "plugin";
 	version: string;

@@ -33,6 +33,11 @@ export const POPULAR_AGENT_IDS: ReadonlySet<string> = new Set([
 	"acp:goose",
 	"acp:opencode",
 	"acp:devin",
+	"acp:openhands",
+	"acp:prime",
+	"acp:blackbox",
+	"acp:code-assistant",
+	"acp:construct",
 ]);
 
 export type AgentGroupKey =

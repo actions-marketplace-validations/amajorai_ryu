@@ -1,7 +1,7 @@
 {
   "id": "@example/research-assistant",
   "name": "Research Assistant",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "The reference plugin: a minimal example that declares one of each runnable kind — an agent, a workflow, a tool, and a skill — plus a companion window. It does nothing useful on purpose, and ships hidden. Copy this directory as the starting point for your own plugin.",
   "tagline": "Reference plugin: one of every runnable kind",
   "keywords": ["example", "reference", "developer", "template"],

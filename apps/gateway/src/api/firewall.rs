@@ -134,7 +134,7 @@ fn audit_firewall_check_block(state: &SharedState, headers: &HeaderMap, kind: &s
         .map(|k| k.strip_prefix("Bearer ").unwrap_or(k).to_string())
         .unwrap_or_else(|| "firewall-check".to_string());
 
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: Uuid::new_v4().to_string(),
         api_key,
         user_name: None,

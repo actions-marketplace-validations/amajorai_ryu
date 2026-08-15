@@ -1,7 +1,7 @@
 {
   "id": "@ryu/finetune",
   "name": "Fine-tuning",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "A LoRA/QLoRA training studio: launch fine-tune jobs on this node's GPU or a remote Ryu Cloud GPU node, track them durably, merge the trained adapter to GGUF, and register the result as a swappable local model.",
   "tagline": "Train a model on your own data, on your own GPU",
   "keywords": ["finetune", "lora", "training", "gpu", "models"],

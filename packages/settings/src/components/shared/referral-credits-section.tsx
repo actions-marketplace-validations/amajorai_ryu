@@ -124,7 +124,7 @@ function RefereeRow({ referee }: { referee: CreditReferralReferee }) {
 			</div>
 			<div className="flex shrink-0 items-center gap-2">
 				{referee.amountMicroUsd === null ? null : (
-					<span className="font-medium text-sm tabular-nums">
+					<span className="font-heading font-medium text-sm tabular-nums">
 						{formatCredits(referee.amountMicroUsd)}
 					</span>
 				)}
@@ -177,9 +177,9 @@ function CapSummary({ cap }: { cap: CreditReferralDashboard["cap"] }) {
 					<p className="text-muted-foreground text-xs uppercase">
 						Credits earned
 					</p>
-					<p className="font-semibold text-lg tabular-nums">
-						{formatCredits(cap.earnedMicroUsd)}
-					</p>
+				<p className="font-heading font-semibold text-lg tabular-nums">
+					{formatCredits(cap.earnedMicroUsd)}
+				</p>
 					<p className="text-muted-foreground text-xs">
 						{cap.paidCount === 1
 							? "1 referral paid out"
@@ -190,11 +190,11 @@ function CapSummary({ cap }: { cap: CreditReferralDashboard["cap"] }) {
 					<p className="text-muted-foreground text-xs uppercase">
 						Still available
 					</p>
-					<p className="font-semibold text-lg tabular-nums">
-						{cap.remainingMicroUsd === null
-							? "Unlimited"
-							: formatCredits(cap.remainingMicroUsd)}
-					</p>
+				<p className="font-heading font-semibold text-lg tabular-nums">
+					{cap.remainingMicroUsd === null
+						? "Unlimited"
+						: formatCredits(cap.remainingMicroUsd)}
+				</p>
 					<p className="text-muted-foreground text-xs">
 						{cap.remainingMicroUsd === null
 							? "No limit on your account"

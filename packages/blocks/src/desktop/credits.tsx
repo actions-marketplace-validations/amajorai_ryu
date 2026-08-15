@@ -129,7 +129,7 @@ function LedgerAmount({
 	const formatted = formatMicroUsd(Math.abs(row.delta), currency);
 	return (
 		<span
-			className={`font-medium text-sm tabular-nums ${
+			className={`font-heading font-medium text-sm tabular-nums ${
 				row.isCredit ? "text-green-600 dark:text-green-400" : "text-foreground"
 			}`}
 		>
@@ -243,7 +243,7 @@ export function CreditsView({
 							) : (
 								<HugeiconsIcon className="mr-2 size-3.5" icon={Add01Icon} />
 							)}
-							Add ${packs[0]} credits
+							Add <span className="font-heading">${packs[0]}</span> credits
 						</Button>
 					</div>
 				</div>
@@ -262,7 +262,7 @@ export function CreditsView({
 								</p>
 								<p className="mt-0.5 text-muted-foreground text-xs">
 									Includes{" "}
-									<span className="font-medium text-foreground tabular-nums">
+									<span className="font-heading font-medium text-foreground tabular-nums">
 										{formatMicroUsd(
 											entitlement.monthlyCreditPoolMicroUsd,
 											currency
@@ -296,7 +296,7 @@ export function CreditsView({
 								className="size-6 text-muted-foreground"
 								icon={DollarCircleIcon}
 							/>
-							<span className="font-semibold text-3xl tabular-nums">
+							<span className="font-heading font-semibold text-3xl tabular-nums">
 								{wallet
 									? formatMicroUsd(wallet.balanceMicroUsd, currency)
 									: "—"}
@@ -341,7 +341,7 @@ export function CreditsView({
 											</p>
 										) : null}
 									</div>
-									<span className="shrink-0 font-medium text-sm tabular-nums">
+									<span className="shrink-0 font-heading font-medium text-sm tabular-nums">
 										{formatMicroUsd(pool.remainingMicroUsd, currency)}
 									</span>
 								</div>
@@ -374,7 +374,7 @@ export function CreditsView({
 									) : (
 										<HugeiconsIcon className="mr-2 size-3.5" icon={Add01Icon} />
 									)}
-									${pack}
+									<span className="font-heading">${pack}</span>
 								</Button>
 							))}
 						</div>
@@ -450,7 +450,7 @@ export function CreditsView({
 									</div>
 									<div className="flex flex-col items-end">
 										<LedgerAmount currency={currency} row={entry} />
-										<span className="text-muted-foreground text-xs tabular-nums">
+										<span className="font-heading text-muted-foreground text-xs tabular-nums">
 											{formatMicroUsd(entry.balanceAfter, currency)}
 										</span>
 									</div>

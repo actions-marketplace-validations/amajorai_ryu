@@ -15,6 +15,7 @@ import { METAL_EDGE_TILE_RING_PX, MetalEdge } from "./metal-edge.tsx";
 import PageHeader from "./page-header.tsx";
 import { Spinner } from "./spinner.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs.tsx";
+import { UsernameMarquee } from "./username-marquee.tsx";
 import { QUEUE_STATS_MIN, WaitlistPass } from "./waitlist-pass.tsx";
 import { WaitlistUsernameField } from "./waitlist-username-field.tsx";
 
@@ -405,6 +406,15 @@ export function WaitlistQueue({
 									subtitle="Want in faster? Every friend who joins on your link moves you up the queue."
 									title="Share your link"
 								/>
+								{/* The username reel: the handle on the pass is the same name
+								    everyone on your link can now claim for themselves. A short
+								    reel keeps it in the room without stealing the step. */}
+								<div className="flex items-center gap-3">
+									<UsernameMarquee height={80} speed={1.5} />
+									<p className="text-muted-foreground text-xs">
+										Claim your username before it&apos;s taken.
+									</p>
+								</div>
 								{/* The link as an object you press, not a text field you are
 								    invited to edit. A read-only input asks to be selected and
 								    copied by hand; this is one big target that does the

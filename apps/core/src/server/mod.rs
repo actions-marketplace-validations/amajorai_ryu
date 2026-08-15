@@ -50,6 +50,7 @@ pub mod uploads;
 /// [`crate::memory_host`]. This alias keeps the ~19 `memory::`-qualified call
 /// sites in Core unchanged (re-export shim, zero business logic).
 pub use ryu_memory as memory;
+pub mod app_notify;
 pub mod notifications_api;
 pub mod openapi;
 pub mod plugin_bridge_api;
@@ -2459,6 +2460,18 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
             post(start_pi_provider_login),
         )
         .route(
+            "/api/pi-config/providers/:id/accounts",
+            get(pi_provider_accounts),
+        )
+        .route(
+            "/api/pi-config/providers/:id/accounts/switch",
+            post(pi_provider_account_switch),
+        )
+        .route(
+            "/api/pi-config/providers/:id/accounts/remove",
+            post(pi_provider_account_remove),
+        )
+        .route(
             "/api/pi-config/login/:session/events",
             get(pi_provider_login_events),
         )
@@ -2860,10 +2873,7 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/uploads/:id", get(uploads::serve_upload))
         // At-rest encryption posture: master-key custody + per-store coverage.
         // Read-only and secret-free — see `server::encryption`.
-        .route(
-            "/api/encryption/status",
-            get(encryption::encryption_status),
-        )
+        .route("/api/encryption/status", get(encryption::encryption_status))
         // ── Autoresearch data path (`/api/research/*`) is served out-of-process by
         // the `ryu-research` sidecar via the manifest `public_mount` — no in-process
         // route (see `@ryu/research`).
@@ -2905,6 +2915,9 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route("/api/gateway/evals/run", post(gateway_run_evals))
         // ── Gateway audit proxy (M4 / #177) ─────────────────────────────────
         .route("/api/gateway/audit", get(gateway_audit))
+        // ── Gateway live-traffic proxy (SSE): streams the gateway's /v1/traffic
+        // feed through Core so the desktop dashboard never holds the master key.
+        .route("/api/gateway/traffic", get(gateway_traffic))
         // ── Gateway budget-spend proxy (M2 control-layer UX) ─────────────────
         .route("/api/gateway/budget/spend", get(gateway_budget_spend))
         // ── Canvas: ported to the `@ryu/canvas` Ryu App (Path-B companion).
@@ -2970,6 +2983,14 @@ pub fn create_router(state: ServerState, auth_token: Option<String>, bind_addr: 
         .route(
             "/api/notifications/:id/ack",
             post(notifications_api::ack_notification),
+        )
+        .route(
+            "/api/notifications/:id/archive",
+            post(notifications_api::archive_notification),
+        )
+        .route(
+            "/api/notifications/:id/unarchive",
+            post(notifications_api::unarchive_notification),
         )
         // ── Approval inbox (human-in-the-loop) ──────────────────────────────
         // The ONE mount of `/api/approvals/*`, in its own gated sub-router (see
@@ -3557,11 +3578,19 @@ fn agents_routes(app_store: &PluginStore) -> Router<ServerState> {
             "/api/agents/:id/threads/import",
             post(import_agent_thread_handler),
         )
+        // ── Import agent *setup* from a scanned local folder (instructions,
+        //    skills, MCP servers, plugins, Claude memories) — ChatGPT/Codex
+        //    `/import` parity. Scan lists; run imports the selection. ──
+        .route("/api/import/scan", post(scan_import_handler))
+        .route("/api/import/run", post(run_import_handler))
         // ── ACP session config (agent-reported permission modes / models /
         //    config options like reasoning effort), Zed-style ──
         .route("/api/agents/:id/acp-config", get(acp_config))
         .route("/api/agents/:id/authenticate", post(acp_authenticate))
         .route("/api/agents/:id/logout", post(acp_logout))
+        .route("/api/agents/:id/accounts", get(acp_accounts))
+        .route("/api/agents/:id/accounts/switch", post(acp_account_switch))
+        .route("/api/agents/:id/accounts/remove", post(acp_account_remove))
         .route("/api/agents/:id/sessions", get(list_acp_sessions_handler))
         .route(
             "/api/agents/:id/sessions/:sid",
@@ -4144,7 +4173,6 @@ mod update_check_wire_shape_tests {
     }
 }
 
-
 /// `POST /api/update/schedule` — install this update at the node's next quiet
 /// hour instead of now.
 ///
@@ -4161,18 +4189,17 @@ mod update_check_wire_shape_tests {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn schedule_update(Json(body): Json<serde_json::Value>) -> axum::response::Response {
-    let asset: crate::update::ReleaseAsset = match serde_json::from_value(
-        body.get("asset").cloned().unwrap_or(body.clone()),
-    ) {
-        Ok(a) => a,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("invalid asset: {e}") })),
-            )
-                .into_response();
-        }
-    };
+    let asset: crate::update::ReleaseAsset =
+        match serde_json::from_value(body.get("asset").cloned().unwrap_or(body.clone())) {
+            Ok(a) => a,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("invalid asset: {e}") })),
+                )
+                    .into_response();
+            }
+        };
     let version = body
         .get("version")
         .and_then(|v| v.as_str())
@@ -4276,7 +4303,9 @@ async fn get_preference(
     // while still letting a cleared preference genuinely return to the default.
     let default_value = |key: &str| -> Option<String> {
         (key == crate::agent_selection::GLOBAL_SELECTION_PREF)
-            .then(|| serde_json::to_string(&crate::agent_selection::builtin_default_selection()).ok())
+            .then(|| {
+                serde_json::to_string(&crate::agent_selection::builtin_default_selection()).ok()
+            })
             .flatten()
     };
     match state.preferences.get(&key).await {
@@ -5925,6 +5954,49 @@ async fn chat_stream(
     // atomic on every subsequent request; covers both the single- and team-chat
     // branches below because it fires before either dispatches.
     fire_on_chat_once(&state);
+    // Workflow turn: run the DAG with the user's message as its chat input,
+    // streaming node progress into the thread. Per-resource ACL on the workflow
+    // (workflow.run), then a fail-closed chat-input gate so a message never
+    // silently vanishes down a workflow that has no entry `Input` node.
+    // Dispatched before the team branch: a workflow target is the most specific
+    // intent (the message IS the run's input), so it wins when both are set.
+    if let Some(workflow_id) = req.workflow_id.clone() {
+        if enforce_permission_on(
+            &state,
+            &caller,
+            crate::identity_verify::permissions::WORKFLOW_RUN,
+            crate::acl::KIND_WORKFLOW,
+            &workflow_id,
+        )
+        .await
+        .is_err()
+        {
+            return json_error(
+                StatusCode::FORBIDDEN,
+                "insufficient permissions: workflow.run".to_owned(),
+            );
+        }
+        let workflow = match crate::workflow::store::load_workflow(&workflow_id) {
+            Ok(w) => w,
+            Err(_) => {
+                return crate::sidecar::adapters::error_stream(format!(
+                    "Unknown workflow: {workflow_id}"
+                ));
+            }
+        };
+        if !crate::workflow::accepts_chat_input(&workflow) {
+            return crate::sidecar::adapters::error_stream(format!(
+                "Workflow '{}' doesn't accept a chat input — add an Input node at the entry to run it from chat.",
+                workflow.name
+            ));
+        }
+        return crate::sidecar::adapters::route_workflow_chat_stream(
+            req,
+            workflow,
+            state.conversations.clone(),
+        )
+        .await;
+    }
     // Team turn: fan out to the team's members per its coordination strategy.
     if let Some(team_id) = req.team_id.clone() {
         let team = match state.teams.get(&team_id).await {
@@ -6749,7 +6821,8 @@ async fn acp_authenticate(
         .provider_id
         .as_deref()
         .and_then(crate::pi_config::subscription_login_present);
-    if let Err(e) = crate::sidecar::adapters::acp::authenticate_acp(spawn_cmd, body.method_id).await
+    if let Err(e) =
+        crate::sidecar::adapters::acp::authenticate_acp(spawn_cmd.clone(), body.method_id).await
     {
         return (
             StatusCode::BAD_GATEWAY,
@@ -6762,6 +6835,10 @@ async fn acp_authenticate(
         )
             .into_response();
     }
+    // Record the sign-in as an account in the sealed vault so the picker can list
+    // and switch it. Managed Pi: snapshot the credential Pi wrote into its own
+    // auth.json. Any other agent: an opaque account under its scope.
+    crate::pi_config::record_acp_account(&spawn_cmd, body.provider_id.as_deref());
     let Some(was_present) = before else {
         // No subscription provider named — nothing to check against. Report the
         // RPC result, flagged unverified so the caller does not claim a login.
@@ -6833,6 +6910,214 @@ async fn acp_logout(
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({ "loggedOut": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Body for the provider/agent account switch + remove routes.
+#[derive(serde::Deserialize)]
+struct AccountAction {
+    /// The vault `accountId` to switch to / remove.
+    #[serde(rename = "accountId")]
+    account_id: String,
+    /// The provider an ACP account belongs to (required for managed-Pi agent
+    /// accounts, which live in a provider scope).
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+/// `GET /api/pi-config/providers/:id/accounts` — the accounts a provider holds
+/// in the sealed vault (labels, kinds, active flag — NEVER a credential).
+#[utoipa::path(
+    get,
+    path = "/api/pi-config/providers/{id}/accounts",
+    tag = "Agents",
+    summary = "List a Pi provider's accounts",
+    params(("id" = String, Path, description = "Provider id")),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn pi_provider_accounts(Path(provider_id): Path<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "accounts": crate::pi_config::list_provider_accounts(&provider_id),
+    }))
+}
+
+/// `POST /api/pi-config/providers/:id/accounts/switch` — make another stored
+/// account the active one for a provider, materializing it into Pi's files.
+#[utoipa::path(
+    post,
+    path = "/api/pi-config/providers/{id}/accounts/switch",
+    tag = "Agents",
+    summary = "Switch a Pi provider's active account",
+    params(("id" = String, Path, description = "Provider id")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn pi_provider_account_switch(
+    Path(provider_id): Path<String>,
+    Json(body): Json<AccountAction>,
+) -> axum::response::Response {
+    match crate::pi_config::switch_provider_account(&provider_id, &body.account_id) {
+        Ok(catalog) => Json(catalog).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "switched": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/pi-config/providers/:id/accounts/remove` — remove an account.
+/// If it was active, the newest remaining account takes over.
+#[utoipa::path(
+    post,
+    path = "/api/pi-config/providers/{id}/accounts/remove",
+    tag = "Agents",
+    summary = "Remove a Pi provider account",
+    params(("id" = String, Path, description = "Provider id")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn pi_provider_account_remove(
+    Path(provider_id): Path<String>,
+    Json(body): Json<AccountAction>,
+) -> axum::response::Response {
+    match crate::pi_config::remove_provider_account(&provider_id, &body.account_id) {
+        Ok(catalog) => Json(catalog).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "removed": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/agents/:id/accounts` — the accounts an ACP agent holds (labels
+/// only). For the managed Pi these are its provider accounts, tagged with their
+/// provider; for any other agent they are its opaque sign-ins.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/accounts",
+    tag = "Agents",
+    summary = "List an ACP agent's accounts",
+    params(("id" = String, Path, description = "Agent id")),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn acp_accounts(
+    State(state): State<ServerState>,
+    Path(agent_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let accounts = match crate::sidecar::adapters::resolve_acp_spawn_cmd(
+        &agent_id,
+        &state.agents,
+        &state.agent_store,
+    )
+    .await
+    {
+        Some(spawn_cmd) => crate::pi_config::list_acp_accounts(&spawn_cmd),
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({ "accounts": accounts }))
+}
+
+/// `POST /api/agents/:id/accounts/switch` — switch an ACP agent's active
+/// account. Managed Pi accounts live in a provider scope (switch = materialize
+/// that credential); every other agent's accounts are opaque, so switching means
+/// re-signing-in — the response flags `reauthenticate` for the UI to drive it.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/accounts/switch",
+    tag = "Agents",
+    summary = "Switch an ACP agent's active account",
+    params(("id" = String, Path, description = "Agent id")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn acp_account_switch(
+    State(state): State<ServerState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<AccountAction>,
+) -> axum::response::Response {
+    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+        &agent_id,
+        &state.agents,
+        &state.agent_store,
+    )
+    .await
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "switched": false, "error": "not an ACP agent" })),
+        )
+            .into_response();
+    };
+    // An opaque (non-managed-Pi) agent account cannot be switched by vault alone:
+    // the agent owns its auth. Tell the UI to drive a fresh sign-in instead.
+    if !spawn_cmd.contains("PI_CODING_AGENT_DIR") {
+        return Json(serde_json::json!({
+            "switched": true,
+            "reauthenticate": true,
+        }))
+        .into_response();
+    }
+    match crate::pi_config::switch_acp_account(
+        &spawn_cmd,
+        &body.account_id,
+        body.provider.as_deref(),
+    ) {
+        Ok(true) => Json(serde_json::json!({ "switched": true })).into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "switched": false, "error": "no such account" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "switched": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/agents/:id/accounts/remove` — remove an ACP agent account.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/accounts/remove",
+    tag = "Agents",
+    summary = "Remove an ACP agent account",
+    params(("id" = String, Path, description = "Agent id")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn acp_account_remove(
+    State(state): State<ServerState>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<AccountAction>,
+) -> axum::response::Response {
+    let Some(spawn_cmd) = crate::sidecar::adapters::resolve_acp_spawn_cmd(
+        &agent_id,
+        &state.agents,
+        &state.agent_store,
+    )
+    .await
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "removed": false, "error": "not an ACP agent" })),
+        )
+            .into_response();
+    };
+    match crate::pi_config::remove_acp_account(&spawn_cmd, &body.account_id) {
+        Ok(true) => Json(serde_json::json!({ "removed": true })).into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "removed": false, "error": "no such account" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "removed": false, "error": e.to_string() })),
         )
             .into_response(),
     }
@@ -7409,43 +7694,46 @@ async fn agent_capabilities(
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         // Same selections the composer's `/acp-config` read used, so the
         // reasoning flag and the advertised options describe the SAME session.
-        let (detected, source) =
-            match crate::sidecar::adapters::acp::probe_acp_config_with(spawn_cmd, cwd, acp_selections)
-                .await
-            {
-                Ok(v) => {
-                    let acp = DetectedCaps {
-                        tools: true,
-                        reasoning: caps::acp_probe_reasoning(&v),
-                        vision: false,
-                        diffusion: false,
-                    };
-                    let merged = caps::merge_acp_with_local(acp, local_detected);
-                    let source = if local_detected.is_some() {
-                        "acp_probe+gguf"
-                    } else {
-                        "acp_probe"
-                    };
-                    (merged, source)
-                }
-                // Probe failed (agent binary missing, etc.) — assume a tool loop
-                // is available so we don't hide controls on a transient error.
-                Err(_) => {
-                    let fallback = DetectedCaps {
-                        tools: true,
-                        reasoning: false,
-                        vision: false,
-                        diffusion: false,
-                    };
-                    let merged = caps::merge_acp_with_local(fallback, local_detected);
-                    let source = if local_detected.is_some() {
-                        "default+gguf"
-                    } else {
-                        "default"
-                    };
-                    (merged, source)
-                }
-            };
+        let (detected, source) = match crate::sidecar::adapters::acp::probe_acp_config_with(
+            spawn_cmd,
+            cwd,
+            acp_selections,
+        )
+        .await
+        {
+            Ok(v) => {
+                let acp = DetectedCaps {
+                    tools: true,
+                    reasoning: caps::acp_probe_reasoning(&v),
+                    vision: false,
+                    diffusion: false,
+                };
+                let merged = caps::merge_acp_with_local(acp, local_detected);
+                let source = if local_detected.is_some() {
+                    "acp_probe+gguf"
+                } else {
+                    "acp_probe"
+                };
+                (merged, source)
+            }
+            // Probe failed (agent binary missing, etc.) — assume a tool loop
+            // is available so we don't hide controls on a transient error.
+            Err(_) => {
+                let fallback = DetectedCaps {
+                    tools: true,
+                    reasoning: false,
+                    vision: false,
+                    diffusion: false,
+                };
+                let merged = caps::merge_acp_with_local(fallback, local_detected);
+                let source = if local_detected.is_some() {
+                    "default+gguf"
+                } else {
+                    "default"
+                };
+                (merged, source)
+            }
+        };
         return Json(CapabilityReport::build(detected, overrides, source)).into_response();
     }
 
@@ -7935,8 +8223,10 @@ async fn channel_commands(State(state): State<ServerState>) -> axum::response::R
     let manifests = state.app_manifests.read().await;
     // No surface filter: a channel bot is not one of the declared `Surface`s, and
     // an unknown surface means "do not filter" everywhere else in this file too.
-    let plugin_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, None);
+    let mut plugin_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, None);
     drop(manifests);
+    // Imported user slash commands (Codex prompts) ride alongside the plugin set.
+    plugin_commands.extend(read_user_slash_commands(&state.preferences).await);
 
     let skills = state.skills.enabled();
     let commands = build_channel_commands(&plugin_commands, &skills);
@@ -7999,7 +8289,8 @@ async fn worktree_diff_handler(
     // interval a UI polls at, far above per-keystroke.
     const WORKTREE_DIFF_MAX_AGE: std::time::Duration = std::time::Duration::from_millis(1500);
     let Some((path, base)) = live.filter(|_| age >= WORKTREE_DIFF_MAX_AGE) else {
-        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({}))).into_response();
+        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({})))
+            .into_response();
     };
 
     let read = |path: std::path::PathBuf, base: String| async move {
@@ -8011,7 +8302,8 @@ async fn worktree_diff_handler(
     let Some(mut fresh) = read(path.clone(), base.clone()).await else {
         // The blocking task panicked or was cancelled — answer with what we had
         // rather than failing the read.
-        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({}))).into_response();
+        return Json(serde_json::to_value(&cached).unwrap_or(serde_json::json!({})))
+            .into_response();
     };
 
     // `worktree_diff` answers "no changes" for a git FAILURE as well as for a
@@ -9276,11 +9568,8 @@ async fn all_plugin_catalog_entries(
             // user had chosen; here it is the DEFAULT store page for everyone, and
             // a source is only ever a bonus shelf on it. A slow one is dropped from
             // this render rather than allowed to hold the whole page.
-            match tokio::time::timeout(
-                PLUGIN_ALL_SOURCE_TIMEOUT,
-                source.search(&state.client, &q),
-            )
-            .await
+            match tokio::time::timeout(PLUGIN_ALL_SOURCE_TIMEOUT, source.search(&state.client, &q))
+                .await
             {
                 Ok(Ok(val)) => val
                     .get("items")
@@ -10153,6 +10442,27 @@ fn plugin_manifest_to_entry(m: &crate::plugin_manifest::PluginManifest) -> serde
         if let Some(category) = &m.category {
             obj.insert("category".to_owned(), json!(category));
         }
+        // A theme plugin's card square should be its own palette — the same
+        // swatch the Appearance tab's preset picker paints — rather than a
+        // generative dither avatar or a generic glyph. Project the FIRST theme's
+        // preview onto the card so the client can paint it; emitted only when the
+        // manifest actually contributes themes, so an ordinary plugin's card stays
+        // byte-identical. `contributes.themes` is a typed field (pure design
+        // tokens, no code), so nothing executable can ride this key.
+        if let Some(c) = &m.contributes {
+            if let Some(theme) = c.themes.first() {
+                obj.insert(
+                    "theme_preview".to_owned(),
+                    json!({
+                        "bg": theme.preview.bg,
+                        "surface": theme.preview.surface,
+                        "primary": theme.preview.primary,
+                        "text": theme.preview.text,
+                        "mode": theme.mode,
+                    }),
+                );
+            }
+        }
         // Listing-posture keys. Each is emitted ONLY when it is the non-default, so
         // an ordinary listing's card JSON is byte-identical to what it was before
         // these existed and no client has to learn three new always-present fields.
@@ -10477,11 +10787,9 @@ fn plugin_marketplace_item_to_entry(
         // badge, never safety. The authoritative check runs against the signed
         // manifest in `resolve_plugin_from_catalog`, which refuses the install
         // regardless of what the card claimed.
-        if let Some(engines) = it
-            .get("engines")
-            .filter(|v| v.is_object())
-            .and_then(|v| serde_json::from_value::<crate::plugin_manifest::EnginesReq>(v.clone()).ok())
-        {
+        if let Some(engines) = it.get("engines").filter(|v| v.is_object()).and_then(|v| {
+            serde_json::from_value::<crate::plugin_manifest::EnginesReq>(v.clone()).ok()
+        }) {
             obj.insert("engines".to_owned(), json!(engines));
             obj.insert(
                 "compatibility".to_owned(),
@@ -10504,6 +10812,12 @@ fn plugin_marketplace_item_to_entry(
             "provenance",
             "repo_url",
             "license",
+            // The grouping stamp a community MARKETPLACE entry carries, naming the
+            // marketplace its row belongs under ("Community Marketplaces" →
+            // sub-heading). Only meaningful on the `github-topic` feed; the
+            // `all` view overwrites both with the browsed source's own meta.
+            "catalog_source_id",
+            "catalog_source_name",
             // Publisher identity. `org_verified_tier` only ever QUALIFIES the check
             // ("Verified organization — Partner"); the flag below is what renders it,
             // so a tier arriving without the flag correctly shows nothing. Snake_case
@@ -10518,6 +10832,13 @@ fn plugin_marketplace_item_to_entry(
         // Non-string passthroughs (the loop above copies strings only).
         if let Some(reviewed) = it.get("reviewed").and_then(|v| v.as_bool()) {
             obj.insert("reviewed".to_owned(), json!(reviewed));
+        }
+        // A theme listing's palette, when the source card carries one — the card
+        // the store renders must show the theme's own swatch, not a dither avatar.
+        // Pure colour strings from the marketplace server; the render layer
+        // validates + falls back, same as `icon_dither`.
+        if let Some(preview) = it.get("theme_preview").filter(|v| v.is_object()) {
+            obj.insert("theme_preview".to_owned(), preview.clone());
         }
         // Is the PUBLISHING ORGANIZATION identity-checked? A separate axis from
         // `reviewed` (did anyone read the code) and from manifest signing, and it
@@ -12056,7 +12377,7 @@ async fn find_manifest(
 /// don't break). Neither direction can be turned into a bypass by breaking the
 /// preferences store.
 async fn load_trust_policy() -> crate::plugins::isolation::TrustPolicy {
-    use crate::plugins::isolation::{REQUIRE_TRUST_PREF, TRUSTED_IDS_PREF, TrustPolicy};
+    use crate::plugins::isolation::{TrustPolicy, REQUIRE_TRUST_PREF, TRUSTED_IDS_PREF};
     let Ok(store) = crate::server::preferences::PreferencesStore::open_default() else {
         return TrustPolicy::default();
     };
@@ -12130,11 +12451,8 @@ async fn plugins_isolation_handler(State(state): State<ServerState>) -> axum::re
             }));
             continue;
         };
-        let report = crate::plugins::isolation::resolve(
-            manifest,
-            record.provenance.as_ref(),
-            &policy,
-        );
+        let report =
+            crate::plugins::isolation::resolve(manifest, record.provenance.as_ref(), &policy);
         let refused = report.should_refuse_host_access(&policy);
         let mut value = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
         if let Some(obj) = value.as_object_mut() {
@@ -13298,6 +13616,7 @@ async fn plugin_contributions(
     let mut sidebar_modes = Vec::new();
     let mut themes = Vec::new();
     let mut dock_panels = Vec::new();
+    let mut live_activities = Vec::new();
     let mut output_styles = Vec::new();
 
     // Surface filter (`targets`): a plugin that doesn't target the calling host
@@ -13309,8 +13628,11 @@ async fn plugin_contributions(
     let manifests = state.app_manifests.read().await;
     // Slash commands are collected by a shared walk because a SECOND reader —
     // `GET /api/channels/commands` — has to apply exactly the same enabled filter;
-    // see [`collect_plugin_slash_commands`].
-    let slash_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, surface);
+    // see [`collect_plugin_slash_commands`]. Imported user commands (Codex
+    // prompts) are appended here, unenabled (they are the user's own, not gated
+    // by a plugin's enabled bit).
+    let mut slash_commands = collect_plugin_slash_commands(&manifests, &enabled_ids, surface);
+    slash_commands.extend(read_user_slash_commands(&state.preferences).await);
     // Marketplace tabs — the ONE family collected outside the enabled filter. See
     // `Contributes::store_tabs`: the Store is where an app gets installed, and every
     // built-in feature app is `NOT_PRE_INSTALLED`, so an enabled-gated tab would be
@@ -13426,6 +13748,16 @@ async fn plugin_contributions(
             c.dock_panels
                 .iter()
                 .filter_map(|p| serde_json::to_value(p).ok())
+                .map(tag),
+        );
+        // Live activities — the app-owned "Dynamic Island" cards. Same tag-and-collect
+        // shape as the sibling families; the `spec` stays opaque to Core, so an
+        // activity capability this build has never heard of still reaches a newer
+        // shell intact.
+        live_activities.extend(
+            c.live_activities
+                .iter()
+                .filter_map(|a| serde_json::to_value(a).ok())
                 .map(tag),
         );
         turn_hooks.extend(
@@ -13570,6 +13902,11 @@ async fn plugin_contributions(
         "sidebar_modes": sidebar_modes,
         "themes": themes,
         "dock_panels": dock_panels,
+        // Contributed live activities (the "Dynamic Island" cards) — enabled-gated
+        // like the rest of the client-rendered families, tagged with their owning
+        // plugin id so the dock can group and the contributed adapter can poll their
+        // `source` through the host's authenticated Core seam.
+        "live_activities": live_activities,
         // Contributed output styles (design §4). The DECLARATION view — which
         // enabled plugin ships which style — next to `themes`, its closest sibling.
         // Which style is in FORCE is a different question with a different answer,
@@ -14174,11 +14511,10 @@ async fn apply_sidecars(
                             // the plugin: a manifest with two `http` sidecars would
                             // otherwise have the second lowering overwrite the first's
                             // rows, with the winner decided by health-poll order.
-                            sidecar_key:
-                                crate::sidecar::manifest_sidecar::namespaced_name(
-                                    &manifest.id,
-                                    &spec.name,
-                                ),
+                            sidecar_key: crate::sidecar::manifest_sidecar::namespaced_name(
+                                &manifest.id,
+                                &spec.name,
+                            ),
                             // The live manifest store, so a re-lowering after an
                             // in-place update reads the NEW mount + declared routes
                             // (this handler is not re-run by the update path — see
@@ -14193,11 +14529,7 @@ async fn apply_sidecars(
                                 .as_deref()
                                 .map(|m| m.trim_end_matches('/').to_owned())
                                 .unwrap_or_default(),
-                            declared_paths: http
-                                .routes
-                                .iter()
-                                .map(|r| r.path.clone())
-                                .collect(),
+                            declared_paths: http.routes.iter().map(|r| r.path.clone()).collect(),
                             client: state.client.clone(),
                         },
                     );
@@ -16609,12 +16941,9 @@ async fn pi_provider_login_events(
     use tokio::sync::broadcast::error::RecvError;
 
     let session = crate::pi_config::oauth_login::get(&session_id);
-    let replay = session
-        .as_ref()
-        .map(|s| s.replay())
-        .unwrap_or_else(|| {
-            vec![json!({ "type": "error", "message": "this login is no longer active" })]
-        });
+    let replay = session.as_ref().map(|s| s.replay()).unwrap_or_else(|| {
+        vec![json!({ "type": "error", "message": "this login is no longer active" })]
+    });
     let live = session.as_ref().map(|s| s.subscribe());
 
     let stream = futures_util::stream::unfold(
@@ -16921,8 +17250,9 @@ async fn import_agent(
 }
 
 /// The active [`CatalogKind::Agent`] source (defaults to the built-in primary).
-async fn active_published_agent_source(state: &ServerState) -> Option<crate::catalog_source::Source>
-{
+async fn active_published_agent_source(
+    state: &ServerState,
+) -> Option<crate::catalog_source::Source> {
     state
         .catalog_sources
         .get_active(
@@ -19379,6 +19709,701 @@ async fn import_agent_thread_handler(
         "already_imported": false,
     }))
     .into_response()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Import agent *setup* from a scanned local folder (ChatGPT/Codex `/import`
+// parity). The scanner + foreign-format parsers live in `crate::import`; the
+// handlers below own the stateful writes so each item lands through the same
+// store seam as the normal install flows. See `docs/agent-setup-import.md`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ScanImportBody {
+    path: String,
+}
+
+/// `POST /api/import/scan { path }` — list what a folder has that Ryu can
+/// import (instructions, skills, MCP servers, plugins, Claude project
+/// memories). Read-only; runs the bounded walk on a blocking thread.
+#[utoipa::path(
+    post,
+    path = "/api/import/scan",
+    tag = "Agents",
+    summary = "Scan a local folder for importable agent setup",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn scan_import_handler(
+    State(state): State<ServerState>,
+    Json(body): Json<ScanImportBody>,
+) -> axum::response::Response {
+    let root = match crate::import::canonicalize_root(&body.path) {
+        Ok(root) => root,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    let result = tokio::task::spawn_blocking(move || crate::import::scan_source(&root)).await;
+    match result {
+        Ok(Ok(scan)) => Json(json!({
+            "root": scan.root,
+            "items": scan.items,
+            "warnings": scan.warnings,
+        }))
+        .into_response(),
+        Ok(Err(e)) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RunImportBody {
+    path: String,
+    items: Vec<crate::import::ImportSelection>,
+}
+
+/// `POST /api/import/run { path, items: [{ kind, id }] }` — import the selected
+/// items found by a prior scan. Each item is re-resolved against the folder on
+/// disk (never trusting client bytes), validated, and written into Ryu's own
+/// store. Returns one outcome per item.
+#[utoipa::path(
+    post,
+    path = "/api/import/run",
+    tag = "Agents",
+    summary = "Import selected agent setup items from a scanned folder",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn run_import_handler(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<RunImportBody>,
+) -> axum::response::Response {
+    let root = match crate::import::canonicalize_root(&body.path) {
+        Ok(root) => root,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    if body.items.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "no items selected".to_string());
+    }
+    let mut results = Vec::with_capacity(body.items.len());
+    for selection in body.items {
+        let outcome = import_setup_item(&state, &caller, &root, &selection).await;
+        results.push(outcome);
+    }
+    Json(json!({
+        "root": root.to_string_lossy(),
+        "results": results,
+    }))
+    .into_response()
+}
+
+/// Dispatch one selected import item to its destination store. Falls back to a
+/// `failed` outcome on any error rather than aborting the batch.
+async fn import_setup_item(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    match selection.kind.as_str() {
+        crate::import::kind::INSTRUCTIONS => import_instructions_item(state, root, selection).await,
+        crate::import::kind::SKILL => import_skill_item(state, root, selection).await,
+        crate::import::kind::MCP_SERVER => import_mcp_item(state, root, selection).await,
+        crate::import::kind::PLUGIN => import_plugin_item(state, root, selection).await,
+        crate::import::kind::MEMORY => import_memory_item(state, caller, root, selection).await,
+        crate::import::kind::AGENT => import_agent_item(state, root, selection).await,
+        crate::import::kind::SLASH_COMMAND => {
+            import_slash_command_item(state, root, selection).await
+        }
+        other => crate::import::ImportOutcome::failed(
+            other,
+            &selection.id,
+            &selection.id,
+            &format!("unknown item kind {other:?}"),
+        ),
+    }
+}
+
+/// Snapshot an `AGENTS.md`/`CLAUDE.md` into the preferences store, keyed by the
+/// folder's content hash, and hand back the containing folder so the desktop
+/// registers it as a workspace project. (Runtime injection of that content into
+/// the agent system prompt is a separate, deliberately-deferred phase.)
+async fn import_instructions_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    let path = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::INSTRUCTIONS,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::INSTRUCTIONS,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let folder = path.parent().unwrap_or(root);
+    let key = format!(
+        "project.instructions.{}",
+        crate::import::content_sha256(&folder.to_string_lossy())
+    );
+    let value = serde_json::json!({
+        "path": path.to_string_lossy(),
+        "content": content,
+        "imported_at": chrono_now_ms(),
+    });
+    let mut outcome = crate::import::ImportOutcome::ok(
+        crate::import::kind::INSTRUCTIONS,
+        &selection.id,
+        "Project instructions",
+    );
+    match state
+        .preferences
+        .set(&key, &serde_json::to_string(&value).unwrap_or_default())
+        .await
+    {
+        Ok(()) => {
+            outcome.folder_path = Some(folder.to_string_lossy().to_string());
+        }
+        Err(e) => {
+            outcome.status = "failed";
+            outcome.detail = Some(format!("could not save instructions: {e}"));
+        }
+    }
+    outcome
+}
+
+/// Copy a found skill directory into the skills registry and activate it — the
+/// exact same path a URL/source skill install uses.
+async fn import_skill_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    let dir = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::SKILL,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    match crate::skills_catalog::from_source::install_from_dir(&dir, None) {
+        Ok(result) => {
+            state.skills.reload();
+            crate::import::ImportOutcome::ok(
+                crate::import::kind::SKILL,
+                &selection.id,
+                &format!("Skill '{}'", result.slug),
+            )
+        }
+        Err(e) => crate::import::ImportOutcome::failed(
+            crate::import::kind::SKILL,
+            &selection.id,
+            &selection.id,
+            &e.to_string(),
+        ),
+    }
+}
+
+/// Lower a foreign MCP entry into `~/.ryu/mcp.json` (enabled — it is the user's
+/// own server), screening remote URLs and refusing names that collide.
+async fn import_mcp_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    let (token, name) = match crate::import::resolve_mcp_id(&selection.id) {
+        Ok(v) => v,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::MCP_SERVER,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let title = format!("MCP server '{name}'");
+    let cfg = match crate::import::read_mcp_entry(root, token, &name) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::MCP_SERVER,
+                &selection.id,
+                &title,
+                &e.to_string(),
+            )
+        }
+    };
+    // Name + shape gates mirror `create_mcp_server` (no `__`, exactly-one of
+    // command/url, SSRF screen on remote urls).
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.contains("__") {
+        return crate::import::ImportOutcome::failed(
+            crate::import::kind::MCP_SERVER,
+            &selection.id,
+            &title,
+            &format!("server name {trimmed:?} is not a valid MCP server name"),
+        );
+    }
+    if cfg.url.is_some() == cfg.command.is_some() {
+        return crate::import::ImportOutcome::failed(
+            crate::import::kind::MCP_SERVER,
+            &selection.id,
+            &title,
+            "MCP server declares neither a command (stdio) nor a url (http), or both",
+        );
+    }
+    if let Some(url) = &cfg.url {
+        if let Err(e) = screen_agent_egress_url(url).await {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::MCP_SERVER,
+                &selection.id,
+                &title,
+                &format!("unsafe url {url:?}: {e}"),
+            );
+        }
+    }
+    match write_imported_mcp_entry(&name, cfg).await {
+        Ok(()) => {
+            state.mcp.reload();
+            crate::import::ImportOutcome::ok(crate::import::kind::MCP_SERVER, &selection.id, &title)
+        }
+        Err((StatusCode::CONFLICT, _)) => crate::import::ImportOutcome::already(
+            crate::import::kind::MCP_SERVER,
+            &selection.id,
+            &title,
+        ),
+        Err((_, msg)) => crate::import::ImportOutcome::failed(
+            crate::import::kind::MCP_SERVER,
+            &selection.id,
+            &title,
+            &msg,
+        ),
+    }
+}
+
+/// Validate + hydrate + persist a plugin manifest found in the scanned folder,
+/// through the same sink as URL/bundle installs (installed **disabled** by
+/// design — grants must be reviewed before enable, mirroring the "finish setup
+/// after importing" card).
+async fn import_plugin_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    let dir = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::PLUGIN,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let manifest_path = match crate::import::find_manifest_path(&dir) {
+        Some(p) => p,
+        None => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::PLUGIN,
+                &selection.id,
+                &selection.id,
+                "no manifest found",
+            )
+        }
+    };
+    let raw = match std::fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::PLUGIN,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    // Parse + hydrate `code_file` refs against the source dir, then run the full
+    // manifest validation gate.
+    let manifest =
+        match crate::plugin_manifest::PluginManifest::parse_and_validate_with_code(&raw, |rel| {
+            std::fs::read_to_string(dir.join(rel)).map_err(|e| e.to_string())
+        }) {
+            Ok(m) => m,
+            Err(e) => {
+                return crate::import::ImportOutcome::failed(
+                    crate::import::kind::PLUGIN,
+                    &selection.id,
+                    &selection.id,
+                    &e,
+                )
+            }
+        };
+    let title = format!("Plugin '{}'", manifest.name);
+    match persist_installed_plugin(state, manifest, None, None).await {
+        Ok(_) => {
+            crate::import::ImportOutcome::ok(crate::import::kind::PLUGIN, &selection.id, &title)
+        }
+        Err((StatusCode::CONFLICT, _)) => crate::import::ImportOutcome::already(
+            crate::import::kind::PLUGIN,
+            &selection.id,
+            &title,
+        ),
+        Err((_, msg)) => crate::import::ImportOutcome::failed(
+            crate::import::kind::PLUGIN,
+            &selection.id,
+            &title,
+            &msg,
+        ),
+    }
+}
+
+/// Record a Claude Code project memory into the Ryu memory store, deduped by a
+/// content-hash tag (the memory crate itself has no content dedup, so the
+/// importer owns idempotency).
+async fn import_memory_item(
+    state: &ServerState,
+    caller: &Option<crate::identity_verify::VerifiedCaller>,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    let path = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::MEMORY,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let Some((content, when_to_use, importance)) = crate::import::parse_claude_memory(&path) else {
+        return crate::import::ImportOutcome::failed(
+            crate::import::kind::MEMORY,
+            &selection.id,
+            &selection.id,
+            "not a readable memory file",
+        );
+    };
+    let tag = format!(
+        "import:memory:claude:{}",
+        &crate::import::content_sha256(&content)[..16]
+    );
+    match state.memory.ids_with_tag(&tag).await {
+        Ok(ids) if !ids.is_empty() => {
+            return crate::import::ImportOutcome::already(
+                crate::import::kind::MEMORY,
+                &selection.id,
+                "Memory",
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                crate::import::kind::MEMORY,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    }
+    let owner = memory_owner_user_id(caller);
+    let mem = memory::NewMemory {
+        content,
+        scope: memory::MemoryScope::User,
+        scope_id: None,
+        category: memory::MemoryCategory::ProjectContext,
+        importance,
+        when_to_use,
+        tags: vec![tag],
+        author_agent_id: None,
+    };
+    match state.memory.record_full(&owner, "default", mem).await {
+        Ok(Some(id)) => {
+            match state.memory.get(&id).await {
+                Ok(Some(entry)) => index_memory_entry(state, &entry).await,
+                _ => {}
+            }
+            crate::import::ImportOutcome::ok(crate::import::kind::MEMORY, &selection.id, "Memory")
+        }
+        Ok(None) => crate::import::ImportOutcome::failed(
+            crate::import::kind::MEMORY,
+            &selection.id,
+            &selection.id,
+            "empty memory content",
+        ),
+        Err(e) => crate::import::ImportOutcome::failed(
+            crate::import::kind::MEMORY,
+            &selection.id,
+            &selection.id,
+            &e.to_string(),
+        ),
+    }
+}
+
+/// Import a Codex subagent (`~/.codex/agents/<name>.md`) as a Ryu agent through
+/// the SAME portable template the export/import endpoints use — there is no
+/// second importer to drift from the first. The subagent's front-matter
+/// `name`/`description`/`model` and its body (the system prompt) map onto
+/// `AgentTemplate`; a same-named agent already present makes the import a no-op.
+async fn import_agent_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    use crate::import::kind;
+
+    let path = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(kind::AGENT, &selection.id, &selection.id, &e.to_string())
+        }
+    };
+    let Some(sub) = crate::import::parse_codex_subagent(&path) else {
+        return crate::import::ImportOutcome::failed(
+            kind::AGENT,
+            &selection.id,
+            &selection.id,
+            "not a readable Codex subagent file",
+        );
+    };
+    let title = format!("Agent '{}'", sub.name);
+    match state.agent_store.list().await {
+        Ok(records) if records.iter().any(|r| r.name == sub.name) => {
+            return crate::import::ImportOutcome::already(kind::AGENT, &selection.id, &title)
+        }
+        Ok(_) => {}
+        Err(_) => {}
+    }
+    let template = crate::agents::AgentTemplate {
+        kind: "agent".to_owned(),
+        name: sub.name,
+        version: "1.0.0".to_owned(),
+        agent_config: crate::agents::AgentTemplateConfig {
+            description: sub.description,
+            system_prompt: Some(sub.system_prompt),
+            tools: sub.tools,
+            composio_actions: Vec::new(),
+            skills: Vec::new(),
+            identity_profile_ids: Vec::new(),
+            engine: None,
+            model: sub.model,
+            chat_model: None,
+            stt: None,
+            tts: None,
+            image_model: None,
+            video_model: None,
+            memory: None,
+            persona: None,
+            policy_ref: None,
+        },
+    };
+    match state.agent_store.create(template.into_create_agent()).await {
+        Ok(_) => crate::import::ImportOutcome::ok(kind::AGENT, &selection.id, &title),
+        Err(e) => crate::import::ImportOutcome::failed(kind::AGENT, &selection.id, &title, &e.to_string()),
+    }
+}
+
+/// The preferences key holding imported user slash commands: a JSON array of
+/// `{ command, description?, body }`. Served into the composer's `/` menu and
+/// expanded client-side (the body fills the input when the command is picked).
+const USER_SLASH_COMMANDS_PREF: &str = "user.slash-commands";
+
+/// Read the imported user slash commands from the preferences store.
+async fn read_user_slash_commands(
+    prefs: &PreferencesStore,
+) -> Vec<serde_json::Value> {
+    match prefs.get(USER_SLASH_COMMANDS_PREF).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Import a Codex slash-command prompt (`~/.codex/prompts/<name>.md`) into the
+/// preferences-backed user command list, replacing any same-`/name` entry.
+/// The command shows up in the composer's `/` menu (served alongside plugin
+/// contributions) and expands to its prompt template when picked.
+async fn import_slash_command_item(
+    state: &ServerState,
+    root: &std::path::Path,
+    selection: &crate::import::ImportSelection,
+) -> crate::import::ImportOutcome {
+    use crate::import::kind;
+
+    let path = match crate::import::resolve_item_path(root, &selection.id) {
+        Ok(p) => p,
+        Err(e) => {
+            return crate::import::ImportOutcome::failed(
+                kind::SLASH_COMMAND,
+                &selection.id,
+                &selection.id,
+                &e.to_string(),
+            )
+        }
+    };
+    let Some(prompt) = crate::import::parse_codex_prompt(&path) else {
+        return crate::import::ImportOutcome::failed(
+            kind::SLASH_COMMAND,
+            &selection.id,
+            &selection.id,
+            "not a readable Codex prompt file",
+        );
+    };
+    let title = format!("Slash command '/{}'", prompt.name);
+    let command = format!("/{}", prompt.name);
+    let mut entry = serde_json::json!({ "id": format!("user.{}", prompt.name), "command": command, "body": prompt.body });
+    if let Some(desc) = prompt.description {
+        entry["description"] = serde_json::json!(desc);
+    }
+
+    let mut list: Vec<serde_json::Value> = match state
+        .preferences
+        .get(USER_SLASH_COMMANDS_PREF)
+        .await
+    {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let existed = list
+        .iter()
+        .any(|e| e.get("command").and_then(|c| c.as_str()) == Some(command.as_str()));
+    list.retain(|e| e.get("command").and_then(|c| c.as_str()) != Some(command.as_str()));
+    list.push(entry);
+    let value = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_owned());
+    match state.preferences.set(USER_SLASH_COMMANDS_PREF, &value).await {
+        Ok(()) => {
+            if existed {
+                crate::import::ImportOutcome::already(kind::SLASH_COMMAND, &selection.id, &title)
+            } else {
+                crate::import::ImportOutcome::ok(kind::SLASH_COMMAND, &selection.id, &title)
+            }
+        }
+        Err(e) => crate::import::ImportOutcome::failed(
+            kind::SLASH_COMMAND,
+            &selection.id,
+            &title,
+            &e.to_string(),
+        ),
+    }
+}
+
+/// Millis epoch (local clock) for import bookkeeping, matching the crate's
+/// `now_millis()` conventions.
+fn chrono_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Write a single **enabled** MCP server entry into `~/.ryu/mcp.json` —
+/// read-modify-write with an atomic tmp + rename, preserving unknown top-level
+/// keys. Imported servers are the user's own config, so they land enabled
+/// (unlike catalog installs, which force disabled). Conflicts refuse rather
+/// than clobber.
+async fn write_imported_mcp_entry(
+    name: &str,
+    mut cfg: crate::sidecar::mcp::McpServerConfig,
+) -> Result<(), (StatusCode, String)> {
+    use crate::sidecar::mcp::McpServerConfig;
+
+    let cfg_path = crate::sidecar::mcp::McpRegistry::config_path();
+    cfg.enabled = true;
+    // `name` is a borrowed `&str`; clone so the blocking closure can own it.
+    let name = name.to_string();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
+        if let Some(parent) = cfg_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot create config dir: {e}"),
+                )
+            })?;
+        }
+        let mut file_map: std::collections::BTreeMap<String, McpServerConfig> = if cfg_path.exists()
+        {
+            let raw = std::fs::read_to_string(&cfg_path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot read mcp.json: {e}"),
+                )
+            })?;
+            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("mcp.json is malformed (fix it before importing): {e}"),
+                )
+            })?;
+            val.get("mcpServers")
+                .and_then(|v| {
+                    serde_json::from_value::<std::collections::BTreeMap<String, McpServerConfig>>(
+                        v.clone(),
+                    )
+                    .ok()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        if file_map.contains_key(&name) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("MCP server '{name}' is already in mcp.json"),
+            ));
+        }
+        file_map.insert(name.to_string(), cfg);
+        let out = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": file_map }))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to serialize mcp.json: {e}"),
+                )
+            })?;
+        let tmp = cfg_path.with_extension("json.tmp");
+        write_secret_file(&tmp, out.as_bytes()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to write mcp.json: {e}"),
+            )
+        })?;
+        std::fs::rename(&tmp, &cfg_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to rename mcp.json.tmp: {e}"),
+            )
+        })?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write task panicked: {e}"),
+        )),
+    }
 }
 
 /// Real tools available for an agent. For ACP agents this is the set of tools
@@ -22138,10 +23163,8 @@ async fn mesh_peers(State(state): State<ServerState>) -> Json<serde_json::Value>
     // that looks enrollable and always 401s. `shared_fleet_token` returns `None` for
     // a minted token, which surfaces the existing, accurate "provision the same
     // RYU_TOKEN on both nodes" affordance instead.
-    let resp = ryu_mesh::build_peers_response(
-        &status,
-        crate::node_token::shared_fleet_token().as_deref(),
-    );
+    let resp =
+        ryu_mesh::build_peers_response(&status, crate::node_token::shared_fleet_token().as_deref());
     Json(serde_json::to_value(resp).unwrap_or_default())
 }
 
@@ -22314,7 +23337,9 @@ pub(crate) fn spawn_mesh_client_install(
 ) -> bool {
     use std::sync::atomic::Ordering;
     if MESH_INSTALL_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        tracing::info!("mesh: a Tailscale client install is already running — not starting another");
+        tracing::info!(
+            "mesh: a Tailscale client install is already running — not starting another"
+        );
         return false;
     }
     tokio::spawn(async move {
@@ -22337,7 +23362,9 @@ pub(crate) fn spawn_mesh_client_install(
             }
             Err(e) => {
                 tracing::error!("mesh: automatic Tailscale client install failed: {e:#}");
-                install_status.set_failed("tailscale", format!("{e:#}")).await;
+                install_status
+                    .set_failed("tailscale", format!("{e:#}"))
+                    .await;
             }
         }
     });
@@ -26121,6 +27148,37 @@ struct AddCatalogSourceBody {
     auth: Option<crate::catalog_source::SourceAuth>,
 }
 
+/// SSRF guard for a user-supplied custom MARKETPLACE source `base_url`
+/// (Skill/Plugin kinds). A marketplace may be:
+/// - a **local path** (user-local, read straight from disk — no outbound fetch,
+///   so no SSRF surface), validated to exist,
+/// - a **`git@` / `ssh://` clone URL** (the host is screened like any git clone),
+/// - an **`https://`** repo or manifest URL (the full [`validate_remote_base_url`]
+///   guard). `http://` is rejected like the https-only rule elsewhere.
+/// Other kinds (model, mcp, …) keep the https-only [`validate_remote_base_url`].
+async fn validate_marketplace_base_url(raw: &str) -> Result<(), String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Ok(());
+    }
+    if crate::catalog_source::sources::is_local_marketplace_ref(url) {
+        let path = crate::catalog_source::sources::expand_local_path(url);
+        if !path.exists() {
+            return Err(format!(
+                "local marketplace path does not exist: {}",
+                path.display()
+            ));
+        }
+        return Ok(());
+    }
+    if url.starts_with("git@") || url.starts_with("ssh://") {
+        let (host, port) =
+            crate::skills_catalog::from_source::clone_host_port(url).map_err(|e| e.to_string())?;
+        return resolve_guarded_host(&host, port).await.map(|_| ());
+    }
+    validate_remote_base_url(url).await
+}
+
 /// SSRF guard for a user-supplied custom catalog-source `base_url`. A custom
 /// model source's base URL is interpolated into outbound fetch URLs and driven
 /// by the shared client, so an unvalidated value is an SSRF / cloud-metadata
@@ -26863,10 +27921,19 @@ async fn catalog_sources_add(
     }
     // A custom source's base_url becomes an outbound fetch target — validate it
     // against the SSRF guard before persisting (authenticated, but still a
-    // metadata/internal-host read primitive otherwise).
+    // metadata/internal-host read primitive otherwise). Marketplace kinds
+    // (Skill/Plugin) additionally accept local paths and git@/ssh clone URLs
+    // (see `validate_marketplace_base_url`); every other kind stays https-only.
     if let Some(ref base) = body.base_url {
         if !base.trim().is_empty() {
-            if let Err(e) = validate_remote_base_url(base).await {
+            let result = match body.kind {
+                crate::catalog_source::CatalogKind::Skill
+                | crate::catalog_source::CatalogKind::Plugin => {
+                    validate_marketplace_base_url(base).await
+                }
+                _ => validate_remote_base_url(base).await,
+            };
+            if let Err(e) = result {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "ok": false, "error": e })),
@@ -30257,6 +31324,81 @@ async fn gateway_audit(
     }
 }
 
+// ── Gateway live-traffic proxy (SSE) ────────────────────────────────────────
+//
+// The gateway exposes `GET /v1/traffic` as an admin-gated Server-Sent Events
+// stream (master key or the loopback posture), feeding the desktop's live
+// traffic dashboard. The desktop never holds the gateway master key, so Core
+// proxies it with its own gateway token and streams the bytes through unchanged.
+//
+// The response is a LONG-LIVED SSE stream: on gateway down / error it returns a
+// short, fail-soft JSON body (`{ "reachable": false, "error": … }`) so the
+// client can distinguish "gateway down (Core up)" from "Core down", matching
+// the audit proxy's contract; a healthy gateway streams `text/event-stream`
+// indefinitely. Core's own response is not cached and carries no body
+// transformation — it is a byte relay.
+
+#[utoipa::path(
+    get,
+    path = "/api/gateway/traffic",
+    tag = "Gateway",
+    summary = "Stream live gateway traffic (proxied SSE)",
+    responses((status = 200, description = "Server-Sent Events stream of redacted request events"))
+)]
+async fn gateway_traffic(State(state): State<ServerState>) -> axum::response::Response {
+    use crate::sidecar::gateway::{gateway_admin_key, gateway_url};
+
+    let base = gateway_url();
+    let base = base.trim_end_matches('/');
+    let token = gateway_admin_key();
+    let url = format!("{base}/v1/traffic");
+
+    let mut req = state.client.get(&url);
+    // No overall timeout: the SSE stream stays open indefinitely. reqwest's
+    // connect timeout still applies (default ~10s), so a down gateway fails fast.
+    if let Some(t) = token.as_deref() {
+        req = req.bearer_auth(t);
+    }
+
+    match req.send().await {
+        Err(e) => (
+            StatusCode::OK,
+            Json(json!({ "reachable": false, "error": e.to_string() })),
+        )
+            .into_response(),
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status_u16 = resp.status().as_u16();
+                let body = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or_else(|_| json!({}));
+                return (
+                    StatusCode::OK,
+                    Json(json!({ "reachable": false, "status": status_u16, "error": body })),
+                )
+                    .into_response();
+            }
+            // Stream the gateway's SSE bytes through unchanged.
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/event-stream"),
+            );
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            );
+            (
+                StatusCode::OK,
+                headers,
+                axum::body::Body::from_stream(resp.bytes_stream()),
+            )
+                .into_response()
+        }
+    }
+}
+
 // ── Gateway budget-spend proxy (M2 control-layer UX) ────────────────────────
 //
 // The gateway tracks live per-user / per-agent / per-session token spend in
@@ -30411,6 +31553,21 @@ async fn list_workflows(
         );
     }
     let workflows = crate::workflow::store::list_workflows();
+    // Attach the chat-triggerable flag so the desktop composer can filter to
+    // the workflows that actually consume a typed message, from the same
+    // definition of "has a chat input" Core's `workflow_id` turn route enforces.
+    let workflows: Vec<serde_json::Value> = workflows
+        .into_iter()
+        .map(|wf| {
+            serde_json::to_value(&wf)
+                .map(|mut v| {
+                    v["chat_input"] =
+                        serde_json::Value::Bool(crate::workflow::accepts_chat_input(&wf));
+                    v
+                })
+                .unwrap_or(serde_json::Value::Null)
+        })
+        .collect();
     Json(json!({ "workflows": workflows })).into_response()
 }
 
@@ -31682,7 +32839,12 @@ async fn install_dependencies(State(state): State<ServerState>) -> Json<serde_js
     // half-written toolchain install is worse than letting it finish).
     let steps: [(&str, &str, fn() -> bool, fn() -> Result<(), String>); 4] = [
         ("git", "Git", || command_exists("git"), install_git),
-        ("rust", "Rust toolchain", || command_exists("rustc"), install_rust),
+        (
+            "rust",
+            "Rust toolchain",
+            || command_exists("rustc"),
+            install_rust,
+        ),
         (
             "npm",
             "Node runtime",
@@ -31790,10 +32952,13 @@ mod remote_auth_tests {
     fn exposed_core_requires_a_real_token() {
         assert!(enforce_remote_auth(None, None, false, true).is_err());
         assert!(enforce_remote_auth(Some("   ".to_string()), None, false, true).is_err());
-        assert!(
-            enforce_remote_auth(Some("CHANGE_ME".to_string()), Some(TokenSource::Env), false, true)
-                .is_err()
-        );
+        assert!(enforce_remote_auth(
+            Some("CHANGE_ME".to_string()),
+            Some(TokenSource::Env),
+            false,
+            true
+        )
+        .is_err());
         assert!(enforce_remote_auth(
             Some("replace_me".to_string()),
             Some(TokenSource::Env),
@@ -31820,13 +32985,9 @@ mod remote_auth_tests {
     #[test]
     fn non_loopback_bind_accepts_a_self_minted_token() {
         for source in [TokenSource::File, TokenSource::Minted] {
-            let token = enforce_remote_auth(
-                Some("ryu_deadbeef".to_string()),
-                Some(source),
-                false,
-                true,
-            )
-            .expect("a minted token is a real secret; a plain remote bind may use it");
+            let token =
+                enforce_remote_auth(Some("ryu_deadbeef".to_string()), Some(source), false, true)
+                    .expect("a minted token is a real secret; a plain remote bind may use it");
             assert_eq!(token.as_deref(), Some("ryu_deadbeef"));
         }
     }
@@ -31843,13 +33004,9 @@ mod remote_auth_tests {
     fn mesh_accepts_any_strong_non_placeholder_token() {
         // A strong token — minted, file-persisted, or env-provisioned — is accepted.
         for source in [TokenSource::File, TokenSource::Minted, TokenSource::Env] {
-            let token = enforce_remote_auth(
-                Some("ryu_deadbeef".to_string()),
-                Some(source),
-                true,
-                false,
-            )
-            .expect("mesh accepts a strong non-placeholder token whatever its provenance");
+            let token =
+                enforce_remote_auth(Some("ryu_deadbeef".to_string()), Some(source), true, false)
+                    .expect("mesh accepts a strong non-placeholder token whatever its provenance");
             assert_eq!(token.as_deref(), Some("ryu_deadbeef"));
         }
     }
@@ -32506,6 +33663,80 @@ mod plugin_catalog_tests {
         assert!(e.get("compatibility").is_none());
     }
 
+    /// A theme plugin's card carries its own palette so the Store can paint the
+    /// same swatch the Appearance tab's preset picker shows, instead of a generic
+    /// dither avatar. `contributes.themes[0].preview` is projected verbatim (all
+    /// four swatch colours + the mode); a plugin that contributes no theme gets no
+    /// `theme_preview` key at all, so non-theme cards stay byte-identical.
+    #[test]
+    fn manifest_theme_preview_reaches_the_card() {
+        let m: PluginManifest = serde_json::from_value(json!({
+            "id": "@acme/midnight-theme",
+            "name": "Midnight Theme",
+            "version": "1.0.0",
+            "runnables": [],
+            "category": "Themes",
+            "contributes": {
+                "themes": [{
+                    "id": "@acme/midnight-theme:midnight",
+                    "label": "Midnight",
+                    "mode": "dark",
+                    "preview": {
+                        "bg": "#0b0e14",
+                        "surface": "#141926",
+                        "primary": "#7c9cff",
+                        "text": "#e6e9f0",
+                    },
+                    "tokens": { "--background": "#0b0e14" },
+                }],
+            },
+        }))
+        .expect("fixture manifest parses");
+
+        let e = plugin_manifest_to_entry(&m);
+        assert_eq!(e["theme_preview"]["bg"], "#0b0e14");
+        assert_eq!(e["theme_preview"]["surface"], "#141926");
+        assert_eq!(e["theme_preview"]["primary"], "#7c9cff");
+        assert_eq!(e["theme_preview"]["text"], "#e6e9f0");
+        assert_eq!(e["theme_preview"]["mode"], "dark");
+
+        // Only the FIRST theme preview travels — the card paints the listing's
+        // own swatch, and the picker reads every theme from the manifest itself.
+        let multi: PluginManifest = serde_json::from_value(json!({
+            "id": "@acme/duo-theme",
+            "name": "Duo Theme",
+            "version": "1.0.0",
+            "runnables": [],
+            "contributes": {
+                "themes": [
+                    { "id": "a", "label": "A", "mode": "light",
+                      "preview": { "bg": "#fff", "surface": "#eee", "primary": "#0af", "text": "#111" },
+                      "tokens": {} },
+                    { "id": "b", "label": "B", "mode": "dark",
+                      "preview": { "bg": "#000", "surface": "#111", "primary": "#f00", "text": "#eee" },
+                      "tokens": {} },
+                ],
+            },
+        }))
+        .expect("fixture manifest parses");
+        assert_eq!(
+            plugin_manifest_to_entry(&multi)["theme_preview"]["bg"],
+            "#fff"
+        );
+
+        // And a non-theme manifest emits no key at all.
+        let bare: PluginManifest = serde_json::from_value(json!({
+            "id": "acme/tool",
+            "name": "Tool",
+            "version": "1.0.0",
+            "runnables": [],
+        }))
+        .expect("fixture manifest parses");
+        assert!(plugin_manifest_to_entry(&bare)
+            .get("theme_preview")
+            .is_none());
+    }
+
     /// A manifest's `banner` reaches the card VERBATIM, whatever keys it carries.
     ///
     /// The banner is how a listing declares its own hero background instead of
@@ -32761,6 +33992,36 @@ mod plugin_catalog_tests {
         assert!(plugin_marketplace_item_to_entry(&json!({ "name": "x" }), "s").is_none());
     }
 
+    /// A hosted theme card's `theme_preview` (projected by the marketplace server
+    /// from the stored manifest) rides through the projector onto the store card,
+    /// so a theme's icon square is its palette rather than a dither avatar. Only
+    /// emitted when the source card actually carries the object.
+    #[test]
+    fn hosted_theme_preview_rides_through_the_projector() {
+        let preview = json!({
+            "bg": "#0b0e14",
+            "surface": "#141926",
+            "primary": "#7c9cff",
+            "text": "#e6e9f0",
+            "mode": "dark",
+        });
+        let item = json!({
+            "id": "@acme/midnight-theme",
+            "name": "Midnight Theme",
+            "category": "Themes",
+            "theme_preview": preview,
+        });
+        let e = plugin_marketplace_item_to_entry(&item, "ryu-marketplace").unwrap();
+        assert_eq!(e["theme_preview"], preview);
+        assert_eq!(e["category"], "Themes");
+
+        // A card without the palette emits no key — an ordinary plugin's card is
+        // byte-identical, and the client keeps its last-resort glyph.
+        let plain = json!({ "id": "@acme/tool", "name": "Tool" });
+        let e = plugin_marketplace_item_to_entry(&plain, "ryu-marketplace").unwrap();
+        assert!(e.get("theme_preview").is_none());
+    }
+
     /// The community trust contract, end to end through the projector. `origin`
     /// must survive as **snake_case** — the store's notice keys on
     /// `entry.origin === "community"`, and a dropped/renamed field would render an
@@ -32795,6 +34056,34 @@ mod plugin_catalog_tests {
         assert_eq!(e["descriptor_only"], true);
         assert_eq!(e["type"], "app");
         assert_eq!(e["built_in"], false);
+    }
+
+    /// A community MARKETPLACE entry's grouping stamp must survive the projector,
+    /// snake_case end to end — the store's "Community Marketplaces" section files
+    /// each row under its marketplace's sub-heading by these two keys.
+    #[test]
+    fn a_marketplace_entry_card_keeps_its_grouping_stamp() {
+        let item = json!({
+            "id": "ghmp:acme/bazaar:thing-tool",
+            "name": "Thing Tool",
+            "description": "Does the thing.",
+            "type": "plugin",
+            "origin": "community",
+            "reviewed": false,
+            "provenance": "github-topic",
+            "descriptor_only": true,
+            "repo_url": "https://github.com/acme/thing-tool",
+            "catalog_source_id": "acme/bazaar",
+            "catalog_source_name": "The Bazaar",
+        });
+        let e = plugin_marketplace_item_to_entry(&item, "github-topic").unwrap();
+        assert_eq!(e["catalog_source_id"], "acme/bazaar");
+        assert_eq!(e["catalog_source_name"], "The Bazaar");
+        // And the rest of the community trust contract travels with it.
+        assert_eq!(e["origin"], "community");
+        assert_eq!(e["reviewed"], false);
+        assert_eq!(e["descriptor_only"], true);
+        assert_eq!(e["repo_url"], "https://github.com/acme/thing-tool");
     }
 
     /// `descriptor_only` is now card-declared, with the legacy integrations.sh id
@@ -34362,13 +35651,17 @@ mod pure_helper_tests {
         let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
 
         assert_eq!(
-            npx_package_of_command("npx", &args(&["-y", "@scope/server", "--port", "1"])).as_deref(),
+            npx_package_of_command("npx", &args(&["-y", "@scope/server", "--port", "1"]))
+                .as_deref(),
             Some("@scope/server")
         );
         // A remote plan is bridged through `mcp-remote`, which is the package to warm.
         assert_eq!(
-            npx_package_of_command("npx", &args(&["-y", "mcp-remote", "https://example.com/mcp"]))
-                .as_deref(),
+            npx_package_of_command(
+                "npx",
+                &args(&["-y", "mcp-remote", "https://example.com/mcp"])
+            )
+            .as_deref(),
             Some("mcp-remote")
         );
         // A pinned version is KEPT (unlike `npx_package_of`, which normalizes an id).
@@ -34378,7 +35671,10 @@ mod pure_helper_tests {
         );
         // Not an npm-spawned server ⇒ nothing to prefetch.
         assert_eq!(npx_package_of_command("uvx", &args(&["some-server"])), None);
-        assert_eq!(npx_package_of_command("docker", &args(&["run", "img"])), None);
+        assert_eq!(
+            npx_package_of_command("docker", &args(&["run", "img"])),
+            None
+        );
         // npx with only flags ⇒ None.
         assert_eq!(npx_package_of_command("npx", &args(&["-y"])), None);
     }
@@ -34800,7 +36096,11 @@ mod pure_helper_tests {
         let manifests = vec![store_tab_manifest("@ryu/workflows", "workflows")];
         let none = enabled_set(&[]);
         let out = collect_plugin_store_tabs(&manifests, &none, &none, None);
-        assert_eq!(out.len(), 1, "an absent app still contributes its store tab");
+        assert_eq!(
+            out.len(),
+            1,
+            "an absent app still contributes its store tab"
+        );
         assert_eq!(out[0]["plugin"], "@ryu/workflows");
         assert_eq!(out[0]["app_installed"], false);
         assert_eq!(out[0]["app_enabled"], false);
@@ -34867,7 +36167,8 @@ mod pure_helper_tests {
             "the tab must point at the catalog route Core actually serves"
         );
         assert_eq!(
-            out[0]["spec"]["install"]["http"]["path"], "/api/workflows/catalog/install"
+            out[0]["spec"]["install"]["http"]["path"],
+            "/api/workflows/catalog/install"
         );
     }
 
@@ -34927,7 +36228,11 @@ mod pure_helper_tests {
         let none = enabled_set(&[]);
 
         let disabled = collect_plugin_settings_tabs(&manifests, &installed, &none, None);
-        assert_eq!(disabled.len(), 1, "a disabled plugin still offers its settings");
+        assert_eq!(
+            disabled.len(),
+            1,
+            "a disabled plugin still offers its settings"
+        );
         assert_eq!(disabled[0]["plugin"], "@ryu/exa");
         assert_eq!(
             disabled[0]["app_enabled"], false,
@@ -34965,8 +36270,13 @@ mod pure_helper_tests {
         }))];
         let installed = enabled_set(&["@ryu/exa"]);
         assert_eq!(
-            collect_plugin_settings_tabs(&manifests, &installed, &installed, Some(Surface::Desktop))
-                .len(),
+            collect_plugin_settings_tabs(
+                &manifests,
+                &installed,
+                &installed,
+                Some(Surface::Desktop)
+            )
+            .len(),
             1
         );
         assert_eq!(
@@ -35120,12 +36430,8 @@ async fn pair_poll(Json(body): Json<PairPollBody>) -> (StatusCode, Json<serde_js
             StatusCode::OK,
             Json(json!({ "error": "authorization_pending" })),
         ),
-        PollOutcome::AccessDenied => {
-            (StatusCode::OK, Json(json!({ "error": "access_denied" })))
-        }
-        PollOutcome::ExpiredToken => {
-            (StatusCode::OK, Json(json!({ "error": "expired_token" })))
-        }
+        PollOutcome::AccessDenied => (StatusCode::OK, Json(json!({ "error": "access_denied" }))),
+        PollOutcome::ExpiredToken => (StatusCode::OK, Json(json!({ "error": "expired_token" }))),
     }
 }
 
@@ -35152,9 +36458,7 @@ struct PairDecisionBody {
 }
 
 /// `POST /api/pair/approve` — mint a bearer for a pending request. PROTECTED.
-async fn pair_approve(
-    Json(body): Json<PairDecisionBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+async fn pair_approve(Json(body): Json<PairDecisionBody>) -> (StatusCode, Json<serde_json::Value>) {
     match crate::pairing::approve(&body.user_code) {
         crate::pairing::DecisionOutcome::Approved => {
             (StatusCode::OK, Json(json!({ "approved": true })))
@@ -35350,7 +36654,6 @@ pub(crate) async fn enforce_permission_on(
         crate::acl::Decision::Denied => Err(StatusCode::FORBIDDEN),
     }
 }
-
 
 /// The space a document really belongs to, for authorization.
 ///
@@ -36016,7 +37319,10 @@ mod llamacpp_acceleration_tests {
         // The point of the alias: no second manager, no second port, no second
         // GGUF-serving engine for `pick_engine` to choose between.
         for alias in ["llamacpp-cpu", "llamacpp-cuda", "llamacpp-vulkan"] {
-            assert!(!is_local_engine(alias), "{alias} must not be in LOCAL_ENGINES");
+            assert!(
+                !is_local_engine(alias),
+                "{alias} must not be in LOCAL_ENGINES"
+            );
         }
     }
 }

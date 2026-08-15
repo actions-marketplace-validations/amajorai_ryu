@@ -1832,7 +1832,7 @@ fn ghost_action_call(
         "screenshot" => ("ghost__ghost_screenshot", json!({})),
         unknown => {
             return Err(format!(
-                "unknown ghost action '{unknown}' — install the ghost sidecar (Windows-first) and record a supported step"
+                "unknown ghost action '{unknown}' — install the ghost sidecar and record a supported step"
             ))
         }
     };

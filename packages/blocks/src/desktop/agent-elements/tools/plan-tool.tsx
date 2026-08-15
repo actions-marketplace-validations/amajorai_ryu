@@ -1,12 +1,7 @@
-﻿import { Button } from "@ryu/ui/components/button";
+﻿import { ToolResult } from "@ryu/ui/components/agents/tool-result";
+import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
-import {
-	IconChevronsDown,
-	IconChevronsUp,
-	IconFileDescription,
-} from "@tabler/icons-react";
 import { memo, useState } from "react";
-import { IconSpinner } from "../icons.tsx";
 import { Markdown } from "../markdown.tsx";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool.ts";
 
@@ -48,7 +43,6 @@ export const PlanTool = memo(function PlanTool({
 }: PlanToolProps) {
 	const { isPending } = getToolStatus(part, chatStatus);
 	const plan = part.input?.plan;
-	const [isExpanded, setIsExpanded] = useState(false);
 	const [isApproved, setIsApproved] = useState(false);
 
 	if (!plan) {
@@ -74,108 +68,42 @@ export const PlanTool = memo(function PlanTool({
 	};
 
 	return (
-		<div className="an-tool-plan overflow-hidden rounded-[var(--radius)] bg-muted">
-			<div className="flex h-7 items-center justify-between pr-2.5 pl-3">
-				<div className="flex min-w-0 items-center gap-1">
-					{isPending ? (
-						<IconSpinner className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
-					) : (
-						<IconFileDescription className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-					)}
-					<span className="truncate text-muted-foreground text-xs">
-						{fileName}
-					</span>
-				</div>
-				<Button
-					aria-label={isExpanded ? "Collapse plan" : "Expand plan"}
-					className="size-5 text-muted-foreground"
-					onClick={() => setIsExpanded((prev) => !prev)}
-					size="icon"
-					type="button"
-					variant="ghost"
-				>
-					{isExpanded ? (
-						<IconChevronsUp className="h-3.5 w-3.5" />
-					) : (
-						<IconChevronsDown className="h-3.5 w-3.5" />
-					)}
-				</Button>
-			</div>
-
-			<div className="pt-2">
-				<div className="space-y-1.5">
-					<div className="px-3 text-foreground text-sm">{plan.title}</div>
-
+		<div className="an-tool-plan">
+			<ToolResult
+				collapseOnComplete={false}
+				defaultOpen={!isPending}
+				kind="custom"
+				status={isPending ? "running" : "success"}
+				title={plan.title}
+				tool={fileName}
+			>
+				<div className="space-y-2">
 					{hasSummary ? (
-						<div className="relative">
-							<div
-								className={cn(
-									"px-3",
-									"text-muted-foreground text-sm",
-									!isExpanded && "max-h-[94px] overflow-hidden"
-								)}
-							>
-								<Markdown className="text-sm" content={summary} />
-							</div>
-
-							{!isExpanded && (
-								<div className="absolute inset-x-0 bottom-0 h-16 pr-2 pb-2 pl-3.5">
-									<div className="absolute inset-x-0 bottom-0 h-full w-full bg-linear-to-b from-0% from-transparent to-50% to-background" />
-									<div className="relative flex h-full items-end justify-between">
-										<Button
-											className="-mx-2 h-5 px-1.5 text-muted-foreground text-xs hover:text-foreground"
-											onClick={() => setIsExpanded(true)}
-											size="sm"
-											type="button"
-											variant="ghost"
-										>
-											Read detailed plan
-										</Button>
-										{!isAlreadyApproved && (
-											<Button
-												className="h-5 px-1.5 text-xs"
-												onClick={handleApprove}
-												size="sm"
-												type="button"
-											>
-												{approveText}
-											</Button>
-										)}
-									</div>
-								</div>
-							)}
-						</div>
+						<Markdown className="text-sm" content={summary} />
 					) : (
-						<div className="text-muted-foreground text-xs">
+						<p className="text-muted-foreground text-xs">
 							No plan summary provided.
-						</div>
+						</p>
 					)}
-				</div>
-
-				{(isExpanded || !hasSummary) && (
-					<div className="mt-2 flex items-center justify-between pt-1.5 pr-2 pb-2 pl-3.5">
-						<Button
-							className="-mx-2 h-5 px-1.5 text-muted-foreground text-xs hover:text-foreground"
-							onClick={() => setIsExpanded((prev) => !prev)}
-							size="sm"
-							type="button"
-							variant="ghost"
-						>
-							{isExpanded ? "Hide detailed plan" : "Read detailed plan"}
-						</Button>
-						{!isAlreadyApproved && (
+					{!isAlreadyApproved ? (
+						<div className="flex items-center gap-2 border-t border-border/60 pt-2">
 							<Button
-								className="h-5 px-1.5 text-xs"
+								className={cn("h-7 px-2.5 text-xs")}
+								disabled={isPending}
 								onClick={handleApprove}
 								size="sm"
 								type="button"
 							>
 								{approveText}
 							</Button>
-						)}
-					</div>
-				)}
-			</div>
+						</div>
+					) : (
+						<p className="text-emerald-600 text-xs dark:text-emerald-400">
+							{approveText}
+						</p>
+					)}
+				</div>
+			</ToolResult>
 		</div>
 	);
 }, areToolPropsEqual);

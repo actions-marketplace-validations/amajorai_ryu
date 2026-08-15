@@ -19,7 +19,7 @@
 
 pub mod downloader;
 
-pub use downloader::{default_model_path, StableDiffusionDownloader};
+pub use downloader::StableDiffusionDownloader;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,25 +51,50 @@ pub fn sd_base_url() -> String {
     format!("http://{}", sd_addr())
 }
 
-/// Resolve the diffusion model path in priority order:
+/// How the active diffusion model was chosen — decides which companion files
+/// (text encoders / VAE) `sd-server` needs, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelKind {
+    /// `RYU_SD_MODEL` override — a single explicit file, no companions.
+    EnvOverride,
+    /// The bundled default image model (SDXL) — CLIP-L / CLIP-G / VAE.
+    DefaultImage,
+    /// The user-selected default image model (SDXL) — CLIP-L / CLIP-G / VAE.
+    KnownImage,
+    /// The default video model (Wan2.1) — umt5-xxl / VAE, provisioned lazily.
+    KnownVideo,
+    /// Some other installed diffusion GGUF — single `-m`, no companions.
+    Other,
+}
+
+/// Resolve the diffusion model and its kind in priority order:
 /// 1. `RYU_SD_MODEL` environment variable (testing / manual override).
 /// 2. User-selected active diffusion model from preferences
 ///    (`local-diffusion-model` pref key → stem → `~/.ryu/models/<stem>.gguf`).
 /// 3. The bundled default from the downloader.
-async fn resolved_model_path() -> std::path::PathBuf {
+async fn resolved_model() -> (std::path::PathBuf, ModelKind) {
     if let Ok(p) = std::env::var("RYU_SD_MODEL") {
-        return std::path::PathBuf::from(p);
+        return (std::path::PathBuf::from(p), ModelKind::EnvOverride);
     }
-    if let Some(path) = active_diffusion_model_path().await {
-        return path;
+    if let Some(stem) = active_diffusion_model_stem().await {
+        let path = crate::model_catalog::installed::model_file_path(&stem);
+        if path.exists() {
+            let kind = if stem == downloader::VIDEO_DEFAULT_STEM {
+                ModelKind::KnownVideo
+            } else if stem == downloader::IMAGE_DEFAULT_STEM {
+                ModelKind::KnownImage
+            } else {
+                ModelKind::Other
+            };
+            return (path, kind);
+        }
     }
-    default_model_path()
+    (downloader::default_model_path(), ModelKind::DefaultImage)
 }
 
-/// Read the user's active diffusion model preference and resolve it to an
-/// on-disk path. Returns `None` when no preference is set, the file is absent,
-/// or the preferences store cannot be opened.
-async fn active_diffusion_model_path() -> Option<std::path::PathBuf> {
+/// Read the user's active diffusion model preference (a local GGUF stem). Returns
+/// `None` when no preference is set or the preferences store cannot be opened.
+async fn active_diffusion_model_stem() -> Option<String> {
     let prefs = crate::server::preferences::PreferencesStore::open_default().ok()?;
     let raw = prefs
         .get(crate::model_catalog::installed::ACTIVE_DIFFUSION_MODEL_PREF)
@@ -79,8 +104,25 @@ async fn active_diffusion_model_path() -> Option<std::path::PathBuf> {
     if stem.is_empty() {
         return None;
     }
-    let path = crate::model_catalog::installed::model_file_path(stem);
-    path.exists().then_some(path)
+    Some(stem.to_string())
+}
+
+/// Extra `sd-server` flags to load a multi-file diffusion model. SDXL and Wan
+/// ship as a UNet / diffusion transformer plus separate text encoders and a VAE,
+/// so the spawn must pass them explicitly; a single-file GGUF needs only `-m`.
+fn companion_args(kind: ModelKind) -> Vec<(String, std::path::PathBuf)> {
+    match kind {
+        ModelKind::DefaultImage | ModelKind::KnownImage => vec![
+            ("--clip_l".to_string(), downloader::clip_l_path()),
+            ("--clip_g".to_string(), downloader::clip_g_path()),
+            ("--vae".to_string(), downloader::vae_path()),
+        ],
+        ModelKind::KnownVideo => vec![
+            ("--t5xxl".to_string(), downloader::video_t5xxl_path()),
+            ("--vae".to_string(), downloader::video_vae_path()),
+        ],
+        ModelKind::EnvOverride | ModelKind::Other => Vec::new(),
+    }
 }
 
 /// Lifecycle manager for the stable-diffusion.cpp media sidecar.
@@ -151,6 +193,7 @@ impl Sidecar for StableDiffusionManager {
         let process = self.process.clone();
         let adopted_external = Arc::clone(&self.adopted_external);
         let client = self.client.clone();
+        let downloads = self.downloads.clone();
         Box::pin(async move {
             // Adopt an already-running sd-server rather than spawning a competing
             // process that would fail to bind the port.
@@ -174,7 +217,28 @@ impl Sidecar for StableDiffusionManager {
                 );
             }
 
-            let model = resolved_model_path().await;
+            let (model, kind) = resolved_model().await;
+
+            // The video default is not bundled at onboarding (~5 GB, GPU-preferred);
+            // provision it lazily the first time a video model is selected. Files
+            // that already exist (e.g. the transformer GGUF installed via the model
+            // catalog) are skipped individually by the downloader.
+            if kind == ModelKind::KnownVideo
+                && (!downloader::video_model_path().exists()
+                    || !downloader::video_t5xxl_path().exists()
+                    || !downloader::video_vae_path().exists())
+            {
+                let dc = downloads.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "default video model (Wan2.1) files missing and no download center wired"
+                    )
+                })?;
+                downloader::StableDiffusionDownloader::new()
+                    .ensure_video_default(&dc)
+                    .await
+                    .context("provisioning default Wan2.1 video model")?;
+            }
+
             if !model.exists() {
                 anyhow::bail!(
                     "stable diffusion model not found at {}. Install the media engine from \
@@ -186,7 +250,7 @@ impl Sidecar for StableDiffusionManager {
 
             tracing::info!("sd-server starting ({})", binary_path.display());
 
-            let args: Vec<String> = vec![
+            let mut args: Vec<String> = vec![
                 "-m".into(),
                 model.to_string_lossy().to_string(),
                 "--listen-ip".into(),
@@ -194,6 +258,11 @@ impl Sidecar for StableDiffusionManager {
                 "--listen-port".into(),
                 sd_port().to_string(),
             ];
+            for (flag, path) in companion_args(kind) {
+                args.push(flag);
+                args.push(path.to_string_lossy().to_string());
+            }
+
             let program = binary_path.to_string_lossy().to_string();
             process
                 .start_path_with_args(&program, &args)

@@ -93,7 +93,7 @@ function LicenseRow({ license }: { license: OwnedLicense }) {
 					})}
 				</p>
 			</div>
-			<span className="shrink-0 font-medium text-sm tabular-nums">
+			<span className="shrink-0 font-heading font-medium text-sm tabular-nums">
 				{formatPrice(license.priceMinor, license.currency)}
 			</span>
 		</div>

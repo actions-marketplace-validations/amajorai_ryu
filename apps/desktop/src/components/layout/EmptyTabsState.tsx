@@ -17,6 +17,7 @@ import {
 	Layers,
 	type LucideIcon,
 	MessageSquarePlus,
+	Settings2,
 	Sparkles,
 	Workflow,
 } from "lucide-react";
@@ -32,8 +33,10 @@ import {
 import { useSession } from "@/lib/auth-client.ts";
 import { useComposerSlot } from "@/src/components/assistant/useComposerSlot.tsx";
 import { GettingStartedChecklist } from "@/src/components/chat/GettingStartedChecklist.tsx";
+import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { WorkspaceBar } from "@/src/components/chat/WorkspaceBar.tsx";
+import { LiveActivityDock } from "@/src/components/live/LiveActivityDock.tsx";
 import { useSpacesContext } from "@/src/contexts/SpacesContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -547,6 +550,7 @@ export function EmptyTabsState() {
 	const { spaces } = useSpacesContext();
 	const activeNode = useActiveNode();
 	const [importOpen, setImportOpen] = useState(false);
+	const [setupImportOpen, setSetupImportOpen] = useState(false);
 	const importTarget = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
@@ -583,6 +587,12 @@ export function EmptyTabsState() {
 			description: "From Claude Code, Codex…",
 			icon: Import,
 			onSelect: () => setImportOpen(true),
+		},
+		{
+			label: "Import setup",
+			description: "Instructions, skills, MCP servers…",
+			icon: Settings2,
+			onSelect: () => setSetupImportOpen(true),
 		},
 		{
 			label: "Spaces",
@@ -787,6 +797,11 @@ export function EmptyTabsState() {
 
 					<LaunchpadComposer />
 
+					{/* Live activities — the "Dynamic Island" dock. Compact pills for
+					    whatever is in progress (agent runs, downloads, approvals,
+					    recording, contributed). Self-hides when nothing is live. */}
+					<LiveActivityDock />
+
 					{/* Every launchpad section — including the onboarding checklist — is
 					    reorderable and collapsible; the render order is persisted. */}
 					{/* TEMP: get-started, agents, spaces AND quick-actions sections hidden
@@ -810,6 +825,11 @@ export function EmptyTabsState() {
 				onImported={(conversationId) => openTab("/chat", { conversationId })}
 				onOpenChange={setImportOpen}
 				open={importOpen}
+				target={importTarget}
+			/>
+			<ImportSetupDialog
+				onOpenChange={setSetupImportOpen}
+				open={setupImportOpen}
 				target={importTarget}
 			/>
 		</div>

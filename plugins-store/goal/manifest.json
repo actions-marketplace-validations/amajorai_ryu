@@ -1,7 +1,7 @@
 {
   "id": "@ryu/goal",
   "name": "Goal",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Give the agent a goal with `/goal` and it keeps working until a judge model agrees the goal is actually met, re-prompting itself after every turn instead of stopping and waiting for you. `/goal clear` stops the loop; the judge model is configurable.",
   "tagline": "Keep working until a judge model says it's done",
   "keywords": ["agent", "autonomy", "goals", "loop"],

@@ -1,10 +1,7 @@
-﻿import { cn } from "@ryu/ui/lib/utils";
-import { memo, useEffect, useState } from "react";
+﻿import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
+import { memo, useEffect, useMemo, useState } from "react";
 import { getToolStatus } from "../utils/format-tool.ts";
-import { GenericTool } from "./generic-tool.tsx";
 import { toolRegistry } from "./tool-registry.ts";
-import { ToolRowBase } from "./tool-row-base.tsx";
-import { ToolTimingProvider } from "./tool-timing.tsx";
 
 export interface SubagentToolProps {
 	chatStatus?: string;
@@ -28,6 +25,20 @@ function formatElapsedTime(ms: number): string {
 		return `${minutes}m`;
 	}
 	return `${minutes}m ${remainingSeconds}s`;
+}
+
+/** Map a nested ACP tool part onto a beUI AgentActivity trace item. */
+function toTraceItem(part: any, index: number) {
+	const meta = toolRegistry[part.type];
+	const label = meta?.title(part) ?? part.type?.replace("tool-", "") ?? "Tool";
+	const detail = meta?.subtitle?.(part);
+	return {
+		id: part.toolCallId ?? `${part.type}-${index}`,
+		type: "trace" as const,
+		kind: "message" as const,
+		label,
+		detail,
+	};
 }
 
 export const SubagentTool = memo(function SubagentTool({
@@ -63,8 +74,8 @@ export const SubagentTool = memo(function SubagentTool({
 			const meta = lastTool ? toolRegistry[lastTool.type] : null;
 			if (meta) {
 				const title = meta.title(lastTool);
-				const subtitle = meta.subtitle?.(lastTool);
-				return subtitle ? `${title} ${subtitle}` : title;
+				const sub = meta.subtitle?.(lastTool);
+				return sub ? `${title} ${sub}` : title;
 			}
 		}
 
@@ -79,75 +90,41 @@ export const SubagentTool = memo(function SubagentTool({
 		!isPending && outputDuration ? outputDuration : elapsedMs
 	);
 
+	const items = useMemo(
+		() =>
+			nestedTools.slice(0, MAX_VISIBLE_TOOLS).map((nestedPart, idx) =>
+				toTraceItem(nestedPart, idx)
+			),
+		[nestedTools]
+	);
+
 	if (isInterrupted && !part.output) {
 		return (
-			<ToolRowBase completeLabel="Subagent interrupted" isAnimating={false} />
+			<span className="text-muted-foreground text-sm">
+				Subagent interrupted
+			</span>
 		);
 	}
 
 	return (
 		<div className="an-tool-task">
-			<ToolRowBase
-				completeLabel="Completed Subagent"
-				detail={subtitle}
-				expandable={hasNestedTools}
-				isAnimating={isPending}
-				shimmerLabel="Running Subagent"
-				trailingContent={
-					elapsedTimeDisplay ? (
-						<span className="shrink-0 font-normal text-muted-foreground/60 tabular-nums">
-							{elapsedTimeDisplay}
-						</span>
-					) : undefined
+			<AgentActivity
+				activeLabel={
+					elapsedTimeDisplay
+						? `${subtitle || "Running subagent"} · ${elapsedTimeDisplay}`
+						: subtitle || "Running subagent"
 				}
-			>
-				<div className="relative">
-					{isPending && nestedTools.length > MAX_VISIBLE_TOOLS && (
-						<div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-8 bg-linear-to-b from-background to-transparent" />
-					)}
-					<div
-						className={cn(
-							nestedTools.length > 1 ? "space-y-2" : "space-y-0",
-							isPending &&
-								nestedTools.length > MAX_VISIBLE_TOOLS &&
-								"max-h-[120px] overflow-y-auto"
-						)}
-					>
-						{nestedTools.map((nestedPart, idx) => {
-							const nestedMeta = toolRegistry[nestedPart.type];
-							// Nested rows are rendered here rather than through
-							// `ToolRenderer`, so each one has to RE-provide its own
-							// timing. Inheriting the parent subagent's stamp would label
-							// every step with the whole subagent's duration.
-							if (!nestedMeta) {
-								return (
-									<ToolTimingProvider key={idx} part={nestedPart}>
-										<ToolRowBase
-											completeLabel={
-												nestedPart.type?.replace("tool-", "") ?? "Tool"
-											}
-											isAnimating={false}
-										/>
-									</ToolTimingProvider>
-								);
-							}
-							const { isPending: nestedIsPending, isError: nestedIsError } =
-								getToolStatus(nestedPart, chatStatus);
-							return (
-								<ToolTimingProvider key={idx} part={nestedPart}>
-									<GenericTool
-										icon={nestedMeta.icon}
-										isError={nestedIsError}
-										isPending={nestedIsPending}
-										subtitle={nestedMeta.subtitle?.(nestedPart)}
-										title={nestedMeta.title(nestedPart)}
-									/>
-								</ToolTimingProvider>
-							);
-						})}
-					</div>
-				</div>
-			</ToolRowBase>
+				collapseOnComplete={false}
+				contentType="trace"
+				defaultOpen={false}
+				items={items}
+				status={isPending ? "working" : "complete"}
+				summary={
+					description.length > 60
+						? `${description.slice(0, 57)}...`
+						: description || "Subagent completed"
+				}
+			/>
 		</div>
 	);
 });

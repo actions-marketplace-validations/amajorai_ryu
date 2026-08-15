@@ -21,6 +21,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+# WS client for the ext-proxy WebSocket tunnel: Core upgrades a client socket and
+# bridges it to a manifest sidecar's declared WS endpoint (the interactive desktop
+# stream rides `/api/ext/ws/<plugin>/<route>`). Loopback dials only, so the
+# `connect` feature and no TLS extras are needed — the hop never leaves 127.0.0.1.
+tokio-tungstenite = { version = "0.24", features = ["connect"] }
 # BYOK SMTP sink for self-host alerts + agent-inbox send — extracted to the
 # `ryu-email-send` crate (owns the lettre transport). Core injects the SMTP
 # password resolver at startup; secret custody stays kernel-side in `smtp_auth`.

@@ -39,7 +39,8 @@ const SENSITIVE_MARKERS: [&str; 7] = [
 ///
 /// Includes the Windows essentials (`SYSTEMROOT`, `APPDATA`, `PATHEXT`, ...): an
 /// `npx`/`node` MCP server cannot launch on Windows without them, and none carry
-/// credentials. This project is Windows-first, so omitting them would break MCP.
+/// credentials. The project ships Windows, macOS and Linux desktop builds, so
+/// omitting them would break MCP on Windows.
 pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
     // POSIX essentials.
     "PATH",
@@ -78,6 +79,16 @@ pub const MCP_SAFE_ALLOWLIST: &[&str] = &[
     // one is a loopback overlay URL, the other a data-dir path.
     "RYU_GHOST_OVERLAY_URL",
     "GHOST_DATA_DIR",
+    // `DISPLAY` (X11): a virtual-desktop node runs Core against a headless X display
+    // (`Xvfb`/`Xvnc`), and Ghost must see that display to capture + drive the same
+    // screen the desktop app streams. The variable names the display, not a secret;
+    // the spawned MCP child inherits whatever display the node operator configured.
+    "DISPLAY",
+    // `XAUTHORITY` (X11): the cookie file the display uses for access control. Same
+    // reasoning as DISPLAY — an X server started with a non-default auth file needs
+    // it passed through or the child cannot connect. Not a secret (a cookie is not a
+    // credential in this deployment model; the display is loopback/private).
+    "XAUTHORITY",
     // Research (same move as ghost: from a hardcoded built-in MCP provider to its
     // app manifest's `mcp_servers`, `ryu-research mcp`). In-process, the tools read
     // this var straight out of Core's env; spawned as a child they get nothing but
@@ -239,6 +250,9 @@ mod tests {
             ("RYU_RESEARCH_UPSTREAM", "http://127.0.0.1:9087"),
             ("RYU_GHOST_OVERLAY_URL", "http://127.0.0.1:7986"),
             ("GHOST_DATA_DIR", "/home/u/.ghost"),
+            // A virtual-desktop node: the X display the desktop app streams.
+            ("DISPLAY", ":99"),
+            ("XAUTHORITY", "/home/u/.Xauthority"),
             // A neighbouring RYU_* var that is NOT allowlisted must still drop —
             // the entries above are individual decisions, not a prefix rule.
             ("RYU_GATEWAY_URL", "http://127.0.0.1:7981"),
@@ -247,6 +261,8 @@ mod tests {
         assert!(has(&out, "RYU_RESEARCH_UPSTREAM"));
         assert!(has(&out, "RYU_GHOST_OVERLAY_URL"));
         assert!(has(&out, "GHOST_DATA_DIR"));
+        assert!(has(&out, "DISPLAY"), "the virtual display must reach Ghost");
+        assert!(has(&out, "XAUTHORITY"));
         assert!(!has(&out, "RYU_GATEWAY_URL"));
     }
 

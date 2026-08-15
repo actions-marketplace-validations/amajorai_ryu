@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { GITHUB_SVGL, SvglIcon } from "./svgl-icon.tsx";
 import {
 	GITHUB_RELEASES_REPO,
 	GITHUB_REPO,
@@ -42,27 +43,25 @@ export default function FooterBuildInfo() {
 		: `${GITHUB_REPO}/releases`;
 
 	return (
-		<p className="text-muted-foreground text-xs">
+		<p className="flex items-center justify-center gap-2 text-muted-foreground text-xs">
 			<a
-				className={linkClass}
+				aria-label="Ryu on GitHub"
+				className="text-muted-foreground transition-colors hover:text-foreground"
 				href={GITHUB_REPO}
 				rel="noopener noreferrer"
 				target="_blank"
 			>
-				GitHub
+				<SvglIcon spec={GITHUB_SVGL} size={16} />
 			</a>
 			{latestRelease ? (
-				<>
-					{" · "}
-					<a
-						className={linkClass}
-						href={releaseUrl}
-						rel="noopener noreferrer"
-						target="_blank"
-					>
-						Release {latestRelease}
-					</a>
-				</>
+				<a
+					className={linkClass}
+					href={releaseUrl}
+					rel="noopener noreferrer"
+					target="_blank"
+				>
+					Release {latestRelease}
+				</a>
 			) : null}
 			{siteVersion ? (
 				<>

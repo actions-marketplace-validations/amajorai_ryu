@@ -1,9 +1,15 @@
 ﻿import {
 	Alert02Icon,
 	ArrowDataTransferHorizontalIcon,
+	ArrowDown02Icon,
 	InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import {
+	type CitationItem,
+	CitationList,
+} from "@ryu/ui/components/agents/citations";
+import { ReasoningText } from "@ryu/ui/components/agents/loading-states";
 import { Bubble, BubbleContent } from "@ryu/ui/components/bubble";
 import { Button } from "@ryu/ui/components/button";
 import { Marker, MarkerContent, MarkerIcon } from "@ryu/ui/components/marker";
@@ -14,15 +20,7 @@ import {
 	MessageFooter,
 	MessageHeader,
 } from "@ryu/ui/components/message";
-import {
-	MessageScroller,
-	MessageScrollerButton,
-	MessageScrollerContent,
-	MessageScrollerItem,
-	MessageScrollerProvider,
-	MessageScrollerViewport,
-	useMessageScroller,
-} from "@ryu/ui/components/message-scroller";
+import { MessageScroller as BeuiMessageScroller } from "@ryu/ui/components/agents/message-scroller";
 import {
 	ImageGeneration,
 	type ImageGenerationStatus,
@@ -83,7 +81,7 @@ import { DateSeparator } from "./date-separator.tsx";
 import { ErrorMessage } from "./error-message.tsx";
 import { FloatingDateHeader } from "./floating-date-header.tsx";
 import { usePinnedUserMessage } from "./hooks/use-pinned-user-message.ts";
-import { CitationSources } from "./inline-citation.tsx";
+import { useTranscriptAnchor } from "./hooks/use-transcript-anchor.ts";
 import { Markdown } from "./markdown.tsx";
 import { isServerAssignedMessageId } from "./message-reaction-id.ts";
 import type { MessageReactionBucket } from "./message-reactions.tsx";
@@ -91,13 +89,11 @@ import { AcpUsageStats, MessageStats } from "./message-stats.tsx";
 import { PinnedUserMessageBar } from "./pinned-user-message-bar.tsx";
 import { shouldShowPlanning } from "./planning-visibility.ts";
 import { messageSelectableProps, SelectionQuoteToolbar } from "./quote.tsx";
-import { SpiralLoader } from "./spiral-loader.tsx";
 import {
 	hasVisibleContentAtNoDetail,
 	isHiddenAtNoDetail,
 } from "./tool-detail-visibility.ts";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer.tsx";
-import { ToolRowBase } from "./tools/tool-row-base.tsx";
 import type { CustomToolRendererProps } from "./types.ts";
 import {
 	MESSAGE_TIME_OPTIONS,
@@ -106,6 +102,7 @@ import {
 } from "./user-message.tsx";
 import { extractCitations } from "./utils/citations.ts";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer.ts";
+import { WorkflowRunProgressCard } from "./workflow-run-part.tsx";
 
 export interface MessageListProps {
 	/**
@@ -419,6 +416,15 @@ function getPlanningActivity(messages: UIMessage[]): PlanningActivity {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
+}
+
+/** `https://www.example.com/x` → `example.com`, for a citation's domain line. */
+function hostnameOfCitation(url: string): string {
+	try {
+		return new URL(url).hostname.replace(/^www\./, "");
+	} catch {
+		return url;
+	}
 }
 
 function isTextPart(part: unknown): part is { type: "text"; text: string } {
@@ -1358,6 +1364,12 @@ function getFailoverNote(part: unknown): string | null {
 		: null;
 }
 
+/** True for a `data-ryu-workflow` part — the live checklist Core streams while
+ *  a `workflow_id` chat turn runs. */
+function isWorkflowRunPart(part: unknown): boolean {
+	return isRecord(part) && part.type === "data-ryu-workflow";
+}
+
 /**
  * Was this turn cut off before it finished?
  *
@@ -1413,7 +1425,9 @@ function groupMessagesIntoTurns(messages: UIMessage[]): AssistantTurn[] {
  * the surface gains layout, then stop until the conversation changes so a
  * scrolled-up read is never yanked back down.
  *
- * Rendered inside `MessageScrollerProvider`; renders nothing.
+ * Rendered above the scroller; scrolls the beUI MessageScroller's viewport,
+ * located the same way `usePinnedUserMessage` finds it (by data-slot). Renders
+ * nothing.
  */
 function OpenAtBottom({
 	containerRef,
@@ -1426,7 +1440,6 @@ function OpenAtBottom({
 	hasMessages: boolean;
 	conversationKey: string | null;
 }) {
-	const { scrollToEnd } = useMessageScroller();
 	const settledKeyRef = useRef<string | null>(null);
 
 	useEffect(() => {
@@ -1438,6 +1451,12 @@ function OpenAtBottom({
 		}
 		const container = containerRef.current;
 		if (!container) {
+			return;
+		}
+		const viewport = container.querySelector<HTMLElement>(
+			'[data-slot="message-scroller-viewport"]'
+		);
+		if (!viewport) {
 			return;
 		}
 		let observer: ResizeObserver | null = null;
@@ -1457,10 +1476,13 @@ function OpenAtBottom({
 			if (container.clientHeight === 0) {
 				return;
 			}
-			if (scrollToEnd({ behavior: "auto" })) {
-				settledKeyRef.current = conversationKey;
-				observer?.disconnect();
+			if (typeof viewport.scrollTo === "function") {
+				viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" });
+			} else {
+				viewport.scrollTop = viewport.scrollHeight;
 			}
+			settledKeyRef.current = conversationKey;
+			observer?.disconnect();
 		};
 		jump();
 		if (
@@ -1472,7 +1494,7 @@ function OpenAtBottom({
 		observer = new ResizeObserver(jump);
 		observer.observe(container);
 		return () => observer?.disconnect();
-	}, [containerRef, conversationKey, enabled, hasMessages, scrollToEnd]);
+	}, [containerRef, conversationKey, enabled, hasMessages]);
 
 	return null;
 }
@@ -1515,7 +1537,15 @@ export const MessageList = memo(function MessageList({
 	// Which user message is currently in inline-edit mode (null = none).
 	const [editingId, setEditingId] = useState<string | null>(null);
 	const [isMounted, setIsMounted] = useState(false);
+	// Whether the reader is at the live edge of the transcript — driven by the
+	// beUI scroller's `onFollowChange`. `false` is when the scroll-to-end button
+	// appears.
+	const [following, setFollowing] = useState(true);
 	const scrollerRef = useRef<HTMLDivElement>(null);
+	// The beUI MessageScroller's scrollable viewport. Forwarded via
+	// `viewportRef` so the pinned bar, the floating date header and the TOC can
+	// read scroll position without owning the scroller.
+	const viewportRef = useRef<HTMLElement | null>(null);
 	const {
 		density,
 		hideToolDetail,
@@ -1595,8 +1625,8 @@ export const MessageList = memo(function MessageList({
 	// Who is on the turn, drawn in the row's leading slot. Several agents overlap
 	// slightly (`-space-x-1`) so three marks still read as one group rather than a
 	// row of loose icons; a single agent is unaffected by the negative margin.
-	// `undefined` (not an empty node) when there is nothing to draw, so ToolRowBase
-	// falls back to the spiral loader it has always shown.
+	// `undefined` (not an empty node) when there is nothing to draw, so the
+	// planning row leads with the shimmer label alone.
 	const planningMarks = (
 		assistantPlanningAvatars?.length
 			? assistantPlanningAvatars
@@ -1716,6 +1746,27 @@ export const MessageList = memo(function MessageList({
 		return byId;
 	}, [turns]);
 
+	// Anchor ids in DOM order: every turn that opens with a user message. The
+	// beUI MessageScroller owns scroll-follow but exposes no anchor API, so the
+	// transcript tracks "which turn is at the top" itself — the fact the floating
+	// date header and the chat TOC both render from.
+	const transcriptAnchorIds = useMemo(
+		() =>
+			turns
+				.map((turn) => turn.userMsg?.id)
+				.filter((id): id is string => Boolean(id)),
+		[turns]
+	);
+	const {
+		currentAnchorId,
+		registerAnchor: registerTranscriptAnchor,
+		scrollToMessage,
+	} = useTranscriptAnchor({
+		anchorIds: transcriptAnchorIds,
+		enabled: !isCompact,
+		viewportRef,
+	});
+
 	// --- messaging-style user runs -----------------------------------------
 	// A "run" is consecutive messages from the same speaker: one avatar for the
 	// whole run, tight spacing inside it. Only the USER side needs computing.
@@ -1795,133 +1846,128 @@ export const MessageList = memo(function MessageList({
 	}, [turns, assistantAvatar, assistantName]);
 
 	return (
-		<MessageScrollerProvider
-			autoScroll
-			defaultScrollPosition={initialScrollBehavior === "top" ? "start" : "end"}
-		>
-			<div className="flex min-h-0 flex-1 flex-col" ref={scrollerRef}>
-				{/* A surface that deliberately reads top-down (a static transcript)
-				    opts out via `initialScrollBehavior="top"`; the user opts out via
-				    Appearance → "Open chats at the latest message". */}
-				<OpenAtBottom
-					containerRef={scrollerRef}
-					conversationKey={conversationKey ?? normalizedMessages[0]?.id ?? null}
-					enabled={openAtBottom && initialScrollBehavior !== "top"}
-					hasMessages={normalizedMessages.length > 0}
-				/>
-				<MessageScroller className={cn("an-message-list flex-1", className)}>
-					{isCompact ? null : <ChatToc items={tocItems} />}
-					{/* Mounted HERE — a direct child of the scroller root, beside
-					    ChatToc — and not inside the viewport, because it is absolutely
-					    positioned and must stay out of flow. In flow it would move the
-					    anchors that elect the pinned-message bar, which is precisely the
-					    feedback loop that produced React #185. Compact density (island
-					    mini-chat, companion popover) skips it exactly like ChatToc, so
-					    those surfaces keep their zero-observer scroll path. */}
-					{isCompact ? null : (
-						<FloatingDateHeader
-							groups={dayGroups}
-							startOfToday={startOfToday}
-							turnIndexByAnchorId={turnIndexByAnchorId}
-						/>
-					)}
-					<MessageScrollerViewport>
-						{pinUserMessage && !isCompact && pinnedMessage ? (
-							// `data-slot` is load-bearing: the pin bar sits IN FLOW, so
-							// mounting it pushes every anchor below it down by its own
-							// height. usePinnedUserMessage measures this element to size the
-							// release hysteresis that stops the bar un-electing its own
-							// anchor (see PIN_RELEASE_SLACK).
-							//
-							// `top-0`: the bar owns the TOP lane, and the floating date chip
-							// now paints below it (see `pinBarRef` for how the chip learns
-							// this bar's height). It used to be the other way round —
-							// `top-9`, reserving 36px above for the chip — which put the
-							// chip in the topmost band of the transcript, where it collided
-							// with the tab bar and read as chrome rather than as part of the
-							// conversation.
-							//
-							// It MUST be a sticky top offset and NOT padding — an offset
-							// only moves where the bar paints, whereas padding would change
-							// its offsetHeight, which is the very number PINNED_BAR_SLOT /
-							// PIN_RELEASE_SLACK measure.
-							<div
-								className="sticky top-0 z-20 -mb-1"
-								data-slot="pinned-user-message-bar"
-								ref={pinBarRef}
-							>
-								<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
-									<PinnedUserMessageBar
-										message={pinnedMessage}
-										onScrollTo={scrollToPinned}
-									/>
-								</div>
-							</div>
-						) : null}
-						{/* 744 = the composer's own 720px column PLUS its `px-3` gutter
-						    (input-bar.tsx wraps `mx-auto max-w-[720px]` in `px-3`).
-						    Matching both numbers — not just the 720 — is what puts a
-						    message's content edges on the composer's card edges at every
-						    width. With `max-w-[720px] px-4` the transcript sat 16px inside
-						    the composer on each side, which reads as a gap to the right of
-						    the user avatar. */}
-						{/* `gap-0`, NOT the `gap-2` this used to carry. A uniform gap can
-						    only express one vertical rhythm, and messaging grouping needs
-						    two: ~2px between consecutive messages from the same speaker
-						    and 8px everywhere else. A run spans SIBLING children here (see
-						    `userRunPositions`), so the tightening cannot live on a wrapper
-						    — every direct child brings its own explicit top margin
-						    instead, keyed off `data-group-position`. Negative margins are
-						    deliberately not used: they would fight the scroller's
-						    intrinsic-size estimates. */}
-						<MessageScrollerContent
-							className={cn(
-								"w-full gap-0",
-								isCompact ? "px-0.5 py-1" : "mx-auto max-w-[744px] px-3 py-6"
-							)}
-						>
-							{turns.map((turn, turnIndex) => {
-								const isLastTurn = turnIndex === turns.length - 1;
-								const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
-								// Present only on the turn that OPENS a day run, and never
-								// for the undated head run (subagent transcripts, the
-								// storyboard and the e2e fixtures carry no `createdAt`, so
-								// they get no separators at all).
-								const separatorKey = separatorKeys.get(turnIndex);
-								// Where this turn's USER row sits in its sender run. Also the
-								// spacing key: a row that continues a run sits 2px under its
-								// predecessor, everything else keeps the 8px the old `gap-2`
-								// on Content used to give every child.
-								const groupPosition = userRunPositions[turnIndex] ?? "single";
-								const continuesRun =
-									groupPosition === "middle" || groupPosition === "last";
+		<div className="relative flex min-h-0 flex-1 flex-col" ref={scrollerRef}>
+			{/* A surface that deliberately reads top-down (a static transcript)
+			    opts out via `initialScrollBehavior="top"`; the user opts out via
+			    Appearance → "Open chats at the latest message". */}
+			<OpenAtBottom
+				containerRef={scrollerRef}
+				conversationKey={conversationKey ?? normalizedMessages[0]?.id ?? null}
+				enabled={openAtBottom && initialScrollBehavior !== "top"}
+				hasMessages={normalizedMessages.length > 0}
+			/>
+			{/* beUI MessageScroller: self-contained follow-at-the-live-edge viewport.
+			    `data-slot` props below preserve the transcript DOM contract the
+			    pinned-message bar and the e2e scroll/grouping/date specs read. The
+			    turn rows render as plain `message-scroller-item` children (beUI
+			    has no item primitive), with the same `data-group-position` the
+			    sender-run styling keys off.
+			    `followOutput` is gated by the SAME pref `OpenAtBottom` reads: with
+			    "Open chats at the latest message" off, a transcript that hydrated
+			    hidden must stay where it loaded once revealed — the beUI scroller's
+			    ResizeObserver would otherwise re-follow the reveal resize and yank
+			    it to the bottom (chat-scroll-story.spec.ts asserts this). */}
+			<BeuiMessageScroller
+				busy={isStreaming}
+				className={cn("an-message-list flex-1", className)}
+				contentClassName={cn(
+					"w-full gap-0",
+					isCompact ? "px-0.5 py-1" : "mx-auto max-w-[744px] px-3 py-6"
+				)}
+				contentProps={{ "data-slot": "message-scroller-content" }}
+				followOutput={openAtBottom && initialScrollBehavior !== "top"}
+				label="Conversation"
+				onFollowChange={setFollowing}
+				smooth
+				viewportProps={{ "data-slot": "message-scroller-viewport" }}
+				viewportRef={viewportRef}
+			>
+				{pinUserMessage && !isCompact && pinnedMessage ? (
+					// `data-slot` is load-bearing: the pin bar sits IN FLOW, so
+					// mounting it pushes every anchor below it down by its own
+					// height. usePinnedUserMessage measures this element to size the
+					// release hysteresis that stops the bar un-electing its own
+					// anchor (see PIN_RELEASE_SLACK).
+					//
+					// `top-0`: the bar owns the TOP lane, and the floating date chip
+					// now paints below it (see `pinBarRef` for how the chip learns
+					// this bar's height). It used to be the other way round —
+					// `top-9`, reserving 36px above for the chip — which put the
+					// chip in the topmost band of the transcript, where it collided
+					// with the tab bar and read as chrome rather than as part of the
+					// conversation.
+					//
+					// It MUST be a sticky top offset and NOT padding — an offset
+					// only moves where the bar paints, whereas padding would change
+					// its offsetHeight, which is the very number PINNED_BAR_SLOT /
+					// PIN_RELEASE_SLACK measure.
+					<div
+						className="sticky top-0 z-20 -mb-1"
+						data-slot="pinned-user-message-bar"
+						ref={pinBarRef}
+					>
+						<div className="mx-auto w-full max-w-[744px] px-3 pt-2 pb-1">
+							<PinnedUserMessageBar
+								message={pinnedMessage}
+								onScrollTo={scrollToPinned}
+							/>
+						</div>
+					</div>
+				) : null}
+				{/* 744 = the composer's own 720px column PLUS its `px-3` gutter
+				    (input-bar.tsx wraps `mx-auto max-w-[720px]` in `px-3`).
+				    Matching both numbers — not just the 720 — is what puts a
+				    message's content edges on the composer's card edges at every
+				    width. With `max-w-[720px] px-4` the transcript sat 16px inside
+				    the composer on each side, which reads as a gap to the right of
+				    the user avatar. */}
+				{/* `gap-0`, NOT the `gap-2` this used to carry. A uniform gap can
+				    only express one vertical rhythm, and messaging grouping needs
+				    two: ~2px between consecutive messages from the same speaker
+				    and 8px everywhere else. A run spans SIBLING children here (see
+				    `userRunPositions`), so the tightening cannot live on a wrapper
+				    — every direct child brings its own explicit top margin
+				    instead, keyed off `data-group-position`. Negative margins are
+				    deliberately not used: they would fight the scroller's
+				    intrinsic-size estimates. */}
+				{turns.map((turn, turnIndex) => {
+					const isLastTurn = turnIndex === turns.length - 1;
+					const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
+					// Present only on the turn that OPENS a day run, and never
+					// for the undated head run (subagent transcripts, the
+					// storyboard and the e2e fixtures carry no `createdAt`, so
+					// they get no separators at all).
+					const separatorKey = separatorKeys.get(turnIndex);
+					// Where this turn's USER row sits in its sender run. Also the
+					// spacing key: a row that continues a run sits 2px under its
+					// predecessor, everything else keeps the 8px the old `gap-2`
+					// on Content used to give every child.
+					const groupPosition = userRunPositions[turnIndex] ?? "single";
+					const continuesRun =
+						groupPosition === "middle" || groupPosition === "last";
 
-								return (
-									// A Fragment, NOT a wrapper element: the separator and the
-									// turn must both be DIRECT children of
-									// MessageScrollerContent. Content's MutationObserver watches
-									// `childList` with no `subtree`, so a turn appended inside a
-									// per-group wrapper would fire no mutation at all and
-									// scroll-new-turn-to-top would silently die. See
-									// date-separator.tsx for why the separator is a plain div
-									// with no messageId and no scrollAnchor.
-									<Fragment key={turnKey}>
-										{separatorKey === undefined ? null : (
-											<DateSeparator
-												label={dayLabel(separatorKey, startOfToday)}
-											/>
-										)}
-										<MessageScrollerItem
-											className={cn(
-												"relative space-y-2",
-												continuesRun ? "mt-0.5" : "mt-2"
-											)}
-											data-group-position={groupPosition}
-											messageId={turnKey}
-											scrollAnchor={Boolean(turn.userMsg)}
-										>
-											{turn.userMsg &&
-												(() => {
+					return (
+						// A Fragment, NOT a wrapper element: the separator and the
+						// turn must both be DIRECT children of Content, so the
+						// separator can never be picked as a scroll target. beUI
+						// has no item primitive, so the turn is a plain div that
+						// carries the item data-slot the grouping specs read.
+						<Fragment key={turnKey}>
+							{separatorKey === undefined ? null : (
+								<DateSeparator
+									label={dayLabel(separatorKey, startOfToday)}
+								/>
+							)}
+							<div
+								className={cn(
+									"relative space-y-2",
+									continuesRun ? "mt-0.5" : "mt-2"
+								)}
+							data-group-position={groupPosition}
+							data-slot="message-scroller-item"
+						>
+							{turn.userMsg &&
+								(() => {
 													const text = getTextFromParts(
 														turn.userMsg?.parts ?? [],
 														""
@@ -1950,6 +1996,7 @@ export const MessageList = memo(function MessageList({
 																// to a definite string; `turn.userMsg?.id` was
 																// `string | undefined` and registerAnchor needs one.
 																registerAnchor(userMsgId, el);
+																registerTranscriptAnchor(userMsgId, el);
 															}}
 														>
 															<CustomUserMessage
@@ -2280,66 +2327,104 @@ export const MessageList = memo(function MessageList({
 												})()}
 
 											{isLastTurn && showPlanning && (
-												<ToolRowBase
-													completeLabel="Done"
-													icon={<SpiralLoader size={12} />}
-													isAnimating={true}
-													leading={planningLeading}
-													shimmerLabel={planningLabel}
-													// No elapsed badge. It was tolerable when this row
-													// lived for the sub-second gap before the first
-													// token; now that it stays up for the whole turn it
-													// would put a counter ticking beside the streaming
-													// text, which reads as a timer on the user rather
-													// than a report on the agent.
-													showTiming={false}
-												/>
-											)}
-										</MessageScrollerItem>
-									</Fragment>
-								);
-							})}
-							{historyNotice ? (
-								// A thread-level notice, not a turn-level one, so it is the LAST
-								// direct child of Content rather than part of any message. No
-								// `messageId` and no `scrollAnchor`: `handleContentChange` scans
-								// forward for `data-scroll-anchor="true"`, so this row cannot
-								// become the scroll target and steal the jump from the user's next
-								// question — the same rule the date separators follow.
-								<Marker className="mt-2 shrink-0 py-1" key={historyNotice.id}>
-									<MarkerIcon>
-										<HugeiconsIcon
-											icon={InformationCircleIcon}
-											strokeWidth={2}
-										/>
-									</MarkerIcon>
-									<MarkerContent>
-										<span className="font-medium">{historyNotice.title}</span>
-										{historyNotice.description ? (
-											<span> {historyNotice.description}</span>
-										) : null}
-									</MarkerContent>
-									{historyNotice.actions?.map((action) => (
-										<button
-											className="shrink-0 underline underline-offset-3 hover:text-foreground"
-											key={action.label}
-											onClick={action.onClick}
-											type="button"
-										>
-											{action.label}
-										</button>
-									))}
-								</Marker>
+												<div className="flex items-center gap-2 py-0.5">
+													{planningLeading}
+													<ReasoningText
+														className="text-sm"
+														indicator={null}
+														interval={2600}
+														phrases={[planningLabel]}
+														variant="swap"
+									/>
+								</div>
+							)}
+						</div>
+					</Fragment>
+				);
+				})}
+				{historyNotice ? (
+					// A thread-level notice, not a turn-level one, so it is the LAST
+					// direct child of Content rather than part of any message. No
+					// `messageId` and no scroll anchor, so it can never become the
+					// scroll target and steal the jump from the user's next question —
+					// the same rule the date separators follow.
+					<Marker className="mt-2 shrink-0 py-1" key={historyNotice.id}>
+						<MarkerIcon>
+							<HugeiconsIcon
+								icon={InformationCircleIcon}
+								strokeWidth={2}
+							/>
+						</MarkerIcon>
+						<MarkerContent>
+							<span className="font-medium">{historyNotice.title}</span>
+							{historyNotice.description ? (
+								<span> {historyNotice.description}</span>
 							) : null}
-						</MessageScrollerContent>
-					</MessageScrollerViewport>
-					<MessageScrollerButton direction="end" />
-				</MessageScroller>
-				{onQuote && (
-					<SelectionQuoteToolbar containerRef={scrollerRef} onQuote={onQuote} />
-				)}
-			</div>
-		</MessageScrollerProvider>
+						</MarkerContent>
+						{historyNotice.actions?.map((action) => (
+							<button
+								className="shrink-0 underline underline-offset-3 hover:text-foreground"
+								key={action.label}
+								onClick={action.onClick}
+								type="button"
+							>
+								{action.label}
+							</button>
+						))}
+					</Marker>
+				) : null}
+			</BeuiMessageScroller>
+			{/* The scrolled-up escape hatch: beUI keeps following output only while
+			    the reader stays at the live edge, so once they scroll up there is no
+			    built-in way back down. A compact end button appears in that state
+			    and returns to the newest message. `onFollowChange` drives it. */}
+			{!isCompact && !following ? (
+				<Button
+					aria-label="Scroll to end"
+					className="absolute inset-x-0 bottom-3 z-30 mx-auto flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background/85 text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:text-foreground"
+					onClick={() => {
+						const viewport = viewportRef.current;
+						if (!viewport) {
+							return;
+						}
+						if (typeof viewport.scrollTo === "function") {
+							viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+						} else {
+							viewport.scrollTop = viewport.scrollHeight;
+						}
+					}}
+					size="icon"
+					type="button"
+					variant="ghost"
+				>
+					<HugeiconsIcon icon={ArrowDown02Icon} strokeWidth={2} />
+					<span className="sr-only">Scroll to end</span>
+				</Button>
+			) : null}
+			{/* ChatToc and FloatingDateHeader are OUT OF FLOW BY CONSTRUCTION — both
+			    absolutely position against this relative root, exactly where they
+			    used to sit inside the shadcn scroller's own root. Keeping them out
+			    of flow means mounting them can never move a scroll anchor, which is
+			    the same guarantee the pinned-user-message bar's design depends on. */}
+			{isCompact ? null : (
+				<ChatToc
+					currentAnchorId={currentAnchorId}
+					items={tocItems}
+					onScrollToMessage={scrollToMessage}
+				/>
+			)}
+			{isCompact ? null : (
+				<FloatingDateHeader
+					currentAnchorId={currentAnchorId}
+					groups={dayGroups}
+					startOfToday={startOfToday}
+					turnIndexByAnchorId={turnIndexByAnchorId}
+				/>
+			)}
+			{onQuote && (
+				<SelectionQuoteToolbar containerRef={scrollerRef} onQuote={onQuote} />
+			)}
+		</div>
 	);
 });
 
@@ -2479,6 +2564,17 @@ function AssistantParts({
 						</MarkerIcon>
 						<MarkerContent>{failoverNote}</MarkerContent>
 					</Marker>
+				);
+				i++;
+				continue;
+			}
+
+			// A workflow run part — the live per-node checklist Core streams while
+			// a `workflow_id` chat turn executes. Repeated frames reconcile into
+			// one part, so this renders once per turn, updating in place.
+			if (isWorkflowRunPart(part)) {
+				pushPart(
+					<WorkflowRunProgressCard key={`${msg.id}-workflow-${i}`} msg={msg} />
 				);
 				i++;
 				continue;
@@ -2703,10 +2799,20 @@ function AssistantParts({
 		}
 
 		// Cited sources from this turn's web tools (WebFetch/WebSearch) render as
-		// an AICSS-style footer under the reply. Empty when no web tools ran.
+		// a beUI citation list footer under the reply. Empty when no web tools ran.
 		if (citations.length > 0) {
+			const citationItems: CitationItem[] = citations.map((citation) => ({
+				id: citation.url,
+				title: citation.title,
+				domain: hostnameOfCitation(citation.url),
+				url: citation.url,
+			}));
 			pushPart(
-				<CitationSources citations={citations} key={`${msg.id}-citations`} />
+				<CitationList
+					citations={citationItems}
+					className="mt-2 rounded-xl bg-muted/60 p-2"
+					key={`${msg.id}-citations`}
+				/>
 			);
 		}
 

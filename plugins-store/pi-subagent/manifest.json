@@ -1,7 +1,7 @@
 {
   "id": "@ryu/pi-subagent",
   "name": "Subagents",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Automation",
   "description": "Adds the Task tool to the managed Pi agent, so it can delegate a bounded, context-isolated job to a child agent.",
   "tagline": "Let the agent delegate work to child agents",

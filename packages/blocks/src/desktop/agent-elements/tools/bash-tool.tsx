@@ -1,7 +1,6 @@
-﻿import { AgentCode } from "@ryu/ui/components/agents/agent-code";
+﻿import { ToolResult, ToolResultOutput } from "@ryu/ui/components/agents/tool-result";
 import { memo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
-import { TextShimmer } from "../text-shimmer.tsx";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
 import {
 	mapToolInvocationToStep,
@@ -41,73 +40,27 @@ export function BashToolTerminalCard({
 	const isPending = state === "animating";
 	const command = step.bashCommand ?? step.toolDetail;
 	const summary = extractCommandSummary(command);
+	const hasOutput = Boolean(step.bashOutput?.trim());
 
 	return (
-		<div className="overflow-hidden rounded-[var(--radius)] bg-muted">
-			<div className="flex h-7 items-center justify-between pr-2 pl-2.5">
-				<div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-					{isPending ? (
-						<TextShimmer
-							as="span"
-							className="m-0 inline-flex h-full items-center truncate text-xs leading-none"
-							duration={1.2}
-						>
-							Running command: {summary}
-						</TextShimmer>
-					) : (
-						<span className="truncate text-muted-foreground text-xs">
-							Ran command: {summary}
-						</span>
-					)}
+		<div className="an-tool-bash">
+			<ToolResult
+				collapseOnComplete={!expandOutput}
+				defaultOpen={isPending || hasOutput}
+				kind="terminal"
+				status={isPending ? "running" : "success"}
+				title={isPending ? `Running ${summary}` : `Ran ${summary}`}
+				tool="Bash"
+			>
+				<div className="flex flex-col gap-1.5">
+					<ToolResultOutput language="bash">{String(command)}</ToolResultOutput>
+					{!isPending && hasOutput ? (
+						<ToolResultOutput language="bash">
+							{String(step.bashOutput)}
+						</ToolResultOutput>
+					) : null}
 				</div>
-				{isPending && (
-					<svg
-						className="h-3 w-3 shrink-0 animate-spin text-muted-foreground"
-						fill="none"
-						viewBox="0 0 16 16"
-					>
-						<circle
-							cx="8"
-							cy="8"
-							r="6"
-							stroke="currentColor"
-							strokeDasharray="28"
-							strokeDashoffset="7"
-							strokeLinecap="round"
-							strokeWidth="1.5"
-						/>
-					</svg>
-				)}
-			</div>
-			<div className="overflow-hidden bg-background/60 px-2.5 py-1.5 font-mono text-[12px] leading-[16px]">
-				<div className="flex gap-1.5">
-					<span
-						aria-hidden="true"
-						className="select-none text-amber-600 leading-[16px] dark:text-amber-400"
-					>
-						$
-					</span>
-					{/* Shiki-tokenised so a pipeline reads as a pipeline. The hook keeps
-					    the previous tokens while a command is still streaming, so the
-					    line never flashes back to plain text between chunks. */}
-					<AgentCode
-						className="min-w-0 flex-1 whitespace-pre-wrap break-all text-[12px] text-foreground leading-[16px]"
-						code={command}
-						language="bash"
-					/>
-				</div>
-				{!isPending && step.bashOutput && (
-					<div
-						className={
-							expandOutput
-								? "mt-1 max-h-[400px] overflow-y-auto whitespace-pre-line text-muted-foreground"
-								: "mt-1 max-h-[80px] overflow-hidden whitespace-pre-line text-muted-foreground"
-						}
-					>
-						{step.bashOutput}
-					</div>
-				)}
-			</div>
+			</ToolResult>
 			{approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
 		</div>
 	);

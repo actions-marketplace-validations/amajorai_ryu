@@ -1153,6 +1153,11 @@ fn trusted_builtin_bin_path(bin_key: &str) -> Option<std::path::PathBuf> {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| ryu_bin().join("rtk")),
         ),
+        "bws" => Some(
+            std::env::var_os("RYU_BWS_BIN")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| ryu_bin().join("bws")),
+        ),
         _ => None,
     }
 }
@@ -2458,12 +2463,13 @@ mod tests {
     #[test]
     fn builtin_command_seed_covers_only_trusted_builtin_bins() {
         // Seeding scans ONLY `load_builtins()` (compiled-in), so the built-in
-        // command tools (spider, rtk) are seeded and an untrusted/user manifest bin
+        // command tools (spider, rtk, bws) are seeded and an untrusted/user manifest bin
         // never could be. Pure — never touches the process-global OnceLock.
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         // Deterministic paths regardless of the dev box's PATH.
         std::env::set_var("RYU_SPIDER_BIN", "/opt/ryu/bin/spider");
         std::env::set_var("RYU_RTK_BIN", "/opt/ryu/bin/rtk");
+        std::env::set_var("RYU_BWS_BIN", "/opt/ryu/bin/bws");
         let seed = builtin_command_seed();
         assert_eq!(
             seed.get("spider"),
@@ -2473,11 +2479,16 @@ mod tests {
             seed.get("rtk"),
             Some(&std::path::PathBuf::from("/opt/ryu/bin/rtk"))
         );
+        assert_eq!(
+            seed.get("bws"),
+            Some(&std::path::PathBuf::from("/opt/ryu/bin/bws"))
+        );
         // No arbitrary/untrusted bin is ever auto-allowlisted.
         assert!(!seed.contains_key("bash"));
         assert!(!seed.contains_key("echo"));
         std::env::remove_var("RYU_SPIDER_BIN");
         std::env::remove_var("RYU_RTK_BIN");
+        std::env::remove_var("RYU_BWS_BIN");
     }
 
     #[test]

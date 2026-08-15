@@ -1,7 +1,9 @@
 {
   "id": "@ryu/shadow",
   "name": "Shadow",
-  "version": "1.0.0",
+  "version": "0.1.14",
+  "system": true,
+  "builtin": true,
   "description": "Search everything Shadow has captured (screen text, audio transcripts, input) and summarize recent activity. Exposed as declarative HTTP tools that reach the device-local Shadow sidecar through Core's authenticated `/api/shadow/*` proxy (which injects Shadow's bearer token).",
   "icon": "record",
   "iconDither": { "from": 296, "to": "transparent", "direction": "down" },
@@ -34,7 +36,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Full-text search over everything Shadow has captured (screen text, audio transcripts, input). Returns matching timeline entries. Shadow capture is Windows-first; when the sidecar is not running the tool reports itself unavailable.",
+        "description": "Full-text search over everything Shadow has captured (screen text, audio transcripts, input). Returns matching timeline entries. Shadow capture is cross-platform (Windows, macOS, Linux); when the sidecar is not running the tool reports itself unavailable.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -66,7 +68,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Semantic (vector) search over captured history. Use for fuzzy, meaning-based recall when exact keywords are unknown. Shadow capture is Windows-first; when the sidecar is not running the tool reports itself unavailable.",
+        "description": "Semantic (vector) search over captured history. Use for fuzzy, meaning-based recall when exact keywords are unknown. Shadow capture is cross-platform (Windows, macOS, Linux); when the sidecar is not running the tool reports itself unavailable.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -98,7 +100,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Fetch captured timeline entries within an explicit time range (microseconds since the Unix epoch). Shadow capture is Windows-first; when the sidecar is not running the tool reports itself unavailable.",
+        "description": "Fetch captured timeline entries within an explicit time range (microseconds since the Unix epoch). Shadow capture is cross-platform (Windows, macOS, Linux); when the sidecar is not running the tool reports itself unavailable.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -129,7 +131,7 @@
         },
         "fail_open": true,
         "unwrap_body": true,
-        "description": "Summarize what the user has been doing in the last N minutes, drawn from captured history. Shadow capture is Windows-first; when the sidecar is not running the tool reports itself unavailable.",
+        "description": "Summarize what the user has been doing in the last N minutes, drawn from captured history. Shadow capture is cross-platform (Windows, macOS, Linux); when the sidecar is not running the tool reports itself unavailable.",
         "input_schema": {
           "type": "object",
           "properties": {

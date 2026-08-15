@@ -1,7 +1,7 @@
 {
   "id": "@ryu/healing",
   "name": "Self-Healing",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Developer Tools",
   "description": "Self-healing: failed runs are diagnosed by a Gateway side-model and proposed fixes are delivered to the approvals inbox for human review before they apply.",
   "tagline": "Failed runs diagnose and fix themselves — with your approval",
@@ -46,7 +46,7 @@
     "apps": [
       {
         "id": "@ryu/approvals",
-        "min_version": "1.0.0"
+        "min_version": "0.1.14"
       }
     ]
   },

@@ -266,7 +266,7 @@ function PriceBlock({
 		<>
 			<div className="mb-1 flex items-baseline">
 				<NumberTicker
-					className="font-semibold text-4xl"
+					className="font-heading font-semibold text-4xl tabular-nums"
 					prefix="$"
 					value={perMonth}
 				/>
@@ -278,7 +278,11 @@ function PriceBlock({
 			    one reads as the static one having failed to update. */}
 			{showSeatTotal ? (
 				<p className="mb-1 flex items-baseline font-medium text-sm">
-					<NumberTicker prefix="$" value={seatTotal} />
+					<NumberTicker
+						className="font-heading tabular-nums"
+						prefix="$"
+						value={seatTotal}
+					/>
 					<span className="ml-1">/mo for {seats} seats</span>
 				</p>
 			) : null}
@@ -286,6 +290,7 @@ function PriceBlock({
 				<p className="mb-6 flex items-baseline text-muted-foreground text-xs">
 					<span className="mr-1">Billed</span>
 					<NumberTicker
+						className="font-heading tabular-nums"
 						prefix="$"
 						value={showSeatTotal ? seatAnnualTotal : annualTotal}
 					/>
@@ -693,7 +698,7 @@ function CloudUpgradePanel({
 											{isLoading ? (
 												<Loader2 className="size-4 animate-spin" />
 											) : (
-												<span className="font-semibold text-sm">
+												<span className="font-heading font-semibold text-sm tabular-nums">
 													+${tier.monthlyAddUsd}
 													<span className="text-muted-foreground text-xs">
 														/mo
@@ -829,11 +834,11 @@ export function LifetimePlanCard({
 			<CardContent className="flex-1">
 				<div className="mb-1 flex items-baseline gap-2">
 					<NumberTicker
-						className="font-semibold text-4xl"
+						className="font-heading font-semibold text-4xl tabular-nums"
 						prefix="$"
 						value={29}
 					/>
-					<span className="text-muted-foreground text-xl line-through">
+					<span className="font-heading text-muted-foreground text-xl line-through tabular-nums">
 						$69
 					</span>
 					<span className="ml-1 text-muted-foreground">once</span>
@@ -914,7 +919,12 @@ export function ProPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>{`$${PRO_INCLUDED_USD}/month of AI usage included`}</span>
+						<span>
+							<span className="font-heading tabular-nums">
+								${PRO_INCLUDED_USD}
+							</span>
+							/month of AI usage included
+						</span>
 					</li>
 					<li className="flex items-center">
 						<Zap className="mr-2 size-4" />
@@ -1022,7 +1032,12 @@ export function MaxPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>{`$${MAX_INCLUDED_USD}/month of AI usage included`}</span>
+						<span>
+							<span className="font-heading tabular-nums">
+								${MAX_INCLUDED_USD}
+							</span>
+							/month of AI usage included
+						</span>
 					</li>
 					<li className="flex items-center">
 						<Mail className="mr-2 size-4" />
@@ -1162,7 +1177,12 @@ export function TeamsPlanCard({
 					</li>
 					<li className="flex items-center">
 						<Coins className="mr-2 size-4" />
-						<span>{`$${TEAMS_INCLUDED_PER_SEAT_USD}/seat/month of AI usage, pooled`}</span>
+						<span>
+							<span className="font-heading tabular-nums">
+								${TEAMS_INCLUDED_PER_SEAT_USD}
+							</span>
+							/seat/month of AI usage, pooled
+						</span>
 					</li>
 					<li className="flex items-center">
 						<Shield className="mr-2 size-4" />
@@ -1333,7 +1353,7 @@ export function SelfHostedOssCard() {
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex-1">
-				<div className="mb-1 font-semibold text-4xl">$0</div>
+				<div className="mb-1 font-heading font-semibold text-4xl tabular-nums">$0</div>
 				<p className="mb-6 text-muted-foreground text-xs">
 					Free forever · self-supported
 				</p>
@@ -1708,7 +1728,7 @@ export function PricingInstancePicker({
 								) : (
 									<div className="mb-6 flex items-baseline">
 										<NumberTicker
-											className="font-semibold text-4xl"
+											className="font-heading font-semibold text-4xl tabular-nums"
 											prefix="$"
 											value={instance.monthlyUsd}
 										/>

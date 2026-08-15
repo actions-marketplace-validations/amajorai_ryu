@@ -381,13 +381,25 @@ pub fn oauth_provider_id(ryu_provider_id: &str) -> Option<&'static str> {
 }
 
 /// Merge a completed credential into the managed Pi's `auth.json` under
-/// `auth_key`, preserving every other provider's entry.
+/// `auth_key`, preserving every other provider's entry. Also records the login
+/// as a NEW account in the sealed vault (so a provider can hold several
+/// accounts) and materializes the active account back into `auth.json`.
 fn store_credential(auth_key: &str, credential: &Value) -> Result<()> {
     super::ensure_dir()?;
     let mut auth = super::read_auth();
     auth.insert(auth_key.to_owned(), credential.clone());
     let body = serde_json::to_string_pretty(&auth)?;
-    super::write_secret_file(&super::auth_path(), &body)
+    super::write_secret_file(&super::auth_path(), &body)?;
+    // A completed OAuth login is a real account: seal it into the vault under the
+    // provider's scope. The label defaults to the pi-ai provider id — the only
+    // identity the flow reliably exposes (an email/name is not guaranteed).
+    super::vault_upsert_credential(
+        &super::accounts::provider_scope(auth_key),
+        auth_key,
+        super::accounts::KIND_OAUTH,
+        credential.clone(),
+    );
+    Ok(())
 }
 
 /// Begin a subscription login. Returns the session id the client streams from.

@@ -1,5 +1,6 @@
 import { Copy01Icon, Tick01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Alert, AlertDescription, AlertTitle } from "@ryu/ui/components/alert";
 import { Button } from "@ryu/ui/components/button";
 import {
 	Dialog,
@@ -23,7 +24,7 @@ import QRCode from "react-qr-code";
 import { sileo } from "sileo";
 import { authClient } from "@/lib/auth-client.ts";
 
-type Step = "password" | "qr" | "verify" | "backup" | "manage";
+type Step = "password" | "qr" | "verify" | "backup" | "confirm" | "manage";
 
 // Wallet-app morph: the panel springs to its new height as the active step
 // swaps, per beui.dev/components/motion/morphing-modal. This used to redeclare
@@ -34,6 +35,12 @@ type Step = "password" | "qr" | "verify" | "backup" | "manage";
 
 // Pulls the base32 secret out of the otpauth:// URI for manual entry.
 const TOTP_SECRET_RE = /secret=([^&]+)/;
+
+// Backup codes are shown as "XXXXX-XXXXX" but accepted case-insensitively and
+// with or without the hyphen, so both what is displayed and what the user types
+// are compared in a normalized form.
+const normalizeBackupCode = (code: string) =>
+	code.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
 
 interface TwoFactorDialogProps {
 	isEnabled: boolean;
@@ -52,6 +59,11 @@ export function TwoFactorDialog({
 	const [backupCodes, setBackupCodes] = useState<string[]>([]);
 	const [otp, setOtp] = useState("");
 	const [otpStatus, setOtpStatus] = useState<OTPStatus>("idle");
+	const [confirmCode, setConfirmCode] = useState("");
+	const [confirmStatus, setConfirmStatus] = useState<OTPStatus>("idle");
+	// Set once a confirm attempt failed, so the backup view can show a "these
+	// codes are critical" banner the second time the codes are shown.
+	const [saveReminder, setSaveReminder] = useState(false);
 	const [isBusy, setIsBusy] = useState(false);
 	const [copiedAll, setCopiedAll] = useState(false);
 
@@ -64,6 +76,9 @@ export function TwoFactorDialog({
 			setBackupCodes([]);
 			setOtp("");
 			setOtpStatus("idle");
+			setConfirmCode("");
+			setConfirmStatus("idle");
+			setSaveReminder(false);
 		}
 	};
 
@@ -97,6 +112,9 @@ export function TwoFactorDialog({
 			const codes =
 				(result.data as { backupCodes?: string[] })?.backupCodes ?? [];
 			setBackupCodes(codes);
+			setConfirmCode("");
+			setConfirmStatus("idle");
+			setSaveReminder(false);
 			setStep("backup");
 			onStatusChange();
 		} catch (error) {
@@ -140,6 +158,9 @@ export function TwoFactorDialog({
 			const codes =
 				(result.data as { backupCodes?: string[] })?.backupCodes ?? [];
 			setBackupCodes(codes);
+			setConfirmCode("");
+			setConfirmStatus("idle");
+			setSaveReminder(false);
 			setStep("backup");
 		} catch (error) {
 			sileo.error({
@@ -151,6 +172,33 @@ export function TwoFactorDialog({
 		} finally {
 			setIsBusy(false);
 		}
+	};
+
+	// Prove the user actually stored the codes before the dialog closes. Every
+	// entered code must match one of the freshly generated ones (hyphens and
+	// casing ignored). A miss bounces back to the codes with a save reminder.
+	const handleConfirmBackup = (e: React.FormEvent) => {
+		e.preventDefault();
+		const entered = normalizeBackupCode(confirmCode);
+		if (!entered) {
+			setConfirmStatus("error");
+			return;
+		}
+		const saved = new Set(backupCodes.map(normalizeBackupCode));
+		if (saved.has(entered)) {
+			sileo.success({ title: "Backup codes confirmed" });
+			handleOpenChange(false);
+			return;
+		}
+		setConfirmStatus("error");
+		setConfirmCode("");
+		setSaveReminder(true);
+		setStep("backup");
+		sileo.error({
+			title: "That code didn't match",
+			description:
+				"Save these backup codes somewhere safe — without them you can be locked out of your account if you lose your authenticator app.",
+		});
 	};
 
 	const copyAllBackupCodes = () => {
@@ -346,6 +394,16 @@ export function TwoFactorDialog({
 										</DialogDescription>
 									</DialogHeader>
 									<div className="space-y-3">
+										{saveReminder && (
+											<Alert variant="warning">
+												<AlertTitle>These codes are critical</AlertTitle>
+												<AlertDescription>
+													They&apos;re the only way back into your account if
+													you lose your authenticator app. Save them somewhere
+													safe now — they won&apos;t be shown again.
+												</AlertDescription>
+											</Alert>
+										)}
 										<div className="grid grid-cols-2 gap-1.5 rounded-lg bg-muted/50 p-4">
 											{backupCodes.map((code) => (
 												<code
@@ -377,10 +435,72 @@ export function TwoFactorDialog({
 										</Button>
 									</div>
 									<DialogFooter>
-										<Button onClick={() => handleOpenChange(false)}>
-											Done
+										<Button
+											onClick={() => {
+												setConfirmCode("");
+												setConfirmStatus("idle");
+												setStep("confirm");
+											}}
+										>
+											I&apos;ve saved them
 										</Button>
 									</DialogFooter>
+								</>
+							)}
+
+							{step === "confirm" && (
+								<>
+									<DialogHeader>
+										<DialogTitle>Confirm Your Backup Codes</DialogTitle>
+										<DialogDescription>
+											Enter one of the codes above to prove you saved them. If
+											they don&apos;t match, we&apos;ll show them again —
+											it&apos;s that important.
+										</DialogDescription>
+									</DialogHeader>
+									<form className="space-y-4" onSubmit={handleConfirmBackup}>
+										<div className="space-y-2">
+											<Label htmlFor="2fa-confirm-code">Backup code</Label>
+											<Input
+												aria-invalid={confirmStatus === "error"}
+												autoComplete="off"
+												autoFocus
+												className="font-mono"
+												disabled={isBusy}
+												id="2fa-confirm-code"
+												onChange={(e) => {
+													setConfirmCode(e.target.value);
+													if (confirmStatus !== "idle") {
+														setConfirmStatus("idle");
+													}
+												}}
+												placeholder="XXXXX-XXXXX"
+												spellCheck={false}
+												value={confirmCode}
+											/>
+											{confirmStatus === "error" && (
+												<p className="text-destructive text-sm">
+													That code doesn&apos;t match. Save the codes above —
+													without them you can be locked out of your account.
+												</p>
+											)}
+										</div>
+										<DialogFooter>
+											<Button
+												onClick={() => setStep("backup")}
+												type="button"
+												variant="ghost"
+											>
+												Back
+											</Button>
+											<Button
+												disabled={isBusy || !confirmCode.trim()}
+												type="submit"
+											>
+												Confirm
+											</Button>
+										</DialogFooter>
+									</form>
 								</>
 							)}
 

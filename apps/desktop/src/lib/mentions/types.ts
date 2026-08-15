@@ -8,6 +8,7 @@ import type { ComponentType } from "react";
 export type MentionKind =
 	| "agent"
 	| "team"
+	| "workflow"
 	| "space"
 	| "skill"
 	| "mcp"
@@ -66,6 +67,8 @@ export interface MentionSources {
 	skills: { id: string; name: string }[];
 	spaces: { id: string; name: string }[];
 	teams: { id: string; name: string }[];
+	/** Chat-triggerable workflows (those with a root `Input` node, per Core). */
+	workflows: { id: string; name: string; description?: string | null }[];
 }
 
 /** A labelled section of candidates in the menu (e.g. "Agents", "Plugins"). */

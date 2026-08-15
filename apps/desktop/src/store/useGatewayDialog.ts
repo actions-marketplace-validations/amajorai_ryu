@@ -27,6 +27,11 @@ export type GatewaySection =
 	| "usage"
 	| "audit"
 	| "evals"
+	// The node's public API surface: endpoint URLs to point OpenAI/Anthropic/
+	// Gemini clients at, local API-key management, and a live traffic dashboard.
+	| "api"
+	// The Ryu MCP server layer: registered servers + the tools they expose.
+	| "mcp"
 	// Moved from the App Settings dialog (node-level Core infra, not apps):
 	| "connections"
 	| "email-alerts"

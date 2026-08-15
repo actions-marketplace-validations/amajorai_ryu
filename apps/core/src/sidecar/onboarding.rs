@@ -128,7 +128,8 @@ pub struct LocalStackStatus {
     /// works with no setup on platforms with a prebuilt server (Windows x64,
     /// macOS arm64, Linux x86_64); the sidecar stays opt-in to *run* (lazily
     /// started on the first `/api/images/generate`). Heaviest bundled default
-    /// (~1.76 GB model), so its failure is non-fatal and never blocks anything.
+    /// (~4.6 GB SDXL base incl. text encoders + VAE), so its failure is
+    /// non-fatal and never blocks anything.
     pub sdcpp_installed: bool,
     /// Non-fatal warning messages surfaced to the UI (e.g. download failed).
     pub warnings: Vec<String>,
@@ -1016,10 +1017,13 @@ impl SetupManager {
         // Bundled-by-default so text-to-image works zero-setup, mirroring the STT/
         // TTS engines. `ensure_installed` fetches the prebuilt sd-server binary for
         // the platform (Windows x64 / macOS arm64 / Linux x86_64) plus the default
-        // SD v1.4 Q8_0 GGUF (~1.76 GB). Non-fatal and independent of everything
-        // else — on a platform with no prebuilt server (Intel mac, arm Linux) it
-        // warns and never blocks. The engine stays opt-in to *run* (not in
-        // `startup_order`); the `/api/images/generate` route lazily starts it.
+        // SDXL base model — the Q8_0 UNet GGUF with its CLIP-L / CLIP-G text
+        // encoders and VAE (~4.6 GB total). The video default (Wan2.1) is not part
+        // of onboarding; it is downloaded lazily on first use. Non-fatal and
+        // independent of everything else — on a platform with no prebuilt server
+        // (Intel mac, arm Linux) it warns and never blocks. The engine stays opt-in
+        // to *run* (not in `startup_order`); the `/api/images/generate` route
+        // lazily starts it.
         let sdcpp_installed =
             match crate::sidecar::providers::sdcpp::StableDiffusionDownloader::new()
                 .ensure_installed(downloads)

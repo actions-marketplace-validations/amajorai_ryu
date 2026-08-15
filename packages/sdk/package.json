@@ -26,6 +26,41 @@
       "import": "./dist/agent.js",
       "require": "./dist/agent.cjs"
     },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "import": "./dist/model.js",
+      "require": "./dist/model.cjs"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js",
+      "require": "./dist/mcp.cjs"
+    },
+    "./mcp/server": {
+      "types": "./dist/mcp/server.d.ts",
+      "import": "./dist/mcp/server.js",
+      "require": "./dist/mcp/server.cjs"
+    },
+    "./mcp/client": {
+      "types": "./dist/mcp/client.d.ts",
+      "import": "./dist/mcp/client.js",
+      "require": "./dist/mcp/client.cjs"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js",
+      "require": "./dist/plugin.cjs"
+    },
+    "./runnable": {
+      "types": "./dist/runnable.d.ts",
+      "import": "./dist/runnable.js",
+      "require": "./dist/runnable.cjs"
+    },
+    "./builder": {
+      "types": "./dist/builder.d.ts",
+      "import": "./dist/builder.js",
+      "require": "./dist/builder.cjs"
+    },
     "./cli": {
       "import": "./dist/cli.js"
     }

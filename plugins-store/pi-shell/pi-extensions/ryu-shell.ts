@@ -102,6 +102,21 @@
  * lifetime bound at all. A real bound for that case has to live INSIDE the
  * spawned command (a ppid watchdog prefix), not in Pi. Not done here.
  *
+ * RESTART NOTIFICATION (the durable-ledger section below) does not close that
+ * window — nothing Pi-side can — but it stops the orphan from being SILENT.
+ * Every spawn, finish and release is written to a per-project ledger file that
+ * survives the process, and the next Pi for the project tells its agent about
+ * shells a previous process left running with no completion record, marking
+ * them stopped so the agent re-verifies (is the port still bound?) instead of
+ * assuming its server is up. This is a straight copy of Claude Code's "N
+ * background task(s) from the previous session have no completion record".
+ * The notice is injected once per process, before the first turn's LLM call,
+ * via the `context` event; a stale `shell_id` passed to `bash_output`/`bash_kill`
+ * after a restart also consults the ledger so the model reads the shell's story
+ * rather than a bare "unknown id". The ledger deliberately never carries output
+ * (it died with the process) and orphans are marked stopped, not signalled
+ * (the pid may belong to a different process by now).
+ *
  * What is deliberately NOT done: `process.on("exit" | "SIGTERM")` handlers.
  * Registering a SIGTERM listener in Node SUPPRESSES the default terminate
  * behaviour, so it would make the Pi process HARDER to kill — it makes this risk
@@ -142,9 +157,14 @@
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ContextEvent,
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 /** Prefix on every stderr line so Core's `acp_subprocess` log is greppable. */
@@ -195,6 +215,28 @@ const BUFFER_CAP_BYTES = 256 * 1024;
  * entries beyond this are evicted at the next spawn.
  */
 const MAX_FINISHED_RETAINED = MAX_SHELLS;
+
+/**
+ * The ledger file name, written inside the session directory (per project). The
+ * session dir is stable across Pi processes for a project, which is what makes
+ * orphan detection possible at all: a record written here by a dead process is
+ * read by the next one.
+ */
+const LEDGER_FILE = "ryu-background-shells.json";
+
+/**
+ * How long finished/stopped records are retained before pruning. Long enough
+ * that a record's story survives a restart well past the point anyone cares,
+ * short enough that the file cannot grow without bound across many sessions.
+ */
+const LEDGER_PRUNE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Ceiling on non-running ledger records. Running records are already bounded by
+ * `MAX_SHELLS`; this caps the finished/stopped tail so an abandoned project's
+ * ledger never becomes a pile of corpses.
+ */
+const LEDGER_MAX_ENTRIES = MAX_SHELLS * 4;
 
 /** Shell id prefix. Short, greppable, and obviously not a pid. */
 const SHELL_ID_PREFIX = "bg_";
@@ -247,6 +289,38 @@ interface BackgroundShell {
 }
 
 /**
+ * The durable half of a background shell, as written to the ledger. The ledger
+ * is the only thing that survives a Pi process dying, so it carries everything
+ * a later process needs to tell the agent what happened.
+ */
+interface ShellRecord {
+	code?: number | null;
+	command: string;
+	cwd: string;
+	description?: string;
+	finished_at?: number;
+	pid?: number;
+	/**
+	 * The pid of the Pi process that spawned this shell. The orphan
+	 * discriminator: on scan, only records written by a DIFFERENT pid are
+	 * orphans — a same-pid record belongs to a live process that can still
+	 * finish it (a reload's teardown does exactly that).
+	 */
+	process_pid: number;
+	reason?: string;
+	signal?: string | null;
+	started_at: number;
+	/** `running` | `finished` (ended inside a live process) | `stopped` (orphan, marked at scan). */
+	status: "running" | "finished" | "stopped";
+}
+
+/** The ledger file's shape. Versioned so a future layout change can migrate. */
+interface ShellLedger {
+	shells: Record<string, ShellRecord>;
+	version: 1;
+}
+
+/**
  * The shell registry. Module-level ON PURPOSE — it is what lets a shell outlive
  * the turn that started it (see the preamble). It is also why the factory tears
  * down before rebinding: jiti may return this same module, and this same Map,
@@ -256,6 +330,20 @@ let shells = new Map<string, BackgroundShell>();
 
 /** Monotonic id source. Never reset, so an id is never reused within a process. */
 let nextShellId = 1;
+
+/**
+ * The session directory the ledger lives in, cached on first sight. Ledger
+ * writes are no-ops until this is set — there is nothing durable to do without
+ * a place to put it, and every write is guarded anyway.
+ */
+let ledgerDir: string | undefined;
+
+/**
+ * True once this process has scanned the ledger for orphans. The `context`
+ * event fires before EVERY LLM call, so this flag is what makes the restart
+ * notice appear exactly once per process.
+ */
+let orphanScanDone = false;
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -384,6 +472,301 @@ function drainShell(shell: BackgroundShell): string {
 	return text;
 }
 
+// ── Durable ledger & restart notification ────────────────────────────────────
+//
+// Everything above is in-memory and dies with the Pi process. That is fine for
+// the running conversation, but it is exactly the hole this section exists to
+// paper over: if Pi is SIGKILLed or crashes, the TTL timer and the `MAX_SHELLS`
+// count die inside it and the shells are orphaned with no record anywhere.
+// Claude Code's bash tool has the same hole and handles it by telling the NEXT
+// session about it — "N background shell command task(s) from the previous
+// session have no completion record … they have been marked stopped" — so the
+// agent re-verifies instead of assuming its server is still up.
+//
+// We copy that. Every shell is written to a durable ledger the moment it
+// spawns, marked finished the moment it ends, and deleted once its final output
+// has been collected. The ledger lives in the session directory
+// (`~/.ryu/pi-agent/sessions/<encoded-cwd>/ryu-background-shells.json`), which
+// is per-project and survives the process, so the next Pi for this project can
+// tell which shells were still running when the previous one died. On the first
+// LLM call of a new process we scan it: any shell recorded as running by a
+// DIFFERENT pid is an orphan — it may have been stopped when the session died
+// or may still be running — so we mark it stopped and inject a notice into the
+// model's context. One notice per process, injected before the first turn's LLM
+// call, so the agent re-verifies before continuing.
+//
+// Two deliberate bounds on the ledger's honesty:
+//   - It records spawns, finishes and releases, never output. A restarted agent
+//     is told that bg_1 ended and why, not what it printed — the ring buffer
+//     died with the process.
+//   - Orphans are marked stopped but NOT signalled. The child's pid may belong
+//     to a different process by now, so killing by pid would be worse than
+//     leaving it. The agent is told to verify (is the port still bound?) rather
+//     than asked to trust that "stopped" killed anything.
+//
+// One scoping consequence, stated so nobody re-derives it as a surprise: the
+// ledger is keyed by the session DIRECTORY, i.e. per project, not per
+// conversation. Two conversations in one project share it, so a fresh chat can
+// be told about a shell an older chat started. That is the price of surviving a
+// hard kill (the conversation id exists only inside the dead process), and it
+// is the safe direction to err: an agent told "a previous session's shell may
+// still be running <command>" verifies before starting a conflicting dev server.
+
+// ── Ledger I/O ──────────────────────────────────────────────────────────────
+
+function ledgerPath(): string | undefined {
+	return ledgerDir ? path.join(ledgerDir, LEDGER_FILE) : undefined;
+}
+
+/** Read the ledger. Any failure yields an empty ledger — the file is advisory. */
+function loadLedger(): ShellLedger {
+	const file = ledgerPath();
+	if (!file) {
+		return { version: 1, shells: {} };
+	}
+	try {
+		if (!existsSync(file)) {
+			return { version: 1, shells: {} };
+		}
+		const parsed = JSON.parse(
+			readFileSync(file, "utf8")
+		) as Partial<ShellLedger>;
+		return { version: 1, shells: parsed.shells ?? {} };
+	} catch (err) {
+		log(`ledger read failed (${errorText(err)}); treating as empty.`);
+		return { version: 1, shells: {} };
+	}
+}
+
+/** Write the ledger. A failure is logged, never thrown — the ledger must not break a turn. */
+function saveLedger(ledger: ShellLedger): void {
+	const file = ledgerPath();
+	if (!file) {
+		return;
+	}
+	try {
+		mkdirSync(path.dirname(file), { recursive: true });
+		writeFileSync(file, JSON.stringify(ledger, null, "\t"));
+	} catch (err) {
+		log(
+			`ledger write failed (${errorText(err)}); shell state will not survive a restart.`
+		);
+	}
+}
+
+/**
+ * Read-modify-write the ledger in ONE synchronous run. Every writer goes through
+ * this: Pi executes a message's tool calls concurrently, and the synchronous fs
+ * calls serialize on the event loop, so a read and a write from two parallel
+ * spawns cannot interleave. `mutate` runs inside the try — a bad record must
+ * never be saved back.
+ */
+function updateLedger(mutate: (ledger: ShellLedger) => void): void {
+	const ledger = loadLedger();
+	try {
+		mutate(ledger);
+	} catch (err) {
+		log(`ledger update failed (${errorText(err)}).`);
+		return;
+	}
+	saveLedger(ledger);
+}
+
+/** Drop records that are no longer worth keeping: old finished ones, and a hard cap on the rest. */
+function pruneLedger(ledger: ShellLedger): void {
+	const now = Date.now();
+	for (const [id, rec] of Object.entries(ledger.shells)) {
+		if (rec.status === "running") {
+			continue;
+		}
+		const doneAt = rec.finished_at ?? rec.started_at;
+		if (now - doneAt > LEDGER_PRUNE_MS) {
+			delete ledger.shells[id];
+		}
+	}
+	const nonRunning = Object.entries(ledger.shells)
+		.filter(([, rec]) => rec.status !== "running")
+		.sort((a, b) => a[1].started_at - b[1].started_at);
+	for (const [id] of nonRunning.slice(
+		0,
+		Math.max(0, nonRunning.length - LEDGER_MAX_ENTRIES)
+	)) {
+		delete ledger.shells[id];
+	}
+}
+
+/** Remember where the ledger lives, once, from the first context in sight. */
+function rememberSessionDir(ctx: ExtensionContext): void {
+	if (ledgerDir) {
+		return;
+	}
+	try {
+		ledgerDir = ctx.sessionManager.getSessionDir() || undefined;
+	} catch {
+		ledgerDir = undefined;
+	}
+}
+
+/** Persist a freshly spawned shell so a later process can see it never finished. */
+function recordStarted(shell: BackgroundShell): void {
+	if (!ledgerPath()) {
+		return;
+	}
+	updateLedger((ledger) => {
+		pruneLedger(ledger);
+		ledger.shells[shell.id] = {
+			command: shell.command,
+			cwd: shell.cwd,
+			description: shell.description,
+			pid: shell.pid,
+			process_pid: process.pid,
+			started_at: shell.startedAt,
+			status: "running",
+		};
+	});
+}
+
+/**
+ * Mark a shell finished in the ledger. Called from `finish`, the single choke
+ * point every terminal transition (natural exit, kill, TTL, teardown) passes
+ * through, so a finished record always carries the same story the model would
+ * have been told.
+ */
+function recordFinished(shell: BackgroundShell): void {
+	if (!ledgerPath()) {
+		return;
+	}
+	updateLedger((ledger) => {
+		const rec = ledger.shells[shell.id];
+		if (!rec) {
+			return;
+		}
+		rec.status = "finished";
+		rec.code = shell.exit?.code ?? null;
+		rec.signal = shell.exit?.signal ?? null;
+		rec.reason = shell.exit?.reason;
+		rec.finished_at = Date.now();
+	});
+}
+
+/** Forget a shell whose final output has been collected. Mirrors the in-memory release. */
+function recordReleased(id: string): void {
+	if (!ledgerPath()) {
+		return;
+	}
+	updateLedger((ledger) => {
+		delete ledger.shells[id];
+	});
+}
+
+/** The ledger record for an id, or undefined. Used to explain a stale id to the model. */
+function ledgerRecord(id: string): ShellRecord | undefined {
+	return loadLedger().shells[id];
+}
+
+/** One-line state description of a ledger record, for the model. */
+function describeLedgerRecord(rec: ShellRecord): string {
+	const when = formatDuration(Date.now() - rec.started_at);
+	const head = `${rec.command} (started ${when} ago, cwd: ${rec.cwd})`;
+	if (rec.status === "stopped") {
+		return `${head} — stopped (${rec.reason ?? "no reason recorded"})`;
+	}
+	if (rec.status === "finished") {
+		const why =
+			rec.reason ??
+			(rec.signal
+				? `killed by ${rec.signal}`
+				: `exited with code ${rec.code ?? 0}`);
+		return `${head} — finished (${why})`;
+	}
+	return `${head} — recorded as running`;
+}
+
+// ── Orphan scan & notification ───────────────────────────────────────────────
+
+/**
+ * Collect shells the previous Pi process left running — records written by a
+ * DIFFERENT pid with no completion. Marks them `stopped` so a later process
+ * does not re-notify, and returns them for the notice. A record written by THIS
+ * pid is skipped: it belongs to a live process that can still finish it.
+ */
+function claimOrphans(): Array<{ id: string; rec: ShellRecord }> {
+	const ledger = loadLedger();
+	const orphans = Object.entries(ledger.shells)
+		.filter(
+			([, rec]) => rec.status === "running" && rec.process_pid !== process.pid
+		)
+		.map(([id, rec]) => ({ id, rec }));
+	if (orphans.length === 0) {
+		return [];
+	}
+	const now = Date.now();
+	for (const { rec } of orphans) {
+		rec.status = "stopped";
+		rec.reason = "the previous session ended";
+		rec.finished_at = now;
+	}
+	saveLedger(ledger);
+	return orphans;
+}
+
+/** The restart notice, mirroring Claude Code's background-task warning. */
+function buildOrphanNotice(
+	orphans: Array<{ id: string; rec: ShellRecord }>
+): string {
+	const plural =
+		orphans.length === 1 ? "background shell has" : "background shells have";
+	const lines = orphans
+		.map(
+			({ id, rec }) =>
+				`- ${id}: ${rec.command} (cwd: ${rec.cwd}, started ${formatDuration(Date.now() - rec.started_at)} ago)`
+		)
+		.join("\n");
+	return [
+		"Session restarted — re-verifying state before continuing.",
+		"",
+		`⏺ ${orphans.length} ${plural} no completion record from the previous session. They may have been stopped when that session ended, or they may have been running when the previous process exited. They have been marked stopped.`,
+		"",
+		lines,
+		"",
+		"Verify their actual state before assuming anything they were doing is still live — e.g. check whether a dev server is still bound to its port, and restart anything the current task depends on.",
+	].join("\n");
+}
+
+/**
+ * The `context` event fires before every LLM call. On the first one of this
+ * process we scan the ledger for shells a previous process left running, mark
+ * them stopped, and inject the notice into the messages the model is about to
+ * see — the one time, per process, the agent is told its background shells may
+ * not have survived the restart.
+ */
+function notifyOrphans(
+	ctx: ExtensionContext,
+	messages: ContextEvent["messages"]
+): void {
+	if (orphanScanDone) {
+		return;
+	}
+	orphanScanDone = true;
+	rememberSessionDir(ctx);
+	const orphans = claimOrphans();
+	if (orphans.length === 0) {
+		return;
+	}
+	log(
+		`marked ${orphans.length} orphaned shell(s) as stopped; notifying the agent.`
+	);
+	try {
+		messages.push({
+			role: "user",
+			content: [{ type: "text" as const, text: buildOrphanNotice(orphans) }],
+			timestamp: Date.now(),
+		});
+	} catch (err) {
+		log(`could not inject the restart notice (${errorText(err)}).`);
+	}
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 /** Clear the lifetime timer. Idempotent; safe on an already-finished shell. */
@@ -411,6 +794,9 @@ function finish(shell: BackgroundShell, exit: ShellExit): void {
 	shell.child = undefined;
 	// Consumed, so a reused entry can never inherit an unrelated explanation.
 	shell.pendingReason = undefined;
+	// Persist the completion so a later process does not mistake this shell for
+	// an orphan (see the durable-ledger section). No-op when no ledger exists.
+	recordFinished(shell);
 }
 
 /**
@@ -671,6 +1057,16 @@ function requireShell(raw: unknown): BackgroundShell {
 	const id = typeof raw === "string" ? raw.trim() : "";
 	const shell = id ? shells.get(id) : undefined;
 	if (!shell) {
+		// Not in this process's registry. Before declaring it unknown, consult the
+		// durable ledger: a shell the PREVIOUS process left running (an orphan,
+		// marked stopped at the restart scan) still has a record there, and the
+		// model deserves its story rather than a bare "unknown id".
+		const rec = ledgerRecord(id);
+		if (rec && rec.status !== "running") {
+			throw new Error(
+				`shell_id ${JSON.stringify(id)} is no longer managed: ${describeLedgerRecord(rec)}.\n${formatShellList()}`
+			);
+		}
 		throw new Error(
 			`unknown shell_id ${JSON.stringify(id)}. Shells are released once their final output has been collected.\n${formatShellList()}`
 		);
@@ -715,12 +1111,15 @@ export default function (pi: ExtensionAPI) {
 			"bash_output. Use this only for work that does not finish quickly — dev " +
 			"servers, file watchers, long builds and test suites; use the built-in " +
 			"bash tool for anything that returns in seconds. " +
-			`At most ${MAX_SHELLS} background shells may run at once.`,
+			`At most ${MAX_SHELLS} background shells may run at once. ` +
+			"If the session is restarted while one is running you will be told it " +
+			"has been marked stopped — re-verify its actual state then.",
 		promptSnippet: "Run a long-lived command in the background",
 		promptGuidelines: [
 			"Use the built-in bash tool for any command that finishes in seconds; bash_background is only for commands that keep running (dev servers, watchers, long builds and test suites).",
 			"bash_background returns a shell_id immediately and does NOT wait for output; poll it with bash_output and stop it with bash_kill when you are done.",
 			"Background shells stay alive across turns in this conversation, so check for one you already started before starting another.",
+			"When told that background shells from a previous session were marked stopped, re-verify their actual state before assuming a command is still running (e.g. is the dev server still bound to its port?).",
 			"Start one command per background shell; a compound command's grandchildren may survive bash_kill.",
 		],
 		parameters: Type.Object({
@@ -772,6 +1171,10 @@ export default function (pi: ExtensionAPI) {
 				releaseReservation(reserved);
 				throw err;
 			}
+			// Persist the spawn so a later process can tell this shell never
+			// finished (the restart-notification ledger).
+			rememberSessionDir(ctx);
+			recordStarted(shell);
 			const cwd = shell.cwd;
 			const text = [
 				`Started background shell ${shell.id} (pid ${shell.pid ?? "unknown"}).`,
@@ -794,7 +1197,9 @@ export default function (pi: ExtensionAPI) {
 			"and report whether it is still running or how it exited. The read is " +
 			"destructive: each call returns only what is NEW, so poll rather than " +
 			"re-reading. Once a finished shell's final output has been collected its " +
-			"id is released. Pass kill=true to stop the shell after collecting.",
+			"id is released. Pass kill=true to stop the shell after collecting. " +
+			"After a session restart a shell id that was never released reports its " +
+			"recorded end state instead of failing as unknown.",
 		promptSnippet: "Read new output from a background shell",
 		promptGuidelines: [
 			"Poll bash_output to follow a background shell; each call returns only output produced since the previous call.",
@@ -832,6 +1237,7 @@ export default function (pi: ExtensionAPI) {
 			// growing for the rest of the conversation.
 			if (finished) {
 				shells.delete(shell.id);
+				recordReleased(shell.id);
 			}
 			const tail = finished
 				? `\nShell ${shell.id} has ended and its id is now released.`
@@ -864,6 +1270,7 @@ export default function (pi: ExtensionAPI) {
 			await terminate(shell, "bash_kill");
 			const output = drainShell(shell);
 			shells.delete(shell.id);
+			recordReleased(shell.id);
 			const text = [
 				`Stopped ${shell.id} after ${formatDuration(Date.now() - shell.startedAt)}.`,
 				`command: ${shell.command}`,
@@ -882,5 +1289,14 @@ export default function (pi: ExtensionAPI) {
 	// last of four defences rather than the only one.
 	pi.on("session_shutdown", async () => {
 		await stopAllShells("the session ended");
+	});
+
+	// The restart-notification seam (Claude Code's "background task(s) from the
+	// previous session have no completion record" notice). Fires before every
+	// LLM call; the guard inside makes the orphan notice appear exactly once per
+	// process, on the first call — i.e. just before the agent's first turn after
+	// a restart decides what to do.
+	pi.on("context", (event, ctx) => {
+		notifyOrphans(ctx, event.messages);
 	});
 }

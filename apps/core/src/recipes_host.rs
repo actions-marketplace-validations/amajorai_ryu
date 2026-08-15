@@ -119,7 +119,7 @@ impl CoreRecipesHost {
             ));
         }
         let mut session = McpSession::connect(&ghost_command()).await.map_err(|e| {
-            anyhow!("could not start the ghost recorder: {e}. Install the ghost sidecar (Windows-first) to record recipes.")
+            anyhow!("could not start the ghost recorder: {e}. Install the ghost sidecar to record recipes.")
         })?;
         let info = session
             .call_tool("ghost_learn_start", json!({ "task": task }))

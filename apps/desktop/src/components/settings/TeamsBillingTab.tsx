@@ -404,7 +404,7 @@ function TeamsBillingTabForOrg({
 					<SettingsGroup>
 						<SettingsItem
 							actions={
-								<span className="font-semibold text-sm">
+								<span className="font-heading font-semibold text-sm tabular-nums">
 									{walletQuery.data
 										? formatMicroUsd(walletQuery.data.wallet.balanceMicroUsd)
 										: "—"}
@@ -423,7 +423,7 @@ function TeamsBillingTabForOrg({
 						/>
 						<SettingsItem
 							actions={
-								<span className="font-semibold text-sm">
+								<span className="font-heading font-semibold text-sm tabular-nums">
 									{pool > 0 ? formatMicroUsd(pool) : "—"}
 								</span>
 							}

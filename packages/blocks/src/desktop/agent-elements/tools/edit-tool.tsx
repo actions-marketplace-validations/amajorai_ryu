@@ -1,15 +1,12 @@
-﻿import { type FileContents, MultiFileDiff } from "@pierre/diffs/react";
-import { Button } from "@ryu/ui/components/button";
-import { IconChevronDown } from "@tabler/icons-react";
-import React, { memo } from "react";
+﻿import { FileDiff } from "@ryu/ui/components/agents/file-diff";
+import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
-import { FileExtIcon } from "../icons/file-ext-icon.tsx";
-import { TextShimmer } from "../text-shimmer.tsx";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
 import {
 	mapToolInvocationToStep,
 	mapToolStateToStepState,
 } from "../utils/tool-adapters.ts";
+import { diffLines } from "../utils/diff-lines.ts";
 import {
 	type ToolApproval,
 	ToolApprovalFooter,
@@ -23,6 +20,23 @@ export interface EditToolDiffCardProps {
 	output?: Record<string, unknown>;
 	state: StepState;
 	step: Extract<TimelineStep, { type: "tool-call" }>;
+}
+
+export { diffLines };
+
+/** Derive the language hint for the diff from the file extension. */
+function languageForFile(fileName: string): "typescript" | "json" | "bash" | "diff" | "tsx" | "text" {
+	const ext = fileName.split(".").pop()?.toLowerCase();
+	if (ext === "ts" || ext === "tsx" || ext === "js" || ext === "jsx") {
+		return "tsx";
+	}
+	if (ext === "json") {
+		return "json";
+	}
+	if (ext === "sh" || ext === "bash" || ext === "zsh") {
+		return "bash";
+	}
+	return "diff";
 }
 
 export function EditToolDiffCard({
@@ -43,36 +57,10 @@ export function EditToolDiffCard({
 		step.toolDetail;
 	const hasFileName = Boolean(fileName);
 	const isWrite = step.toolName === "Write";
-	const [themeType, setThemeType] = React.useState<"light" | "dark">("light");
-	const [isExpanded, setIsExpanded] = React.useState(!isCollapsible);
 
-	React.useEffect(() => {
-		if (typeof window === "undefined") {
-			return;
-		}
-		const updateTheme = () => {
-			const isDark = document.documentElement.classList.contains("dark");
-			setThemeType(isDark ? "dark" : "light");
-		};
-		updateTheme();
-
-		const observer = new MutationObserver(updateTheme);
-		observer.observe(document.documentElement, {
-			attributes: true,
-			attributeFilter: ["class"],
-		});
-
-		return () => {
-			observer.disconnect();
-		};
-	}, []);
-
-	React.useEffect(() => {
-		setIsExpanded(!isCollapsible);
-	}, [isCollapsible]);
-
-	const diffFiles = React.useMemo(() => {
-		const fileLabel = fileName || "file";
+	// Resolve old/new contents the same way the legacy @pierre/diffs path did:
+	// prefer the part's own old/new strings, then the step's parsed diff lines.
+	const diff = useMemo(() => {
 		const oldFromOutput =
 			typeof output?.old_content === "string" ? output.old_content : undefined;
 		const newFromOutput =
@@ -101,147 +89,37 @@ export function EditToolDiffCard({
 		if (!(oldContents || newContents)) {
 			return null;
 		}
-
-		const oldFile: FileContents = {
-			name: fileLabel,
-			contents: oldContents,
+		return {
+			file: fileName ?? "file",
+			lines: diffLines(oldContents, newContents),
 		};
-		const newFile: FileContents = {
-			name: fileLabel,
-			contents: newContents,
-		};
-
-		return { oldFile, newFile };
 	}, [fileName, input, output, step.diffLines]);
 
-	const diffCssVars = React.useMemo(
-		() =>
-			themeType === "dark"
-				? ({
-						"--diffs-bg": "#000",
-						"--diffs-bg-buffer-override": "#000",
-						"--diffs-bg-context-override": "#000",
-						"--diffs-bg-hover-override": "#0a0a0a",
-						"--diffs-bg-separator-override": "#0f0f0f",
-					} as React.CSSProperties)
-				: undefined,
-		[themeType]
-	);
-
-	const diffUnsafeCss = React.useMemo(
-		() =>
-			themeType === "dark"
-				? `
-[data-diff],
-[data-file],
-[data-diffs-header],
-[data-error-wrapper],
-[data-virtualizer-buffer] {
-  --diffs-bg: #000;
-  --diffs-bg-buffer-override: #000;
-  --diffs-bg-context-override: #000;
-  --diffs-bg-hover-override: #0a0a0a;
-  --diffs-bg-separator-override: #0f0f0f;
-}
-`
-				: undefined,
-		[themeType]
-	);
-
-	const diffClassName =
-		"an-edit-diff dark:bg-black dark:[--diffs-bg:#000] dark:[--diffs-bg-buffer-override:#000] dark:[--diffs-bg-context-override:#000] dark:[--diffs-bg-hover-override:#0a0a0a] dark:[--diffs-bg-separator-override:#0f0f0f]";
+	const pendingTitle = isWrite
+		? isPending
+			? "Creating"
+			: "Created"
+		: isPending
+			? "Editing"
+			: "Edited";
 
 	return (
-		<div className="an-edit-tool-card overflow-hidden rounded-[var(--radius)] bg-muted dark:bg-black">
-			<div className="flex h-7 items-center justify-between bg-muted px-2.5 py-0">
-				<div className="flex min-w-0 items-center gap-1.5">
-					{hasFileName && (
-						<FileExtIcon className="h-3 w-3 shrink-0" filename={fileName} />
-					)}
-					{isPending && !diffFiles ? (
-						<TextShimmer as="span" className="text-xs" duration={1.2}>
-							Generating...
-						</TextShimmer>
-					) : isPending ? (
-						<TextShimmer as="span" className="text-xs" duration={1.2}>
-							{isWrite ? "Creating" : "Editing"} {fileName}
-						</TextShimmer>
-					) : (
-						<span className="truncate text-muted-foreground text-xs">
-							{isWrite ? "Created" : "Edited"} {fileName}
-						</span>
-					)}
-				</div>
-				{step.diffStats && !isPending && (
-					<span className="inline-flex gap-2 font-mono text-[11px] text-muted-foreground">
-						{step.diffStats.split(" ").map((token) => (
-							<span
-								className={
-									token.startsWith("+")
-										? "text-emerald-600 dark:text-emerald-400"
-										: token.startsWith("-")
-											? "text-red-600 dark:text-red-400"
-											: undefined
-								}
-								key={token}
-							>
-								{token}
-							</span>
-						))}
-					</span>
-				)}
-			</div>
-			{diffFiles ? (
-				<div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
-					<div
-						className={isCollapsible ? "group/edit-diff relative" : "relative"}
-					>
-						<div
-							className={
-								isCollapsible && !isExpanded
-									? "max-h-[260px] overflow-hidden"
-									: undefined
-							}
-						>
-							<MultiFileDiff
-								className={diffClassName}
-								key={themeType}
-								newFile={diffFiles.newFile}
-								oldFile={diffFiles.oldFile}
-								options={{
-									theme: { dark: "github-dark", light: "github-light" },
-									themeType,
-									unsafeCSS: diffUnsafeCss,
-									diffStyle: "unified",
-									disableFileHeader: true,
-								}}
-								style={diffCssVars}
-							/>
-						</div>
-						{isCollapsible && (
-							<Button
-								aria-label={isExpanded ? "Hide" : "Show more"}
-								className={
-									"group absolute inset-x-0 bottom-0 flex h-16 items-end justify-center pb-2 text-muted-foreground hover:bg-transparent hover:text-foreground" +
-									(isExpanded
-										? "bg-transparent"
-										: "bg-linear-to-b from-transparent to-background")
-								}
-								onClick={() => setIsExpanded((prev) => !prev)}
-								type="button"
-								variant="ghost"
-							>
-								<IconChevronDown
-									className={
-										"h-4 w-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100" +
-										(isExpanded ? "rotate-180" : "rotate-0")
-									}
-								/>
-							</Button>
-						)}
-					</div>
-				</div>
-			) : null}
+		<div className="an-edit-tool-card">
+			{diff ? (
+				<FileDiff
+					collapseOnComplete={isCollapsible && !isPending}
+					defaultOpen={!isCollapsible || isPending}
+					file={hasFileName ? fileName : "file"}
+					language={languageForFile(fileName ?? "file")}
+					lines={diff.lines}
+					maxHeight={360}
+					status={isPending ? "streaming" : "complete"}
+				/>
+			) : (
+				<span className="text-muted-foreground text-sm">
+					{pendingTitle} {fileName}
+				</span>
+			)}
 			{approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
 		</div>
 	);

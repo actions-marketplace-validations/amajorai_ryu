@@ -341,6 +341,7 @@ export const UserMessage = memo(function UserMessage({
 	reactions,
 }: UserMessageProps) {
 	const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+	const lightboxOriginRef = useRef<HTMLElement | null>(null);
 	const textParts = message.parts?.filter(isTextPart) ?? [];
 	const text = textParts.map((p) => p.text).join("");
 
@@ -426,7 +427,12 @@ export const UserMessage = memo(function UserMessage({
 							)}
 							key={i}
 							onClick={
-								enableImagePreview ? () => setLightboxIndex(i) : undefined
+								enableImagePreview
+									? (event) => {
+											lightboxOriginRef.current = event.currentTarget;
+											setLightboxIndex(i);
+										}
+									: undefined
 							}
 						>
 							<img
@@ -444,6 +450,7 @@ export const UserMessage = memo(function UserMessage({
 					initialIndex={lightboxIndex ?? 0}
 					onClose={() => setLightboxIndex(null)}
 					open={lightboxIndex !== null}
+					originRef={lightboxOriginRef}
 				/>
 			)}
 			{files.length > 0 && (

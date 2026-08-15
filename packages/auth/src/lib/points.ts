@@ -67,6 +67,7 @@ export const POINTS_REASONS = [
 	"milestone",
 	"streak_bonus",
 	"referral",
+	"quest",
 	"unlock_spend",
 	"admin_adjust",
 	"paid_grant",

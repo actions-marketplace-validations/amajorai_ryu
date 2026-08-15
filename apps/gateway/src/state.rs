@@ -30,6 +30,7 @@ use crate::{
     semantic_cache::{SemanticCache, SemanticCacheRegistry},
     skills::SkillsRegistry,
     tools::ToolSearchClient,
+    traffic::TrafficBus,
     wasm_policy::WasmPolicyHost,
 };
 
@@ -173,6 +174,10 @@ pub struct AppState {
     /// construction failed, in which case wasm evaluation fails closed. See
     /// [`Self::wasm_host`].
     wasm_host: OnceLock<Option<Arc<WasmPolicyHost>>>,
+    /// Live traffic bus for `GET /v1/traffic`. Every audit record published via
+    /// [`Self::log_audit`] is also broadcast here (redacted), so the desktop's
+    /// live dashboard needs no polling. Inert when no subscriber is connected.
+    pub traffic: TrafficBus,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -385,6 +390,7 @@ impl AppState {
             policy: RwLock::new(EffectivePolicy::default()),
             jobs: MediaJobStore::new(),
             wasm_host: OnceLock::new(),
+            traffic: TrafficBus::new(),
         })
     }
 
@@ -529,6 +535,15 @@ impl AppState {
         }
     }
 
+    /// The gateway's single audit chokepoint: persists the record to the active
+    /// audit backend AND broadcasts a redacted copy to the live traffic bus.
+    /// Every audit call site funnels through here, so the `GET /v1/traffic` feed
+    /// can never miss a request the audit store recorded (and vice-versa).
+    pub fn log_audit(&self, record: crate::audit::AuditRecord) {
+        self.traffic.publish(crate::traffic::traffic_event(&record));
+        self.audit.log(record);
+    }
+
     /// Borrow the auth config for the duration of a closure.
     pub fn with_auth<F, T>(&self, f: F) -> T
     where
@@ -658,6 +673,7 @@ impl AppState {
             policy: RwLock::new(EffectivePolicy::default()),
             jobs: MediaJobStore::new(),
             wasm_host: OnceLock::new(),
+            traffic: TrafficBus::new(),
         }
     }
 }

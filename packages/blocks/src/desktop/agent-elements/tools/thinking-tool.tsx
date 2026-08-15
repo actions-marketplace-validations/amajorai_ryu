@@ -1,4 +1,5 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { AgentActivity } from "@ryu/ui/components/agents/agent-activity";
+import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
 import {
@@ -6,21 +7,6 @@ import {
 	mapToolStateToStepState,
 } from "../utils/tool-adapters.ts";
 import { resolveThinkingStepState } from "./thinking-state.ts";
-import { ToolRowBase } from "./tool-row-base.tsx";
-
-const WHITESPACE_RE = /\s+/;
-
-// Compact "1.2k" / "12k" formatter for a count, keeping one decimal below 10k.
-function formatCompact(n: number): string {
-	if (n < 1000) {
-		return String(n);
-	}
-	const k = Math.round(n / 100) / 10;
-	if (k >= 10) {
-		return `${Math.round(k)}k`;
-	}
-	return `${k}k`;
-}
 
 // "Thought for {N}s" duration, promoting to "{m}m {s}s" past a minute.
 function formatDuration(ms: number): string {
@@ -31,60 +17,6 @@ function formatDuration(ms: number): string {
 	const minutes = Math.floor(totalSec / 60);
 	const seconds = totalSec % 60;
 	return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
-}
-
-// Size hint for a reasoning block: prefer a real token count when the part
-// carries one, else fall back to word (or, failing that, character) count of
-// the reasoning text so the badge degrades gracefully.
-function formatSizeHint(
-	tokenCount: number | undefined,
-	text: string
-): string | null {
-	if (typeof tokenCount === "number" && tokenCount > 0) {
-		return `${formatCompact(tokenCount)} tokens`;
-	}
-	const trimmed = text.trim();
-	if (!trimmed) {
-		return null;
-	}
-	const words = trimmed.split(WHITESPACE_RE).filter(Boolean).length;
-	if (words > 0) {
-		return `${formatCompact(words)} words`;
-	}
-	return `${formatCompact(trimmed.length)} chars`;
-}
-
-// Duration of a reasoning block, in ms, or null when it can't be known.
-//
-// Prefers an explicit `output.totalDurationMs` reported by the engine. Otherwise
-// it measures wall-clock elapsed time while the part is streaming — anchored to
-// the part's `startedAt` when present, else to component mount — and freezes the
-// last measured value the moment streaming ends. A thought loaded from history
-// (never observed streaming, no reported duration) yields null so no bogus badge
-// is shown.
-function useThoughtDurationMs(
-	isAnimating: boolean,
-	startedAt: number | undefined,
-	outputDurationMs: number | undefined
-): number | null {
-	const mountRef = useRef(Date.now());
-	const anchor = typeof startedAt === "number" ? startedAt : mountRef.current;
-	const [elapsedMs, setElapsedMs] = useState(0);
-
-	useEffect(() => {
-		if (!isAnimating) {
-			return;
-		}
-		const update = () => setElapsedMs(Math.max(0, Date.now() - anchor));
-		update();
-		const id = setInterval(update, 500);
-		return () => clearInterval(id);
-	}, [isAnimating, anchor]);
-
-	if (typeof outputDurationMs === "number" && outputDurationMs > 0) {
-		return outputDurationMs;
-	}
-	return elapsedMs > 0 ? elapsedMs : null;
 }
 
 export interface ThinkingCollapsedProps {
@@ -104,9 +36,6 @@ export function ThinkingCollapsed({
 	state,
 	onComplete,
 	defaultOpen,
-	expanded,
-	onToggleExpand,
-	startedAt,
 	outputDurationMs,
 	tokenCount,
 }: ThinkingCollapsedProps) {
@@ -116,86 +45,56 @@ export function ThinkingCollapsed({
 	const reasoningText = step.thoughtContent ?? "";
 	const hasContent = reasoningText.length > 0;
 
-	// Auto-open when thought content first arrives during streaming, and
-	// auto-collapse once streaming ends — while never fighting a manual toggle.
-	const [open, setOpen] = useState(defaultOpen ?? (isAnimating && hasContent));
-	const userToggledRef = useRef(false);
-	const wasAnimatingRef = useRef(isAnimating);
-
-	useEffect(() => {
-		if (userToggledRef.current) {
-			wasAnimatingRef.current = isAnimating;
-			return;
+	// Duration: prefer an engine-reported number, else freeze the wall-clock
+	// elapsed time measured while streaming. A thought loaded from history with
+	// no reported duration yields null so no bogus badge is shown.
+	const durationLabel = useMemo(() => {
+		if (typeof outputDurationMs === "number" && outputDurationMs > 0) {
+			return formatDuration(outputDurationMs);
 		}
-		if (isAnimating && hasContent) {
-			setOpen(true);
-		} else if (!isAnimating && wasAnimatingRef.current) {
-			// Reasoning just completed — collapse to a tidy one-line summary.
-			setOpen(false);
+		return null;
+	}, [outputDurationMs]);
+
+	const sizeHint = useMemo(() => {
+		if (typeof tokenCount === "number" && tokenCount > 0) {
+			return `${tokenCount} tokens`;
 		}
-		wasAnimatingRef.current = isAnimating;
-	}, [isAnimating, hasContent]);
+		const trimmed = reasoningText.trim();
+		if (!trimmed) {
+			return null;
+		}
+		return `${trimmed.split(/\s+/).filter(Boolean).length} words`;
+	}, [reasoningText, tokenCount]);
 
-	const durationMs = useThoughtDurationMs(
-		isAnimating,
-		startedAt,
-		outputDurationMs
-	);
-	const durationLabel = durationMs === null ? null : formatDuration(durationMs);
-	const sizeHint = formatSizeHint(tokenCount, reasoningText);
-
-	// When complete the duration lives in the label ("Thought for 5s"), so the
-	// detail carries only the size hint. While streaming the label shimmers
-	// ("Thinking"), so surface the live duration + size in the detail instead.
-	const completeLabel = durationLabel
+	const summary = durationLabel
 		? `Thought for ${durationLabel}`
 		: "Thought";
-	const detail = isAnimating
-		? [durationLabel, sizeHint].filter(Boolean).join(" · ") || undefined
-		: (sizeHint ?? undefined);
 
-	const body = (
-		<div className="max-h-[175px] overflow-y-auto">
-			<p className="whitespace-pre-wrap text-muted-foreground text-sm">
-				{reasoningText}
-			</p>
-		</div>
+	const items = useMemo(
+		() => [
+			{
+				id: step.id ?? "thinking",
+				type: "step" as const,
+				label: hasContent ? reasoningText : "Thinking",
+				status: isAnimating ? ("active" as const) : ("complete" as const),
+				meta: isAnimating
+					? [durationLabel, sizeHint].filter(Boolean).join(" · ") || undefined
+					: (sizeHint ?? undefined),
+			},
+		],
+		[hasContent, isAnimating, reasoningText, sizeHint, durationLabel, step.id]
 	);
 
-	// If controlled from outside, delegate fully to the caller.
-	if (expanded !== undefined) {
-		return (
-			<ToolRowBase
-				completeLabel={completeLabel}
-				detail={detail}
-				expandable={hasContent}
-				expanded={expanded}
-				isAnimating={isAnimating}
-				onToggleExpand={onToggleExpand}
-				shimmerLabel="Thinking"
-			>
-				{body}
-			</ToolRowBase>
-		);
-	}
-
-	const handleToggle = () => {
-		userToggledRef.current = true;
-		setOpen((prev) => !prev);
-	};
-
 	return (
-		<ToolRowBase
-			completeLabel={completeLabel}
-			detail={detail}
-			expandable={hasContent}
-			expanded={open}
-			isAnimating={isAnimating}
-			onToggleExpand={handleToggle}
-			shimmerLabel="Thinking"
-		>
-			{body}
-		</ToolRowBase>
+		<AgentActivity
+			activeLabel="Thinking"
+			collapseOnComplete={!hasContent}
+			contentType="step"
+			defaultOpen={defaultOpen ?? (isAnimating && hasContent)}
+			items={items}
+			status={isAnimating ? "working" : "complete"}
+			summary={summary}
+		/>
 	);
 }
 
@@ -225,8 +124,6 @@ export const ThinkingTool = memo(function ThinkingTool({
 	state: externalState,
 	onComplete: externalOnComplete,
 	defaultOpen,
-	expanded,
-	onToggleExpand,
 }: ThinkingToolProps) {
 	let step: Extract<TimelineStep, { type: "tool-call" }>;
 	let stepState: StepState;
@@ -276,9 +173,6 @@ export const ThinkingTool = memo(function ThinkingTool({
 	// Timing + size metadata, read with the same conventions sibling tools use
 	// (see subagent-tool.tsx): the engine may stamp `startedAt` in provider
 	// metadata and report a final duration / reasoning-token count on the output.
-	const startedAt =
-		(part?.callProviderMetadata?.custom?.startedAt as number | undefined) ??
-		(part?.startedAt as number | undefined);
 	const outputDurationMs =
 		(part?.output?.totalDurationMs as number | undefined) ??
 		(part?.output?.duration as number | undefined) ??
@@ -290,11 +184,8 @@ export const ThinkingTool = memo(function ThinkingTool({
 	return (
 		<ThinkingCollapsed
 			defaultOpen={defaultOpen}
-			expanded={expanded}
 			onComplete={onComplete}
-			onToggleExpand={onToggleExpand}
 			outputDurationMs={outputDurationMs}
-			startedAt={startedAt}
 			state={stepState}
 			step={step}
 			tokenCount={tokenCount}

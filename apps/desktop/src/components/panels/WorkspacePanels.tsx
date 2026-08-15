@@ -11,6 +11,7 @@ import {
 	FolderOpenIcon,
 	Globe02Icon,
 	Megaphone01Icon,
+	MonitorDotFreeIcons,
 	PieChartIcon,
 	PinIcon,
 	PinOffIcon,
@@ -83,6 +84,7 @@ import {
 	extractSubagents,
 } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CrmPanel } from "@/src/components/panels/crm/CrmPanel.tsx";
+import { DesktopStreamPanel } from "@/src/components/panels/DesktopStreamPanel.tsx";
 import {
 	type BuiltinTabKind,
 	type DockSide,
@@ -567,6 +569,10 @@ type TabKind = DockTabKind;
 const DockRouteHostContext = createContext(false);
 
 interface PanelTab {
+	/** The artifact this artifact tab shows (only `kind === "artifact"`). Each
+	 *  artifact gets its OWN tab — opening a second artifact never replaces the
+	 *  first (the dock's artifact surface has no one-at-a-time limit). */
+	artifact?: Artifact;
 	kind: TabKind;
 	label: string;
 	/** True when this tab is project-shared (visible in every chat for the folder). */
@@ -683,12 +689,18 @@ function contributedTabType(panel: PluginDockPanel): TabTypeDef {
 }
 
 let tabCounter = 0;
-function makeTab(kind: TabKind, label: string, n?: number): PanelTab {
+function makeTab(
+	kind: TabKind,
+	label: string,
+	n?: number,
+	artifact?: Artifact
+): PanelTab {
 	tabCounter += 1;
 	return {
 		uid: `tab-${tabCounter}`,
 		kind,
 		label: n == null ? label : `${label} ${n}`,
+		artifact,
 	};
 }
 
@@ -701,6 +713,27 @@ function usePanelTabs(initial: PanelTab[]) {
 		const tab = makeTab(kind, label, sameKind.length + 1);
 		setTabs((prev) => [...prev, tab]);
 		setActiveUid(tab.uid);
+		return tab.uid;
+	};
+
+	/** Open one ARTIFACT per tab: focus the existing tab showing the same artifact
+	 *  id, or stack a new one. This is what lets several artifacts sit side by
+	 *  side in the dock (no one-at-a-time limit) while re-opening one re-focuses. */
+	const openArtifact = (artifact: Artifact) => {
+		const existing = tabs.find(
+			(t) => t.kind === "artifact" && t.artifact?.id === artifact.id
+		);
+		if (existing) {
+			setTabs((prev) =>
+				prev.map((t) => (t.uid === existing.uid ? { ...t, artifact } : t))
+			);
+			setActiveUid(existing.uid);
+			return existing.uid;
+		}
+		const tab = makeTab("artifact", artifact.title, undefined, artifact);
+		setTabs((prev) => [...prev, tab]);
+		setActiveUid(tab.uid);
+		return tab.uid;
 	};
 
 	const closeTab = (uid: string) => {
@@ -761,6 +794,7 @@ function usePanelTabs(initial: PanelTab[]) {
 		closeOthers,
 		closeAll,
 		adoptTab,
+		openArtifact,
 		openTab,
 	};
 }
@@ -2613,6 +2647,10 @@ const NATIVE_DOCK_PANELS: Record<string, NativeDockPanelDef> = {
 		icon: UserGroupIcon,
 		render: () => <CrmPanel />,
 	},
+	"@ryu/desktop/desktop": {
+		icon: MonitorDotFreeIcons,
+		render: () => <DesktopStreamPanel />,
+	},
 };
 
 function DockPanelPlaceholder({ text }: { text: string }) {
@@ -2781,10 +2819,8 @@ function TabContent({
 	cowork,
 	dockPanels,
 	subagentView,
-	artifactView,
 	inspectorView,
 }: {
-	artifactView?: Artifact | null;
 	/** Live (not snapshotted) inputs for the context-breakdown tab. */
 	contextView?: ContextPanelView | null;
 	cowork?: CoworkData;
@@ -2829,14 +2865,14 @@ function TabContent({
 		);
 	}
 	if (tab.kind === "artifact") {
-		if (!artifactView) {
+		if (!tab.artifact) {
 			return (
 				<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
 					This artifact is no longer available.
 				</div>
 			);
 		}
-		return <ArtifactRenderer artifact={artifactView} />;
+		return <ArtifactRenderer artifact={tab.artifact} />;
 	}
 	if (tab.kind === "codereview") {
 		return <PatchDiffPanel folder={folder} key={`${tab.uid}-${folder}`} />;
@@ -3343,8 +3379,8 @@ function WorkspacePanelsImpl({
 		},
 		[apps, dockPanels, subagentView]
 	);
-	// The artifact currently pinned to the right panel's artifact tab (if any).
-	const [artifactView, setArtifactView] = useState<Artifact | null>(null);
+	// The artifact is carried ON the artifact tab itself (each artifact = one tab),
+	// so there is no separate pinned artifact view — see `openArtifact`.
 	// The raw message part currently pinned to the right panel's inspector tab.
 	const [inspectorView, setInspectorView] = useState<InspectedPart | null>(
 		null
@@ -3368,13 +3404,16 @@ function WorkspacePanelsImpl({
 		openRightTabRef.current("subagent", subagentName(subagentRequest.id));
 	}, [subagentRequest]);
 
-	// Same one-tab-reuse + nonce-refocus flow for rendered/canvas artifacts.
+	// Rendered/canvas artifacts: each one opens its OWN dock tab (no one-at-a-time
+	// limit), and re-opening the same artifact re-focuses it. `openArtifact` is
+	// re-created each render, so hold it in a ref and depend only on the request.
+	const openArtifactRef = useRef(rightLocal.openArtifact);
+	openArtifactRef.current = rightLocal.openArtifact;
 	useEffect(() => {
 		if (!artifactRequest) {
 			return;
 		}
-		setArtifactView(artifactRequest.artifact);
-		openRightTabRef.current("artifact", artifactRequest.artifact.title);
+		openArtifactRef.current(artifactRequest.artifact);
 	}, [artifactRequest]);
 
 	// Same one-tab-reuse + nonce-refocus flow for the raw part inspector. The
@@ -3750,7 +3789,6 @@ function WorkspacePanelsImpl({
 					<ProjectDockContentSlot active uid={activeRightTab.uid} />
 				) : activeRightTab ? (
 					<TabContent
-						artifactView={artifactView}
 						contextView={contextView}
 						cowork={cowork}
 						dockPanels={dockPanels}

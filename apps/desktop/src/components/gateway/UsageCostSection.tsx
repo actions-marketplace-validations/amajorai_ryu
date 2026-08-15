@@ -179,7 +179,7 @@ function ProviderQuotaCard({ metrics }: { metrics: GatewayMetrics | null }) {
 
 	return (
 		<SettingsSection
-			caption="Live upstream rate-limit windows reported by each provider. The countdown ticks down between polls; a provider only appears once its quota headers have been seen at least once."
+			caption="Live upstream rate-limit windows reported by each provider. The countdown ticks down between polls; a provider only appears after its quota headers have been seen once."
 			title="Provider quota"
 		>
 			{entries.length === 0 ? (
@@ -315,7 +315,9 @@ function MetricTile({ label, value }: { label: string; value: string }) {
 	return (
 		<div className="rounded-lg bg-muted/40 p-3">
 			<div className="text-muted-foreground text-xs">{label}</div>
-			<div className="mt-1 font-semibold text-lg tabular-nums">{value}</div>
+			<div className="mt-1 font-heading font-semibold text-lg tabular-nums">
+				{value}
+			</div>
 		</div>
 	);
 }
@@ -647,7 +649,11 @@ function ProviderCreditsRow({ providerId }: { providerId: string }) {
 	return (
 		<SettingsItem
 			actions={
-				<span className="text-muted-foreground text-sm tabular-nums">
+				<span
+					className={`text-muted-foreground text-sm tabular-nums ${
+						amount ? "font-heading" : ""
+					}`}
+				>
 					{value}
 				</span>
 			}

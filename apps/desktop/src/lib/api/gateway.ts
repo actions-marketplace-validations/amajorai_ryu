@@ -5,7 +5,7 @@
 // /health and /metrics and returns a combined snapshot, or a clear down state
 // (`reachable: false`) when the gateway is unreachable while Core is still up.
 
-import { type ApiTarget, request } from "./client.ts";
+import { apiUrl, type ApiTarget, request, requestHeaders } from "./client.ts";
 import { restartGateway } from "./system.ts";
 
 /** Gateway `/health` payload (status, version, providers, auth flag). */
@@ -1981,6 +1981,138 @@ export async function removeByoaKey(
 	const cfg = await fetchGatewayConfig(target);
 	const next = (cfg.auth?.api_keys ?? []).filter((k) => k.name !== name);
 	return updateGatewayConfig(target, { auth: { api_keys: next } });
+}
+
+// ── Live traffic (SSE via Core proxy) ────────────────────────────────────────
+//
+// Core proxies the gateway's admin-gated `GET /v1/traffic` SSE stream at
+// `/api/gateway/traffic`, forwarding the gateway bearer token server-side so the
+// desktop never holds the master key. The stream is seeded with the recent ring
+// buffer on connect (newest last), then pushes every completed request as an
+// `event: traffic` + `data:` pair.
+
+/** A single redacted live-traffic event (the gateway's `/v1/traffic` payload). */
+export interface TrafficEvent {
+	/** API key, truncated to its prefix (`sk-sec***`). Never a full key. */
+	api_key: string;
+	/** Gateway-internal request id. */
+	request_id: string;
+	/** Provider that served the request (e.g. "openai", "anthropic"). */
+	provider: string;
+	/** Model name as seen by the gateway. */
+	model: string;
+	/** Input tokens billed (0 on error). */
+	input_tokens: number;
+	/** Output tokens billed (0 on error). */
+	output_tokens: number;
+	/** Whether the gateway's own response cache answered. */
+	cache_hit: boolean;
+	/** Wall-clock latency in milliseconds. */
+	latency_ms: number;
+	/** Error message, when the request failed. */
+	error: string | null;
+	/** Event type — "model_call" for LLM calls. */
+	event_type: string;
+	/** Core session/conversation id, when tagged. */
+	session_id: string | null;
+	/** ISO-8601 timestamp when the event was published. */
+	ts: string;
+}
+
+/**
+ * Subscribe to the gateway's live traffic feed via Core's proxy.
+ *
+ * Returns an unsubscribe function. The connection is created on demand and torn
+ * down when the last subscriber unsubscribes. On gateway-down Core returns a
+ * short `{ reachable: false }` JSON body instead of an SSE stream; the
+ * subscription surfaces it as an error and closes (the caller reconnects via
+ * its own retry loop).
+ */
+export function subscribeGatewayTraffic(
+	target: ApiTarget,
+	onEvent: (event: TrafficEvent) => void,
+	onError?: (message: string) => void
+): () => void {
+	const url = apiUrl(target, "/api/gateway/traffic");
+	const controller = new AbortController();
+	const open = async (): Promise<void> => {
+		try {
+			const resp = await fetch(url, {
+				headers: await requestHeaders(target),
+				signal: controller.signal,
+			});
+			if (!resp.ok) {
+				onError?.(`traffic feed returned ${resp.status}`);
+				return;
+			}
+			const contentType = resp.headers.get("content-type") ?? "";
+			if (!contentType.includes("text/event-stream")) {
+				// Core answered a fail-soft JSON body (`{reachable:false}`) instead
+				// of a stream — the gateway is down or auth-gated.
+				const text = await resp.text().catch(() => "");
+				let message = "traffic feed unavailable";
+				try {
+					const parsed = JSON.parse(text) as {
+						error?: unknown;
+						reachable?: boolean;
+					};
+					if (parsed.error) {
+						message = `traffic feed: ${String(parsed.error)}`;
+					} else if (parsed.reachable === false) {
+						message = "traffic feed: gateway unreachable";
+					}
+				} catch {
+					// Not JSON — fall through to the generic message.
+				}
+				onError?.(message);
+				return;
+			}
+
+			const reader = resp.body?.getReader();
+			if (!reader) {
+				onError?.("traffic feed: no response body");
+				return;
+			}
+			const decoder = new TextDecoder();
+			let buffer = "";
+			// eslint-disable-next-line no-constant-condition
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+				buffer += decoder.decode(value, { stream: true });
+				// Split on event boundaries: `event: traffic\ndata: {…}\n\n`.
+				let idx: number;
+				while ((idx = buffer.indexOf("\n\n")) !== -1) {
+					const frame = buffer.slice(0, idx);
+					buffer = buffer.slice(idx + 2);
+					const dataLine = frame
+						.split("\n")
+						.find((l) => l.startsWith("data:"))
+						?.slice(5)
+						.trim();
+					if (!dataLine || dataLine === "[DONE]") {
+						continue;
+					}
+					try {
+						const parsed = JSON.parse(dataLine) as TrafficEvent;
+						onEvent(parsed);
+					} catch {
+						// Malformed frame — skip; the stream continues.
+					}
+				}
+			}
+		} catch (error) {
+			if (controller.signal.aborted) {
+				return; // Tear-down, not an error.
+			}
+			onError?.(error instanceof Error ? error.message : "traffic feed failed");
+		}
+	};
+
+	void open();
+	return () => controller.abort();
 }
 
 // ── Gateway audit proxy (M4 / #177) ──────────────────────────────────────────

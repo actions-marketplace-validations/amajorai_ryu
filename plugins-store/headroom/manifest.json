@@ -1,7 +1,7 @@
 {
   "id": "@ryu/headroom",
   "name": "Headroom Compression",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Developer Tools",
   "description": "Context compression (chopratejas/headroom): compress tool outputs, logs, files, and RAG chunks. 60-95% fewer tokens, reversible retrieval. Requires headroom-ai[mcp].",
   "tagline": "Compress noisy context down to a fraction of its tokens",

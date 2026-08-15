@@ -1,7 +1,7 @@
 {
   "id": "@ryu/output-styles",
   "name": "Output Styles",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "category": "Productivity",
   "description": "The nine built-in output styles \u2014 ELI5, I have ADHD, Explanatory, Learning, Proactive, Plain text, No AI slop, Bro and Gen Z. A style is appended to (or replaces) the agent's base instructions for the turn, so it changes how the agent talks \u2014 role, tone, default response shape \u2014 and never what it knows, which tools it has, or which model runs. Pick one in the composer; browse them in the Store's Output Styles tab.",
   "tagline": "Change how the agent talks, not what it knows",

@@ -385,7 +385,7 @@ fn emit_audit(
     agent_id: Option<String>,
     feature: Option<String>,
 ) {
-    state.audit.log(AuditRecord {
+    state.log_audit(AuditRecord {
         request_id: format!(
             "pt-{}-{}",
             provider_label(format),

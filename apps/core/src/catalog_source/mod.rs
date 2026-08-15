@@ -18,7 +18,7 @@ mod github_topic;
 pub(crate) mod manifest_surface;
 mod registry;
 pub(crate) mod skill_registries;
-mod sources;
+pub(crate) mod sources;
 
 pub use github_topic::{
     GithubTopicSource, COMMUNITY_ORIGIN, GITHUB_TOKEN_PREF, GITHUB_TOPIC_SOURCE_ID,

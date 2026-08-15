@@ -49,13 +49,13 @@ pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
     SystemPlugin {
         manifest_id: "@ryu/ghost",
         sidecar_name: "@ryu/ghost",
-        windows_first: true,
+        windows_first: false,
         local_only: true,
     },
     SystemPlugin {
         manifest_id: "@ryu/shadow",
         sidecar_name: "@ryu/shadow",
-        windows_first: true,
+        windows_first: false,
         local_only: true,
     },
     // (Spider is NO LONGER a system plugin: it became a declarative `command`
@@ -579,6 +579,16 @@ pub const CORE_PLUGINS: &[&str] = &[
     // two default providers of `web.search` would make the choice depend on
     // manifest ordering. exa keeps it; parallel is the swap you opt into.
     "@ryu/exa",
+    // The Ryu Docs MCP plugin — read-only access to the docs site
+    // (docs.ryuhq.com/mcp) as MCP tools. Core-tier is a REQUIREMENT, not a
+    // promotion, for the same reason `scrapling` is: `may_register_mcp_servers`
+    // auto-allows a manifest's `mcp_servers` only for compiled-in fixtures, and
+    // the Community path needs the approved `mcp:server` grant — off the
+    // Gateway's default allowlist and in a reserved namespace, so operator-only.
+    // A Community-tier docs would register nothing and be dead on arrival.
+    // Unlike `scrapling` it needs no install step: the server is REMOTE (a hosted
+    // https URL, not a spawned command), so it is also in `CORE_DEFAULT_ON`.
+    "@ryu/docs",
     // The two Pi extensions that stopped being hardcoded: background bash and
     // sub-agents. Core-tier is a REQUIREMENT, not a promotion, exactly as for
     // `scrapling` above — `pi_config::app_extensions::may_ship_pi_extensions`
@@ -588,6 +598,15 @@ pub const CORE_PLUGINS: &[&str] = &[
     // the move, so anything else is a silent capability regression.
     "@ryu/pi-shell",
     "@ryu/pi-subagent",
+    // The third Pi extension: the `monitor` tool (a from-scratch port of Claude
+    // Code's Monitor for the managed Pi agent). Core-tier is a REQUIREMENT for
+    // the same reason as its siblings — `may_ship_pi_extensions` auto-allows
+    // only compiled-in manifests, and the Community path needs the operator-only
+    // `pi:extension` grant. Unlike them it is NET-NEW rather than previously
+    // unconditional, but it still sits in `CORE_DEFAULT_ON` (see below): a
+    // default-off mirror of a first-class Claude Code tool would read as a
+    // regression.
+    "@ryu/pi-monitor",
     // Workspace real-Chromium browser sidecar — core built-in, installable from the
     // Store but NOT default-on (no publishable sidecar asset; see `CORE_DEFAULT_ON`).
     BROWSER_PLUGIN_ID,
@@ -923,6 +942,13 @@ pub const CORE_PLUGINS: &[&str] = &[
     // whose companion bundle was seeded and must be un-seeded, and this is a native
     // dock-panel app (`companion: null`) that never had one.
     SIMULATOR_PLUGIN_ID,
+    // Virtual Desktop — the same posture as simulator, for the same reason: the
+    // `ryu-desktop` sidecar wraps a real virtual-desktop toolchain (xvfb, a window
+    // manager, tigervnc) that a normal install does not carry, so it is opt-in from
+    // the Store and its native dock panel prompts to install it. Absent from
+    // `seed::NOT_PRE_INSTALLED`: it is a native dock-panel app (`companion: null`),
+    // so there is no companion bundle to un-seed.
+    "@ryu/desktop",
 ];
 
 /// The subset of [`CORE_PLUGINS`] that should be **enabled by default** on a
@@ -954,6 +980,13 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // off takes effect in a new chat (Pi reads its extensions at process start).
     "@ryu/pi-shell",
     "@ryu/pi-subagent",
+    // `monitor` for the managed Pi agent. Default-on for the same reason the
+    // other two are: it is a first-class capability (Claude Code's Monitor, ported
+    // from scratch) that the flagship agent simply should have; a fresh install
+    // that defaulted it off would quietly lack the one tool this plugin exists to
+    // add. Toggling it off takes effect in a new chat (Pi reads its extensions at
+    // process start), exactly like its siblings.
+    "@ryu/pi-monitor",
     // The default tool apps — auto-installed (record seeded enabled) on a fresh
     // install so they show up like the auto-downloaded default models. The actual
     // process runs through its own sidecar/MCP lifecycle; enabling the record just
@@ -999,6 +1032,13 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     // `RYU_EXA_API_KEY` is set (see fixtures/exa.manifest.json). Every other
     // search provider is BYOK-only and stays opt-in.
     "@ryu/exa",
+    // `docs` is default-ON so every agent can look up Ryu documentation without
+    // leaving the chat. Unlike its sibling default-on tool apps it needs no
+    // binary and no key: the MCP server is REMOTE (`https://docs.ryuhq.com/mcp`),
+    // so registration never depends on a probe and the tools are simply there
+    // whenever the docs site is reachable — a fail-open read of a public site,
+    // the same posture as `web_fetch`.
+    "@ryu/docs",
     // NOTE: @ryu/browser is deliberately NOT default-on, and this is the one
     // membership decision here that is driven by RELEASE reality rather than product
     // taste. It was default-on ("so the Browser tab uses the real-Chromium sidecar out
@@ -1478,12 +1518,18 @@ mod tests {
     fn find_system_plugin_returns_correct_metadata() {
         let ghost = find_system_plugin("@ryu/ghost").expect("ghost must be found");
         assert_eq!(ghost.sidecar_name, "@ryu/ghost");
-        assert!(ghost.windows_first);
+        assert!(
+            !ghost.windows_first,
+            "ghost is cross-platform (Windows/macOS/Linux backends)"
+        );
         assert!(ghost.local_only);
 
         let shadow = find_system_plugin("@ryu/shadow").expect("shadow must be found");
         assert_eq!(shadow.sidecar_name, "@ryu/shadow");
-        assert!(shadow.windows_first);
+        assert!(
+            !shadow.windows_first,
+            "shadow capture is cross-platform (Windows/macOS/Linux)"
+        );
         assert!(shadow.local_only);
     }
 

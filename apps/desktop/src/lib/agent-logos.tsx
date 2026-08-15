@@ -44,6 +44,19 @@ export const REGISTRY_LOGO_SLUGS: Record<
 	"mistral-vibe": { light: "mistral-ai_logo", dark: "mistral-ai_logo_dark" },
 	opencode: { light: "opencode", dark: "opencode-dark" },
 	"qwen-code": { light: "qwen_light", dark: "qwen_dark" },
+	// Curated agents (no ACP registry entry) that bundle an upstream brand mark.
+	// Keys are the `acp:`-stripped engine id, which is what `normalizeEngine`
+	// yields for these entries. Sources: svgl (docker), the agent's own site
+	// favicon/brand asset (openhands, blackbox, prime, localharness, agentpool),
+	// or the upstream repo's mark (raxol, bub).
+	agentpool: "agentpool",
+	blackbox: "blackbox",
+	bub: "bub",
+	"docker-agent": "docker",
+	localharness: "localharness",
+	openhands: "openhands",
+	prime: "prime",
+	raxol: "raxol",
 };
 
 /** The registry brand mark for an agent id, as a {@link LogoConfig}. */

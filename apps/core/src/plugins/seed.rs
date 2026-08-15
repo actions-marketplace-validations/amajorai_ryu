@@ -2117,14 +2117,17 @@ mod tests {
         assert!(skipped.is_empty(), "absent != unsatisfiable");
     }
 
-    /// A fresh install must seed the two Pi-extension plugins INSTALLED + ENABLED.
+    /// A fresh install must seed the Pi-extension plugins INSTALLED + ENABLED.
     ///
     /// Pinned separately from the lockstep check below because the failure is
     /// invisible: `pi_config::app_extensions` resolves over the *enabled record set*,
     /// so an id that never gets an enabled record materializes nothing and the
-    /// flagship agent silently loses background bash and sub-agents. Before these
-    /// were plugins, Core shipped both unconditionally — a fresh install losing them
-    /// would be a pure regression, with a missing tool as its only symptom.
+    /// flagship agent silently loses background bash, sub-agents and the monitor.
+    /// Before `pi-shell`/`pi-subagent` were plugins, Core shipped both
+    /// unconditionally — a fresh install losing them would be a pure regression,
+    /// with a missing tool as its only symptom. `pi-monitor` is net-new but
+    /// default-on by design (a first-class capability the flagship should have),
+    /// so the same guard pins it too.
     ///
     /// Two axes have to hold, and they are genuinely separate (see
     /// [`NOT_PRE_INSTALLED`]): the id is in `CORE_DEFAULT_ON` (so `default_on_specs`
@@ -2133,7 +2136,7 @@ mod tests {
     #[test]
     fn the_pi_extension_plugins_are_seeded_enabled_on_a_fresh_install() {
         let specs = default_on_specs();
-        for id in ["@ryu/pi-shell", "@ryu/pi-subagent"] {
+        for id in ["@ryu/pi-shell", "@ryu/pi-subagent", "@ryu/pi-monitor"] {
             assert!(
                 specs.iter().any(|s| s.id == id),
                 "'{id}' has no default-on seed spec, so a fresh install would never create \

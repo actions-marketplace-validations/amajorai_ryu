@@ -211,10 +211,12 @@ export function Insights({
 						<div className="mb-2 flex items-baseline justify-between gap-2">
 							<h3 className="font-medium text-sm">Pipeline</h3>
 							<span className="text-muted-foreground text-xs">
-								{formatCents(
-									pipeline.total_value_cents,
-									pipeline.currency_code
-								)}{" "}
+								<span className="font-heading tabular-nums">
+									{formatCents(
+										pipeline.total_value_cents,
+										pipeline.currency_code
+									)}
+								</span>{" "}
 								across {pipeline.total_records.toLocaleString()} ·{" "}
 								{Math.round(pipeline.win_rate * 100)}% win rate
 							</span>
@@ -243,7 +245,7 @@ export function Insights({
 												</Badge>
 											)}
 										</span>
-										<span className="shrink-0 text-muted-foreground text-xs tabular-nums">
+										<span className="shrink-0 font-heading text-muted-foreground text-xs tabular-nums">
 											{stage.record_count} ·{" "}
 											{formatCents(stage.value_cents, pipeline.currency_code)}
 										</span>

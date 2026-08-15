@@ -7,6 +7,11 @@ import type { CustomToolRendererProps, WidgetAvailablePart } from "../types.ts";
 import { getToolStatus } from "../utils/format-tool.ts";
 import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 import { useWidgetHost } from "../widget-host-context.tsx";
+import {
+	ArtifactTool,
+	artifactIdForPart,
+	isArtifactPart,
+} from "./artifact-tool.tsx";
 import { BashTool } from "./bash-tool.tsx";
 import { EditTool } from "./edit-tool.tsx";
 import { GenericTool } from "./generic-tool.tsx";
@@ -132,6 +137,14 @@ const ToolRendererInner = memo(function ToolRendererInner({
 	const { groupToolUses, expandFileEdits, expandCommands } =
 		useChatDisplayPrefs();
 	const widgetHost = useWidgetHost();
+
+	// Built-in artifact surface (artifact__render inline, or artifact__create's
+	// created file): render the agent's artifact as a live card with an "Open in
+	// panel / tab" affordance. Rendered through the desktop-injected host, so it
+	// degrades to a plain tool row on surfaces without one.
+	if (isArtifactPart(partType, part.toolName)) {
+		return <ArtifactTool id={artifactIdForPart(part.toolCallId)} part={part} />;
+	}
 
 	// Generative UI (ui__render): render the agent's spec inline as the app's own
 	// @ryu/ui components instead of a tool row. Core surfaces it either as a typed

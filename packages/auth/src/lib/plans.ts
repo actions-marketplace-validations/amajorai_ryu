@@ -14,15 +14,18 @@
  * env var. See `docs/polar-products.md` for the products/prices/benefits that
  * must be created in Polar and which env vars carry their ids.
  *
- * Pricing decisions (defaults, epic #496):
- *  - Desktop license  one-time $99 (Polar license-key benefit, 7-day trial,
- *                     1yr updates). Grants desktop access, NO managed inference.
- *  - Pro              $39/mo ($390/yr, 2 months free) + 50% included credit pool.
- *  - Max              $200/mo ($2000/yr, 2 months free) + $150/mo included pool (75%).
- *  - Teams            $39/seat/mo (min 2) + $19.50/seat/mo pool (50%). Org-scoped.
- *                     Deliberately priced AT Pro, not above it — see
+ * Pricing decisions (defaults, epic #496 — repriced 2026-08-14, see
+ * docs/pricing-decision-2026-08-14.md):
+ *  - Desktop license  one-time $69 list (launch $29 via the LAUNCH29 discount;
+ *                     Polar license-key benefit, 7-day trial, 1yr updates).
+ *                     Grants desktop access, NO managed inference.
+ *  - Pro              $39/mo ($390/yr, 2 months free) + $15/mo included pool.
+ *  - Max              $99/mo ($990/yr, 2 months free) + $30/mo included pool.
+ *  - Teams            $49/seat/mo (min 2) + $15/seat/mo pool. Org-scoped; a
+ *                     governance premium over Pro — see
  *                     {@link PLAN_MONTHLY_PRICE_MICRO_USD}.
- *  - Credits top-up   deposit fee 6% + $1.00 floor; usage debits AT COST (markup 0).
+ *  - Credits top-up   deposit fee 15% base (13% Pro, 12% Max/Teams) + $2.40
+ *                     floor; usage debits AT COST (markup 0).
  *
  * The credit pool / markup is captured at DEPOSIT, not per-usage. The wallet is
  * USD-denominated in micro-USD (millionths of a dollar) to match
@@ -252,7 +255,7 @@ export const topupBreakEvenUsd = (bps: number): number =>
  * TOP-UPS REQUIRE A SUBSCRIPTION. `POST /api/credits/topup` refuses any
  * entitlement without `managedInference`, so free users AND Lifetime licence
  * holders cannot top up at all — renting Ryu's keys is a subscription feature,
- * and letting a one-time $99 licence buy credits forever would make Pro
+ * and letting a one-time $69 licence buy credits forever would make Pro
  * pointless. The `desktop-license` row below is therefore UNREACHABLE in
  * practice; it exists so the map is total over `PlanId` and a future policy
  * change has an obvious place to land, not because Lifetime has a rate.
@@ -376,7 +379,7 @@ export const includedCreditPoolMicroUsd = (
  * {@link includedCreditPoolMicroUsd}, never hand-typed per row.
  */
 export const PLAN_MONTHLY_PRICE_MICRO_USD: Record<PlanId, number> = {
-	"desktop-license": 0, // one-time $99 — no recurring price
+	"desktop-license": 0, // one-time $69 list — no recurring price
 	pro: usdToMicro(39),
 	// Ryu Max — $99/mo, down from $200.
 	//
@@ -553,7 +556,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		name: "Ryu Desktop",
 		desktopAccess: true,
 		managedInference: false,
-		// One-time $99 license — no RECURRING price, so the 50% rule derives a 0
+		// One-time $69 list license — no RECURRING price, so the 50% rule derives a 0
 		// monthly grant (no managed inference).
 		monthlyPriceMicroUsd: PLAN_MONTHLY_PRICE_MICRO_USD["desktop-license"],
 		monthlyCreditPoolMicroUsd: includedCreditPoolMicroUsd(
@@ -566,7 +569,7 @@ export const PLANS: Record<PlanId, Plan> = {
 		emailBrandingRemovable: false,
 		seatModel: { kind: "single" },
 		bindings: {
-			// One-time $99 with a Polar license-key benefit + 7-day trial. Defaults
+			// One-time $69 list ($29 launch) with a Polar license-key benefit + 7-day trial. Defaults
 			// to the existing "lifetime" sandbox product until a dedicated
 			// desktop-license product is created (see docs).
 			one_time: {
@@ -1135,7 +1138,7 @@ export const managedInferenceAvailable = (
 /* -------------------------------------------------------------------------- *
  * Desktop trial + paywall gate (epic #496, Unit C1).
  *
- * The desktop is a PAID product (one-time $99 license or a Pro/Max/Teams sub),
+ * The desktop is a PAID product (one-time $69 license or a Pro/Max/Teams sub),
  * but Ryu is open-core: BASIC local/free chat must stay usable forever. So the
  * gate covers only Pro features + managed inference; it never blocks the app
  * shell. A fresh install gets a 7-day trial of full access; after expiry, with

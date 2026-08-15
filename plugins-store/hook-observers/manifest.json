@@ -1,7 +1,7 @@
 {
   "id": "@ryu/hook-observers",
   "name": "Hook Observers",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "A worked reference for the turn-hook events Ryu can fire: five observer hooks watching subagent-stop, session-end, notification, workflow-run-failed, and a third-party app event (`com.ryu.meetings#meeting.ended`), each returning a harmless note. Nothing in Core knows this plugin exists — copy the directory as the starting point for your own event-driven plugin.",
   "tagline": "Reference plugin: one observer per hook event",
   "keywords": ["developer", "hooks", "example", "reference"],

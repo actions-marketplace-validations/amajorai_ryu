@@ -12,6 +12,7 @@ import {
 	Package01Icon,
 	PuzzleIcon,
 	Settings01Icon,
+	Settings02Icon,
 	Sun01Icon,
 } from "@hugeicons/core-free-icons";
 import { renderTemplate } from "@ryu/app-host/views";
@@ -33,6 +34,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useTheme } from "next-themes";
 import { useEffect, useRef, useState } from "react";
 import { useAuthContext } from "@/contexts/auth-context.tsx";
+import { ImportSetupDialog } from "@/src/components/chat/ImportSetupDialog.tsx";
 import { ImportThreadsDialog } from "@/src/components/chat/ImportThreadsDialog.tsx";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
@@ -142,6 +144,7 @@ export function CommandPalette() {
 	const [open, setOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [importOpen, setImportOpen] = useState(false);
+	const [setupImportOpen, setSetupImportOpen] = useState(false);
 	const [settingsSection, setSettingsSection] =
 		useState<SettingsSection>("appearance");
 	const { openTab } = useTabsContext();
@@ -372,6 +375,11 @@ export function CommandPalette() {
 	const handleImportThread = () => {
 		close();
 		setImportOpen(true);
+	};
+
+	const handleImportSetup = () => {
+		close();
+		setSetupImportOpen(true);
 	};
 
 	const handleToggleFullscreen = () => {
@@ -681,6 +689,15 @@ export function CommandPalette() {
 				onSelect: handleImportThread,
 			},
 			{
+				id: "action-import-setup",
+				group: "Actions",
+				title: "Import Agent Setup",
+				value:
+					"import setup instructions skills mcp server plugin memory claude cursor codex from folder",
+				icon: Settings02Icon,
+				onSelect: handleImportSetup,
+			},
+			{
 				id: "action-profile",
 				group: "Actions",
 				title: "Profile & Account",
@@ -793,6 +810,12 @@ export function CommandPalette() {
 				}}
 				onOpenChange={setImportOpen}
 				open={importOpen}
+				target={target}
+			/>
+
+			<ImportSetupDialog
+				onOpenChange={setSetupImportOpen}
+				open={setupImportOpen}
 				target={target}
 			/>
 

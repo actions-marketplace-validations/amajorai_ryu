@@ -1,7 +1,7 @@
 {
   "id": "@ryu/agent-status",
   "name": "Agent Status",
-  "version": "1.0.0",
+  "version": "0.1.14",
   "description": "Splits your agent runs across three sidebar sections — Working, Needs input and Done — each row showing the project it belongs to.",
   "tagline": "See which agents are working, stuck, or done",
   "category": "Productivity",
@@ -21,6 +21,60 @@
   "engines": { "ryu": ">=0.1.0" },
   "runnables": [],
   "contributes": {
+    "live_activities": [
+      {
+        "id": "working",
+        "title": "Working",
+        "icon": "lucide:loader-circle",
+        "accent": "var(--primary)",
+        "order": 1,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/runs" },
+            "items": "runs",
+            "filter": [{ "key": "run_status", "equals": "running" }],
+            "map": {
+              "id": "id",
+              "title": "title",
+              "titleFallback": "Untitled run",
+              "detail": "folder_path"
+            },
+            "refreshMs": 5000,
+            "limit": 5
+          },
+          "map": {
+            "status": "run_status",
+            "statusMap": {
+              "running": "running",
+              "completed": "done",
+              "failed": "error"
+            }
+          },
+          "target": "/chat?conversationId={{item.id}}"
+        }
+      },
+      {
+        "id": "needs-input",
+        "title": "Needs input",
+        "icon": "lucide:message-circle-question",
+        "accent": "var(--warning, #f59e0b)",
+        "order": 2,
+        "spec": {
+          "source": {
+            "http": { "method": "GET", "path": "/api/approvals?status=pending" },
+            "items": "approvals",
+            "map": { "id": "id", "title": "title", "detail": "summary" },
+            "refreshMs": 5000,
+            "limit": 10
+          },
+          "map": {
+            "status": "status",
+            "statusMap": { "pending": "waiting" }
+          },
+          "target": "/inbox"
+        }
+      }
+    ],
     "sidebar_sections": [
       {
         "id": "working",

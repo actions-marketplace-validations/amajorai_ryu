@@ -34,11 +34,14 @@ interface HeaderLink {
 }
 
 // Header stays minimal: the Products, Solutions, and Resources mega-menus are
-// the primary nav. Docs, Marketplace, Compare, Pricing, Engines, Blog,
-// Changelog, and Help now live inside the Resources dropdown (and the footer)
-// to keep the top bar uncluttered, so the marketing header ships no extra
-// flat links by default.
-const MARKETING_LINKS: readonly HeaderLink[] = [];
+// the primary nav. Marketplace is the one flat link — it is the discovery
+// surface for every kind of thing an agent can run, so it stays one click from
+// the top bar rather than buried in the Resources dropdown. Docs, Compare,
+// Pricing, Engines, Blog, Changelog, and Help live inside that dropdown (and
+// the footer) to keep the top bar uncluttered.
+const MARKETING_LINKS: readonly HeaderLink[] = [
+	{ to: "/marketplace", label: "Marketplace" },
+];
 
 // Public link to the open-source Core repository, surfaced next to the Resources
 // menu so visitors can jump straight to the code.

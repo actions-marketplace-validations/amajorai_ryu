@@ -24,6 +24,7 @@ import type { CellOpts } from "@ryu/ui/types/data-grid";
 import type { ColumnDef } from "@tanstack/react-table";
 import { Maximize2, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTabTitleSync } from "@/src/components/layout/tab-rename.tsx";
 import { ColumnEditor } from "@/src/components/spaces/ColumnEditor.tsx";
 import { BoardView } from "@/src/components/spaces/views/BoardView.tsx";
 import { GalleryView } from "@/src/components/spaces/views/GalleryView.tsx";
@@ -274,6 +275,17 @@ export default function SpaceDatabaseEditorPage({
 			});
 		}, SAVE_DEBOUNCE_MS);
 	}, [flush]);
+
+	// A strip double-click rename only rewrites `tab.title`; converge this
+	// editor's own title (and persist it through the normal save path) so the
+	// page header and the server document follow the strip.
+	useTabTitleSync({
+		ready: loaded,
+		scheduleSave,
+		setTitle,
+		tabId,
+		titleRef,
+	});
 
 	// Flush a pending save when the tab unmounts so in-flight edits are not lost.
 	useEffect(

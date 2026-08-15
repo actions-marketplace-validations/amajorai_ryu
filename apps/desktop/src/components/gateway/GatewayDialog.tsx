@@ -1,6 +1,7 @@
 import {
 	Activity01Icon,
 	Add01Icon,
+	ApiIcon,
 	ArrowDown01Icon,
 	ArrowUp01Icon,
 	BubbleChatIcon,
@@ -12,6 +13,7 @@ import {
 	GridIcon,
 	Key01Icon,
 	PencilEdit01Icon,
+	Plug01Icon,
 	PuzzleIcon,
 	Refresh01Icon,
 	Settings01Icon,
@@ -89,8 +91,10 @@ import {
 	type EvaluatorEditorMode,
 } from "@/src/components/evaluators/EvaluatorEditorDialog.tsx";
 import { AgentEgressSection } from "@/src/components/gateway/AgentEgressSection.tsx";
+import { ApiSection } from "@/src/components/gateway/ApiSection.tsx";
 import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
 import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
+import { McpSection } from "@/src/components/gateway/McpSection.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
@@ -210,11 +214,13 @@ import {
 	getComposioApiKey,
 	getExecApprovalEnabled,
 	getFalApiKey,
+	getPreference,
 	getReplicateApiKey,
 	setAgentSelection,
 	setComposioApiKey,
 	setExecApprovalEnabled,
 	setFalApiKey,
+	setPreference,
 	setReplicateApiKey,
 } from "@/src/lib/api/preferences.ts";
 import { deleteProviderKey, setProviderKey } from "@/src/lib/api/secrets.ts";
@@ -774,7 +780,7 @@ function ByokCard({
 
 	return (
 		<SettingsSection
-			caption="Add your own API keys for OpenAI, Anthropic, OpenRouter, or Gemini. Keys are stored in the OS credential store, encrypted at rest, and pushed to the local gateway; they are never sent to a Ryu server or written to a plaintext file. The masked badge reflects whether a key is set; the actual value is not displayed after saving."
+			caption="Add your own API keys for OpenAI, Anthropic, OpenRouter, or Gemini. Keys are stored in the OS credential store, encrypted at rest, and pushed to the local gateway; they are never sent to a Ryu server or written to a plaintext file. The badge shows whether a key is set; the value itself is never shown again."
 			title="Provider keys (BYOK)"
 		>
 			<SettingsGroup>
@@ -2432,7 +2438,7 @@ function SmartRoutingCard({
 
 	return (
 		<SettingsSection
-			caption="Custom routing instructions. A cheap classifier model reads each message and sends it to the model you picked for that kind of request. For example, route coding questions to Claude and casual chat to a local model. Changes take effect after the gateway restarts. The classifier runs once per conversation; if it errors, times out, or matches no rule, the request keeps its originally requested model."
+			caption="Custom routing instructions. A cheap classifier model reads each message and sends it to the model you picked for that kind of request. For example, route coding questions to Claude and casual chat to a local model. Changes take effect after the gateway restarts. The classifier runs once per conversation; if it errors, times out, or matches no rule, the request keeps the model it originally asked for."
 			headerAction={
 				<Button
 					disabled={isDisabled || saving}
@@ -5794,12 +5800,27 @@ function RunEvalsPanel({ target }: { target: ApiTarget }) {
  * field writes, so there is one value vocabulary rather than a special case for
  * "the global one".
  */
+// How long the resident local chat model stays loaded after its last request
+// before llama-server unloads it from memory (auto-reload on the next request).
+// Mirrors Core's `engine.llamacpp.sleep-idle-seconds` preference; the stored
+// value is seconds, and `"0"` means "never unload".
+const LOCAL_MODEL_IDLE_PREF = "engine.llamacpp.sleep-idle-seconds";
+const LOCAL_MODEL_IDLE_OPTIONS = [
+	{ value: "0", label: "Never" },
+	{ value: "60", label: "1 minute" },
+	{ value: "300", label: "5 minutes" },
+	{ value: "900", label: "15 minutes" },
+	{ value: "1800", label: "30 minutes" },
+	{ value: "3600", label: "1 hour" },
+];
+
 function DefaultsSection({ target }: { target: ApiTarget }) {
 	const [selection, setSelection] = useState<AgentSelection>(
 		EMPTY_AGENT_SELECTION
 	);
 	const [loaded, setLoaded] = useState(false);
-
+	const [idleSeconds, setIdleSeconds] = useState("300");
+	const [idleLoaded, setIdleLoaded] = useState(false);
 	useEffect(() => {
 		let cancelled = false;
 		getAgentSelection(target, DEFAULT_AGENT_SELECTION_PREF_KEY)
@@ -5841,6 +5862,42 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 		[target]
 	);
 
+	useEffect(() => {
+		let cancelled = false;
+		getPreference(target, LOCAL_MODEL_IDLE_PREF)
+			.then((raw) => {
+				if (!cancelled) {
+					if (raw != null) {
+						setIdleSeconds(raw);
+					}
+					setIdleLoaded(true);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setIdleLoaded(true);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [target]);
+
+	const saveIdleSeconds = useCallback(
+		async (next: string) => {
+			const previous = idleSeconds;
+			setIdleSeconds(next);
+			const ok = await setPreference(target, LOCAL_MODEL_IDLE_PREF, next);
+			if (!ok) {
+				setIdleSeconds(previous);
+				toast.error("Couldn't save the auto-unload setting", {
+					description: "Check your connection and try again.",
+				});
+			}
+		},
+		[target, idleSeconds]
+	);
+
 	return (
 		<SettingsSection
 			caption="Anything on this node that needs an agent or a model, but has none configured of its own, uses this: plugin settings left blank, chat auto-rename, side questions, the advisor, context compaction, and follow-up suggestions. A setting that names its own target always wins over this one. Leave it unset to keep each feature's built-in fallback. For chat titles and suggestions that fallback is the on-device local model, so setting a cloud default here does route those through the Gateway."
@@ -5869,6 +5926,45 @@ function DefaultsSection({ target }: { target: ApiTarget }) {
 						directly. Features that make a plain model call can't run an agent.
 						If you pick one, they use the model it is configured with, and fall
 						back to their own default when it has none.
+					</p>
+				</div>
+			</SettingsCard>
+
+			<SettingsCard className="space-y-4">
+				<div className="flex flex-col gap-1.5">
+					<Label className="text-muted-foreground text-xs">
+						Auto-unload local model
+					</Label>
+					{idleLoaded ? (
+						<Select
+							onValueChange={(v: string | null) => {
+								if (v) {
+									saveIdleSeconds(v).catch(() => undefined);
+								}
+							}}
+							value={idleSeconds}
+						>
+							<SelectTrigger className="h-8 w-40">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{LOCAL_MODEL_IDLE_OPTIONS.map((opt) => (
+									<SelectItem key={opt.value} value={opt.value}>
+										{opt.label}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					) : (
+						<Skeleton className="h-8 w-40" />
+					)}
+					<p className="text-muted-foreground text-xs">
+						Applies to the llama.cpp engine, Ryu's on-device engine. The model
+						stays loaded this long after its last request, then frees its
+						memory; the next message reloads it. "Never" keeps it resident.
+						Other local engines (Ollama, vLLM, SGLang, MLX, Apple Foundation
+						Models) manage their own memory, so this setting has no effect on
+						them.
 					</p>
 				</div>
 			</SettingsCard>
@@ -6009,6 +6105,21 @@ const GATEWAY_SECTIONS: {
 		hint: "Every request this node handled, in raw form.",
 		icon: Activity01Icon,
 		keywords: "audit log trace requests history",
+	},
+	{
+		value: "api",
+		label: "API & traffic",
+		hint: "Point OpenAI, Anthropic or Gemini clients at this node, manage its API keys, and watch requests live.",
+		icon: ApiIcon,
+		keywords:
+			"api endpoint url server compatible openai anthropic gemini base copy token keys live traffic dashboard sse",
+	},
+	{
+		value: "mcp",
+		label: "MCP server",
+		hint: "The Model Context Protocol servers this node runs, and the tools they expose.",
+		icon: Plug01Icon,
+		keywords: "mcp model context protocol server tools claude cursor stdio",
 	},
 	{
 		value: "evals",
@@ -6224,7 +6335,11 @@ const GATEWAY_NAV_GROUPS: { items: GatewaySection[]; title?: string }[] = [
 	},
 	{
 		title: "Connect",
-		items: ["network", "integrations", "connections", "email-alerts"],
+		items: ["api", "network", "integrations", "connections", "email-alerts"],
+	},
+	{
+		title: "Developer",
+		items: ["mcp"],
 	},
 	{ title: "Reports", items: ["usage", "audit", "evals"] },
 	// Node-level Core-infra tabs moved out of the App Settings dialog (not apps —
@@ -6261,6 +6376,8 @@ const SECTION_TINTS: Partial<Record<GatewaySection, SettingsTint>> = {
 	network: "blue",
 	integrations: "indigo",
 	connections: "teal",
+	api: "blue",
+	mcp: "teal",
 	"email-alerts": "orange",
 	usage: "green",
 	audit: "gray",
@@ -6596,6 +6713,15 @@ export function GatewayDialog({
 					/>
 				) : null}
 				{section === "audit" ? <AuditPanel target={target} /> : null}
+				{section === "api" ? (
+					<ApiSection
+						managed={managed}
+						reachable={reachable}
+						statusUrl={status?.url ?? null}
+						target={target}
+					/>
+				) : null}
+				{section === "mcp" ? <McpSection target={target} /> : null}
 				{section === "evals" ? <RunEvalsPanel target={target} /> : null}
 				{/* Node-level Core-infra tabs (moved out of the App Settings dialog). */}
 				{section === "connections" ? <ConnectionsTab /> : null}

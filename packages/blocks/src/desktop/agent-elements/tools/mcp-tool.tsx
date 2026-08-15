@@ -1,4 +1,7 @@
-﻿import { ToolResultOutput } from "@ryu/ui/components/agents/tool-result";
+﻿import {
+	ToolResult,
+	ToolResultOutput,
+} from "@ryu/ui/components/agents/tool-result";
 import { memo, useMemo } from "react";
 import { useChatDisplayPrefs } from "../chat-display-prefs.tsx";
 import { areToolPropsEqual, getToolStatus } from "../utils/format-tool.ts";
@@ -8,7 +11,6 @@ import {
 	ToolApprovalFooter,
 } from "./tool-approval-footer.tsx";
 import type { McpToolInfo } from "./tool-registry.ts";
-import { ToolRowBase } from "./tool-row-base.tsx";
 
 export interface McpToolProps {
 	chatStatus?: string;
@@ -196,8 +198,6 @@ export const McpTool = memo(function McpTool({
 		return { code: displayOutput as string, language } as const;
 	}, [displayOutput]);
 
-	const hasExpandableContent = !!outputBlock && !isPending;
-
 	// The chat tool loop (DA7) attaches an `approval` object to the part input
 	// when a requested tool needs the user's go-ahead. When present, render the
 	// shared approval footer so the user can approve or skip the call.
@@ -215,34 +215,21 @@ export const McpTool = memo(function McpTool({
 
 	return (
 		<div className="an-tool-mcp">
-			<ToolRowBase
-				completeLabel={title}
-				defaultOpen={defaultOpen}
-				detail={subtitle || undefined}
-				expandable={hasExpandableContent}
-				isAnimating={isPending}
-				shimmerLabel={title}
-				trailingContent={undefined}
+			<ToolResult
+				collapseOnComplete={!expandCodeBlocks}
+				defaultOpen={defaultOpen ?? false}
+				kind="request"
+				meta={subtitle || undefined}
+				status={isPending ? "running" : "success"}
+				title={title}
+				tool={mcpInfo.displayName}
 			>
 				{outputBlock && (
-					// The height cap is this wrapper's job, not the renderer's. It used
-					// to come free from the markdown path's own scroll container
-					// (`agent-ui.css`, `[data-code-detail="capped"]`), so dropping that
-					// path without replacing the cap let a 3000-character payload
-					// stretch the row to whatever height it wanted.
-					<div
-						className={
-							expandCodeBlocks
-								? "text-[12px]"
-								: "max-h-[240px] overflow-y-auto overscroll-contain text-[12px]"
-						}
-					>
-						<ToolResultOutput language={outputBlock.language}>
-							{outputBlock.code}
-						</ToolResultOutput>
-					</div>
+					<ToolResultOutput language={outputBlock.language}>
+						{outputBlock.code}
+					</ToolResultOutput>
 				)}
-			</ToolRowBase>
+			</ToolResult>
 			{approval && <ToolApprovalFooter isPending={isPending} {...approval} />}
 		</div>
 	);

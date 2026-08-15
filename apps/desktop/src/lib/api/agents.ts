@@ -824,6 +824,79 @@ export async function fetchAgentTools(
 }
 
 // ---------------------------------------------------------------------------
+// ACP agent accounts (multi-account sign-ins, from the sealed vault)
+// ---------------------------------------------------------------------------
+
+/** One account an ACP agent holds (labels only — never a credential). */
+export interface AgentAccount {
+	accountId: string;
+	/** Display name (email, provider label, or "Signed-in account"). */
+	label: string;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Whether this is the account the agent uses. */
+	active: boolean;
+	/** For the managed Pi agent, the provider id this account belongs to. */
+	provider?: string;
+}
+
+export async function fetchAgentAccounts(
+	target: ApiTarget,
+	id: string
+): Promise<AgentAccount[]> {
+	const json = await request<{ accounts?: AgentAccount[] }>(
+		target,
+		`/api/agents/${id}/accounts`
+	);
+	return json.accounts ?? [];
+}
+
+export interface SwitchAgentAccountInput {
+	accountId: string;
+	/** The provider an account belongs to (managed-Pi agent accounts). */
+	provider?: string;
+}
+
+export async function switchAgentAccount(
+	target: ApiTarget,
+	id: string,
+	input: SwitchAgentAccountInput
+): Promise<{ reauthenticate?: boolean }> {
+	const json = await request<{ switched: boolean; reauthenticate?: boolean; error?: string }>(
+		target,
+		`/api/agents/${id}/accounts/switch`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(input),
+		}
+	);
+	if (!json.switched) {
+		throw new Error(json.error ?? "Could not switch account");
+	}
+	return { reauthenticate: json.reauthenticate };
+}
+
+export async function removeAgentAccount(
+	target: ApiTarget,
+	id: string,
+	accountId: string
+): Promise<void> {
+	const json = await request<{ removed: boolean; error?: string }>(
+		target,
+		`/api/agents/${id}/accounts/remove`,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ accountId }),
+		}
+	);
+	if (!json.removed) {
+		throw new Error(json.error ?? "Could not remove account");
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Conversation participants (council / multi-agent)
 // ---------------------------------------------------------------------------
 

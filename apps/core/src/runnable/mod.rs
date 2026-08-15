@@ -24,6 +24,7 @@
 pub mod agent_builder;
 pub mod dashboard_builder;
 pub mod self_build;
+pub mod tool_build;
 pub mod workflow_builder;
 
 // `RunnableKind` and `RunnableMeta` are the pure-data identity slice of the

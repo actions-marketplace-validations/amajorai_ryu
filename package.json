@@ -35,7 +35,7 @@
     "polar:provision-voucher": "bun run scripts/polar/provision-voucher.ts",
     "registry:generate": "node tools/generate-registry.mjs",
     "registry:check": "node tools/generate-registry.mjs --check",
-    "test:tools": "node --test tools/generate-registry.test.mjs tools/generate-marketplace.test.mjs tools/toolsmith/harness.test.mjs tools/toolsmith/purity.test.mjs tools/toolsmith/manifest.test.mjs scripts/release/next-version.test.mjs scripts/release/channel-brand.test.mjs scripts/release/artifact-name.test.mjs scripts/wipe.test.mjs",
+    "test:tools": "node --test tools/generate-registry.test.mjs tools/generate-marketplace.test.mjs tools/generate-icons.test.mjs tools/toolsmith/harness.test.mjs tools/toolsmith/purity.test.mjs tools/toolsmith/manifest.test.mjs scripts/release/next-version.test.mjs scripts/release/channel-brand.test.mjs scripts/release/artifact-name.test.mjs scripts/wipe.test.mjs",
     "test:plugins": "node --test \"plugins-store/*/plugin.test.mjs\" \"plugins-store/*/tool.test.mjs\" \"apps-store/*/plugin.test.mjs\" \"apps-store/*/tool.test.mjs\"",
     "mirror:satellites": "bash tools/mirror-satellites.sh",
     "mirror:plugins": "bash tools/mirror-plugins.sh",
@@ -90,9 +90,11 @@
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
     "@ryu/config": "workspace:*",
+    "@takumi-rs/image-response": "^0.71.7",
     "@types/bun": "catalog:",
     "husky": "latest",
     "lint-staged": "latest",
+    "react": "^19.2.4",
     "turbo": "^2.8.12",
     "typescript": "^5",
     "ultracite": "7.3.0"

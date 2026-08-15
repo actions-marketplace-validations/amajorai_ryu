@@ -1,12 +1,10 @@
-﻿import { Button } from "@ryu/ui/components/button";
-import {
-	IconChevronDown,
-	IconChevronUp,
-	IconMessageCircleQuestion,
-} from "@tabler/icons-react";
+﻿import {
+	ApprovalCard,
+	type ApprovalCardAnswer,
+	type ApprovalCardQuestion,
+} from "@ryu/ui/components/agents/approval-card";
 import { useEffect, useMemo, useState } from "react";
 import type { QuestionAnswer, QuestionConfig } from "./question-prompt.tsx";
-import { QuestionPrompt } from "./question-prompt.tsx";
 
 export interface QuestionToolPart {
 	input?: {
@@ -48,6 +46,47 @@ function formatAnswer(answer: QuestionAnswer) {
 	return ids || "Answered";
 }
 
+/** Map an in-thread `QuestionConfig` onto the beUI ApprovalCard question shape. */
+function toApprovalQuestion(
+	question: QuestionConfig,
+	index: number
+): ApprovalCardQuestion {
+	const customLabel = question.customLabel;
+	return {
+		id: question.title || `question-${index}`,
+		title: question.title,
+		description: question.description,
+		// `text` questions are free-form: surfaced as the custom answer input.
+		multiple: question.kind === "multi",
+		allowCustom: question.kind === "text" || question.allowCustom,
+		customPlaceholder:
+			question.kind === "text"
+				? (question.placeholder ?? "Type your answer")
+				: (question.customPlaceholder ?? customLabel),
+		options: (question.options ?? []).map((option) => ({
+			value: option.id,
+			label: option.description ? `${option.label} — ${option.description}` : option.label,
+		})),
+	};
+}
+
+/** Map a beUI answer back onto the QuestionAnswer contract the part expects. */
+function fromApprovalAnswer(
+	question: QuestionConfig,
+	answer: ApprovalCardAnswer
+): QuestionAnswer {
+	if (question.kind === "text") {
+		return { kind: "text", text: answer.custom ?? "" };
+	}
+	const selectedIds = answer.selected.filter((id) => id !== "__custom__");
+	const customText = answer.custom?.trim();
+	return {
+		kind: question.kind,
+		selectedIds,
+		text: customText || undefined,
+	};
+}
+
 export function QuestionTool({ part }: QuestionToolProps) {
 	const [localIndex, setLocalIndex] = useState(part.input?.questionIndex ?? 1);
 	const questions: QuestionConfig[] = part.input?.questions ?? [];
@@ -85,51 +124,24 @@ export function QuestionTool({ part }: QuestionToolProps) {
 		totalQuestions === 1
 			? !!outputAnswer || answeredCount >= 1
 			: totalQuestions > 0 && answeredCount >= totalQuestions;
-	const showNavigation = totalQuestions > 1 && !isComplete;
-	const canGoPrev = clampedIndex > 1;
-	const canGoNext = clampedIndex < totalQuestions;
-	const summaryAnswers = useMemo(() => {
-		if (!isComplete || totalQuestions <= 1) {
-			return [];
-		}
-		return Array.from({ length: totalQuestions }, (_, idx) => ({
-			index: idx + 1,
-			answer: localAnswers[idx + 1],
-		}));
-	}, [isComplete, localAnswers, totalQuestions]);
+
 	const summaryText = useMemo(() => {
-		if (!isComplete) {
-			return "";
-		}
-		if (summaryAnswers.length > 0) {
-			return summaryAnswers
-				.map(
-					(item) =>
-						`${item.index}: ${item.answer ? formatAnswer(item.answer) : "Pending"}`
-				)
-				.join(" • ");
-		}
 		if (outputAnswer) {
 			return formatAnswer(outputAnswer);
 		}
 		if (localAnswers[clampedIndex]) {
 			return formatAnswer(localAnswers[clampedIndex]);
 		}
-		return "Pending";
-	}, [isComplete, summaryAnswers, outputAnswer, localAnswers, clampedIndex]);
+		return "Response submitted";
+	}, [outputAnswer, localAnswers, clampedIndex]);
 
-	const goPrev = () => {
-		if (!canGoPrev) {
-			return;
-		}
-		part.input?.onPreviousQuestion?.();
-		if (!isControlled) {
-			setLocalIndex((prev) => Math.max(1, prev - 1));
-		}
-	};
+	const approvalQuestions = useMemo(
+		() => questions.map(toApprovalQuestion),
+		[questions]
+	);
 
 	const goNext = () => {
-		if (!canGoNext) {
+		if (clampedIndex >= totalQuestions) {
 			return;
 		}
 		part.input?.onNextQuestion?.();
@@ -139,70 +151,58 @@ export function QuestionTool({ part }: QuestionToolProps) {
 	};
 
 	return (
-		<div className="overflow-hidden rounded-[var(--radius)] bg-muted">
-			<div className="flex h-7 items-center justify-between px-3 text-muted-foreground text-xs">
-				<div className="inline-flex items-center gap-1.5">
-					<IconMessageCircleQuestion className="h-3.5 w-3.5" />
-					Question
-				</div>
-				{showNavigation && (
-					<div className="inline-flex items-center gap-1">
-						<Button
-							aria-label="Previous question"
-							className="size-5 rounded-sm"
-							disabled={!canGoPrev}
-							onClick={goPrev}
-							size="icon"
-							type="button"
-							variant="ghost"
-						>
-							<IconChevronUp className="h-3.5 w-3.5" />
-						</Button>
-						<span>
-							{clampedIndex} of {totalQuestions}
-						</span>
-						<Button
-							aria-label="Next question"
-							className="size-5 rounded-sm"
-							disabled={!canGoNext}
-							onClick={goNext}
-							size="icon"
-							type="button"
-							variant="ghost"
-						>
-							<IconChevronDown className="h-3.5 w-3.5" />
-						</Button>
-					</div>
-				)}
-			</div>
-
-			{isComplete ? (
-				<div className="bg-background px-3 py-2 text-muted-foreground text-xs">
-					{summaryText}
-				</div>
-			) : (
-				<QuestionPrompt
-					allowSkip={part.input?.allowSkip}
-					initialAnswer={localAnswers[clampedIndex]}
-					key={`${clampedIndex}-${question.title}`}
-					nextLabel={part.input?.nextLabel}
-					onSubmit={(nextAnswer) => {
-						setLocalAnswers((prev) => ({
-							...prev,
-							[clampedIndex]: nextAnswer,
-						}));
-						part.input?.onSubmitAnswer?.(nextAnswer);
-						if (clampedIndex < totalQuestions) {
-							goNext();
-						}
-					}}
-					questionIndex={clampedIndex}
-					questions={questions}
-					skipLabel={part.input?.skipLabel}
-					submitLabel={part.input?.submitLabel}
-					totalQuestions={totalQuestions}
-				/>
+		<ApprovalCard
+			className="an-tool-question"
+			defaultStep={clampedIndex - 1}
+			defaultAnswers={Object.fromEntries(
+				Object.entries(localAnswers)
+					.filter(([, answer]) => answer && answer.kind !== "skip")
+					.map(([index, answer]) => [
+						questions[Number(index) - 1]?.title ?? index,
+						{
+							selected: answer.selectedIds ?? [],
+							custom: answer.text,
+						} satisfies ApprovalCardAnswer,
+					])
 			)}
-		</div>
+			description="The agent needs an answer before it continues."
+			questions={approvalQuestions}
+			status={isComplete ? "answered" : "pending"}
+			submitLabel={part.input?.submitLabel ?? "Submit response"}
+			onAnswersChange={(answers) => {
+				// Keep localAnswers in sync so completion state and the summary stay
+				// truthful as the user moves through the questions.
+				const next: Record<number, QuestionAnswer> = {};
+				for (const [title, answer] of Object.entries(answers)) {
+					const idx = questions.findIndex((q) => q.title === title);
+					if (idx >= 0) {
+						next[idx + 1] = fromApprovalAnswer(questions[idx]!, answer);
+					}
+				}
+				setLocalAnswers(next);
+			}}
+			onStepChange={(step) => {
+				if (!isControlled) {
+					setLocalIndex(step + 1);
+				}
+			}}
+			onSubmit={(answers) => {
+				// The primary action advances through questions; on the last one it
+				// reports the answer to the part.
+				if (clampedIndex < totalQuestions) {
+					goNext();
+					return;
+				}
+				const lastQuestion = questions[clampedIndex - 1];
+				if (!lastQuestion) {
+					return;
+				}
+				const answer = answers[lastQuestion.title];
+				part.input?.onSubmitAnswer?.(
+					answer ? fromApprovalAnswer(lastQuestion, answer) : { kind: "skip" }
+				);
+			}}
+			result={isComplete ? summaryText : undefined}
+		/>
 	);
 }

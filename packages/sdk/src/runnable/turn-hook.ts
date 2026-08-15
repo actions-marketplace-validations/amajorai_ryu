@@ -184,6 +184,7 @@ export function definePlugin(options: DefinePluginOptions): PluginManifest {
 		sidebar_sections: [],
 		sidebar_buttons: [],
 		dock_panels: [],
+		live_activities: [],
 		data_categories: [],
 		pi_extensions: [],
 		output_styles: [],

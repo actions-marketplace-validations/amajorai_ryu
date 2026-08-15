@@ -1933,6 +1933,27 @@ pub struct Contributes {
     #[serde(default)]
     pub dock_panels: Vec<DockPanelContribution>,
 
+    /// **Live activities** the plugin contributes — small, always-live status cards
+    /// the desktop shell's "Dynamic Island" dock (empty-shell launchpad + sidebar)
+    /// renders for something in progress: an agent run, a download, a pending
+    /// approval, a recording. The desktop half of the same status vocabulary the
+    /// mobile `AgentActivity` uses, so one mental model spans devices.
+    ///
+    /// Each entry is a [`LiveActivityContribution`]: a typed envelope (`id`/`title`/
+    /// `icon`/`accent`/`order`) around an **opaque** `spec` payload the desktop
+    /// renderer interprets. Like a [`Contributes::sidebar_sections`] entry it carries
+    /// a `ViewSource` (a Core `/api/` path the shell polls) and a field-map; unlike a
+    /// section it maps response ROWS to live-activity cards (status/progress/target)
+    /// instead of nav rows. The app returns DATA — never code — so a live activity
+    /// cannot be made ugly and needs zero sidecar code.
+    ///
+    /// Self-contained (it names no runnable), so it stays out of
+    /// [`Contributes::referenced_ids`]; the `spec` stays opaque to Core so a new
+    /// activity capability is a renderer change, not a Core change. Served + tagged
+    /// with the owning `plugin` id at `GET /api/plugins/contributions`.
+    #[serde(default)]
+    pub live_activities: Vec<LiveActivityContribution>,
+
     /// Per-message actions the plugin contributes to the desktop message toolbar
     /// (thumbs, rate, transform, …). Lets an app own a control in the per-message
     /// toolbar instead of the shell welding the action into the closed set of
@@ -2625,6 +2646,45 @@ pub struct SidebarSectionContribution {
 
     /// The opaque section spec (source/itemTarget/itemActions/create). Interpreted by
     /// the desktop renderer, never by Core. Absent = a header with no rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<serde_json::Value>,
+}
+
+/// One app-registered **live activity** — a small, always-live status card the
+/// desktop's "Dynamic Island" dock (empty-shell launchpad + sidebar) renders for
+/// something in progress: an agent run, a download, a pending approval, a
+/// recording. The desktop half of the status vocabulary the mobile `AgentActivity`
+/// uses (`running` / `waiting` / `review` / `done` / `error`), so one mental model
+/// spans devices.
+///
+/// A typed envelope around an opaque `spec` (the `LiveActivitySpec` in
+/// `@ryu/app-host/live-activity`: a `ViewSource` for the live rows, a field-map
+/// from rows to card fields, and a `target` route template). Core stores it
+/// verbatim and tags it with the owning `plugin` id; the `spec` stays opaque so a
+/// new activity capability is a renderer change, not a Core change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LiveActivityContribution {
+    /// Stable id for this activity within the plugin (namespaced into the shell's
+    /// dock identity as `plugin:<pluginId>:<id>:<rowId>`).
+    pub id: String,
+
+    /// Human-facing title shown on the dock card (falls back to the row title).
+    pub title: String,
+
+    /// Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Optional accent colour hint (any CSS color) tinting the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+
+    /// Optional placement hint among the dock's activities (lower = first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
+
+    /// The opaque activity spec (source/map/target). Interpreted by the desktop
+    /// renderer, never by Core. Absent = a header-only activity (renders nothing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<serde_json::Value>,
 }

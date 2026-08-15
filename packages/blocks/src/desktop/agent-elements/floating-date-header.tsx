@@ -4,7 +4,6 @@
 // WhatsApp and Telegram do.
 
 import { Marker, MarkerContent } from "@ryu/ui/components/marker";
-import { useMessageScrollerVisibility } from "@ryu/ui/components/message-scroller";
 import { memo } from "react";
 import { type DayGroup, dayKeyAtTurnIndex, dayLabel } from "./date-groups.ts";
 
@@ -23,21 +22,20 @@ import { type DayGroup, dayKeyAtTurnIndex, dayLabel } from "./date-groups.ts";
  * second in-flow element whose visibility is driven by scroll position would
  * reintroduce exactly that loop. Keep this absolute.
  *
- * The state comes from `useMessageScrollerVisibility`, a snapshot the scroller
- * already computes and `ChatToc` already subscribes to on every non-compact
- * transcript. This is a SECOND CONSUMER of an existing RAF-batched store: no
- * new observer, no new effect, no setState-in-effect, no layout reads of our
- * own.
+ * The state comes from a scroll-position read the message list owns and passes
+ * down (`currentAnchorId`) — the anchor the transcript's user messages were
+ * stamped with. This is a SECOND CONSUMER of the same single value the chat TOC
+ * reads; no new observer, no new effect, no setState-in-effect, no layout reads
+ * of our own.
  *
- * Known imprecision, shipped deliberately: the scroller's
- * `scrollPreviousItemPeek` defaults to 64 and message-list passes neither it
- * nor `scrollMargin`, so the anchor — and therefore this chip — flips ~64px
- * BEFORE the separator reaches the top edge.
+ * Known imprecision, shipped deliberately: the anchor flips ~`topOffset` px
+ * BEFORE the separator reaches the top edge (same tolerance the TOC uses).
  */
 export const FloatingDateHeader = memo(function FloatingDateHeader({
 	groups,
 	startOfToday,
 	turnIndexByAnchorId,
+	currentAnchorId,
 }: {
 	/** Day runs for the transcript, in turn order. */
 	groups: readonly DayGroup[];
@@ -45,8 +43,9 @@ export const FloatingDateHeader = memo(function FloatingDateHeader({
 	startOfToday: number;
 	/** Anchor id (the turn's user-message id) → its flat turn index. */
 	turnIndexByAnchorId: ReadonlyMap<string, number>;
+	/** The user message currently at the top of the transcript, if any. */
+	currentAnchorId?: string | null;
 }) {
-	const { currentAnchorId } = useMessageScrollerVisibility();
 
 	// Nothing anchored yet (empty transcript, or a scroll position above the
 	// first anchor) — say nothing rather than guess a date.
