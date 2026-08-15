@@ -89,12 +89,20 @@ jobs:
           # releases page stays readable and large enough to bisect across a few
           # days of merges.
           RETAIN: "10"
+          # Optional. Unset = the changelog is the raw mirror-commit bullets,
+          # which is already real content; set, they are merged into highlights.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -e
           # Notes must be GENERATED before the release references them — the
           # rolling-build banner, no changelog (mirror history is just sync
           # commits, and no publish step follows to fill one in).
+          # Banner + install block only; the changelog is appended below.
           node scripts/release-notes.mjs --channel canary --repo "$GITHUB_REPOSITORY" --no-changelog > notes.md
+          # A rolling build has NO follow-up step that can fill in notes later —
+          # whatever is written here is what it ships with. The mirror commit
+          # bodies in range carry real summaries, so read them.
+          node scripts/rolling-notes.mjs --channel canary --repo "$GITHUB_REPOSITORY" >> notes.md
           # The tag now CARRIES the version, so `release_version` reads it straight
           # off the tag. The title keeps the same shape anyway: it is what a human
           # reads, and it remains the fallback if a tag is ever hand-made.

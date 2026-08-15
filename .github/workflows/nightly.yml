@@ -102,12 +102,20 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           # Nightlies land once a day, so 14 is about two weeks of history.
           RETAIN: "14"
+          # Optional. Unset = the changelog is the raw mirror-commit bullets,
+          # which is already real content; set, they are merged into highlights.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -e
           # Notes must be GENERATED before the release references them — the
           # rolling-build banner, no changelog (mirror history is just sync
           # commits, and no publish step follows to fill one in).
+          # Banner + install block only; the changelog is appended below.
           node scripts/release-notes.mjs --channel nightly --repo "$GITHUB_REPOSITORY" --no-changelog > notes.md
+          # A rolling build has NO follow-up step that can fill in notes later —
+          # whatever is written here is what it ships with. The mirror commit
+          # bodies in range carry real summaries, so read them.
+          node scripts/rolling-notes.mjs --channel nightly --repo "$GITHUB_REPOSITORY" >> notes.md
           # The tag now CARRIES the version, so `release_version` reads it off the
           # tag and only falls back to the title. --prerelease is load-bearing:
           # `/releases/latest` excludes prereleases, which is what keeps a stable
