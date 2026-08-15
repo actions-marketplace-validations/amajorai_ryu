@@ -41,7 +41,7 @@ const SHOW_AWARD_BADGE = false;
  * a paragraph.
  */
 const HERO_TITLE =
-	"The document work that fills your team's week, done overnight.";
+	"Secure and reliable AI agents automating critical business work 24/7";
 
 /**
  * The headline gets the same chromatic sweep every section header on this page
