@@ -27,4 +27,7 @@ paths = [
   '''packages/ui/src/components/editor/plugins/.*-kit\.tsx''',
   # App scaffold README: `dev-token` in a curl example is a placeholder, not a secret.
   '''packages/create-ryu-app/template/app/README\.md''',
+  # Quest keys are stable identifiers, not credentials. The generic-api-key rule
+  # treats the `refer-3-monthly` / `refer-5-monthly` names as secrets.
+  '''packages/auth/src/lib/quests\.ts''',
 ]

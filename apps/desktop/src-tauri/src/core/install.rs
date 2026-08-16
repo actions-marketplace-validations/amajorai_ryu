@@ -25,10 +25,21 @@
 //! resolves only when already on PATH via `RYU_BROWSER_BIN`.)
 
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 const RELEASE_BASE: &str = "https://github.com/amajorai/ryu/releases/latest/download";
+const INSTALL_EVENT_PREFIX: &str = "RYU_INSTALL_EVENT:";
+
+fn install_script_url() -> &'static str {
+    if cfg!(windows) {
+        "https://raw.githubusercontent.com/amajorai/ryu/main/install.ps1"
+    } else {
+        "https://raw.githubusercontent.com/amajorai/ryu/main/install.sh"
+    }
+}
 
 /// The running desktop app's version (e.g. `"0.0.8"`), used to stamp downloaded
 /// sidecars and to decide whether an already-installed one is stale. The release
@@ -191,6 +202,186 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
     which::which(spec.bin_name).is_ok_and(|hit| !crate::profile::is_foreign_profile_bin(&hit))
 }
 
+/// Forward one machine-readable line from the canonical one-line installer to
+/// the webview. Human output remains in the child process log; only the stable
+/// `RYU_INSTALL_EVENT:` envelope crosses the Tauri boundary.
+fn forward_installer_event(app: &AppHandle, line: &str) {
+    let Some(json) = line.trim().strip_prefix(INSTALL_EVENT_PREFIX) else {
+        return;
+    };
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(payload) => {
+            let _ = app.emit("installer-progress", payload);
+        }
+        Err(error) => {
+            tracing::warn!(%error, line, "canonical installer emitted invalid progress JSON");
+        }
+    }
+}
+
+/// Run the same public one-line installer used by headless users. The script is
+/// downloaded to a private temporary file before execution so its stdout can be
+/// streamed safely and the shell/powershell process can be supervised. The
+/// script owns Core, Gateway, CLI, and the start of Core's bundled defaults;
+/// Desktop keeps ownership of agent detection and its own preferences.
+async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("create installer client: {e}"))?;
+    let response = client
+        .get(install_script_url())
+        .send()
+        .await
+        .map_err(|e| format!("download installer script: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "download installer script: HTTP {}",
+            response.status()
+        ));
+    }
+    let script = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read installer script: {e}"))?;
+    let script_path = std::env::temp_dir().join(format!(
+        "ryu-installer-{}-{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default(),
+        if cfg!(windows) { ".ps1" } else { ".sh" }
+    ));
+    std::fs::write(&script_path, &script)
+        .map_err(|e| format!("write temporary installer script: {e}"))?;
+
+    let mut command = if cfg!(windows) {
+        let shell = which::which("pwsh")
+            .or_else(|_| which::which("powershell"))
+            .map_err(|_| "could not find PowerShell (pwsh or powershell)".to_string())?;
+        let mut command = tokio::process::Command::new(shell);
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]);
+        command.arg(&script_path);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg(&script_path);
+        command
+    };
+
+    let install_dir = crate::profile::ryu_home_dir().join("bin");
+    let core_bind = format!("127.0.0.1:{}", crate::profile::core_port());
+    let core_url = crate::profile::core_base_url();
+    let core_log = crate::profile::ryu_home_dir().join("ryu-core.log");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("RYU_INSTALL_DIR", install_dir)
+        .env("RYU_NO_MODIFY_PATH", "1")
+        .env("RYU_PROGRESS_FORMAT", "json")
+        .env("RYU_INSTALL_MARKER", app_version(app))
+        .env("RYU_START_CORE", "1")
+        .env("RYU_INSTALL_DEFAULTS", "1")
+        .env("RYU_CORE_BIND", core_bind)
+        .env("RYU_CORE_URL", core_url)
+        .env("RYU_CORE_LOG", core_log)
+        .env("RYU_PROFILE", crate::profile::name());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("start canonical installer: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "canonical installer stdout was not captured".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "canonical installer stderr was not captured".to_string())?;
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    while !stdout_done || !stderr_done {
+        tokio::select! {
+            result = stdout_lines.next_line(), if !stdout_done => {
+                match result {
+                    Ok(Some(line)) => forward_installer_event(app, &line),
+                    Ok(None) => stdout_done = true,
+                    Err(error) => {
+                        tracing::warn!(%error, "read canonical installer stdout failed");
+                        stdout_done = true;
+                    }
+                }
+            }
+            result = stderr_lines.next_line(), if !stderr_done => {
+                match result {
+                    Ok(Some(line)) => tracing::info!(target: "ryu_installer", "{line}"),
+                    Ok(None) => stderr_done = true,
+                    Err(error) => {
+                        tracing::warn!(%error, "read canonical installer stderr failed");
+                        stderr_done = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait for canonical installer: {e}"))?;
+    let _ = std::fs::remove_file(&script_path);
+    if !status.success() {
+        let error = format!("canonical installer exited with {status}");
+        let _ = app.emit(
+            "installer-progress",
+            serde_json::json!({
+                "version": 1,
+                "phase": "error",
+                "component": "installer",
+                "status": "failed",
+                "percent": 0,
+                "error": error,
+            }),
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Ensure the managed Core/Gateway/CLI stack through the canonical public
+/// installer. A matching managed pair is already standardized and needs no
+/// network round trip; otherwise the script is the only binary installer used
+/// by Desktop. The script also starts Core, which kicks off the default stack.
+pub async fn ensure_unified_installed(app: &AppHandle) -> Result<PathBuf, String> {
+    let expected = app_version(app);
+    if !is_installed(&CORE, &expected) || !is_installed(&GATEWAY, &expected) {
+        let _ = app.emit(
+            "installer-progress",
+            serde_json::json!({
+                "version": 1,
+                "phase": "installer",
+                "component": "installer",
+                "status": "started",
+                "percent": 0,
+            }),
+        );
+        run_unified_installer(app).await?;
+    }
+    install_path(CORE.bin_name).ok_or_else(|| "could not resolve home directory".to_string())
+}
+
 /// Download `asset` from the release hub into `~/.ryu/bin/<dest_file>` and return
 /// its path. Writes to a temp path then renames, so an interrupted download never
 /// leaves a truncated binary that looks installed; sets `0o755` on unix. Emits
@@ -338,7 +529,7 @@ async fn install_sidecar(
 /// Emits `core-install-progress` events. (Signature preserved — called from
 /// `lib.rs` first-launch orchestration and `ensure_core_installed`.)
 pub async fn download_core_binary(app: &AppHandle) -> Result<PathBuf, String> {
-    install_sidecar(app, &CORE, "core-install-progress").await
+    ensure_unified_installed(app).await
 }
 
 /// Download the platform `ryu-gateway` binary into `~/.ryu/bin/` and return its
@@ -348,7 +539,7 @@ pub async fn download_core_binary(app: &AppHandle) -> Result<PathBuf, String> {
 /// (warn, still let the app open) and — critically — awaits this *before* starting
 /// Core so the gateway is on disk when Core's spawn resolves it on PATH.
 pub async fn download_gateway_binary(app: &AppHandle) -> Result<PathBuf, String> {
-    install_sidecar(app, &GATEWAY, "gateway-install-progress").await
+    ensure_unified_installed(app).await
 }
 
 /// Ensure `ryu-gateway` is installed, downloading it if absent. Skips the download
@@ -356,11 +547,7 @@ pub async fn download_gateway_binary(app: &AppHandle) -> Result<PathBuf, String>
 /// starting Core (Core spawns the gateway at boot) and logs a loud warning on
 /// failure, but the app still opens (degraded chat beats no app).
 pub async fn ensure_gateway_installed(app: &AppHandle) -> Result<PathBuf, String> {
-    if is_installed(&GATEWAY, &app_version(app)) {
-        return install_path(GATEWAY.bin_name)
-            .ok_or("could not resolve home directory".to_string());
-    }
-    download_gateway_binary(app).await
+    ensure_unified_installed(app).await
 }
 
 // The opt-in app-sidecar prefetch (`progress_event`, `ensure_optional_installed`,

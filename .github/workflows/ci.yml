@@ -2,7 +2,8 @@ name: ci
 
 # Build / test + secret scan on push and PR.
 #
-# Scoped to the units that build standalone today (gateway, cli). Broader coverage
+# Scoped to the Rust unit that builds standalone today (gateway). The CLI is now
+# the Bun/TypeScript app under apps/cli, not a Cargo crate. Broader coverage
 # (core/ghost/shadow build, and a TypeScript workspace job) is pending the root-manifest
 # prune transform that lets the OSS subset `bun install` without the closed packages.
 
@@ -26,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [gateway, cli]
+        dir: [gateway]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev

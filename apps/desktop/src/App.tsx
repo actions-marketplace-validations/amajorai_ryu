@@ -20,20 +20,17 @@ import {
 	shouldNudgeLocalMissing,
 } from "@/lib/prefer-local-node.ts";
 import { getRyuStatus, startRyuCore } from "@/lib/tauri-bridge.ts";
-// Boot effects fire before Tauri is guaranteed to have injected
-// `window.__TAURI_INTERNALS__`, and `listen()` reaches into it for
-// `transformCallback` — the single most frequent production error on 0.1.11.
-// The gate makes an early subscription wait for the bridge instead of rejecting.
-import {
-	listenWhenReady,
-	withTauri,
-} from "@/src/lib/tauri-ready.ts";
 import { EntitlementProvider } from "@/src/contexts/entitlement-context.tsx";
 import { initAnalytics } from "@/src/lib/analytics.ts";
 import { fetchWaitlistMe } from "@/src/lib/api/waitlist.ts";
 import { initCrashReporting } from "@/src/lib/crash.ts";
 import { applyDecorumChrome } from "@/src/lib/decorumTitlebar.ts";
 import { startSettingsSync } from "@/src/lib/settings-sync/engine.ts";
+// Boot effects fire before Tauri is guaranteed to have injected
+// `window.__TAURI_INTERNALS__`, and `listen()` reaches into it for
+// `transformCallback` — the single most frequent production error on 0.1.11.
+// The gate makes an early subscription wait for the bridge instead of rejecting.
+import { listenWhenReady, withTauri } from "@/src/lib/tauri-ready.ts";
 import { AgentationToolbar } from "./components/AgentationToolbar.tsx";
 import { CrashBoundary } from "./components/CrashBoundary.tsx";
 import Layout from "./components/layout/Layout.tsx";
@@ -45,6 +42,10 @@ import { initInvertedBackgrounds } from "./hooks/useInvertedBackgrounds.ts";
 import { initPointerCursor } from "./hooks/usePointerCursor.ts";
 import { initTheme, useThemePreset } from "./hooks/useThemePreset.ts";
 import { useBuildProfile } from "./lib/build-profile.ts";
+import {
+	type InstallerProgress,
+	installerComponentLabel,
+} from "./lib/installer-progress.ts";
 import { isOnboardingActive } from "./lib/onboarding-active.ts";
 import { useReleaseChannel } from "./lib/release-channel.ts";
 import CompanionPage from "./pages/CompanionPage.tsx";
@@ -72,25 +73,6 @@ function getTauriWindowLabel(): string {
 }
 
 const WINDOW_LABEL = getTauriWindowLabel();
-
-const MB = 1024 * 1024;
-
-/** "42%" for the sidecar-install progress toast — this binary's own completion,
- *  matching the line onboarding shows. Falls back to a raw size when the release
- *  hub sends no `Content-Length` (no denominator, so no honest percentage), and
- *  to a plain wait line before the first chunk lands. */
-function downloadProgressLabel(
-	received?: number,
-	total?: number | null
-): string {
-	if (!received) {
-		return "Starting the download…";
-	}
-	if (!total) {
-		return `${Math.round(received / MB)} MB`;
-	}
-	return `${Math.min(100, Math.round((received / total) * 100))}%`;
-}
 
 /** Terminates a `listenWhenReady(...).then(...)` chain. Outside Tauri the gate
  *  already resolves to a no-op unlisten, so reaching here means a real subscribe
@@ -276,57 +258,66 @@ function MainApp() {
 	}, [setCoreStatus]);
 
 	useEffect(() => {
-		// Surface sidecar auto-install progress emitted by the Rust installers when a
-		// fresh production install pulls the binaries from the release hub. A no-op in
-		// dev (turbo owns them, so the backend never emits these).
-		//
-		// BOTH required binaries report here. Only core did before, so a local setup
-		// went quiet after "Ryu Core installed" while the 40 MB gateway — which Core
-		// hands every model call — downloaded with nothing on screen at all.
+		// Surface the same versioned installer stream used inline by onboarding. A
+		// no-op in onboarding avoids stacking a toast over the progress card; outside
+		// the wizard this keeps background setup visible too.
 		const unlisteners: (() => void)[] = [];
-		for (const [event, name] of [
-			["core-install-progress", "Ryu Core"],
-			["gateway-install-progress", "the model gateway"],
-		] as const) {
-			listenWhenReady<{
-				error?: string;
-				phase: string;
-				received?: number;
-				total?: number | null;
-			}>(event, ({ payload }) => {
-				// Onboarding reports these same two installs inline, on a screen whose
-				// whole job is showing them. Toasting there stacked a second, redundant
-				// report over the first — so while the wizard is up, it owns the news.
-				if (isOnboardingActive()) {
-					return;
-				}
-				if (payload.phase === "downloading") {
-					// One long-lived progress toast, updated in place as bytes land: the
-					// installer streams the body and reports on the way, and a
-					// `type: "loading"` toast takes the shared progress slot so each
-					// update replaces the last instead of stacking. A single fire-and-
-					// forget "Downloading…" was the only feedback for the whole download.
+		listenWhenReady<InstallerProgress>("installer-progress", ({ payload }) => {
+			if (isOnboardingActive()) {
+				return;
+			}
+			const label = installerComponentLabel(payload.component);
+			const progress =
+				payload.percent === undefined
+					? undefined
+					: `${payload.percent}% of setup`;
+			if (payload.phase === "binary" && payload.status === "started") {
+				toast.show({
+					title: `Installing ${label}`,
+					description: progress,
+					type: "loading",
+					duration: null,
+				});
+			} else if (
+				payload.phase === "binary" &&
+				(payload.status === "complete" || payload.status === "skipped")
+			) {
+				toast.success(
+					payload.status === "skipped"
+						? `${label} is already installed`
+						: `${label} installed`
+				);
+			} else if (payload.phase === "core" && payload.status === "started") {
+				toast.show({
+					title: "Starting Ryu Core",
+					description: progress,
+					type: "loading",
+					duration: null,
+				});
+			} else if (payload.phase === "defaults") {
+				if (
+					payload.component === "bundled-defaults" &&
+					payload.status === "started"
+				) {
 					toast.show({
-						title: `Downloading ${name}`,
-						description: downloadProgressLabel(payload.received, payload.total),
+						title: "Setting up Ryu",
+						description:
+							"Bundled models, engines, and skills are downloading in the background.",
 						type: "loading",
 						duration: null,
 					});
-				} else if (payload.phase === "installing") {
-					toast.show({
-						title: `Installing ${name}`,
-						type: "loading",
-						duration: null,
-					});
-				} else if (payload.phase === "done") {
-					toast.success(`${name} installed`);
-				} else if (payload.phase === "error") {
-					toast.error(payload.error ?? `Couldn't install ${name}`);
 				}
-			})
-				.then((fn) => unlisteners.push(fn))
-				.catch(ignoreSubscribeFailure);
-		}
+			} else if (
+				payload.phase === "bootstrap" &&
+				payload.status === "complete"
+			) {
+				toast.success("Ryu setup is ready");
+			} else if (payload.phase === "error") {
+				toast.error(payload.error ?? "Ryu setup failed");
+			}
+		})
+			.then((fn) => unlisteners.push(fn))
+			.catch(ignoreSubscribeFailure);
 		return () => {
 			for (const fn of unlisteners) {
 				fn();
@@ -352,12 +343,15 @@ function MainApp() {
 		)
 			.then((fn) => unlisteners.push(fn))
 			.catch(ignoreSubscribeFailure);
-		listenWhenReady<{ error?: string }>("quick-capture:failed", ({ payload }) => {
-			toast.error({
-				title: "Couldn't keep that",
-				description: payload.error ?? "The capture didn't reach Ryu.",
-			});
-		})
+		listenWhenReady<{ error?: string }>(
+			"quick-capture:failed",
+			({ payload }) => {
+				toast.error({
+					title: "Couldn't keep that",
+					description: payload.error ?? "The capture didn't reach Ryu.",
+				});
+			}
+		)
 			.then((fn) => unlisteners.push(fn))
 			.catch(ignoreSubscribeFailure);
 		return () => {

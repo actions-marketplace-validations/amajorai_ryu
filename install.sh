@@ -3,23 +3,53 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/amajorai/ryu/main/install.sh | sh
 #
-# Downloads the headless stack — ryu-core, ryu-gateway, ryu-cli — into ~/.ryu/bin
-# and puts it on your PATH. Core starts the Gateway and a fully-local model stack
-# itself, so there is nothing else to wire up.
+# Installs and starts the headless stack — ryu-core, ryu-gateway, ryu-cli — in
+# ~/.ryu/bin. Starting Core is part of the install so the same entry point also
+# kicks off the bundled models, engines, skills, and built-in defaults. Core owns
+# those defaults; this script is the cross-surface bootstrap that starts them.
+# Island and Ghost are intentionally NOT part of the default closure yet.
 #
 # Environment overrides:
 #   RYU_INSTALL_DIR   install location            (default: $HOME/.ryu/bin)
 #   RYU_VERSION       release tag e.g. v0.0.4      (default: latest)
 #   RYU_SKIP_CHECKSUM 1 to skip sha256 verify      (default: verify, abort on failure)
 #   RYU_NO_MODIFY_PATH 1 to leave shell rc untouched
+#   RYU_START_CORE    0 to install binaries without starting Core (default: 1)
+#   RYU_CORE_BIND     Core bind address (default: 127.0.0.1:7980)
+#   RYU_CORE_URL      Core health URL (default: http://127.0.0.1:7980)
+#   RYU_PROGRESS_FORMAT json to emit RYU_INSTALL_EVENT JSON lines for callers
+#   RYU_INSTALL_MARKER version marker written beside installed binaries
 set -eu
 
 REPO="amajorai/ryu"
 INSTALL_DIR="${RYU_INSTALL_DIR:-$HOME/.ryu/bin}"
 BINARIES="ryu-core ryu-gateway ryu-cli"
+PROGRESS_FORMAT="${RYU_PROGRESS_FORMAT:-human}"
+START_CORE="${RYU_START_CORE:-1}"
+INSTALL_DEFAULTS="${RYU_INSTALL_DEFAULTS:-1}"
+CORE_BIND="${RYU_CORE_BIND:-127.0.0.1:7980}"
+CORE_URL="${RYU_CORE_URL:-http://127.0.0.1:7980}"
+INSTALL_MARKER="${RYU_INSTALL_MARKER:-latest}"
+FORCE_INSTALL="${RYU_FORCE_INSTALL:-0}"
+EVENT_PREFIX="RYU_INSTALL_EVENT:"
 
 info() { printf '  %s\n' "$1"; }
+emit() {
+  [ "$PROGRESS_FORMAT" = "json" ] || return 0
+  phase="$1"
+  component="$2"
+  status="$3"
+  percent="$4"
+  printf '%s{"version":1,"phase":"%s","component":"%s","status":"%s","percent":%s}\n' \
+    "$EVENT_PREFIX" "$phase" "$component" "$status" "$percent"
+}
 err()  { printf 'error: %s\n' "$1" >&2; exit 1; }
+fail() {
+  component="$1"
+  message="$2"
+  emit "error" "$component" "failed" 0
+  err "$message"
+}
 
 # --- detect OS/arch and map to release-asset suffix -------------------------
 os="$(uname -s)"
@@ -87,16 +117,36 @@ mkdir -p "$INSTALL_DIR"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-for bin in $BINARIES; do
+install_binary() {
+  bin="$1"
+  ordinal="$2"
   asset="$bin-$suffix"
   url="$base/$asset"
+  dest="$INSTALL_DIR/$bin"
   out="$tmp/$bin"
+  before=$(( (ordinal - 1) * 15 ))
+  after=$(( ordinal * 15 ))
+
+  if [ "$FORCE_INSTALL" != "1" ] && [ -x "$dest" ]; then
+    info "$bin already installed"
+    printf '%s\n' "$INSTALL_MARKER" > "$dest.version"
+    emit "binary" "$bin" "skipped" "$after"
+    return 0
+  fi
+
   info "$bin"
-  dl "$url" "$out" || err "download failed: $url"
-  verify "$out" "$url.sha256"
+  emit "binary" "$bin" "started" "$before"
+  dl "$url" "$out" || fail "$bin" "download failed: $url"
+  verify "$out" "$url.sha256" || fail "$bin" "verification failed: $url"
   chmod +x "$out"
-  mv "$out" "$INSTALL_DIR/$bin"
-done
+  mv "$out" "$dest"
+  printf '%s\n' "$INSTALL_MARKER" > "$dest.version"
+  emit "binary" "$bin" "complete" "$after"
+}
+
+install_binary ryu-core 1
+install_binary ryu-gateway 2
+install_binary ryu-cli 3
 
 # --- PATH -------------------------------------------------------------------
 added_path=0
@@ -120,10 +170,62 @@ if [ "$added_path" = "1" ]; then
   info "Added $INSTALL_DIR to your PATH — open a new terminal, or run:"
   info "  export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
+if [ "$START_CORE" = "1" ]; then
+  # The desktop and the one-line install now share this exact Core bring-up. The
+  # Core process owns the default model/engine/skill installers and continues
+  # those downloads in the background after its health endpoint is ready.
+  export RYU_INSTALL_DEFAULTS="$INSTALL_DEFAULTS"
+  emit "core" "ryu-core" "started" 55
+  core_log="${RYU_CORE_LOG:-$HOME/.ryu/ryu-core.log}"
+  core_dir="$(dirname "$core_log")"
+  mkdir -p "$core_dir"
+
+  http_ok() {
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS --max-time 3 "$CORE_URL/api/health" >/dev/null 2>&1
+    else
+      wget -qO- --timeout=3 "$CORE_URL/api/health" >/dev/null 2>&1
+    fi
+  }
+
+  if ! http_ok; then
+    info "starting Ryu Core"
+    nohup "$INSTALL_DIR/ryu-core" "--bind=$CORE_BIND" \
+      >>"$core_log" 2>&1 </dev/null &
+  else
+    info "Ryu Core is already running"
+  fi
+
+  healthy=0
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if http_ok; then
+      healthy=1
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$healthy" = "1" ] || fail "ryu-core" "Ryu Core did not become healthy at $CORE_URL"
+  emit "core" "ryu-core" "complete" 75
+
+  if [ "$INSTALL_DEFAULTS" = "1" ]; then
+    info "Core is provisioning bundled models, engines, skills, and defaults"
+    emit "defaults" "bundled-defaults" "started" 80
+  else
+    info "bundled defaults were not requested"
+    emit "defaults" "bundled-defaults" "skipped" 80
+  fi
+  info "Island and Ghost installs are disabled for this release"
+  emit "defaults" "island" "skipped" 85
+  emit "defaults" "ghost" "skipped" 85
+fi
+
+emit "bootstrap" "ryu" "complete" 100
 cat <<EOF
 
 Next:
-  ryu-core     # start the node (spawns the Gateway + a local model stack, no key needed)
+  ryu-core     # already running; starts the Gateway + local defaults if restarted
   ryu-cli      # in another terminal, connect the TUI to it
 
 Point any OpenAI-compatible client at the Gateway: http://127.0.0.1:7981/v1

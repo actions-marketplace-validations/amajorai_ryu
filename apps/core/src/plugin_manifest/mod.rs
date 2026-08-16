@@ -427,6 +427,8 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/spider/manifest.json"),
     include_str!("../../../../plugins-store/scrapling/manifest.json"),
     include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
+    include_str!("../../../../plugins-store/expect/manifest.json"),
+    include_str!("../../../../plugins-store/agentation/manifest.json"),
     include_str!("../../../../plugins-store/exa/manifest.json"),
     include_str!("../../../../plugins-store/tavily/manifest.json"),
     include_str!("../../../../plugins-store/brave/manifest.json"),

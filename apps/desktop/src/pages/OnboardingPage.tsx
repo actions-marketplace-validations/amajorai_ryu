@@ -29,6 +29,10 @@ import { ApiError, type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 // import { installAndLaunchIsland } from "@/src/lib/api/island.ts";
 import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
 import { setFeatureEnabled, TOGGLEABLE_FEATURES } from "@/src/lib/features.ts";
+import {
+	type InstallerProgress,
+	installerComponentLabel,
+} from "@/src/lib/installer-progress.ts";
 import { setOnboardingActive } from "@/src/lib/onboarding-active.ts";
 import { onboardingExtensionsRoute } from "@/src/lib/onboarding-tutorial.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
@@ -414,25 +418,12 @@ async function startLocalCore(
 	};
 }
 
-/** A `<bin>-install-progress` event from the Rust release-hub installer. */
-interface InstallProgress {
-	error?: string;
-	phase: "downloading" | "installing" | "done" | "error";
-	received?: number;
-	total?: number | null;
-}
-
-const MB = 1024 * 1024;
-// The two binaries download inside the `installing` phase, so their real fraction
-// is mapped into a band that starts where the phase starts and stops short of the
-// phase's own placeholder — the bar only ever moves forward as the flow advances
-// from download → boot → local-stack wait.
-const DOWNLOAD_BAND_START = 12;
-const DOWNLOAD_BAND_END = 55;
-// The stages either side of the download, which have no measurable fraction of
-// their own. They bracket the band so the bar only ever moves forward across the
-// whole pick: prepare → download → unpack → boot → the phase's own 60 for the
-// local-stack wait that follows.
+/** The stages the installer events cannot see — Core booting, the local engine
+ *  install, and agent detection. A fixed position keeps the bar honest across
+ *  the whole local setup flow. */
+// The stages either side of the installer range have no measurable fraction of
+// their own. They bracket the script's structured progress: prepare → install →
+// boot → local-stack wait.
 const STAGE_PREPARING = 8;
 const STAGE_BOOTING = 58;
 const STAGE_ENGINE = 70;
@@ -444,41 +435,6 @@ const STAGE_AGENTS = 82;
 interface LocalStatusReporter {
 	done: (line: string) => void;
 	status: (line: string | null, percent?: number | null) => void;
-}
-
-/** The download's real completion as a bar percentage, or null when the release
- *  hub sent no `Content-Length` (nothing honest to draw — the phase placeholder
- *  takes over). */
-function downloadPercent(p: InstallProgress): number | null {
-	if (!p.total) {
-		return null;
-	}
-	const fraction = Math.min(1, (p.received ?? 0) / p.total);
-	return Math.round(
-		DOWNLOAD_BAND_START + (DOWNLOAD_BAND_END - DOWNLOAD_BAND_START) * fraction
-	);
-}
-
-/** "Downloading Ryu Core 42%". The percentage is of THIS step's own download,
- *  not of setup as a whole: each binary counts 0–100 for itself, which is what
- *  makes the number mean something while it is on screen. Falls back to a raw
- *  size only when the release hub sends no `Content-Length` (no denominator, so
- *  no honest percentage), and to the bare label before the first chunk lands. */
-function downloadLabel(label: string, p: InstallProgress): string {
-	const received = p.received ?? 0;
-	if (received === 0) {
-		return `${label}…`;
-	}
-	if (!p.total) {
-		return `${label} ${Math.round(received / MB)} MB`;
-	}
-	return `${label} ${stepPercent(received, p.total)}%`;
-}
-
-/** This step's own completion, 0–100, clamped so a `Content-Length` that
- *  undercounts can never print 103%. */
-function stepPercent(received: number, total: number): number {
-	return Math.min(100, Math.round((received / total) * 100));
 }
 
 /** Normalize a typed node address: trim, add a scheme if omitted, drop the
@@ -732,13 +688,10 @@ export default function OnboardingPage() {
 	// release asset, a write error, …). The card used to say only "something went
 	// wrong", which is unactionable for the one path that installs software.
 	const [localError, setLocalError] = useState<string | null>(null);
-	// What the local bring-up is doing RIGHT NOW ("Downloading Ryu Core — 42 of
-	// 119 MB"), and the things it has already finished ("Ryu Core installed",
-	// "Model gateway installed"). Refs, not state: the byte count updates every
-	// megabyte and re-rendering the headline that often would fight TextSwap's
-	// crossfade. The rotation tick samples them instead, so the text changes on
-	// its own cadence while the progress BAR — which is smooth by nature — tracks
-	// `localPercent` live.
+	// What the local bring-up is doing RIGHT NOW ("Installing the model gateway"),
+	// and the things it has already finished ("Ryu Core installed"). Refs, not
+	// state: installer events can arrive frequently and the rotation tick samples
+	// them, while the progress bar tracks the script's structured percentage live.
 	const liveStatusRef = useRef<string | null>(null);
 	const doneStatusRef = useRef<string[]>([]);
 	const [localPercent, setLocalPercent] = useState<number | null>(null);
@@ -788,42 +741,64 @@ export default function OnboardingPage() {
 		[reportDone, reportLocalStatus]
 	);
 
-	// Claim the install-progress events for the duration of the wizard. App.tsx
-	// listens to the same two events and toasts them; here they already drive the
-	// progress bar and the status line below it, so the toast was the same download
-	// reported a second time, stacked over the screen reporting it.
+	// Claim the installer progress for the duration of the wizard. App.tsx listens
+	// to the same stream outside onboarding and toasts it; here the wizard owns the
+	// inline status and progress bar.
 	useEffect(() => {
 		setOnboardingActive(true);
 		return () => setOnboardingActive(false);
 	}, []);
 
-	// Mirror the installers' progress events. BOTH binaries report here — the
-	// gateway is 40 MB of the ~160 MB a local pick downloads and nothing ever said
-	// so, which is why setup looked like it stalled after "Ryu Core installed".
+	// Mirror the public installer's versioned progress envelope. The stream covers
+	// Core, Gateway, CLI, Core boot, and the bundled defaults; agent detection and
+	// the rest of Desktop onboarding remain local responsibilities.
 	useEffect(() => {
 		const unlisteners: (() => void)[] = [];
-		for (const [event, name] of [
-			["core-install-progress", "Ryu Core"],
-			["gateway-install-progress", "the model gateway"],
-		] as const) {
-			listen<InstallProgress>(event, ({ payload }) => {
-				if (payload.phase === "downloading") {
-					liveStatusRef.current = downloadLabel(`Downloading ${name}`, payload);
-					setLocalPercent(downloadPercent(payload));
-				} else if (payload.phase === "installing") {
-					liveStatusRef.current = `Installing ${name}…`;
-					setLocalPercent(DOWNLOAD_BAND_END);
-				} else if (payload.phase === "done") {
-					// Core's `done` lands while the gateway leg and the boot wait are
-					// still ahead, so this only retires the LIVE line — the milestone
-					// keeps it in the loop.
-					reportDone(`${name} installed`);
-					liveStatusRef.current = null;
-				} else if (payload.phase === "error") {
+		listen<InstallerProgress>("installer-progress", ({ payload }) => {
+			const percent = payload.percent ?? null;
+			if (payload.phase === "binary") {
+				const label = installerComponentLabel(payload.component);
+				if (payload.status === "started") {
+					liveStatusRef.current = `Installing ${label}…`;
+				} else if (
+					payload.status === "complete" ||
+					payload.status === "skipped"
+				) {
+					reportDone(`${label} installed`);
 					liveStatusRef.current = null;
 				}
-			}).then((fn) => unlisteners.push(fn));
-		}
+				setLocalPercent(percent);
+			} else if (payload.phase === "core") {
+				if (payload.status === "started") {
+					liveStatusRef.current = "Starting Ryu Core…";
+				} else if (payload.status === "complete") {
+					reportDone("Ryu Core is healthy");
+					liveStatusRef.current = null;
+				}
+				setLocalPercent(percent);
+			} else if (payload.phase === "defaults") {
+				if (
+					payload.component === "bundled-defaults" &&
+					payload.status === "started"
+				) {
+					liveStatusRef.current =
+						"Installing bundled models, engines, and skills…";
+				} else if (
+					payload.component === "bundled-defaults" &&
+					payload.status === "skipped"
+				) {
+					liveStatusRef.current = null;
+				}
+				setLocalPercent(percent);
+			} else if (payload.phase === "bootstrap") {
+				// `startLocalCore` still performs the Desktop health wait after the
+				// script exits, so leave room for that phase before the local-stack
+				// and agent steps take the bar to completion.
+				setLocalPercent(payload.status === "complete" ? 75 : percent);
+			} else if (payload.phase === "error") {
+				liveStatusRef.current = null;
+			}
+		}).then((fn) => unlisteners.push(fn));
 		return () => {
 			for (const fn of unlisteners) {
 				fn();

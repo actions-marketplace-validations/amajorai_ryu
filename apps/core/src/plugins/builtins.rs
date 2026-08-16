@@ -561,6 +561,12 @@ pub const CORE_PLUGINS: &[&str] = &[
     "@ryu/shadow",
     "@ryu/spider",
     "@ryu/agentbrowser",
+    // Expect and Agentation are local Node MCP servers. Core-tier is required so
+    // their manifest-owned stdio servers can register without the reserved
+    // `mcp:server` marketplace grant; both are default-on so browser QA and visual
+    // feedback are available alongside the built-in skills on a fresh install.
+    "@ryu/expect",
+    "@ryu/agentation",
     // Third `web.extract` provider (Scrapling's MCP server). Core-tier is a
     // REQUIREMENT here, not a promotion: `may_register_mcp_servers` auto-allows
     // manifest-declared `mcp_servers` only for compiled-in fixtures, and the
@@ -1037,6 +1043,8 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/shadow",
     "@ryu/spider",
     "@ryu/agentbrowser",
+    "@ryu/expect",
+    "@ryu/agentation",
     // `exa` is default-ON so the `web.search` toolkit has a provider out of the
     // box. Without this the capability had ZERO enabled providers on a fresh
     // install, and because the read model derives its capability list from the

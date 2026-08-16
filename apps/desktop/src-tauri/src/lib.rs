@@ -246,22 +246,11 @@ async fn ensure_core_installed(app: tauri::AppHandle) -> Result<String, String> 
     }
     #[cfg(not(debug_assertions))]
     {
-        // The gateway is Core's managed sidecar and takes every model call, so it
-        // has to be on disk BEFORE Core spawns. The boot path installs it, but a
-        // fresh install never reaches that branch: it only downloads when the
-        // default node is already local, which is false until this very pick. So
-        // the local pick used to leave a Core with no gateway and degraded chat.
-        // Loud-but-non-fatal, exactly as the boot path treats it.
-        if let Some(p) = resolve_core_binary() {
-            if let Err(e) = crate::core::install::ensure_gateway_installed(&app).await {
-                tracing::error!("Failed to auto-install ryu-gateway: {}", e);
-            }
-            return Ok(p.to_string_lossy().to_string());
-        }
-        let p = crate::core::install::download_core_binary(&app).await?;
-        if let Err(e) = crate::core::install::ensure_gateway_installed(&app).await {
-            tracing::error!("Failed to auto-install ryu-gateway: {}", e);
-        }
+        // The public one-line installer is the single binary/bootstrap path for
+        // Desktop as well as headless users. It installs Core, Gateway, and CLI,
+        // starts Core, and tells Core to begin its bundled defaults. Desktop then
+        // keeps ownership of agent detection and the preferences below this step.
+        let p = crate::core::install::ensure_unified_installed(&app).await?;
         Ok(p.to_string_lossy().to_string())
     }
 }
@@ -1897,14 +1886,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 #[allow(unused_mut)]
                 let mut binary = resolve_core_binary();
-                // Production only: fetch the core binary from the public release hub
-                // into ~/.ryu/bin/ when it is missing OR when a stale copy from an
-                // older app version is sitting there. The app self-updates via the
-                // Tauri updater, but the out-of-process ryu-core sidecar is separate:
-                // without this staleness check a 0.0.3 core lingered forever after the
-                // app moved to 0.0.8. In dev the binary is owned by turbo
-                // (`bun run dev:core`), so we never download — resolve_core_binary's
-                // dev fallback finds the debug build.
+                // Production only: run the canonical one-line installer when the
+                // managed local stack is missing or stale. The installer owns Core,
+                // Gateway, CLI, and the start of Core's bundled defaults. In dev the
+                // binary is owned by turbo (`bun run dev:core`), so this branch is
+                // disabled — resolve_core_binary's dev fallback finds the debug build.
                 //
                 // The missing-binary half is now gated on the user having chosen
                 // to run locally (`nodes.json` exists and its default node is this
@@ -1920,7 +1906,7 @@ pub fn run() {
                 if (binary.is_none() && crate::nodes::default_node_is_local())
                     || (binary.is_some() && crate::core::install::is_managed_core_stale(&handle))
                 {
-                    match crate::core::install::download_core_binary(&handle).await {
+                    match crate::core::install::ensure_unified_installed(&handle).await {
                         Ok(p) => binary = Some(p),
                         // Keep whatever resolve_core_binary found on failure: a download
                         // error should degrade to the old-but-working core, not strand it.
