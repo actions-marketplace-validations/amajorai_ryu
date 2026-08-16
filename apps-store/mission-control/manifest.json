@@ -2,6 +2,7 @@
   "id": "@ryu/mission-control",
   "name": "Mission Control",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Productivity",
   "description": "The project-level view over many chats: recent sessions and what each one accomplished, per-day activity, the files several chats keep returning to, and the to-dos left outstanding in threads nobody reopened. Declares the out-of-process ryu-mission-control sidecar (kind:local), which owns the digest store and the cross-chat rollup and is served to the desktop through the generic ext-proxy public_mount. The digests themselves are computed in the desktop from each chat's message parts and PUT here, because a manifest sidecar has no conversation read and the parts column is sealed at rest — the same function feeds the in-chat Mission Control panel, so a chat's summary is identical in both places.",
   "tagline": "What every chat did, and what is still open",

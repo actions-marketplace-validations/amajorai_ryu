@@ -334,7 +334,8 @@ impl PluginCipher {
 
     /// Seal a string into the `encp:v1:` envelope under this plugin's subkey.
     pub fn seal(&self, plaintext: &str) -> Result<String> {
-        self.inner.seal_with_prefix(PLUGIN_ENVELOPE_PREFIX, plaintext)
+        self.inner
+            .seal_with_prefix(PLUGIN_ENVELOPE_PREFIX, plaintext)
     }
 
     /// Open a value sealed by [`Self::seal`].
@@ -751,7 +752,10 @@ mod tests {
         // Determinism across processes is what makes stored ciphertext readable
         // after a restart.
         let sealed = test_plugin_cipher("@ryu/notes").seal("stable").unwrap();
-        assert_eq!(test_plugin_cipher("@ryu/notes").open(&sealed).unwrap(), "stable");
+        assert_eq!(
+            test_plugin_cipher("@ryu/notes").open(&sealed).unwrap(),
+            "stable"
+        );
         // A legacy (non-canonical) id derives a DIFFERENT key. This is the
         // canonicalization trap the `plugin_cipher` docs warn about: callers must
         // pass the canonical id, or previously sealed values stop opening.

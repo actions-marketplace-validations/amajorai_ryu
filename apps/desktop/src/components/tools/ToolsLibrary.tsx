@@ -244,7 +244,7 @@ export default function ToolsLibrary() {
 					<Button
 						onClick={() => reload().catch(() => undefined)}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Try again
 					</Button>
@@ -556,6 +556,17 @@ function ToolCards({
 	selectedId: string | null;
 	onSelect: (id: string) => void;
 }) {
+	const displayToolName = (tool: McpTool) => {
+		const separator = tool.name.indexOf("__");
+		if (separator === -1) {
+			return tool.name;
+		}
+		return tool.name
+			.slice(separator + 2)
+			.replace(/[_-]+/g, " ")
+			.replace(/\b\w/g, (character) => character.toUpperCase());
+	};
+
 	return (
 		<StoreCardGrid>
 			{tools.map((tool) => (
@@ -582,7 +593,7 @@ function ToolCards({
 						<HugeiconsIcon className="size-5" icon={ComputerTerminal01Icon} />
 					}
 					key={tool.id}
-					name={tool.name}
+					name={displayToolName(tool)}
 					onClick={() => onSelect(`tool:${tool.id}`)}
 					seedId={tool.id}
 					selected={selectedId === `tool:${tool.id}`}

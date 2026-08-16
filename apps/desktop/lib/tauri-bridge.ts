@@ -55,6 +55,18 @@ export const restartRyuCore = async (): Promise<string> => {
 export const openExternal = (url: string) =>
 	invokeWhenReady<void>("open_external", { url });
 
+export interface LinkMetadataPreview {
+	description?: string | null;
+	image?: string | null;
+	siteName?: string | null;
+	title?: string | null;
+	url: string;
+}
+
+/** Fetch a public page's Open Graph metadata through the native shell (no CORS). */
+export const previewLinkMetadata = (url: string) =>
+	invokeWhenReady<LinkMetadataPreview>("preview_link_metadata", { url });
+
 /** Move a tab into a separate OS window (browser-style "open in new window").
  * The new window re-fetches the conversation by id and keeps targeting `node`. */
 export const openTabWindow = (opts: {

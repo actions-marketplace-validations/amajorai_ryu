@@ -2,6 +2,7 @@
   "id": "@ryu/timeline",
   "name": "Timeline",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Productivity",
   "description": "The activity replay timeline: a CapCut-style scrubber over Shadow's captured screen/input/window/audio lanes with a keyframe preview, a Dayflow work journal, and jump-to-moment focus.",
   "tagline": "Scrub back through everything your screen did",

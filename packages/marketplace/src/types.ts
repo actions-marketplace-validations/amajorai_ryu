@@ -14,7 +14,13 @@
 /** The catalog kinds the money layer covers, matching the server's kind.
  *  `agent` is a user-published agent definition — the one kind whose listing is
  *  a configuration rather than code. */
-export type MarketplaceKind = "plugin" | "skill" | "model" | "mcp" | "agent";
+export type MarketplaceKind =
+	| "plugin"
+	| "skill"
+	| "model"
+	| "mcp"
+	| "agent"
+	| "stack_template";
 
 /** Purchase/license lifecycle, mirroring the server's LicenseStatus. */
 export type LicenseStatus = "active" | "refunded" | "disputed";

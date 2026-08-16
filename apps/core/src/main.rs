@@ -39,16 +39,17 @@ mod exec_approval;
 /// which does the same for Core's own generated document.
 mod ext_api;
 mod fal_auth;
+mod fleet;
 mod hardware;
 mod healing_client;
 mod hf_auth;
 mod identity;
 mod identity_verify;
+mod image_host;
 /// Scan a user-picked local folder and import the *setup* it contains (agent
 /// instructions, skills, MCP servers, plugins, Claude project memories) into
 /// Ryu's own stores — the setup-side companion to [`native_history`].
 mod import;
-mod image_host;
 mod inference;
 mod learning;
 mod lsp;
@@ -68,6 +69,7 @@ mod sandbox_host;
 /// registry fetch) inverts through [`mcp_catalog_host`].
 pub use ryu_mcp_catalog as mcp_catalog;
 mod mcp_catalog_host;
+mod mcp_oauth;
 mod meetings_client;
 mod mesh_host;
 mod midnight_wipe;
@@ -299,9 +301,9 @@ async fn main() {
         // existed). `enforce_remote_auth` below still REFUSES to expose a tokenless
         // node beyond loopback, so an unwritable home cannot yield an open node on
         // a public IP.
-        None => tracing::warn!(
-            "no node auth token could be established; local API is UNAUTHENTICATED"
-        ),
+        None => {
+            tracing::warn!("no node auth token could be established; local API is UNAUTHENTICATED")
+        }
     }
 
     // Ghost sidecar env: the Ghost MCP server moved from a hardcoded built-in to
@@ -904,7 +906,10 @@ async fn main() {
     // `create_router` (the fail-closed token gate) and the sidecar `start_all`
     // spawn — so the enabled signal is settled before anything security-relevant
     // or mesh-relevant reads it. Same pattern as entitlement/claude-config/etc.
-    if let Ok(Some(value)) = preferences.get(crate::mesh_host::MESH_ENABLED_PREF_KEY).await {
+    if let Ok(Some(value)) = preferences
+        .get(crate::mesh_host::MESH_ENABLED_PREF_KEY)
+        .await
+    {
         ryu_mesh::set_pref_enabled(ryu_mesh::parse_enabled(Some(&value)));
     }
     // Mesh client PRE-install (separate decision from the enable above — see
@@ -938,6 +943,16 @@ async fn main() {
             .ok()
             .flatten();
         crate::sidecar::gateway::set_managed_fleet_pref(url, token);
+    }
+    // Managed per-request routing preferences. The request-forwarding path is
+    // synchronous, so seed the encoded carrier beside the managed-fleet pair
+    // before any agent can issue a request. The generic preference route keeps
+    // it fresh after a desktop edit.
+    if let Ok(Some(value)) = preferences
+        .get(crate::sidecar::gateway::NODE_ROUTING_PREF_KEY)
+        .await
+    {
+        crate::sidecar::gateway::set_node_routing_prefs_from_json(&value);
     }
     // Local support-access diagnostic channel (#546, P5): the append-only audit
     // log, plus the startup auto-disable sweep. Re-checking the hard expiry HERE
@@ -1132,7 +1147,13 @@ async fn main() {
     }
     // Apply the user's saved default embedding model (if any) to the Spaces store,
     // re-indexing in the background when it differs from what the store opened with.
-    server::spaces::apply_saved_embedding_pref(&spaces, &preferences).await;
+    server::spaces::apply_saved_embedding_pref_all(
+        &spaces,
+        &retrieval,
+        &conversations,
+        &preferences,
+    )
+    .await;
     // App manifests: wrapped in RwLock so self-build tools can hot-install new
     // apps without restarting Core (U57). The self-build tools write into this
     // store and `GET /api/apps` reads from it; no restart required.
@@ -1140,26 +1161,35 @@ async fn main() {
     // is byte-for-byte what `load()` used to return), while `incompatible` holds the
     // plugins this node's version cannot run. The second list exists ONLY so the
     // marketplace can show them greyed with what they need — it is never activated.
-    let loaded_manifests = crate::plugin_manifest::PluginManifestLoader::load_all();
+    let loaded_manifests = {
+        let mut loaded = crate::plugin_manifest::PluginManifestLoader::load_all();
+        let runtime = crate::plugin_manifest::PluginManifestLoader::load_runtime();
+        loaded.compatible = runtime;
+        loaded
+    };
+    // Loopback clients need their manifest-declared ports before the default
+    // marketplace packages are materialized below. Keep this bootstrap snapshot
+    // separate from the runtime set: absent packages must not be activated merely
+    // to make startup port resolution work.
+    let bootstrap_manifests = crate::plugin_manifest::PluginManifestLoader::load_bootstrap();
     if !loaded_manifests.incompatible.is_empty() {
         tracing::info!(
             count = loaded_manifests.incompatible.len(),
             "plugins held back as incompatible with this node's versions"
         );
     }
-    let incompatible_manifests =
-        Arc::new(tokio::sync::RwLock::new(loaded_manifests.incompatible));
+    let incompatible_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.incompatible));
     let app_manifests = Arc::new(tokio::sync::RwLock::new(loaded_manifests.compatible));
     // Loopback client for the out-of-process `ryu-teams` sidecar (single owner of
     // `teams.db`). Port resolved from the just-loaded manifests, profile-shifted.
     let teams = crate::teams_client::TeamsClient::new(crate::teams_client::sidecar_port(
-        &*app_manifests.read().await,
+        &bootstrap_manifests,
     ));
     // Loopback client for the out-of-process `ryu-finetune` sidecar (single owner of
     // `finetune.db` + the Python `unsloth` worker). Port resolved from the just-loaded
     // manifests, profile-shifted — same posture as `teams`.
     let finetune = crate::finetune_client::FinetuneClient::new(
-        crate::finetune_client::sidecar_port(&*app_manifests.read().await),
+        crate::finetune_client::sidecar_port(&bootstrap_manifests),
     );
     // Loopback client for the out-of-process `ryu-quests` sidecar (single owner of
     // `quests.db` + the detection engine). Port resolved from the just-loaded
@@ -1167,7 +1197,7 @@ async fn main() {
     // a process-global so the scheduler (`JobTarget::Quest`) can reach it without
     // `ServerState`.
     let quests = crate::quests_client::QuestsClient::new(crate::quests_client::sidecar_port(
-        &*app_manifests.read().await,
+        &bootstrap_manifests,
     ));
     crate::quests_client::set_global_client(quests.clone());
     // Loopback client for the out-of-process `ryu-monitors` sidecar (single owner of
@@ -1176,7 +1206,7 @@ async fn main() {
     // process-global so the scheduler (`JobTarget::Monitor`) can reach it without
     // `ServerState`; the reconcile loop is spawned once `activity`/`ServerState` exist.
     let monitors = crate::monitors_client::MonitorsClient::new(
-        crate::monitors_client::sidecar_port(&*app_manifests.read().await),
+        crate::monitors_client::sidecar_port(&bootstrap_manifests),
     );
     crate::monitors_client::set_global_client(monitors.clone());
     // Loopback client for the out-of-process `ryu-dashboards` sidecar (single owner
@@ -1186,7 +1216,7 @@ async fn main() {
     // MCP runnable can reach it; also backs the kernel hardware device-dashboard
     // renderer + nudge loop through the `ryu_hardware::DashboardFeed` seam.
     let dashboards = crate::dashboards_client::DashboardsClient::new(
-        crate::dashboards_client::sidecar_port(&*app_manifests.read().await),
+        crate::dashboards_client::sidecar_port(&bootstrap_manifests),
     );
     crate::dashboards_client::set_global_client(dashboards.clone());
     // Loopback client for the out-of-process `ryu-meetings` sidecar (single owner of
@@ -1196,12 +1226,11 @@ async fn main() {
     // `ryu_hardware::MeetingIngest` seam; the activity-feed fold is spawned once
     // `activity`/`ServerState` exist.
     let meetings = crate::meetings_client::MeetingsClient::new(
-        crate::meetings_client::sidecar_port(&*app_manifests.read().await),
+        crate::meetings_client::sidecar_port(&bootstrap_manifests),
     );
-    // Resolve the `ryu-healing` sidecar port now, while `app_manifests` is still in
-    // scope (it is moved into `ServerState` below); the healing client is built
-    // later, once `server_state` exists.
-    let healing_sidecar_port = crate::healing_client::sidecar_port(&*app_manifests.read().await);
+    // Resolve the `ryu-healing` sidecar port from the bootstrap snapshot; the
+    // healing client is built later, once `server_state` exists.
+    let healing_sidecar_port = crate::healing_client::sidecar_port(&bootstrap_manifests);
     let app_store = match crate::plugins::PluginStore::open() {
         Ok(store) => store,
         Err(e) => boot_fail!("failed to open app store: {e:#}"),
@@ -1661,6 +1690,12 @@ async fn main() {
         Err(e) => boot_fail!("failed to open experience store: {e:#}"),
     };
 
+    let agent_ui_templates = match server::agent_ui_templates::AgentUiTemplateStore::open_default()
+    {
+        Ok(store) => store,
+        Err(e) => boot_fail!("failed to open Agent-UI template store: {e:#}"),
+    };
+
     // Handed to the scheduler further down, which is spawned after `ServerState`
     // has taken ownership of the store. `PluginStore` clones share one pool.
     let scheduler_apps = app_store.clone();
@@ -1711,6 +1746,7 @@ async fn main() {
         collab,
         finetune,
         experience: experience_store,
+        agent_ui_templates,
         // Captured for the public `/api/realtime/ws` handler's in-handler node
         // token enforcement (the public router has no `auth_token` Extension).
         // Same env source the protected router resolves below.
@@ -1737,6 +1773,43 @@ async fn main() {
     crate::healing_client::set_global_client(healing.clone());
     crate::healing_client::spawn(healing, server_state.clone());
     let auth_token = crate::node_token::active_token();
+
+    // Ordinary first-party plugins are official marketplace packages, not
+    // compiled runtime entries. Install the default package set through the
+    // same verified catalog path as the Store, then reload the runtime list
+    // before activation and default-on seeding.
+    if !crate::safe_mode::is_active() {
+        const DEFAULT_MARKETPLACE_STARTUP_WAIT: std::time::Duration =
+            std::time::Duration::from_secs(15);
+        let materialization_state = server_state.clone();
+        let mut materialization = tokio::spawn(async move {
+            let newly_materialized =
+                crate::server::install_default_official_plugins(&materialization_state).await;
+            let runtime = crate::plugin_manifest::PluginManifestLoader::load_runtime();
+            *materialization_state.app_manifests.write().await = runtime.clone();
+            crate::plugins::seed::seed_default_on_with_materialized(
+                &materialization_state.app_store,
+                &runtime,
+                &newly_materialized,
+            )
+            .await;
+        });
+        match tokio::time::timeout(DEFAULT_MARKETPLACE_STARTUP_WAIT, &mut materialization).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "default marketplace materialization task failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    wait_secs = DEFAULT_MARKETPLACE_STARTUP_WAIT.as_secs(),
+                    "default marketplace materialization exceeded startup wait; awaiting required mounts before routing"
+                );
+                if let Err(error) = materialization.await {
+                    tracing::warn!(%error, "default marketplace materialization task failed");
+                }
+            }
+        }
+    }
 
     // Fire the `onStartup` activation event (#443) now that `ServerState` exists.
     // This is the live runtime driver behind the plugin activation contract: every
@@ -1780,6 +1853,23 @@ async fn main() {
         });
     }
 
+    // Reconcile the bundled system-skills catalog in the background: install
+    // missing bundled skills, remove `System`-owned skills dropped from the
+    // catalog (never `User`-owned ones), on first boot and whenever the catalog
+    // version changes. Spawned (not awaited) so a slow network sync never delays
+    // the listener bind; idempotent and gated on `skills.sync-system`.
+    {
+        let sync_state = server_state.clone();
+        let sync_preferences = server_state.preferences.clone();
+        tokio::spawn(async move {
+            crate::skills_catalog::system_skills::run_on_boot(
+                &sync_state.client,
+                &sync_preferences,
+            )
+            .await;
+        });
+    }
+
     // Resolve the bind address ONCE (the same chain the listener uses below) and
     // hand it to the fail-closed gate so a `--bind=0.0.0.0` flag cannot bypass the
     // RYU_BIND-only check (#478 V1).
@@ -1790,7 +1880,16 @@ async fn main() {
         .or_else(|| std::env::var("RYU_BIND").ok())
         .unwrap_or_else(|| format!("127.0.0.1:{}", crate::profile::port(7980)));
 
-    let router = server::create_router(server_state, auth_token, &bind_addr);
+    let router_manifests = crate::plugin_manifest::PluginManifestLoader::for_router(
+        &server_state.app_manifests.read().await,
+        &bootstrap_manifests,
+    );
+    let router = server::create_router(
+        server_state.clone(),
+        auth_token,
+        &bind_addr,
+        &router_manifests,
+    );
 
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(l) => l,
@@ -1920,6 +2019,10 @@ async fn main() {
     // `RYU_GATEWAY_TOKEN` with the durable when the file is present; a fresh node
     // (no file) is untouched and exchanges its bootstrap normally.
     sidecar::control_plane::load_persisted_durable_token();
+
+    // Enrolled nodes pull signed fleet desired state over an outbound-only
+    // long poll. Unenrolled/local-only nodes sleep without touching the network.
+    fleet::spawn_reconciler(server_state.clone());
 
     // Resolve the hierarchy-scoped tool set from the control plane (U30) when a
     // gateway key is configured. This narrows the local config-driven MCP

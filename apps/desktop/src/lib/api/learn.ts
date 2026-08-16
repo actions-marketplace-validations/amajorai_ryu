@@ -59,6 +59,26 @@ export function listExperience(target: ApiTarget): Promise<ExperienceList> {
 	return request<ExperienceList>(target, "/api/experience/list");
 }
 
+/** Read whether one conversation is excluded from capture and synthesis. */
+export function getConversationLearningExclusion(
+	target: ApiTarget,
+	conversationId: string
+): Promise<{ conversation_id: string; excluded: boolean }> {
+	return request(target, `/api/learn/exclude/${encodeURIComponent(conversationId)}`);
+}
+
+/** Persist the per-conversation learning exclusion and update buffered rows. */
+export function setConversationLearningExclusion(
+	target: ApiTarget,
+	conversationId: string,
+	excluded: boolean
+): Promise<{ conversation_id: string; excluded: boolean; rows_updated: number }> {
+	return request(target, "/api/learn/exclude", {
+		method: "POST",
+		body: { conversation_id: conversationId, excluded },
+	});
+}
+
 /**
  * Distill a skill from a specific conversation right now. `force: true` is a
  * deliberate user action ("make a skill from this chat"), so it bypasses the

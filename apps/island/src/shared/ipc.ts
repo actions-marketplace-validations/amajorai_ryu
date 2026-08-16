@@ -542,6 +542,7 @@ export interface IslandPluginsApi {
 	onHostStreamEnd(
 		listener: (event: PluginHostStreamEndEvent) => void
 	): () => void;
+	onShortcut(listener: (id: string) => void): () => void;
 	/** Start a streaming host-bridge `agent.run`. Chunks arrive on the
 	 *  `plugins:hostStreamChunk` event and a terminal `plugins:hostStreamEnd`
 	 *  event fires when the stream closes. */
@@ -968,6 +969,7 @@ export const IPC = {
 		hostStreamAbort: "plugins:hostStreamAbort",
 		hostStreamChunk: "plugins:hostStreamChunk",
 		hostStreamEnd: "plugins:hostStreamEnd",
+		shortcut: "plugins:shortcut",
 	},
 	// Command-surface summon events (main -> renderer). `open` is the global-hotkey
 	// summon (show + focus + open the command palette); `blur` fires when the

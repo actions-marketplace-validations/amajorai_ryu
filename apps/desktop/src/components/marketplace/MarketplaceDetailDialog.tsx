@@ -130,7 +130,7 @@ export default function MarketplaceDetailDialog({
 				<DialogHeader className="sr-only">
 					<DialogTitle>{initialName ?? "Listing"}</DialogTitle>
 				</DialogHeader>
-				<div className="max-h-[88vh] overflow-y-auto overflow-x-hidden">
+				<div className="scroll-fade max-h-[88vh] overflow-y-auto overflow-x-hidden">
 					{open ? (
 						<DetailBody
 							id={id}
@@ -416,7 +416,7 @@ function ExamplePrompts({
 	return (
 		<section className="flex flex-col gap-2">
 			<h3 className="font-medium text-sm">Try it</h3>
-			<div className="flex gap-2 overflow-x-auto pb-1">
+			<div className="scroll-fade-x flex gap-2 overflow-x-auto pb-1">
 				{prompts.map((prompt) => (
 					<button
 						className="group flex shrink-0 items-center gap-2 rounded-full border bg-card py-1.5 pr-2.5 pl-1.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -463,7 +463,7 @@ function ScreenshotGallery({
 	return (
 		<section className="flex flex-col gap-2">
 			<h3 className="font-medium text-sm">Screenshots</h3>
-			<div className="flex gap-3 overflow-x-auto pb-2">
+			<div className="scroll-fade-x flex gap-3 overflow-x-auto pb-2">
 				{screenshots.map((url, i) => (
 					<button
 						className="shrink-0 overflow-hidden rounded-lg border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -534,7 +534,7 @@ function SetupSection({ steps }: { steps: DetailSetupStep[] }) {
 									/>
 								}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								{step.actionLabel || "Open"}
 								<HugeiconsIcon className="size-4" icon={LinkSquare02Icon} />
@@ -792,7 +792,7 @@ function ReviewsSection({
 					disabled={loadingMore}
 					onClick={() => loadMore()}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{loadingMore ? <Spinner className="mr-2 size-4" /> : null}
 					Load more

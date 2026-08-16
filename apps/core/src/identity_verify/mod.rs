@@ -184,6 +184,25 @@ pub enum Access {
     Write,
 }
 
+impl Access {
+    /// Return whether this grant satisfies `required`.
+    ///
+    /// Keeping the ordering here avoids repeating subtly different `match`
+    /// ladders at each resource gate (and makes a read-only team/org grant
+    /// impossible to accidentally treat as a write).
+    pub fn at_least(self, required: Self) -> bool {
+        fn rank(access: Access) -> u8 {
+            match access {
+                Access::None => 0,
+                Access::Read => 1,
+                Access::Write => 2,
+            }
+        }
+
+        rank(self) >= rank(required)
+    }
+}
+
 /// The tenancy quartet of a shareable resource (conversation or document), loaded
 /// from its row and fed verbatim into [`can_access`]. The fields mirror the
 /// additive Phase 0 tenancy columns. EXISTING/legacy single-tenant rows carry
@@ -620,10 +639,9 @@ pub fn to_caller_for_org(claims: &VerifiedClaims, node_org_id: Option<&str>) -> 
 ///   - The resource owner always gets `Write`.
 ///   - `visibility == "org"`: a member of the SAME org gets `Write` (`Read` for
 ///     a `Viewer`); anyone else gets `None`.
-///   - `visibility == "team"`: team membership is not yet in the JWT claims, so
-///     for now this is treated identically to `org` (same-org member → Write,
-///     viewer → Read). TODO: tighten to a real team-scoped check once team
-///     memberships are available.
+///   - `visibility == "team"`: the caller must have a verified membership in
+///     `team_id`, and that team must be narrowed to the node's org. The team's
+///     embedded role determines whether the grant is read-only or writable.
 ///   - `visibility == "private"`: only the owner (handled above) — everyone else
 ///     gets `None`.
 ///   - Any unknown visibility string → `None`.
@@ -642,12 +660,8 @@ pub fn can_access(
 
     match visibility {
         "private" => Access::None,
-        // TODO: team-scoped check — claims do not yet carry team membership, so
-        // a team resource is gated like an org resource for now.
-        "org" | "team" => {
-            let _ = team_id;
-            org_access(caller, org_id)
-        }
+        "org" => org_access(caller, org_id),
+        "team" => team_access(caller, org_id, team_id),
         _ => Access::None,
     }
 }
@@ -665,6 +679,33 @@ fn org_access(caller: &VerifiedCaller, org_id: Option<&str>) -> Access {
         }
         _ => Access::None,
     }
+}
+
+/// Resolve a team-scoped grant. A team id alone is not sufficient: the resource
+/// org and the caller's narrowed team membership must both agree, preventing a
+/// team id from another organization from widening access.
+fn team_access(caller: &VerifiedCaller, org_id: Option<&str>, team_id: Option<&str>) -> Access {
+    let (Some(caller_org), Some(resource_org), Some(team_id)) =
+        (caller.org_id.as_deref(), org_id, team_id)
+    else {
+        return Access::None;
+    };
+    if caller_org != resource_org {
+        return Access::None;
+    }
+
+    caller
+        .teams
+        .iter()
+        .find(|team| team.id == team_id && team.org_id == resource_org)
+        .map(|team| {
+            if OrgRole::from_ba_str(&team.role).satisfies(OrgRole::Member) {
+                Access::Write
+            } else {
+                Access::Read
+            }
+        })
+        .unwrap_or(Access::None)
 }
 
 #[cfg(test)]
@@ -727,6 +768,14 @@ mod tests {
     }
 
     #[test]
+    fn access_at_least_orders_none_read_write() {
+        assert!(Access::Write.at_least(Access::Read));
+        assert!(Access::Read.at_least(Access::Read));
+        assert!(!Access::Read.at_least(Access::Write));
+        assert!(!Access::None.at_least(Access::Read));
+    }
+
+    #[test]
     fn private_denies_non_owner() {
         let c = caller("u2", Some("o1"), OrgRole::Owner);
         assert_eq!(
@@ -745,6 +794,36 @@ mod tests {
         let viewer = caller("u3", Some("o1"), OrgRole::Viewer);
         assert_eq!(
             can_access(&viewer, Some("u1"), Some("o1"), "org", None),
+            Access::Read
+        );
+    }
+
+    #[test]
+    fn team_visibility_requires_matching_membership_and_role() {
+        let member = caller("u2", Some("o1"), OrgRole::Member);
+        let mut member = member;
+        member.teams.push(TeamMembership {
+            id: "t1".to_owned(),
+            org_id: "o1".to_owned(),
+            role: "member".to_owned(),
+        });
+        assert_eq!(
+            can_access(&member, Some("u1"), Some("o1"), "team", Some("t1")),
+            Access::Write
+        );
+        assert_eq!(
+            can_access(&member, Some("u1"), Some("o1"), "team", Some("t2")),
+            Access::None
+        );
+
+        let mut viewer = caller("u3", Some("o1"), OrgRole::Viewer);
+        viewer.teams.push(TeamMembership {
+            id: "t1".to_owned(),
+            org_id: "o1".to_owned(),
+            role: "viewer".to_owned(),
+        });
+        assert_eq!(
+            can_access(&viewer, Some("u1"), Some("o1"), "team", Some("t1")),
             Access::Read
         );
     }

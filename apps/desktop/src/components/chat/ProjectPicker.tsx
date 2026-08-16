@@ -5,8 +5,8 @@ import {
 	Cancel01Icon,
 	Folder03Icon,
 	FolderAddIcon,
-	FolderOpenIcon,
 	Search01Icon,
+	Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
@@ -23,9 +23,7 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSub,
-	DropdownMenuSubContent,
-	DropdownMenuSubTrigger,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu";
 import { Input } from "@ryu/ui/components/input";
@@ -204,7 +202,7 @@ export function ProjectPickerContent({
 								className="h-7 border-0 bg-transparent pl-7 text-[12px]"
 								onChange={(e) => setRecentQuery(e.target.value)}
 								onKeyDown={(e) => e.stopPropagation()}
-								placeholder="Search recent folders"
+								placeholder="Search projects"
 								spellCheck={false}
 								value={recentQuery}
 							/>
@@ -254,7 +252,11 @@ export function ProjectPickerContent({
 									{/* Right slot: active dot at rest, remove X on hover. */}
 									<div className="relative z-10 size-4 shrink-0">
 										{isActive && (
-											<span className="pointer-events-none absolute inset-0 m-auto size-1.5 rounded-full bg-foreground/40 transition-opacity duration-150 group-hover/recent:opacity-0" />
+											<HugeiconsIcon
+												className="pointer-events-none absolute inset-0 m-auto size-4 text-foreground/70 transition-opacity duration-150 group-hover/recent:opacity-0"
+												icon={Tick02Icon}
+												strokeWidth={2}
+											/>
 										)}
 										<button
 											aria-label={`Remove ${name} from recents`}
@@ -275,42 +277,31 @@ export function ProjectPickerContent({
 				</>
 			)}
 
-			{/* Browse ▸ { Open existing folder · Start from scratch }. Hidden when the
-			    host offers neither action (e.g. the empty-state popover). */}
-			{(onBrowse || onStartFromScratch) && (
-				<DropdownMenuSub>
-					<DropdownMenuSubTrigger>
-						<HugeiconsIcon
-							className="size-4 shrink-0 text-foreground/40"
-							icon={FolderAddIcon}
-						/>
-						<span className="text-foreground/70">New project</span>
-					</DropdownMenuSubTrigger>
-					<DropdownMenuSubContent>
-						{onBrowse && (
-							<DropdownMenuItem onClick={handleBrowse}>
-								<HugeiconsIcon
-									className="size-4 shrink-0 text-foreground/40"
-									icon={FolderOpenIcon}
-								/>
-								Open existing folder
-							</DropdownMenuItem>
-						)}
+			{hasRecents && <DropdownMenuSeparator />}
 
-						{/* Start from scratch: opens a dialog to name a new folder created
-					    under Documents/Ryu (the dialog is owned by the parent so it
-					    survives this menu closing). */}
-						{onStartFromScratch && (
-							<DropdownMenuItem onClick={onStartFromScratch}>
-								<HugeiconsIcon
-									className="size-4 shrink-0 text-foreground/40"
-									icon={Add01Icon}
-								/>
-								Start from scratch
-							</DropdownMenuItem>
-						)}
-					</DropdownMenuSubContent>
-				</DropdownMenuSub>
+			{/* Project creation stays flat: both actions are reachable in one click from
+			    this menu, with no flyout nested inside the project picker. */}
+			{(onBrowse || onStartFromScratch) && (
+				<>
+					{onBrowse && (
+						<DropdownMenuItem onClick={handleBrowse}>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-foreground/40"
+								icon={FolderAddIcon}
+							/>
+							New project
+						</DropdownMenuItem>
+					)}
+					{onStartFromScratch && (
+						<DropdownMenuItem onClick={onStartFromScratch}>
+							<HugeiconsIcon
+								className="size-4 shrink-0 text-foreground/40"
+								icon={Add01Icon}
+							/>
+							Start from scratch
+						</DropdownMenuItem>
+					)}
+				</>
 			)}
 
 			{folder && (

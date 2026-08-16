@@ -109,6 +109,39 @@ impl AgentRunner {
             None,
             false,
             model,
+            None,
+            Arc::clone(&self.registry),
+            self.conversations.clone(),
+            self.agent_store.clone(),
+            Arc::clone(&self.manager),
+            self.memory.clone(),
+            Arc::clone(&self.worktree_diffs),
+            Arc::clone(&self.mcp),
+            self.skills.clone(),
+            self.traces.clone(),
+        )
+        .await
+    }
+
+    /// Run one configured agent with a caller-owned output-token ceiling. The
+    /// routing layer takes the stricter of this cap and the agent's stored
+    /// inference default, so delegated work cannot inherit a larger budget from
+    /// the registered agent configuration.
+    pub async fn run_with_max_tokens(
+        &self,
+        agent_id: Option<String>,
+        conversation_id: String,
+        text: String,
+        max_tokens: u32,
+    ) -> anyhow::Result<String> {
+        run_text_turn(
+            conversation_id,
+            agent_id,
+            text,
+            None,
+            false,
+            None,
+            Some(max_tokens),
             Arc::clone(&self.registry),
             self.conversations.clone(),
             self.agent_store.clone(),
@@ -150,6 +183,7 @@ impl AgentRunner {
             isolate,
             None,
             // A coordinator worker runs its own agent's configured model.
+            None,
             None,
             Arc::clone(&self.registry),
             self.conversations.clone(),

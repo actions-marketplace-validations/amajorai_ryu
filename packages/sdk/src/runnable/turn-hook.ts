@@ -154,7 +154,7 @@ export interface DefinePluginOptions {
 	/**
 	 * Inline tools the plugin ships — each a {@link ToolRunnable} from `defineTool`
 	 * whose `run` body is bundled as Core's `inline_deno` backend (registered as
-	 * `app__<tool.id>`). Shipping any tool auto-adds the `tool:execute` grant.
+	 * `app.<tool.id>`). Shipping any tool auto-adds the `tool:execute` grant.
 	 */
 	tools?: ToolRunnable[];
 	/** Turn hooks the plugin contributes. */

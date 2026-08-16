@@ -155,11 +155,11 @@ pub async fn exec_tool(
     // the envelope closes over the bare `kind=tool` forward below; Core does not
     // separately scan/budget/audit (D5).
     if body.widget.is_some() {
-        return exec_widget_tool(&state, catalog, &ctx.api_key, body).await;
+        return exec_widget_tool(&state, catalog, &ctx, body).await;
     }
 
     match body.kind.as_str() {
-        "tool" => exec_kind_tool(catalog, body).await,
+        "tool" => exec_kind_tool(&state, catalog, &ctx, body).await,
         "execute" => exec_kind_forward(catalog, "/api/tools/exec", &body).await,
         "resume" => exec_kind_forward(catalog, "/api/tools/exec/resume", &body).await,
         other => Ok(Json(ExecToolResponse::err(format!(
@@ -182,7 +182,7 @@ pub async fn exec_tool(
 async fn exec_widget_tool(
     state: &SharedState,
     catalog: &dyn super::CoreCatalog,
-    api_key: &str,
+    ctx: &crate::pipeline::RequestContext,
     body: ExecToolBody,
 ) -> Result<Json<ExecToolResponse>, GatewayError> {
     let widget = body
@@ -212,7 +212,7 @@ async fn exec_widget_tool(
                 .audit
                 .log(crate::audit::AuditLogger::make_widget_call_record(
                     uuid::Uuid::new_v4().to_string(),
-                    api_key.to_owned(),
+                    ctx.api_key.clone(),
                     origin_server.clone(),
                     tool_id.clone(),
                     body.agent_id.clone(),
@@ -227,7 +227,7 @@ async fn exec_widget_tool(
     // ── scan ─────────────────────────────────────────────────────────────────
     if cfg.enabled && cfg.scan_arguments {
         let args_text = body.arguments.to_string();
-        if let Some(m) = state.with_firewall(|fw| fw.scan_inbound(&args_text)) {
+        if let Some(m) = state.resolved_scanner(ctx).scan_inbound(&args_text) {
             let reason = format!("firewall {:?}: {}", m.kind, m.pattern_name);
             audit_call(0, Some(reason.clone()));
             return Ok(Json(ExecToolResponse::err(format!(
@@ -288,27 +288,101 @@ async fn exec_widget_tool(
 
 /// `kind=tool` → Core `POST /api/mcp/tools/call`.
 async fn exec_kind_tool(
+    state: &SharedState,
     catalog: &dyn super::CoreCatalog,
+    ctx: &crate::pipeline::RequestContext,
     body: ExecToolBody,
 ) -> Result<Json<ExecToolResponse>, GatewayError> {
-    let Some(tool_id) = body.tool_id.as_deref().filter(|s| !s.is_empty()) else {
+    let Some(tool_id) = body
+        .tool_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    else {
         return Ok(Json(ExecToolResponse::err(
             "tool_id is required when kind=tool",
         )));
     };
-    match catalog
+
+    // Ordinary tool calls use the same resolved node → org → agent scanner as
+    // the chat pipeline. This is important for artifact writes: a trusted Core
+    // forwarder must not become a DLP bypass merely because it chose the exec
+    // envelope instead of the model loop.
+    let scanner = state.resolved_scanner(ctx);
+    let scan_input = format!("{tool_id}\n{}", body.arguments);
+    if let Some(m) = scanner.scan_inbound(&scan_input) {
+        let reason = format!("firewall {:?}: {}", m.kind, m.pattern_name);
+        audit_kind_tool(state, ctx, &tool_id, 0, Some(reason.clone()));
+        return Ok(Json(ExecToolResponse::err(format!(
+            "tool call denied ({reason})"
+        ))));
+    }
+
+    if let crate::budget::ExecBudgetResult::Deny { .. } = state.exec_budget.check() {
+        let reason = "exec budget exhausted".to_owned();
+        audit_kind_tool(state, ctx, &tool_id, 0, Some(reason.clone()));
+        return Ok(Json(ExecToolResponse::err(format!(
+            "tool call denied ({reason})"
+        ))));
+    }
+
+    let start = std::time::Instant::now();
+    let outcome = catalog
         .call_tool(
-            tool_id,
+            &tool_id,
             body.arguments,
             body.agent_id.as_deref(),
             body.user_id.as_deref(),
             body.host_conversation_id.as_deref(),
         )
-        .await
-    {
-        Ok(result) => Ok(Json(ExecToolResponse::ok(result))),
-        Err(e) => Ok(Json(ExecToolResponse::err(e))),
+        .await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    state.exec_budget.record(duration_ms);
+
+    match outcome {
+        Ok(result) => {
+            audit_kind_tool(state, ctx, &tool_id, duration_ms, None);
+            Ok(Json(ExecToolResponse::ok(result)))
+        }
+        Err(e) => {
+            audit_kind_tool(state, ctx, &tool_id, duration_ms, Some(e.clone()));
+            Ok(Json(ExecToolResponse::err(e)))
+        }
     }
+}
+
+/// Record a governed ordinary tool call in the same ExecCall stream used by
+/// sandbox and widget executions. Attribution is copied from the authenticated
+/// request context rather than from the body, so user/agent fields remain useful
+/// for governance reporting without becoming authorization inputs.
+fn audit_kind_tool(
+    state: &SharedState,
+    ctx: &crate::pipeline::RequestContext,
+    tool_id: &str,
+    duration_ms: u64,
+    error: Option<String>,
+) {
+    if !state.audit.is_enabled() {
+        return;
+    }
+    let mut record = crate::audit::AuditLogger::make_exec_record(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.api_key.clone(),
+        "core-tool".to_owned(),
+        tool_id.to_owned(),
+        duration_ms,
+        if error.is_some() { -1 } else { 0 },
+        ctx.session_id.clone(),
+        error,
+    );
+    record.user_name = ctx.user_name.clone();
+    record.org_id = ctx.org_id.clone();
+    record.team_id = ctx.team_id.clone();
+    record.project_id = ctx.project_id.clone();
+    record.user_id = ctx.user_id.clone();
+    record.agent_id = ctx.agent_id.clone();
+    record.feature = ctx.feature.clone();
+    state.log_audit(record);
 }
 
 /// `kind=execute|resume` → Core PTC endpoints (`/api/tools/exec[/resume]`, live).
@@ -345,7 +419,9 @@ async fn exec_kind_forward(
     }
 }
 
-use crate::firewall::cmdscan::{scan_command, ApprovalMode, ScanVerdict};
+use crate::firewall::cmdscan::{
+    scan_command_with_rules, ApprovalMode, ManagedCommandRule, ScanVerdict,
+};
 
 /// Request body for `POST /v1/exec/scan` (COMMAND-SCAN CONTRACT, verbatim shape).
 #[derive(Debug, Deserialize)]
@@ -360,6 +436,16 @@ pub struct ExecScanBody {
     #[serde(default)]
     #[allow(dead_code)]
     pub agent: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub organization_id: Option<String>,
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default)]
+    pub managed_rules: Vec<ManagedCommandRule>,
 }
 
 /// `POST /v1/exec/scan` — pre-exec command governance. Returns the verbatim
@@ -385,7 +471,13 @@ pub async fn exec_scan(
     let mode = std::env::var("RYU_EXEC_APPROVAL_MODE")
         .map(|s| ApprovalMode::from_env_str(&s))
         .unwrap_or(ApprovalMode::Manual);
-    let verdict = scan_command(&body.backend, &body.command, mode);
+    let verdict = scan_command_with_rules(
+        &body.backend,
+        &body.command,
+        mode,
+        &body.managed_rules,
+        body.project_id.as_deref(),
+    );
     Ok(Json(verdict))
 }
 

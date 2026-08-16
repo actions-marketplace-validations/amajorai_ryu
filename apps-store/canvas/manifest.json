@@ -2,6 +2,7 @@
   "id": "@ryu/canvas",
   "name": "Canvas",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "A node board for generative media: wire up image, video, chat, text-to-speech, speech-to-text, upload, and note nodes, then run the graph through Ryu's media and agent bridges. Each board persists as a Space document, so it stays editable, shareable, and searchable.",
   "tagline": "Wire up media and agent nodes on one board",
   "keywords": ["canvas", "media", "nodes", "generative", "workflow"],

@@ -304,7 +304,7 @@ async fn apply_compact_hooks(
     directives
         .into_iter()
         .find_map(|d| match d {
-            HookDirective::Replace { text } if !text.trim().is_empty() => Some(text),
+            HookDirective::Replace { text, .. } if !text.trim().is_empty() => Some(text),
             _ => None,
         })
         .unwrap_or(summary)

@@ -45,9 +45,9 @@
       "!apps/raycast",
       "!**/.wxt",
       "!apps/web/public/compare-logos",
-      "!apps/tui/components/ui",
-      "!apps/tui/hooks",
-      "!apps/tui/lib",
+      "!apps/cli/components/ui",
+      "!apps/cli/hooks",
+      "!apps/cli/lib",
       "!**/components/dither-kit"
     ]
   },
@@ -197,7 +197,7 @@
       }
     },
     {
-      "includes": ["apps/tui/src/**"],
+      "includes": ["apps/cli/src/**"],
       "linter": {
         "rules": {
           "correctness": {

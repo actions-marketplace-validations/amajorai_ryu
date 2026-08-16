@@ -6,7 +6,9 @@ import {
 	HoverCardTrigger,
 } from "@ryu/ui/components/hover-card";
 import { cn } from "@ryu/ui/lib/utils";
-import type { ReactNode } from "react";
+import { type ReactNode, useRef } from "react";
+
+const SIDEBAR_PREVIEW_BOUNDARY_SELECTOR = "[data-sidebar-preview-boundary]";
 
 /**
  * Shared sidebar-row preview: always shows on hover (unlike OverflowTooltip,
@@ -26,15 +28,51 @@ export function SidebarItemPreview({
 	side?: "top" | "bottom" | "left" | "right" | "inline-start" | "inline-end";
 	sideOffset?: number;
 }) {
+	const triggerRef = useRef<HTMLAnchorElement>(null);
+	const getPreviewAnchor = () => {
+		const trigger = triggerRef.current;
+		if (!trigger) {
+			return null;
+		}
+
+		const boundary = trigger.closest<HTMLElement>(
+			SIDEBAR_PREVIEW_BOUNDARY_SELECTOR
+		);
+		if (!boundary) {
+			return trigger;
+		}
+
+		return {
+			contextElement: trigger,
+			getBoundingClientRect: () => {
+				const triggerRect = trigger.getBoundingClientRect();
+				const boundaryRect = boundary.getBoundingClientRect();
+				return DOMRect.fromRect({
+					height: triggerRect.height,
+					width: 0,
+					x: boundaryRect.right,
+					y: triggerRect.top,
+				});
+			},
+		};
+	};
+
 	return (
 		<HoverCard>
-			<HoverCardTrigger className="min-w-0 flex-1" closeDelay={0} delay={0}>
+			<HoverCardTrigger
+				className="min-w-0 flex-1"
+				closeDelay={0}
+				delay={0}
+				ref={triggerRef}
+			>
 				{children}
 			</HoverCardTrigger>
 			<HoverCardContent
 				align="start"
+				alignOffset={0}
+				anchor={getPreviewAnchor}
 				className={cn(
-					"w-72 max-w-[min(18rem,calc(100vw-2rem))] p-3 text-sm",
+					"w-80 max-w-[min(20rem,calc(100vw-2rem))] rounded-2xl border-border/70 bg-popover/95 p-4 text-sm shadow-xl backdrop-blur-xl",
 					className
 				)}
 				side={side}

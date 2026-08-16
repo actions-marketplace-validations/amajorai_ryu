@@ -403,7 +403,11 @@ mod tests {
 
     #[test]
     fn success_entry_returns_its_value() {
-        let e = entry(Some(serde_json::json!({"modes": null})), None, Duration::zero());
+        let e = entry(
+            Some(serde_json::json!({"modes": null})),
+            None,
+            Duration::zero(),
+        );
         assert_eq!(e.outcome().unwrap(), serde_json::json!({"modes": null}));
     }
 
@@ -450,7 +454,10 @@ mod tests {
     fn a_key_still_reports_the_spawn_command_it_was_built_from() {
         let mut sel = BTreeMap::new();
         sel.insert("model".to_owned(), "xai/grok-4.6".to_owned());
-        assert_eq!(spawn_cmd_of(&cache_key("opencode acp", &sel)), "opencode acp");
+        assert_eq!(
+            spawn_cmd_of(&cache_key("opencode acp", &sel)),
+            "opencode acp"
+        );
         assert_eq!(spawn_cmd_of("opencode acp"), "opencode acp");
     }
 
@@ -498,8 +505,14 @@ mod tests {
     #[test]
     fn only_successes_are_persisted() {
         let mut map = HashMap::new();
-        map.insert("ok".to_owned(), entry(Some(Value::Null), None, Duration::zero()));
-        map.insert("bad".to_owned(), entry(None, Some("boom"), Duration::zero()));
+        map.insert(
+            "ok".to_owned(),
+            entry(Some(Value::Null), None, Duration::zero()),
+        );
+        map.insert(
+            "bad".to_owned(),
+            entry(None, Some("boom"), Duration::zero()),
+        );
         let kept = successes(&map);
         assert!(kept.contains_key("ok"));
         assert!(
@@ -544,7 +557,11 @@ mod tests {
     fn entries_round_trip_through_json() {
         // The persisted shape must survive a restart; a serde break here would
         // silently reinstate cold-probing on every boot.
-        let e = entry(Some(serde_json::json!({"models": []})), None, Duration::zero());
+        let e = entry(
+            Some(serde_json::json!({"models": []})),
+            None,
+            Duration::zero(),
+        );
         let back: Entry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back.outcome().unwrap(), serde_json::json!({"models": []}));
         assert!(back.is_success());

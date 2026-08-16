@@ -111,10 +111,7 @@ impl LoginSession {
 
     /// Events already emitted, for a client that just attached.
     pub fn replay(&self) -> Vec<Value> {
-        self.history
-            .lock()
-            .map(|h| h.clone())
-            .unwrap_or_default()
+        self.history.lock().map(|h| h.clone()).unwrap_or_default()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
@@ -252,7 +249,10 @@ pub fn get(session_id: &str) -> Option<Arc<LoginSession>> {
 
 /// Drop a session from the registry, killing its child first.
 pub fn cancel(session_id: &str) -> bool {
-    let removed = sessions().lock().ok().and_then(|mut m| m.remove(session_id));
+    let removed = sessions()
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(session_id));
     match removed {
         Some(session) => {
             session.cancel();
@@ -740,7 +740,11 @@ mod tests {
         let status = reap_or_kill(&mut child, EXIT_STATUS_WAIT)
             .await
             .expect("an exited child reports a status");
-        assert_eq!(status.code(), Some(3), "the real exit code reaches the user");
+        assert_eq!(
+            status.code(),
+            Some(3),
+            "the real exit code reaches the user"
+        );
     }
 
     /// With no evidence the message is exactly what it always was; with evidence

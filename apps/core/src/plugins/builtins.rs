@@ -22,7 +22,7 @@
 //! decisions (grant enforcement, security checks) belong in the Gateway.
 //! Nothing in this module enforces policy.
 
-/// Metadata describing a built-in system App whose lifecycle is sidecar-based.
+/// Metadata describing a system App whose lifecycle is sidecar-based.
 #[derive(Debug, Clone)]
 pub struct SystemPlugin {
     /// Reverse-domain manifest id, must match the fixture JSON.
@@ -42,7 +42,9 @@ pub struct SystemPlugin {
     pub local_only: bool,
 }
 
-/// The canonical list of built-in system Apps.
+/// The canonical list of system Apps. This is intentionally a much smaller set
+/// than the official plugin catalog: being shipped by Ryu or verified by the
+/// Ryu Marketplace does not make an app part of Core or uninstall-protected.
 ///
 /// Order is stable and determines display order in the App-store.
 pub const SYSTEM_PLUGINS: &[SystemPlugin] = &[
@@ -674,6 +676,16 @@ pub const CORE_PLUGINS: &[&str] = &[
     // inbox is keyed by agent, `stateful` matches on the conversation) so it spawns a
     // sandbox per turn, and one `agents__ask` is a full agent run on the user's budget.
     "@ryu/agent-comms",
+    // Bounded dynamic workflow fan-out through the generic Core host bridge.
+    // Opt-in: each run can spend model budget and may launch write-capable
+    // delegates when the caller explicitly selects the code_write preset.
+    "@ryu/dynamic-workflows",
+    // Experimental per-turn AGENTS.md tail. Opt-in because it changes every
+    // outbound context and can materially increase prompt size.
+    "@ryu/agents-md-tail",
+    // Cross-provider project and per-agent rules. The manifest owns the Agent
+    // Edit panel and context hook; Core only supplies the generic discovery data.
+    "@ryu/rules",
     // Pre-turn prompt-improver: rewrites the outgoing message via a configurable
     // model before it is sent. Reverse-DNS id (matches its manifest + composer flag).
     "@ryu/auto-expand",
@@ -891,6 +903,10 @@ pub const CORE_PLUGINS: &[&str] = &[
     // Deliberately NOT in `CORE_DEFAULT_ON`, for the reason the leaf apps were
     // demoted: it owns an out-of-process binary a normal install does not have.
     crate::plugin_manifest::REASONING_PLUGIN_ID,
+    // Pull Requests owns a managed sidecar and therefore needs the Core tier
+    // for its process/MCP grants, even though it remains marketplace-installed
+    // and opt-in like the other non-system official apps.
+    "@ryu/pull-requests",
     // Blueprint. Core tier for the same two mechanical reasons as Reasoning directly
     // above, and worth restating because NOTHING TESTS THIS ROW: it declares a
     // managed `ryu-blueprint` sidecar, and `may_run_sidecar` permits one at Community
@@ -974,6 +990,10 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     "@ryu/receipts",
     "@ryu/double-check",
     "@ryu/chat-title",
+    // Rules are configuration, not an optional side effect: a fresh node should
+    // honor Ryu agent rules and compatible project rule files immediately. The
+    // per-agent preference still lets users disable injection or bound its turns.
+    "@ryu/rules",
     // Background bash + sub-agents for the managed Pi agent. Default-on because
     // Core shipped both unconditionally before they became plugins; the win of the
     // move is that they are now DISABLE-able, not that they are off. Turning either
@@ -1258,15 +1278,117 @@ pub const CORE_DEFAULT_ON: &[&str] = &[
     OUTPUT_STYLES_PLUGIN_ID,
 ];
 
-/// The [`crate::plugin_manifest::PluginTier`] of a plugin, derived from
-/// membership in [`CORE_PLUGINS`]. Anything not listed is Community.
+/// The [`crate::plugin_manifest::PluginTier`] of a plugin.
+///
+/// A reserved id is necessary but not sufficient for Core tier: manifests from
+/// the user-writable plugin directory must not inherit Core privileges merely by
+/// copying an official id. The bytes must also be compiled into Core. This keeps
+/// the official id reservation while allowing runtime packages to load as
+/// Community-tier plugins.
 pub fn tier_for(manifest_id: &str) -> crate::plugin_manifest::PluginTier {
-    if CORE_PLUGINS.contains(&manifest_id) {
+    if CORE_PLUGINS.contains(&manifest_id) && is_compiled_in_manifest(manifest_id) {
         crate::plugin_manifest::PluginTier::Core
     } else {
         crate::plugin_manifest::PluginTier::Community
     }
 }
+
+pub fn tier_for_manifest(
+    manifest: &crate::plugin_manifest::PluginManifest,
+) -> crate::plugin_manifest::PluginTier {
+    // A manifest's id is not provenance. In particular, do not let a package
+    // loaded from the user-writable plugin directory inherit the compiled
+    // manifest's tier by copying its id. The exact embedded bytes or a
+    // digest-bound verified marketplace install are the only manifest-aware
+    // ways to earn Core tier here.
+    if CORE_PLUGINS.contains(&manifest.id.as_str())
+        && (is_exact_compiled_manifest(manifest) || is_verified_official_package(manifest))
+    {
+        crate::plugin_manifest::PluginTier::Core
+    } else {
+        crate::plugin_manifest::PluginTier::Community
+    }
+}
+
+fn is_exact_compiled_manifest(manifest: &crate::plugin_manifest::PluginManifest) -> bool {
+    if !is_compiled_in_manifest(&manifest.id) {
+        return false;
+    }
+    let digest = crate::plugins::isolation::manifest_sha256(manifest);
+    crate::plugin_manifest::PluginManifestLoader::load_builtins()
+        .into_iter()
+        .any(|builtin| {
+            builtin.id == manifest.id
+                && crate::plugins::isolation::manifest_sha256(&builtin) == digest
+        })
+}
+
+pub(crate) fn record_verified_official_package(
+    manifest: &crate::plugin_manifest::PluginManifest,
+    provenance: &crate::plugins::isolation::PluginProvenance,
+) {
+    if !CORE_PLUGINS.contains(&manifest.id.as_str())
+        || provenance.builtin
+        || provenance.source_id.as_deref()
+            != Some(crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID)
+        || !provenance.signature_verified
+        || provenance.manifest_sha256.as_deref()
+            != Some(&crate::plugins::isolation::manifest_sha256(manifest))
+    {
+        return;
+    }
+    VERIFIED_OFFICIAL_PACKAGES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("verified package registry lock poisoned")
+        .insert(
+            manifest.id.clone(),
+            provenance.manifest_sha256.clone().unwrap(),
+        );
+}
+
+pub(crate) fn record_verified_official_digest(
+    manifest_id: &str,
+    provenance: &crate::plugins::isolation::PluginProvenance,
+) {
+    if !CORE_PLUGINS.contains(&manifest_id)
+        || provenance.builtin
+        || provenance.source_id.as_deref()
+            != Some(crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID)
+        || !provenance.signature_verified
+    {
+        return;
+    }
+    if let Some(digest) = &provenance.manifest_sha256 {
+        VERIFIED_OFFICIAL_PACKAGES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("verified package registry lock poisoned")
+            .insert(manifest_id.to_owned(), digest.clone());
+    }
+}
+
+pub(crate) fn clear_verified_official_digest(manifest_id: &str) {
+    if let Some(registry) = VERIFIED_OFFICIAL_PACKAGES.get() {
+        registry
+            .lock()
+            .expect("verified package registry lock poisoned")
+            .remove(manifest_id);
+    }
+}
+
+fn is_verified_official_package(manifest: &crate::plugin_manifest::PluginManifest) -> bool {
+    VERIFIED_OFFICIAL_PACKAGES
+        .get_or_init(Default::default)
+        .lock()
+        .expect("verified package registry lock poisoned")
+        .get(&manifest.id)
+        .is_some_and(|digest| digest == &crate::plugins::isolation::manifest_sha256(manifest))
+}
+
+static VERIFIED_OFFICIAL_PACKAGES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
 
 /// Whether a Core-tier plugin should be seeded enabled on first run.
 pub fn is_default_on(manifest_id: &str) -> bool {
@@ -1293,13 +1415,8 @@ pub fn is_default_on(manifest_id: &str) -> bool {
 /// the parse walks every embedded fixture.
 pub fn is_compiled_in_manifest(manifest_id: &str) -> bool {
     static IDS: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
-    IDS.get_or_init(|| {
-        crate::plugin_manifest::PluginManifestLoader::load_builtins()
-            .into_iter()
-            .map(|m| m.id)
-            .collect()
-    })
-    .contains(manifest_id)
+    IDS.get_or_init(crate::plugin_manifest::compiled_manifest_ids)
+        .contains(manifest_id)
 }
 
 /// Whether `manifest_id` is a **system plugin**: one of the [`SYSTEM_PLUGINS`]
@@ -1585,7 +1702,10 @@ mod tests {
             "spider must be Core-tier"
         );
         assert!(is_default_on("@ryu/spider"), "spider must be default-on");
-        assert!(!is_system_plugin("@ryu/spider"), "spider is not a system plugin");
+        assert!(
+            !is_system_plugin("@ryu/spider"),
+            "spider is not a system plugin"
+        );
     }
 
     #[test]
@@ -1596,6 +1716,78 @@ mod tests {
             PluginTier::Community
         );
         assert_eq!(tier_for("does.not.exist"), PluginTier::Community);
+    }
+
+    #[test]
+    fn signed_official_package_retains_core_tier() {
+        use crate::plugin_manifest::PluginTier;
+        use crate::plugins::isolation::{
+            manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
+        };
+
+        let mut official: crate::plugin_manifest::PluginManifest =
+            serde_json::from_value(serde_json::json!({
+                "id": "@ryu/social",
+                "name": "Social",
+                "version": "1.0.0",
+                "runnables": []
+            }))
+            .expect("minimal official manifest");
+        let provenance = PluginProvenance {
+            source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            signature_verified: true,
+            manifest_sha256: Some(manifest_sha256(&official)),
+            ..PluginProvenance::default()
+        };
+        record_verified_official_package(&official, &provenance);
+        assert_eq!(tier_for_manifest(&official), PluginTier::Core);
+        clear_verified_official_digest(&official.id);
+    }
+
+    #[test]
+    fn clearing_verified_official_digest_revokes_core_tier() {
+        use crate::plugin_manifest::PluginTier;
+        use crate::plugins::isolation::{
+            manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
+        };
+
+        let manifest: crate::plugin_manifest::PluginManifest =
+            serde_json::from_value(serde_json::json!({
+                "id": "@ryu/social",
+                "name": "Social",
+                "version": "1.0.0",
+                "runnables": []
+            }))
+            .expect("minimal official manifest");
+        let provenance = PluginProvenance {
+            source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            signature_verified: true,
+            manifest_sha256: Some(manifest_sha256(&manifest)),
+            ..PluginProvenance::default()
+        };
+
+        clear_verified_official_digest(&manifest.id);
+        record_verified_official_package(&manifest, &provenance);
+        assert_eq!(tier_for_manifest(&manifest), PluginTier::Core);
+
+        clear_verified_official_digest(&manifest.id);
+        assert_eq!(tier_for_manifest(&manifest), PluginTier::Community);
+    }
+
+    #[test]
+    fn spoofed_official_id_does_not_retain_core_tier() {
+        use crate::plugin_manifest::PluginTier;
+
+        let spoofed: crate::plugin_manifest::PluginManifest =
+            serde_json::from_value(serde_json::json!({
+                "id": "@ryu/social",
+                "name": "Spoofed Social",
+                "version": "9.9.9",
+                "runnables": []
+            }))
+            .expect("minimal spoofed manifest");
+
+        assert_eq!(tier_for_manifest(&spoofed), PluginTier::Community);
     }
 
     /// #444 Community-tier gate: a non-Core plugin is Community, is therefore NOT
@@ -1726,7 +1918,7 @@ mod tests {
             .iter()
             .find(|d| d.id == SPACES_PLUGIN_ID)
             .expect("Meetings must require Spaces");
-        assert_eq!(dep.min_version.as_deref(), Some("1.0.0"));
+        assert_eq!(dep.min_version.as_deref(), Some("0.1.14"));
 
         // The declared minimum is actually satisfiable by the Spaces we ship —
         // a `requires` that no shipped version can satisfy would fail-closed the
@@ -2104,7 +2296,10 @@ mod tests {
     #[test]
     fn uninstall_protection_covers_every_default_on_plugin_not_just_system_apps() {
         // A default-on, non-SYSTEM plugin is protected (the crux).
-        assert!(!is_system_plugin("@ryu/goal"), "goal is not a SYSTEM plugin");
+        assert!(
+            !is_system_plugin("@ryu/goal"),
+            "goal is not a SYSTEM plugin"
+        );
         assert!(is_default_on("@ryu/goal"));
         assert!(
             is_uninstall_protected("@ryu/goal"),
@@ -2600,7 +2795,8 @@ mod tests {
         for m in &manifests {
             let declares_sidecar = !m.sidecars.is_empty();
             let declares_mcp = !m.mcp_servers.is_empty();
-            if !(declares_sidecar || declares_mcp) || DELIBERATELY_COMMUNITY.contains(&m.id.as_str())
+            if !(declares_sidecar || declares_mcp)
+                || DELIBERATELY_COMMUNITY.contains(&m.id.as_str())
             {
                 continue;
             }

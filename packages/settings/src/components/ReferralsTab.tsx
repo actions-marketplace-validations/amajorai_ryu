@@ -330,7 +330,7 @@ export function ReferralsTab({
 								disabled={!data.referralLink}
 								onClick={handleCopy}
 								type="button"
-								variant="outline"
+								variant="ghost"
 							>
 								<Copy className="size-4" />
 								{copied ? "Copied" : "Copy"}
@@ -607,7 +607,7 @@ export function ReferralsTab({
 											}
 											onClick={() => commissionMutation.mutate(null)}
 											type="button"
-											variant="outline"
+											variant="ghost"
 										>
 											Clear
 										</Button>

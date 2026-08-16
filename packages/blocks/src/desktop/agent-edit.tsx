@@ -17,7 +17,6 @@
 import {
 	Add01Icon,
 	ArrowDown01Icon,
-	ArrowRight01Icon,
 	Brain01Icon,
 	CheckmarkBadge04Icon,
 	Clock01Icon,
@@ -38,6 +37,11 @@ import { Checkbox } from "@ryu/ui/components/checkbox";
 import type { GradientDirection } from "@ryu/ui/components/dither-kit/gradient";
 import type { DitherColor } from "@ryu/ui/components/dither-kit/palette";
 import { Input } from "@ryu/ui/components/input";
+import {
+	InputGroup,
+	InputGroupAddon,
+	InputGroupInput,
+} from "@ryu/ui/components/input-group";
 import { Label } from "@ryu/ui/components/label";
 import { Logo as RyuLogo } from "@ryu/ui/components/logo";
 import {
@@ -72,6 +76,7 @@ import {
 	resolveAgentBanner,
 	useAgentBannerPrefs,
 } from "./agent-banner-dialog.tsx";
+import { formatToolDisplayName } from "./agent-elements/tools/tool-registry.ts";
 import {
 	AGENT_TAB_LABELS,
 	type AgentSettingsEntry,
@@ -85,89 +90,6 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "./settings-items.tsx";
-
-// ── Slot card ─────────────────────────────────────────────────────────────────
-
-export interface SlotOption {
-	id: string;
-	label: string;
-}
-
-export interface SlotCardProps {
-	available?: boolean;
-	description: string;
-	disabled?: boolean;
-	id: string;
-	label: string;
-	onChange?: (value: string) => void;
-	options: SlotOption[];
-	value: string;
-}
-
-export function SlotCard({
-	id,
-	label,
-	description,
-	options,
-	value,
-	onChange,
-	available = true,
-	disabled = false,
-}: SlotCardProps) {
-	const selectId = `slot-${id}`;
-	return (
-		<fieldset aria-label={`${label} slot`} className="flex flex-col gap-2">
-			<div className="flex items-center gap-2">
-				<span className="font-medium text-sm">{label}</span>
-				{available ? null : (
-					<Badge className="ml-auto text-[10px]" variant="secondary">
-						Coming soon
-					</Badge>
-				)}
-			</div>
-			<p className="text-muted-foreground text-xs">{description}</p>
-			{available ? (
-				<div className="flex flex-col gap-1">
-					<Label className="sr-only" htmlFor={selectId}>
-						{label}
-					</Label>
-					{options.length === 0 ? (
-						<p className="text-muted-foreground text-xs">
-							No options installed yet.
-						</p>
-					) : (
-						<Select
-							disabled={disabled}
-							items={options.map((opt) => ({
-								value: opt.id,
-								label: opt.label,
-							}))}
-							onValueChange={(v) => onChange?.(v ?? "")}
-							value={value}
-						>
-							<SelectTrigger className="w-full" id={selectId}>
-								<SelectValue placeholder={`Select ${label.toLowerCase()}`} />
-							</SelectTrigger>
-							<SelectContent>
-								{options.map((opt) => (
-									<SelectItem key={opt.id} value={opt.id}>
-										{opt.label}
-									</SelectItem>
-								))}
-							</SelectContent>
-						</Select>
-					)}
-				</div>
-			) : (
-				<div className="rounded border border-dashed px-3 py-2">
-					<span className="text-muted-foreground text-xs">
-						Slot available once configured
-					</span>
-				</div>
-			)}
-		</fieldset>
-	);
-}
 
 // ── Memory / Spaces slot (live) ────────────────────────────────────────────────
 
@@ -854,7 +776,7 @@ function PiModelPicker({
 							value={query}
 						/>
 					</div>
-					<div className="min-h-0 flex-1 overflow-y-auto p-1">
+					<div className="scroll-fade min-h-0 flex-1 overflow-y-auto p-1">
 						{loading ? (
 							<p className="flex items-center gap-2 px-3 py-4 text-muted-foreground text-xs">
 								<Spinner className="size-3" /> Loading models…
@@ -1715,6 +1637,8 @@ export interface AgentSettingsFormProps {
 
 	// Model slots
 	chatModel: string;
+	/** Injected shared provider/model command picker for the live desktop app. */
+	chatModelPicker?: ReactNode;
 	chatSlotDisabled?: boolean;
 	/** Injected: ClaudeGatewayConfig for `acp:claude`. */
 	claudeConfig?: ReactNode;
@@ -1768,7 +1692,6 @@ export interface AgentSettingsFormProps {
 	memorySpaceIds: Set<string>;
 	/** Whether the agent may record new memories during a session. */
 	memoryWriteEnabled: boolean;
-	moreSlotsOpen?: boolean;
 	// Identity
 	name: string;
 	onAcpCommandChange?: (v: string) => void;
@@ -1802,7 +1725,6 @@ export interface AgentSettingsFormProps {
 	onToggleComposio?: (name: string) => void;
 	onToggleMemoryReadLevel?: (level: string) => void;
 	onToggleMemorySpace?: (id: string) => void;
-	onToggleMoreSlots?: () => void;
 	onToggleSkill?: (id: string) => void;
 	onToggleTool?: (name: string) => void;
 	onToneChange?: (v: string) => void;
@@ -1824,6 +1746,8 @@ export interface AgentSettingsFormProps {
 
 	// Rules
 	rules: string[];
+	/** Injected Agent Edit panel supplied by a plugin (for example Rules). */
+	rulesPanel?: ReactNode;
 	saveDisabled?: boolean;
 	saving?: boolean;
 	scheduleEnabled?: boolean;
@@ -2112,6 +2036,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		isLocked,
 		instructionsEditor,
 		promptStudioPanel,
+		rulesPanel,
 		evalsPanel,
 		calendarPanel,
 		historyPanel,
@@ -2157,6 +2082,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		capabilitiesPanel,
 		identityPanel,
 		chatModel,
+		chatModelPicker,
 		engineOptions,
 		onChatModelChange,
 		chatSlotDisabled,
@@ -2169,8 +2095,6 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		claudeConfig,
 		codexConfig,
 		gatewayRoutingConfig,
-		moreSlotsOpen,
-		onToggleMoreSlots,
 		scheduleEnabled,
 		onScheduleEnabledChange,
 		schedulePhrase,
@@ -2217,6 +2141,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 	// answer here — `agent-settings-search.ts` indexes the ROWS, and picking a hit
 	// switches to its tab and flashes it.
 	const [settingsQuery, setSettingsQuery] = useState("");
+	const [capabilityQuery, setCapabilityQuery] = useState("");
 	// Scopes the reveal to the editor body, so a row title that also appears in
 	// the search results list can't win over the real row in the panel.
 	const editorRef = useRef<HTMLDivElement | null>(null);
@@ -2259,7 +2184,8 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 				<SettingsGroup>
 					<SettingsItem
 						actions={
-							engineOptions.length === 0 ? (
+							chatModelPicker ??
+							(engineOptions.length === 0 ? (
 								<span className="text-muted-foreground text-xs">
 									No options installed yet.
 								</span>
@@ -2287,7 +2213,7 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 										))}
 									</SelectContent>
 								</Select>
-							)
+							))
 						}
 						title="Chat model"
 					/>
@@ -2574,21 +2500,82 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 		</>
 	);
 
+	const normalizedCapabilityQuery = capabilityQuery.trim().toLowerCase();
+	const filteredTools = tools.filter((toolName) =>
+		formatToolDisplayName(toolName)
+			.toLowerCase()
+			.includes(normalizedCapabilityQuery)
+	);
+	const filteredSkills = skills.filter((skill) =>
+		[skill.name, skill.description, skill.id]
+			.filter(Boolean)
+			.some((value) => value?.toLowerCase().includes(normalizedCapabilityQuery))
+	);
+	const enableAllCapabilities = () => {
+		for (const tool of tools) {
+			if (!selectedTools.has(tool)) {
+				onToggleTool?.(tool);
+			}
+		}
+		for (const skill of skills) {
+			if (!selectedSkills.has(skill.id)) {
+				onToggleSkill?.(skill.id);
+			}
+		}
+	};
+	const disableAllCapabilities = () => {
+		for (const tool of tools) {
+			if (selectedTools.has(tool)) {
+				onToggleTool?.(tool);
+			}
+		}
+		for (const skill of skills) {
+			if (selectedSkills.has(skill.id)) {
+				onToggleSkill?.(skill.id);
+			}
+		}
+	};
 	const toolsPanel = (
 		<>
 			{/* Capabilities (tools / thinking / vision) — gates the controls below. */}
 			{capabilitiesPanel}
-			{/* 4. Tools — MCP tools + Skills */}
+			{/* 4. Tools + skills — one readable settings surface. */}
 			<SettingsSection
-				caption="The MCP tools this agent may call."
+				caption="Choose the tools and skills this agent can use."
 				headerAction={
-					selectedTools.size > 0 ? (
-						<Badge variant="secondary">{selectedTools.size}</Badge>
-					) : undefined
+					<div className="flex items-center gap-2">
+						<Button
+							disabled={isLocked || toolsLoading || skillsLoading}
+							onClick={enableAllCapabilities}
+							size="sm"
+							variant="ghost"
+						>
+							Enable all
+						</Button>
+						<Button
+							disabled={isLocked || toolsLoading || skillsLoading}
+							onClick={disableAllCapabilities}
+							size="sm"
+							variant="ghost"
+						>
+							Disable all
+						</Button>
+						<InputGroup className="w-64">
+							<InputGroupAddon>
+								<HugeiconsIcon className="size-4" icon={Search01Icon} />
+							</InputGroupAddon>
+							<InputGroupInput
+								aria-label="Search tools and skills"
+								onChange={(event) => setCapabilityQuery(event.target.value)}
+								placeholder="Search tools and skills…"
+								value={capabilityQuery}
+							/>
+						</InputGroup>
+					</div>
 				}
-				title="Tools"
+				title="Tools & skills"
 			>
-				<SettingsCard className="flex flex-col gap-2">
+				<SettingsCard className="flex flex-col gap-4">
 					{toolsLoading ? (
 						<div className="flex items-center gap-2 text-muted-foreground text-xs">
 							<Spinner className="size-3" />
@@ -2601,85 +2588,96 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 						</p>
 					) : null}
 					{!toolsLoading && tools.length > 0 ? (
-						<div className="flex flex-col gap-2">
-							{tools.map((toolName) => {
+						<div className="grid gap-2 md:grid-cols-2">
+							{filteredTools.map((toolName) => {
 								const checkId = `tool-${toolName}`;
 								return (
-									<div className="flex items-center gap-3" key={toolName}>
-										<Checkbox
+									<div
+										className="flex items-center justify-between gap-3 rounded-xl border bg-muted/20 px-3 py-2.5"
+										key={toolName}
+									>
+										<Label
+											className="min-w-0 cursor-pointer font-normal text-sm"
+											htmlFor={checkId}
+										>
+											<span className="block truncate">
+												{formatToolDisplayName(toolName)}
+											</span>
+											<span className="block truncate text-muted-foreground text-xs">
+												{toolName}
+											</span>
+										</Label>
+										<Switch
 											checked={selectedTools.has(toolName)}
 											disabled={isLocked}
 											id={checkId}
 											onCheckedChange={() => onToggleTool?.(toolName)}
 										/>
-										<Label
-											className="cursor-pointer font-normal text-sm"
-											htmlFor={checkId}
-										>
-											{toolName}
-										</Label>
 									</div>
 								);
 							})}
 						</div>
 					) : null}
-				</SettingsCard>
-			</SettingsSection>
-
-			<SettingsSection
-				caption="Limit this agent to specific skills. Leave all unchecked to allow every enabled skill."
-				headerAction={
-					selectedSkills.size > 0 ? (
-						<Badge variant="secondary">{selectedSkills.size}</Badge>
-					) : undefined
-				}
-				title="Skills"
-			>
-				<SettingsCard className="flex flex-col gap-2">
-					{skillsLoading ? (
-						<div className="flex items-center gap-2 text-muted-foreground text-xs">
-							<Spinner className="size-3" />
-							Loading skills…
+					<div className="border-t pt-4">
+						<div className="mb-2 flex items-center justify-between">
+							<div>
+								<h3 className="font-medium text-sm">Skills</h3>
+								<p className="text-muted-foreground text-xs">
+									Leave all off to allow every enabled skill.
+								</p>
+							</div>
+							<Badge variant="secondary">{selectedSkills.size} enabled</Badge>
 						</div>
-					) : null}
-					{!skillsLoading && skills.length === 0 ? (
-						<p className="text-muted-foreground text-sm">
-							No Skills installed. Browse and install from the Skills page.
-						</p>
-					) : null}
-					{!skillsLoading && skills.length > 0 ? (
-						<div className="flex flex-col gap-2">
-							{skills.map((skill) => {
-								const checkId = `skill-${skill.id}`;
-								return (
-									<div className="flex items-start gap-3" key={skill.id}>
-										<Checkbox
-											checked={selectedSkills.has(skill.id)}
-											disabled={isLocked}
-											id={checkId}
-											onCheckedChange={() => onToggleSkill?.(skill.id)}
-										/>
-										<Label
-											className="cursor-pointer font-normal text-sm"
-											htmlFor={checkId}
+						{skillsLoading ? (
+							<div className="flex items-center gap-2 text-muted-foreground text-xs">
+								<Spinner className="size-3" />
+								Loading skills…
+							</div>
+						) : null}
+						{!skillsLoading && skills.length === 0 ? (
+							<p className="text-muted-foreground text-sm">
+								No Skills installed. Browse and install from the Skills page.
+							</p>
+						) : null}
+						{!skillsLoading && skills.length > 0 ? (
+							<div className="grid gap-2 md:grid-cols-2">
+								{filteredSkills.map((skill) => {
+									const checkId = `skill-${skill.id}`;
+									return (
+										<div
+											className="flex items-start justify-between gap-3 rounded-xl border bg-muted/20 px-3 py-2.5"
+											key={skill.id}
 										>
-											<span className="font-medium">{skill.name}</span>
-											{skill.enabled ? null : (
-												<span className="ml-1.5 text-muted-foreground text-xs">
-													(disabled globally)
+											<Label
+												className="min-w-0 cursor-pointer font-normal text-sm"
+												htmlFor={checkId}
+											>
+												<span className="block truncate font-medium">
+													{skill.name}
 												</span>
-											)}
-											{skill.description ? (
-												<span className="block text-muted-foreground text-xs">
-													{skill.description}
-												</span>
-											) : null}
-										</Label>
-									</div>
-								);
-							})}
-						</div>
-					) : null}
+												{skill.description ? (
+													<span className="block truncate text-muted-foreground text-xs">
+														{skill.description}
+													</span>
+												) : null}
+												{skill.enabled ? null : (
+													<span className="text-muted-foreground text-xs">
+														Disabled globally
+													</span>
+												)}
+											</Label>
+											<Switch
+												checked={selectedSkills.has(skill.id)}
+												disabled={isLocked}
+												id={checkId}
+												onCheckedChange={() => onToggleSkill?.(skill.id)}
+											/>
+										</div>
+									);
+								})}
+							</div>
+						) : null}
+					</div>
 				</SettingsCard>
 			</SettingsSection>
 
@@ -3006,81 +3004,16 @@ export function AgentSettingsForm(props: AgentSettingsFormProps) {
 
 			{/* Always-on directives read as part of "how it behaves", so they sit
 			    with the instructions instead of owning a tab of their own. */}
-			{rulesSection}
+			{rulesPanel ?? rulesSection}
 		</>
 	);
 
 	const advancedPanel = (
-		<>
-			{/* Advanced — collapsible-style group at the bottom */}
-			<section aria-label="Advanced" className="flex flex-col gap-5">
-				<button
-					className="-mx-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-muted/50"
-					onClick={onToggleMoreSlots}
-					type="button"
-				>
-					<span className="font-semibold text-sm">Advanced slots</span>
-					<Badge className="text-[10px]" variant="secondary">
-						Coming soon
-					</Badge>
-					<span className="ml-auto text-muted-foreground">
-						<HugeiconsIcon
-							className="size-4"
-							icon={moreSlotsOpen ? ArrowDown01Icon : ArrowRight01Icon}
-						/>
-					</span>
-				</button>
-
-				{moreSlotsOpen ? (
-					<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-						<SettingsCard>
-							<SlotCard
-								available={false}
-								description="Speech-to-text model for voice input."
-								id="stt"
-								label="Speech-to-text"
-								options={[]}
-								value=""
-							/>
-						</SettingsCard>
-						<SettingsCard>
-							<SlotCard
-								available={false}
-								description="Text-to-speech model for voice output."
-								id="tts"
-								label="Text-to-speech"
-								options={[]}
-								value=""
-							/>
-						</SettingsCard>
-						<SettingsCard>
-							<SlotCard
-								available={false}
-								description="Image generation model for visual tasks."
-								id="image-model"
-								label="Image model"
-								options={[]}
-								value=""
-							/>
-						</SettingsCard>
-						<SettingsCard>
-							<SlotCard
-								available={false}
-								description="Gateway policy ref for firewall, PII filtering, and budget."
-								id="policy"
-								label="Gateway policy"
-								options={[]}
-								value=""
-							/>
-						</SettingsCard>
-					</div>
-				) : null}
-
-				{advancedInference}
-				{connectPanel}
-				{byoaPanel}
-			</section>
-		</>
+		<section aria-label="Advanced" className="flex flex-col gap-5">
+			{advancedInference}
+			{connectPanel}
+			{byoaPanel}
+		</section>
 	);
 
 	// Name + picture + description. In the tabbed editor these live in the profile

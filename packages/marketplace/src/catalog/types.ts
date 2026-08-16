@@ -427,6 +427,16 @@ export interface CatalogSidecar {
 	routes?: CatalogRoute[];
 }
 
+/** A sidecar-declared model provider. This is display-only metadata for the
+ * enable confirmation: the process spec and executable backend never cross the
+ * catalog projection boundary. */
+export interface CatalogModelProvider {
+	api?: string | null;
+	id: string;
+	label?: string | null;
+	models?: string[];
+}
+
 /** A stdio MCP server the plugin registers on enable. `envKeys` deliberately
  *  carries only the env variable NAMES — values are secrets by convention. */
 export interface CatalogMcpServer {
@@ -455,6 +465,7 @@ export interface CatalogApiSurface {
 		type?: string | null;
 	}[];
 	mcpServers?: CatalogMcpServer[];
+	modelProviders?: CatalogModelProvider[];
 	policies?: CatalogContribution[];
 	/** Capabilities this plugin serves to OTHER plugins via the broker. */
 	provides?: {
@@ -525,6 +536,10 @@ export interface CatalogEntry {
 	 *  the local version overlaid; that turns an advisory into a real refusal. */
 	compatibility?: CompatibilityVerdict | null;
 	description: string;
+	/** Public GitHub release-asset downloads, summed across every published
+	 * release. The producer excludes signatures, manifests and text metadata so
+	 * this is a count of distributable payloads rather than release bookkeeping. */
+	downloads?: number | null;
 	descriptor_only?: boolean;
 	developer?: string | null;
 	/** Host version floors this listing declares (the manifest's `engines`), one

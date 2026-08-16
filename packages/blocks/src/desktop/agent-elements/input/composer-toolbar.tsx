@@ -3,12 +3,12 @@
 import { Button } from "@ryu/ui/components/button";
 import { Wave } from "@ryu/ui/components/wave";
 import {
-	IconLayersSubtract,
 	IconLoader2,
 	IconMicrophone,
 	IconPlayerStopFilled,
 } from "@tabler/icons-react";
 import type { ContextUsage } from "../context-usage.tsx";
+import type { ComposerMenuGroup, ComposerMenuItem } from "./composer-menu.tsx";
 import { ContextMeter } from "./context-meter.tsx";
 import {
 	type DoubleCheckControls,
@@ -22,13 +22,6 @@ import { SendButton } from "./send-button.tsx";
 
 export interface ComposerToolbarProps {
 	/**
-	 * When true, an "Add to queue" button appears next to the Stop button so the
-	 * user can stash the typed message while a run is in flight. Driven by the
-	 * host's `enableQueue` + streaming + has-input state.
-	 */
-	canQueue?: boolean;
-
-	/**
 	 * Context-window usage for the persistent composer meter (a donut ring +
 	 * used-percentage shown left of the model selector). Omit to hide the meter;
 	 * the `ContextMeter` also self-hides when the window size or usage is unknown.
@@ -40,6 +33,8 @@ export interface ComposerToolbarProps {
 	 * nothing.
 	 */
 	contextMeterOnOpen?: () => void;
+	directoryGroups?: ComposerMenuGroup[];
+	directoryQuery?: string;
 	disabled?: boolean;
 
 	/**
@@ -81,10 +76,12 @@ export interface ComposerToolbarProps {
 	/** Content rendered on the left, next to the attachment button. */
 	leftActions?: React.ReactNode;
 	onAttach?: () => void;
+	onDirectorySelect?: (item: ComposerMenuItem) => void;
 	/** Generate an image from the current composer text. */
 	onGenerateImage?: () => void;
 	/** Generate a video from the current composer text. */
 	onGenerateVideo?: () => void;
+	onMenuOpenChange?: (open: boolean) => void;
 	onStartVoice: () => void;
 	onStop: () => void;
 	onStopVoice: () => void;
@@ -251,7 +248,7 @@ function resolvePlusMenu(
  * The composer's controls row — rendered INSIDE the textarea card (Codex-style),
  * directly under the textarea and sharing its rounded background. Holds the
  * attachment / "+" button, model selector (rightActions), voice controls, and the
- * send / stop / queue button. Extracted from `input-bar.tsx` so the bar is
+ * send / stop / voice-mode button. Extracted from `input-bar.tsx` so the bar is
  * reusable and the input component stays focused on the textarea.
  */
 export function ComposerToolbar({
@@ -275,21 +272,28 @@ export function ComposerToolbar({
 	hasVideoGen,
 	isGeneratingVideo,
 	onGenerateVideo,
+	directoryGroups,
+	directoryQuery,
+	onDirectorySelect,
+	onMenuOpenChange,
 	isStreaming,
 	hasInput,
 	disabled,
 	onStop,
 	onSubmit,
-	canQueue,
 	contextMeter,
 	contextMeterOnOpen,
 	voiceMode,
 }: ComposerToolbarProps) {
+	// The primary action always reflects what the user can do next: a typed
+	// message sends (and the host queues it when a turn is active), while Stop
+	// appears only for an active turn with an empty composer. The idle empty state
+	// is voice mode through SendButton's `voiceMode` prop.
 	let sendState: "idle" | "typing" | "streaming" = "idle";
-	if (isStreaming) {
-		sendState = "streaming";
-	} else if (hasInput && !disabled) {
+	if (hasInput && !disabled) {
 		sendState = "typing";
+	} else if (isStreaming) {
+		sendState = "streaming";
 	}
 
 	// Media generation lives in the "+" dropdown (alongside Goal / Double-check),
@@ -310,17 +314,24 @@ export function ComposerToolbar({
 		isGeneratingVideo,
 		showAttach,
 	});
+	const showDirectory = Boolean(
+		directoryGroups?.some((group) => group.items.length > 0)
+	);
 
 	const leftCluster = (
 		<div className="flex min-w-0 items-center gap-1">
-			{showPlusMenu && (
+			{(showPlusMenu || showDirectory) && (
 				<GoalPlusButton
+					directoryGroups={directoryGroups}
+					directoryQuery={directoryQuery}
 					disabled={disabled}
 					doubleCheck={doubleCheckControls}
 					ghost={ghostControls}
 					goal={goalControls}
 					imageGen={imageGen}
 					onAttach={showAttach ? onAttach : undefined}
+					onDirectorySelect={onDirectorySelect}
+					onMenuOpenChange={onMenuOpenChange}
 					pluginControls={pluginControls}
 					videoGen={videoGen}
 				/>
@@ -349,22 +360,6 @@ export function ComposerToolbar({
 			    popover. It is unreachable now that attach alone opens the menu
 			    (`showAttach` implies `showPlusMenu`), so the "+" dropdown is now the
 			    attach affordance on every surface. */}
-			{/* While a run is streaming and the user has typed, offer an explicit
-				    "queue" affordance alongside the Stop button so the behaviour is
-				    discoverable (Enter also queues). */}
-			{canQueue && (
-				<Button
-					aria-label="Add message to queue"
-					className="size-7 shrink-0 text-muted-foreground/80 hover:text-foreground"
-					onClick={onSubmit}
-					size="icon"
-					title="Queue this message — sends when the current run finishes"
-					type="button"
-					variant="ghost"
-				>
-					<IconLayersSubtract className="size-4" />
-				</Button>
-			)}
 			{/* When live voice-mode owns the trailing slot, STT dictation moves to
 				    its own small mic button here (left of the trailing waveform).
 				    Hidden while a run streams — the trailing slot is Stop then, and a
@@ -381,15 +376,14 @@ export function ComposerToolbar({
 						onStop={onStopVoice}
 					/>
 				)}
-			{/* Trailing action: live voice-mode waveform when the composer is empty
-				    (or the STT mic when no voice-mode is wired), morphing into Send once
-				    the user types, or Stop while streaming. */}
+			{/* Trailing action: Send whenever text is present, Stop only for an
+			    active turn with an empty composer, otherwise live voice mode (or STT). */}
 			<SendButton
 				onClick={() => {
-					if (isStreaming) {
-						onStop();
-					} else if (hasInput) {
+					if (hasInput) {
 						onSubmit();
+					} else if (isStreaming) {
+						onStop();
 					}
 				}}
 				state={sendState}

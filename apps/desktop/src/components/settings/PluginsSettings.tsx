@@ -43,7 +43,7 @@ export function PluginsSettings() {
 				<p className="text-muted-foreground text-sm">
 					We couldn't load plugin settings. Check your connection and try again.
 				</p>
-				<Button onClick={reload} size="sm" variant="outline">
+				<Button onClick={reload} size="sm" variant="ghost">
 					Retry
 				</Button>
 			</div>

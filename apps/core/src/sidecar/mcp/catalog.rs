@@ -331,7 +331,7 @@ impl McpRegistry {
         skills_allowlist: &[String],
     ) -> Option<DescribedTool> {
         // Composio: not in list_all_tools — describe shallowly.
-        if id.starts_with("composio__") {
+        if id.starts_with("composio.") || id.starts_with("composio__") {
             return Some(ryu_tool_registry::describe_composio(id));
         }
 
@@ -1019,11 +1019,9 @@ mod tests {
             only_ext.iter().all(|d| d.kind == ToolKind::ExtApi),
             "kind=ext-api must return derived rows only: {only_ext:?}"
         );
-        assert!(
-            only_ext
-                .iter()
-                .any(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts")
-        );
+        assert!(only_ext
+            .iter()
+            .any(|d| d.id == "ryu_ext__ryu_crm__get_api_contacts"));
 
         // …and a different filter does not leak them.
         let only_apps = reg
@@ -1057,7 +1055,10 @@ mod tests {
             .await
             .expect("a derived route must be describable");
         assert_eq!(d.kind, ToolKind::ExtApi);
-        assert!(!d.shallow, "the full schema is known, so this is not shallow");
+        assert!(
+            !d.shallow,
+            "the full schema is known, so this is not shallow"
+        );
         assert!(
             d.parameters.is_some(),
             "the raw JSON Schema must be echoed for a caller that wants it"
@@ -1175,7 +1176,10 @@ mod tests {
 
         reg.clear_ext_api_routes("@ryu/crm");
 
-        assert!(!reg.has_ext_api_routes("@ryu/crm"), "the re-wake guard re-arms");
+        assert!(
+            !reg.has_ext_api_routes("@ryu/crm"),
+            "the re-wake guard re-arms"
+        );
         assert!(reg.has_ext_api_routes("@ryu/quests"));
         assert!(reg
             .describe("ryu_ext__ryu_crm__get_api_contacts")

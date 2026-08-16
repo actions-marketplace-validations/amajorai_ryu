@@ -47,8 +47,9 @@ export interface ChatDisplayPrefs {
 	 */
 	expandFileEdits: boolean;
 	/**
-	 * When true, consecutive tool calls (Task/Agent) are collapsed into a single
-	 * grouped row with a summary. When false, every tool call renders individually.
+	 * When true, consecutive compact tool calls are collapsed into a single
+	 * AgentActivity disclosure with a summary. Rich and interactive tools stay
+	 * standalone. When false, every tool call renders individually.
 	 * Default: true.
 	 */
 	groupToolUses: boolean;

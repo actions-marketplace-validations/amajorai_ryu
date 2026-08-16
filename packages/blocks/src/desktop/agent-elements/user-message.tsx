@@ -24,6 +24,8 @@ import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { CollapsibleText } from "./collapsible-text.tsx";
 import { ImageLightbox } from "./image-lightbox.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
+import type { LinkPreviewResolvers } from "./link-preview.tsx";
+import { Markdown } from "./markdown.tsx";
 import {
 	type MessageReactionBucket,
 	MessageReactions,
@@ -33,6 +35,8 @@ import {
 	QuoteBlock,
 	splitLeadingQuote,
 } from "./quote.tsx";
+import type { MentionItem } from "./types.ts";
+import { getWidgetMessageAttribution } from "./types.ts";
 
 export interface UserMessageProps {
 	/**
@@ -75,15 +79,19 @@ export interface UserMessageProps {
 	 * surface (island, storyboard, subagent panel) gets for free.
 	 */
 	groupPosition?: "first" | "last" | "middle" | "single";
+	mentionItems?: MentionItem[];
 	message: UIMessage;
 	onEditCancel?: () => void;
 	onEditSubmit?: (text: string) => void;
+	onOpenFile?: (path: string) => void;
+	onOpenLink?: (url: string) => void;
 	/**
 	 * Toggle the caller's own `emoji` on this message. Its presence is what turns
 	 * the reaction affordance on — a surface that does not pass it renders no
 	 * picker, which is how the island and the storyboard opt out for free.
 	 */
 	onToggleReaction?: (emoji: string) => void;
+	previewResolvers?: LinkPreviewResolvers;
 	/**
 	 * True once Core has assigned this message its real id. The picker stays
 	 * hidden until then: a client-generated id 404s BY DESIGN (Core ships no
@@ -336,6 +344,10 @@ export const UserMessage = memo(function UserMessage({
 	groupPosition = "single",
 	onEditSubmit,
 	onEditCancel,
+	onOpenFile,
+	onOpenLink,
+	mentionItems,
+	previewResolvers,
 	onToggleReaction,
 	reactable = false,
 	reactions,
@@ -386,6 +398,7 @@ export const UserMessage = memo(function UserMessage({
 	}));
 
 	const remoteAuthor = getAuthor(message);
+	const widgetAttribution = getWidgetMessageAttribution(message);
 	const isOwnMessage = !remoteAuthor;
 	const author = isOwnMessage ? (currentUser ?? null) : remoteAuthor;
 	const createdAt = (message as { createdAt?: Date | string }).createdAt;
@@ -503,7 +516,16 @@ export const UserMessage = memo(function UserMessage({
 								contentKey={body}
 								fadeToClass="to-primary"
 							>
-								<p {...messageSelectableProps}>{body}</p>
+								<div {...messageSelectableProps}>
+									<Markdown
+										className="[&_a]:text-primary-foreground [&_button]:text-primary-foreground [&_p]:text-primary-foreground"
+										content={body}
+										mentionItems={mentionItems}
+										onOpenFile={onOpenFile}
+										onOpenLink={onOpenLink}
+										previewResolvers={previewResolvers}
+									/>
+								</div>
 							</CollapsibleText>
 						)}
 					</BubbleContent>
@@ -570,6 +592,9 @@ export const UserMessage = memo(function UserMessage({
 		!isOwnMessage &&
 		Boolean(author?.name) &&
 		(groupPosition === "single" || groupPosition === "first");
+	const showWidgetAttribution =
+		Boolean(widgetAttribution) &&
+		(groupPosition === "single" || groupPosition === "first");
 	// The clock collapses with the avatar — same rows, same reason. This header
 	// sits ABOVE the bubble, so leaving it on every row puts a 16px band plus its
 	// gap between each pair of grouped messages: ~24px of chrome inside a run that
@@ -588,9 +613,18 @@ export const UserMessage = memo(function UserMessage({
 	// Gated as a whole — an empty `MessageHeader` still renders a 16px gapped row
 	// above the bubble, which is the very chrome this is removing.
 	const HeaderNode =
-		showName || showTimestamp ? (
+		showName || showWidgetAttribution || showTimestamp ? (
 			<MessageHeader className="h-4 gap-2 px-0">
 				{showName && <span>{author?.name}</span>}
+				{showWidgetAttribution && widgetAttribution ? (
+					<span
+						className="text-muted-foreground"
+						data-testid="widget-message-attribution"
+						title={`Widget instance ${widgetAttribution.widget_instance_id}`}
+					>
+						Widget · {widgetAttribution.origin_server}
+					</span>
+				) : null}
 				{showTimestamp && TimestampNode}
 			</MessageHeader>
 		) : null;

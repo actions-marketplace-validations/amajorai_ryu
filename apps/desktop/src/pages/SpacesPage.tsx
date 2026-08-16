@@ -16,6 +16,7 @@ import { pluginHostInvoke } from "@/src/lib/api/plugins.ts";
 import {
 	describeRetrievalModeChange,
 	type RetrievalMode,
+	type RetrievalModeProgress,
 	type SpaceDocument,
 	type SpaceMatch,
 } from "@/src/lib/api/spaces.ts";
@@ -91,6 +92,9 @@ export default function SpacesPage({
 	const [retrievalModeNotice, setRetrievalModeNotice] = useState<string | null>(
 		null
 	);
+	const [retrievalModeProgress, setRetrievalModeProgress] =
+		useState<RetrievalModeProgress | null>(null);
+	const retrievalModeAbort = useRef<AbortController | null>(null);
 
 	// Select the requested space once it resolves in the loaded list.
 	useEffect(() => {
@@ -217,26 +221,45 @@ export default function SpacesPage({
 
 	const handleRetrievalModeChange = async (mode: RetrievalMode) => {
 		// Guard on `retrievalModeBusy` as well as disabling the control: the rebuild
-		// runs in one uncancellable `spawn_blocking` transaction on the node, so a
-		// second call would queue a second full rebuild of the same space.
+		// is an expensive background job, so a second call would queue another full
+		// rebuild of the same space.
 		if (!selected || retrievalModeBusy || selected.retrievalMode === mode) {
 			return;
 		}
 		setRetrievalModeBusy(true);
 		setRetrievalModeError(null);
 		setRetrievalModeNotice(null);
+		setRetrievalModeProgress(null);
+		const controller = new AbortController();
+		retrievalModeAbort.current = controller;
 		try {
 			setRetrievalModeNotice(
-				describeRetrievalModeChange(await setRetrievalMode(selected.id, mode))
+				describeRetrievalModeChange(
+					await setRetrievalMode(selected.id, mode, {
+						onProgress: setRetrievalModeProgress,
+						signal: controller.signal,
+					})
+				)
 			);
 		} catch (err) {
-			console.error("Failed to change retrieval mode", err);
-			setRetrievalModeError(
-				"We couldn't change this space's retrieval mode. It is unchanged — please try again."
-			);
+			if (err instanceof DOMException && err.name === "AbortError") {
+				setRetrievalModeNotice(
+					"The retrieval rebuild was cancelled. The space is unchanged."
+				);
+			} else {
+				console.error("Failed to change retrieval mode", err);
+				setRetrievalModeError(
+					"We couldn't change this space's retrieval mode. It is unchanged — please try again."
+				);
+			}
 		} finally {
+			retrievalModeAbort.current = null;
 			setRetrievalModeBusy(false);
 		}
+	};
+
+	const cancelRetrievalModeChange = () => {
+		retrievalModeAbort.current?.abort();
 	};
 
 	// Open a document by its kind: databases use the data-grid editor route, pages
@@ -382,9 +405,11 @@ export default function SpacesPage({
 				onRetrievalModeChange: (mode) => {
 					handleRetrievalModeChange(mode).catch(() => undefined);
 				},
+				onCancelRetrievalMode: cancelRetrievalModeChange,
 				retrievalModeBusy,
 				retrievalModeError,
 				retrievalModeNotice,
+				retrievalModeProgress,
 				searchQuery,
 				searchBusy,
 				searchError,

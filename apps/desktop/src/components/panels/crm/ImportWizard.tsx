@@ -161,7 +161,7 @@ export function ImportWizard({
 				</div>
 			)}
 
-			<div className="min-h-0 flex-1 overflow-y-auto p-4">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto p-4">
 				{step === "upload" && (
 					<div className="space-y-3">
 						<Label htmlFor="crm-import-file">CSV file</Label>
@@ -360,7 +360,7 @@ export function ImportWizard({
 								disabled={busy}
 								onClick={() => setStep("map")}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Back to mapping
 							</Button>
@@ -394,7 +394,7 @@ export function ImportWizard({
 									setDedupeFieldId("");
 								}}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Import another file
 							</Button>

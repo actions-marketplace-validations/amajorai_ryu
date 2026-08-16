@@ -132,7 +132,10 @@ pub async fn notify_all(
 ///
 /// `ack_required` marks a HITL notification whose acknowledgement resumes a
 /// suspended workflow run (`workflow_run_id` + `node_id` identify the gate).
-/// Every channel is best-effort: a push failure never blocks the inbox write.
+/// `source_app_id` records which app raised it (for icon/name resolution in the
+/// desktop); a Core-internal producer passes `None` (or its own id, when it wants
+/// to surface under a named app). Every channel is best-effort: a push failure
+/// never blocks the inbox write.
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_user_notification(
     store: &NotifyStore,
@@ -143,6 +146,7 @@ pub async fn deliver_user_notification(
     workflow_run_id: Option<&str>,
     node_id: Option<&str>,
     ack_required: bool,
+    source_app_id: Option<&str>,
 ) -> Result<String, String> {
     let id = format!("ntf_{}", uuid::Uuid::new_v4().simple());
     let row = NotificationRow {
@@ -157,6 +161,8 @@ pub async fn deliver_user_notification(
         acked: false,
         read_at: None,
         created_at: chrono::Utc::now().to_rfc3339(),
+        source_app_id: source_app_id.map(|s| s.to_owned()),
+        archived_at: None,
     };
     // 1. App inbox (persisted — the one channel that must succeed).
     store
@@ -171,6 +177,7 @@ pub async fn deliver_user_notification(
         level: level.to_owned(),
         target_user_id: Some(user_id.to_owned()),
         notification_id: Some(id.clone()),
+        source_app_id: source_app_id.map(|s| s.to_owned()),
     });
 
     // 3. Mobile push to the member's registered devices.
@@ -193,6 +200,33 @@ pub async fn deliver_user_notification(
         Err(e) => tracing::warn!("notify: failed to read push tokens for {user_id}: {e}"),
     }
     Ok(id)
+}
+
+/// Deliver a plain app-raised notification (no workflow gate) into the user's
+/// inbox + toast + push. `source_app_id` is the AUTHENTICATED calling app's id —
+/// it is always derived from the sidecar identity, never taken from the request
+/// body, so a notification can only ever be attributed to the app that minted
+/// the token that sent it.
+pub async fn deliver_app_notification(
+    store: &NotifyStore,
+    source_app_id: &str,
+    user_id: &str,
+    title: &str,
+    body: &str,
+    level: &str,
+) -> Result<String, String> {
+    deliver_user_notification(
+        store,
+        user_id,
+        title,
+        body,
+        level,
+        None,
+        None,
+        false,
+        Some(source_app_id),
+    )
+    .await
 }
 
 /// Send a single-recipient alert email over the shared BYO SMTP transport.

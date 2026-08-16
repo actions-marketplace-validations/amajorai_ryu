@@ -45,6 +45,7 @@ export interface FileDiffProps {
 	copyText?: string;
 	defaultOpen?: boolean;
 	file: ReactNode;
+	icon?: ReactNode;
 	language?: AgentCodeLanguage;
 	lines: FileDiffLine[];
 	maxHeight?: number;
@@ -81,6 +82,7 @@ function ChangeCount({
 
 export function FileDiff({
 	file,
+	icon,
 	lines,
 	status = "streaming",
 	open,
@@ -193,10 +195,9 @@ export function FileDiff({
 				onClick={() => setOpen(!currentOpen)}
 				type="button"
 			>
-				<FileCode2
-					aria-hidden="true"
-					className="size-4 shrink-0 text-muted-foreground"
-				/>
+				<span className="grid size-4 shrink-0 place-items-center text-muted-foreground">
+					{icon ?? <FileCode2 aria-hidden="true" className="size-4" />}
+				</span>
 				<span className="min-w-0 flex-1 truncate font-mono text-foreground/80 text-xs">
 					{file}
 				</span>

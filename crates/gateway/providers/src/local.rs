@@ -8,7 +8,7 @@ use crate::error::ProviderError;
 
 use super::{
     chat_completions_url, check_response_status, check_stream_status, discover_openai_models,
-    models_from_response, send_with_retry, Provider,
+    embeddings_url, models_from_response, rerank_url, send_with_retry, Provider,
 };
 
 /// Provider for locally-running OpenAI-compatible servers such as Ollama or llama.cpp.
@@ -86,6 +86,51 @@ impl Provider for LocalProvider {
 
             let resp = check_stream_status(resp, "local", None).await?;
             Ok(Body::from_stream(resp.bytes_stream()))
+        })
+    }
+
+    fn embed<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let resp = send_with_retry(
+                || {
+                    let req = self
+                        .client
+                        .post(embeddings_url(&self.base_url))
+                        .json(&payload);
+                    Box::pin(async move { req.send().await })
+                },
+                "local",
+                2,
+            )
+            .await?;
+            check_response_status(resp, "local", None).await
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let resp = send_with_retry(
+                || {
+                    let req = self.client.post(rerank_url(&self.base_url)).json(&payload);
+                    Box::pin(async move { req.send().await })
+                },
+                "local",
+                2,
+            )
+            .await?;
+            check_response_status(resp, "local", None).await
         })
     }
 }

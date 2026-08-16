@@ -328,6 +328,7 @@ export function TabGlyph({
 	icon,
 	unloaded,
 	busy,
+	busySpeed,
 	className,
 	logoSize,
 }: {
@@ -335,6 +336,7 @@ export function TabGlyph({
 	icon?: GlyphValue;
 	unloaded?: boolean;
 	busy?: boolean;
+	busySpeed?: "slow" | "normal" | "fast";
 	className?: string;
 	logoSize: string;
 }) {
@@ -355,7 +357,13 @@ export function TabGlyph({
 	const registeredIcon = shellRoute(path) ? undefined : resolveTabIcon(path);
 
 	if (busy && !unloaded) {
-		return <Spinner aria-label="In progress" className={className} />;
+		return (
+			<Spinner
+				aria-label="In progress"
+				className={className}
+				speed={busySpeed}
+			/>
+		);
 	}
 	if (!unloaded && icon) {
 		const parsed = Number.parseInt(logoSize, 10);
@@ -755,6 +763,7 @@ function PinnedTab({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 									{showAfter && <DropIndicator side="right" />}
 									<TabGlyph
 										busy={busy}
+										busySpeed={tab.busySpeed}
 										className={cn(
 											"size-3.5",
 											isActive ? "text-foreground" : "text-muted-foreground"
@@ -861,6 +870,41 @@ function RegularTab({
 		draft,
 		setDraft,
 	} = useTabRename(tab);
+	const titleContent = (
+		<>
+			{hasNodeOverride && (
+				<Tooltip>
+					<TooltipTrigger
+						render={
+							<span
+								aria-hidden
+								className="mr-1.5 size-1.5 shrink-0 rounded-full bg-success"
+							/>
+						}
+					/>
+					<TooltipContent>
+						Connected to {capitalize(overrideName)}
+					</TooltipContent>
+				</Tooltip>
+			)}
+			{/* One label in both states: a streaming title shimmers on the
+			    SAME clipped line, so an over-long busy title dissolves at the
+			    edge exactly like a resting one instead of losing the fade. */}
+			<OverflowTooltip
+				className={cn(
+					"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
+					tab.unloaded && "italic"
+				)}
+				fade
+				forceShow={tab.unloaded}
+				shimmer={busy && !tab.unloaded}
+				text={tab.title}
+				tooltip={
+					tab.unloaded ? `${tab.title} (unloaded — click to reload)` : undefined
+				}
+			/>
+		</>
+	);
 
 	return (
 		<ContextMenu>
@@ -909,6 +953,7 @@ function RegularTab({
 					>
 						<TabGlyph
 							busy={busy}
+							busySpeed={tab.busySpeed}
 							className="absolute size-3 transition-all duration-150 group-hover/tab:scale-50 group-hover/tab:opacity-0"
 							icon={tab.icon}
 							logoSize="12px"
@@ -922,17 +967,16 @@ function RegularTab({
 					</button>
 
 					{/* Title — activates the tab (and reloads it if unloaded); a
-					    double-click starts an inline rename for a renamable tab. */}
-					<button
-						className={cn(
-							"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
-							isActive ? "text-foreground" : "text-muted-foreground"
-						)}
-						onClick={() => activateTab(tab.id)}
-						onDoubleClick={canRename ? startEditing : undefined}
-						type="button"
-					>
-						{isEditing ? (
+					    double-click starts an inline rename for a renamable tab. The
+					    editor is a sibling of the activation button so the input is
+					    never nested in a native interactive element. */}
+					{isEditing ? (
+						<div
+							className={cn(
+								"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
+								isActive ? "text-foreground" : "text-muted-foreground"
+							)}
+						>
 							<TabRenameInput
 								className="text-xs leading-none"
 								onCancel={cancelEditing}
@@ -940,44 +984,20 @@ function RegularTab({
 								onCommit={commitEditing}
 								value={draft}
 							/>
-						) : (
-							<>
-								{hasNodeOverride && (
-									<Tooltip>
-										<TooltipTrigger
-											render={
-												<span
-													aria-hidden
-													className="mr-1.5 size-1.5 shrink-0 rounded-full bg-success"
-												/>
-											}
-										/>
-										<TooltipContent>
-											Connected to {capitalize(overrideName)}
-										</TooltipContent>
-									</Tooltip>
-								)}
-								{/* One label in both states: a streaming title shimmers on the
-								    SAME clipped line, so an over-long busy title dissolves at the
-								    edge exactly like a resting one instead of losing the fade. */}
-								<OverflowTooltip
-									className={cn(
-										"min-w-0 overflow-hidden whitespace-nowrap font-medium text-xs leading-none",
-										tab.unloaded && "italic"
-									)}
-									fade
-									forceShow={tab.unloaded}
-									shimmer={busy && !tab.unloaded}
-									text={tab.title}
-									tooltip={
-										tab.unloaded
-											? `${tab.title} (unloaded — click to reload)`
-											: undefined
-									}
-								/>
-							</>
-						)}
-					</button>
+						</div>
+					) : (
+						<button
+							className={cn(
+								"flex h-full min-w-0 flex-1 items-center overflow-hidden pr-3 pl-1.5",
+								isActive ? "text-foreground" : "text-muted-foreground"
+							)}
+							onClick={() => activateTab(tab.id)}
+							onDoubleClick={canRename ? startEditing : undefined}
+							type="button"
+						>
+							{titleContent}
+						</button>
+					)}
 				</div>
 			</ContextMenuTrigger>
 			<ContextMenuContent>

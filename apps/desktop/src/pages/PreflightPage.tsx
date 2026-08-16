@@ -571,7 +571,7 @@ export function PreflightPage({
 					/>
 				</div>
 				{embedded ? (
-					<Button onClick={() => refresh()} size="sm" variant="outline">
+					<Button onClick={() => refresh()} size="sm" variant="ghost">
 						Refresh
 					</Button>
 				) : health.coreState === "running" ? (

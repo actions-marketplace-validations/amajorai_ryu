@@ -775,7 +775,7 @@ export function MonitorsView({
 						<Spinner />
 					</div>
 				) : (
-					<ul className="flex-1 space-y-0.5 overflow-y-auto p-1">
+					<ul className="scroll-fade flex-1 space-y-0.5 overflow-y-auto p-1">
 						{monitors.map((m) => (
 							<li key={m.id}>
 								<button
@@ -799,7 +799,7 @@ export function MonitorsView({
 				)}
 			</div>
 
-			<div className="flex-1 overflow-y-auto p-6">
+			<div className="scroll-fade flex-1 overflow-y-auto p-6">
 				{error ? (
 					<p className="mb-3 text-destructive text-sm">{error}</p>
 				) : null}

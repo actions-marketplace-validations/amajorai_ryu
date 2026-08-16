@@ -86,7 +86,7 @@ export function SessionsTab() {
 						<Button
 							onClick={() => setConfirmRevokeAll(true)}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							Revoke all others
 						</Button>

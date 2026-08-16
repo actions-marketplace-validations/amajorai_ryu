@@ -21,6 +21,13 @@ import {
 	setActiveModel,
 } from "@/src/lib/api/models.ts";
 import {
+	type AppInfo,
+	fetchApps,
+	fetchPluginCatalogDetail,
+	installApp,
+	type PluginCatalogDetail,
+} from "@/src/lib/api/plugins.ts";
+import {
 	fetchSkillDetail,
 	installSkill,
 	type SkillDetail,
@@ -128,6 +135,40 @@ function skillBody(
 	};
 }
 
+/** The dialog content for an app intent. Installed state comes from `/api/apps`
+ *  (the lifecycle record) rather than the catalog detail, which carries no
+ *  installed flag. */
+function appBody(
+	intent: { id: string },
+	q: DetailQuery<PluginCatalogDetail>,
+	installed: AppInfo | undefined,
+	run: () => void
+): DialogBody {
+	if (q.isLoading) {
+		return { title: "Loading app…", description: intent.id };
+	}
+	const name = q.data?.name ?? installed?.name ?? intent.id;
+	if (installed?.installed) {
+		return {
+			title: `${name} is installed`,
+			description: "This app is already installed.",
+		};
+	}
+	if (q.error || !q.data) {
+		return {
+			title: "App not found",
+			description: `Could not load "${intent.id}".`,
+			error: true,
+		};
+	}
+	return {
+		title: `Install ${name}?`,
+		description: q.data.description ?? `Install the ${name} app.`,
+		confirm: "Install",
+		onConfirm: run,
+	};
+}
+
 const HTTP_PREFIX = /^https?:\/\//;
 const TRAILING_SLASH = /\/$/;
 
@@ -183,7 +224,11 @@ export function DeepLinkConfirmDialog() {
 	// nodes; it can never introduce a node, and it can never reach a host you have
 	// not already saved.
 	const hintedUrl =
-		intent?.kind === "model" || intent?.kind === "skill" ? intent.node : null;
+		intent?.kind === "model" ||
+		intent?.kind === "skill" ||
+		intent?.kind === "app"
+			? intent.node
+			: null;
 	const hintedNode = hintedUrl
 		? nodes.find((n) => sameUrl(n.url, hintedUrl))
 		: undefined;
@@ -207,6 +252,22 @@ export function DeepLinkConfirmDialog() {
 		queryFn: () => fetchSkillDetail(target, intent?.id as string),
 		enabled: open && intent?.kind === "skill",
 	});
+
+	const appId = intent?.kind === "app" ? intent.id : undefined;
+	const appDetail = useQuery({
+		queryKey: ["deeplink", "app", "detail", target.url, pending?.nonce, appId],
+		queryFn: () => fetchPluginCatalogDetail(target, appId as string),
+		enabled: open && appId !== undefined,
+	});
+
+	const installedApps = useQuery({
+		queryKey: ["deeplink", "app", "installed", target.url, pending?.nonce],
+		queryFn: () => fetchApps(target),
+		enabled: open && appId !== undefined,
+	});
+	const installedApp = appId
+		? installedApps.data?.find((a) => a.id === appId)
+		: undefined;
 
 	const close = () => {
 		if (busy) {
@@ -276,6 +337,28 @@ export function DeepLinkConfirmDialog() {
 		}
 	}
 
+	async function runApp() {
+		if (intent?.kind !== "app") {
+			return;
+		}
+		const name = appDetail.data?.name ?? installedApp?.name ?? intent.id;
+		setBusy(true);
+		try {
+			await installApp(target, intent.id);
+			sileo.success({ title: `Installed ${name}` });
+			Promise.resolve(qc.invalidateQueries({ queryKey: ["apps"] })).catch(
+				() => undefined
+			);
+			clear();
+		} catch (e) {
+			sileo.error({
+				title: e instanceof Error ? e.message : "Install failed",
+			});
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	const existingNode =
 		intent?.kind === "node"
 			? nodes.find((n) => sameUrl(n.url, intent.url))
@@ -316,6 +399,8 @@ export function DeepLinkConfirmDialog() {
 		body = modelBody(intent, modelDetail, runModel);
 	} else if (intent?.kind === "skill") {
 		body = skillBody(intent, skillDetail, runSkill);
+	} else if (intent?.kind === "app") {
+		body = appBody(intent, appDetail, installedApp, runApp);
 	} else if (intent?.kind === "node") {
 		body = nodeBody(intent, existingNode !== undefined, runNode);
 	}
@@ -331,7 +416,9 @@ export function DeepLinkConfirmDialog() {
 					<DialogTitle>{body.title}</DialogTitle>
 					<DialogDescription>{body.description}</DialogDescription>
 				</DialogHeader>
-				{intent.kind === "model" || intent.kind === "skill" ? (
+				{intent.kind === "model" ||
+				intent.kind === "skill" ||
+				intent.kind === "app" ? (
 					<p className="text-muted-foreground text-xs">
 						Installing on{" "}
 						<span className="font-medium text-foreground">

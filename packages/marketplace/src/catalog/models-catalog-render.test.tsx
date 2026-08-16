@@ -16,7 +16,9 @@ import {
 	CatalogHostProvider,
 	type CatalogInstall,
 } from "./host.tsx";
-import ModelsCatalogSection from "./models-catalog-section.tsx";
+import ModelsCatalogSection, {
+	ModelsFilterPanel,
+} from "./models-catalog-section.tsx";
 import type { ModelCard, ModelCatalogState, ModelDetail } from "./types.ts";
 
 const MOCK_INSTALL: CatalogInstall = {
@@ -171,7 +173,47 @@ function render(
 	);
 }
 
+function renderFilterPanel(showInstalledOnly: boolean): string {
+	return renderToStaticMarkup(
+		<ModelsFilterPanel
+			activeSource="huggingface"
+			activeTokens={new Set()}
+			category="all"
+			chips={[]}
+			format="gguf"
+			friendly={false}
+			installedOnly={false}
+			selectingSource={false}
+			selectSource={() => undefined}
+			setCategory={() => undefined}
+			setFormat={() => undefined}
+			setFriendly={() => undefined}
+			setInstalledOnly={() => undefined}
+			setShowTags={() => undefined}
+			setSort={() => undefined}
+			showInstalledOnly={showInstalledOnly}
+			showTags={false}
+			sort="trending"
+			sources={[{ displayName: "Hugging Face", id: "huggingface" }]}
+			toggleToken={() => undefined}
+		/>
+	);
+}
+
 describe("ModelsCatalogSection — list states", () => {
+	test("web filter panel keeps model facets but omits desktop Added control", () => {
+		const html = renderFilterPanel(false);
+		expect(html).toContain("All categories");
+		expect(html).toContain("Runs anywhere (GGUF)");
+		expect(html).toContain("Trending");
+		expect(html).toContain("Tags");
+		expect(html).not.toContain("Added only");
+	});
+
+	test("desktop filter panel retains the Added control", () => {
+		expect(renderFilterPanel(true)).toContain("Added only");
+	});
+
 	test("loading with no models shows no empty/error copy", () => {
 		const html = render(makeModelsState({ loading: true, models: [] }));
 		expect(html).not.toContain("No models found");

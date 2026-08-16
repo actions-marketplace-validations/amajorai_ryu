@@ -67,9 +67,7 @@ use crate::{
     audit::AuditRecord,
     budget::{BudgetDecision, CreditReservation},
     cache::Cache,
-    config::{
-        AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId,
-    },
+    config::{AlertTier, ApiKeyConfig, BudgetAction, FirewallPolicy, Modality, ProviderId},
     error::GatewayError,
     evaluators::{Evaluator, EvaluatorImpl, EvaluatorRegistry, EvaluatorTarget},
     firewall::{inspector::InspectorClient, FirewallScanner},
@@ -2240,6 +2238,7 @@ pub async fn run(
                             duration_ms: Some(latency_ms as u64),
                             user_id: ctx.user_id.clone(),
                             task_label: None,
+                            estimated: None,
                         };
                         tokio::spawn(async move {
                             debit_wallet_for_request(
@@ -2933,7 +2932,14 @@ pub async fn run_multimodal(
         // `.take()`n into the task below; if no debit fires (credits inactive,
         // no org, zero rate, empty output) it stays here and drops on return.
         reservation: mut credit_reservation,
-    } = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Untouched).map_err(|e| {
+    } = enforce_budget(
+        &state,
+        &ctx,
+        &mut body,
+        &mut decision,
+        OutputCeiling::Untouched,
+    )
+    .map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
         e
@@ -3111,7 +3117,8 @@ pub async fn run_multimodal(
                                 .filter(|s| *s > 0.0)
                                 .map(|s| (s * 1000.0).round() as u64),
                             user_id: ctx.user_id.clone(),
-                            task_label: Some(modality.as_str().to_string()),
+                            task_label: Some(media_task_label(&modality, estimated)),
+                            estimated: Some(estimated),
                             ..Default::default()
                         };
                         tokio::spawn(async move {
@@ -3261,7 +3268,14 @@ pub async fn submit_video_job(
     // id and the render happens out of band, so there is no request lifetime for
     // a permit to track. Video spend is bounded by `cost_per_video_micro_usd` on
     // the post-render debit instead.
-    let _budget = enforce_budget(&state, &ctx, &mut body, &mut decision, OutputCeiling::Untouched).map_err(|e| {
+    let _budget = enforce_budget(
+        &state,
+        &ctx,
+        &mut body,
+        &mut decision,
+        OutputCeiling::Untouched,
+    )
+    .map_err(|e| {
         state.metrics.inc_errors();
         audit_failure(&state, &ctx, &requested_model, &e, start);
 
@@ -3373,7 +3387,8 @@ pub async fn submit_video_job(
                             .filter(|s| *s > 0.0)
                             .map(|s| (s * 1000.0).round() as u64),
                         user_id: ctx.user_id.clone(),
-                        task_label: Some("video".to_string()),
+                        task_label: Some(media_task_label(&Modality::Video, estimated)),
+                        estimated: Some(estimated),
                         ..Default::default()
                     },
                 ));
@@ -3482,7 +3497,8 @@ pub async fn poll_video_job(
                             .filter(|s| *s > 0.0)
                             .map(|s| (s * 1000.0).round() as u64),
                         user_id: ctx.user_id.clone(),
-                        task_label: Some("video".to_string()),
+                        task_label: Some(media_task_label(&Modality::Video, estimated)),
+                        estimated: Some(estimated),
                         ..Default::default()
                     },
                 ));
@@ -4029,7 +4045,9 @@ fn reservation_estimate_micro_usd(state: &AppState, body: &Value) -> i64 {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let estimate = credits.debit_amount(request_cost_micro_usd(state, 0, max_tokens));
-    estimate.max(credits.min_reserve_micro_usd).min(i64::MAX as u64) as i64
+    estimate
+        .max(credits.min_reserve_micro_usd)
+        .min(i64::MAX as u64) as i64
 }
 
 /// Whether this request body carries an output-token ceiling the credit clamp
@@ -4058,11 +4076,7 @@ enum OutputCeiling {
 /// zero divides into any balance infinitely), which the caller reads as "no
 /// affordability limit" — correct, because a node that meters nothing cannot
 /// overdraw anyone.
-fn affordable_output_tokens(
-    state: &AppState,
-    available_micro_usd: i64,
-    model: &str,
-) -> u64 {
+fn affordable_output_tokens(state: &AppState, available_micro_usd: i64, model: &str) -> u64 {
     // PER-MODEL, not the flat blended rate. Output prices span roughly 500x
     // across the catalog, so a single rate made this ceiling far too generous on
     // exactly the frontier models where an overdraft is worth having, and
@@ -4372,8 +4386,23 @@ struct DebitAttribution {
     provider: Option<String>,
     /// Human-facing label for what the spend was for.
     task_label: Option<String>,
+    /// Whether the amount was priced from the configured media fallback rather
+    /// than provider-reported compute time.
+    estimated: Option<bool>,
     /// The user whose action incurred the charge, when the request carried one.
     user_id: Option<String>,
+}
+
+/// Keep the existing human-facing label for a fallback charge. The explicit
+/// `estimated` field is the durable machine-readable marker; provider timing
+/// remains in `durationMs` when measured.
+fn media_task_label(modality: &Modality, estimated: bool) -> String {
+    let label = modality.as_str();
+    if estimated {
+        format!("{label} (estimated cost)")
+    } else {
+        label.to_string()
+    }
 }
 
 fn debit_request_body(
@@ -4426,6 +4455,9 @@ fn debit_request_body(
     put_str("model", &attribution.model);
     put_str("userId", &attribution.user_id);
     put_str("taskLabel", &attribution.task_label);
+    if let Some(estimated) = attribution.estimated {
+        obj.insert("estimated".to_string(), Value::Bool(estimated));
+    }
     for (key, value) in [
         ("inputTokens", attribution.input_tokens),
         ("outputTokens", attribution.output_tokens),
@@ -5105,6 +5137,7 @@ fn attach_stream_observer(
                                     duration_ms: Some(latency_ms as u64),
                                     user_id: s.ctx.user_id.clone(),
                                     task_label: None,
+                                    estimated: None,
                                 },
                             )
                             .await;
@@ -6032,6 +6065,7 @@ mod tests {
             "inputTokens",
             "outputTokens",
             "durationMs",
+            "estimated",
         ] {
             assert!(bare.get(key).is_none(), "{key} must be absent, not null");
         }
@@ -6051,6 +6085,7 @@ mod tests {
                 duration_ms: Some(2_140),
                 user_id: Some("u_1".to_string()),
                 task_label: Some("3 tool calls".to_string()),
+                estimated: None,
             },
         );
         assert_eq!(full["provider"], "anthropic");
@@ -6082,6 +6117,45 @@ mod tests {
         );
         assert!(blank.get("provider").is_none());
         assert!(blank.get("model").is_none());
+    }
+
+    #[test]
+    fn media_fallback_is_marked_in_the_existing_ledger_task_label() {
+        let estimated = debit_request_body(
+            "o1",
+            1_950,
+            "media",
+            "req_1:image",
+            None,
+            None,
+            &DebitAttribution {
+                provider: Some("replicate".to_string()),
+                model: Some("image-model".to_string()),
+                task_label: Some(media_task_label(&Modality::Image, true)),
+                estimated: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(estimated["taskLabel"], "image (estimated cost)");
+        assert_eq!(estimated["estimated"], true);
+
+        let measured = debit_request_body(
+            "o1",
+            2_925,
+            "media",
+            "req_2:image",
+            None,
+            None,
+            &DebitAttribution {
+                task_label: Some(media_task_label(&Modality::Image, false)),
+                duration_ms: Some(3_000),
+                estimated: Some(false),
+                ..Default::default()
+            },
+        );
+        assert_eq!(measured["taskLabel"], "image");
+        assert_eq!(measured["durationMs"], 3_000);
+        assert_eq!(measured["estimated"], false);
     }
 
     #[test]

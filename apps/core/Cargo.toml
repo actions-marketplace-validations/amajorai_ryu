@@ -1,6 +1,6 @@
 [package]
 name = "ryu-core"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -70,6 +70,9 @@ base64 = { version = "0.22", features = ["alloc"] }
 # this layer is the USER identity (see src/identity_verify/).
 jsonwebtoken = "9"
 rand = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+aes-gcm = "0.10"
 # Phase 3 multi-user collaboration (#multiplayer): authoritative CRDT document
 # engine. `yrs` is the Rust port of Yjs with an IDENTICAL binary v1 update /
 # state-vector format, so a custom JS Yjs provider's updates apply natively — we

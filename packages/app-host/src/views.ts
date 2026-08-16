@@ -562,6 +562,17 @@ export interface DockPanelSpec {
 	companion?: string;
 	/** Placeholder shown while the panel has nothing to draw. */
 	emptyText?: string;
+	/**
+	 * Optional host link bridge. A panel may claim URL schemes and name an
+	 * authenticated endpoint on its own ext-proxy mount. The desktop uses this
+	 * declaration to open chat links without hardcoding an app id.
+	 */
+	linkHandler?: {
+		bodyKey?: string;
+		method?: "POST" | "PUT";
+		path: string;
+		schemes: string[];
+	};
 	/** Id of a sibling `contributes.views` entry, for a `panel: "view"` entry. */
 	view?: string;
 }

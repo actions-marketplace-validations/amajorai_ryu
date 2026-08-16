@@ -27,11 +27,6 @@ import { PlanBadge, type PlanTier } from "@ryu/ui/components/plan-badge";
 import { SidebarMenu, SidebarMenuItem } from "@ryu/ui/components/sidebar";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
 import { useQuery } from "@tanstack/react-query";
 import {
 	ArrowUp,
@@ -653,33 +648,6 @@ export function NavUser({
 									<ContextMenuItem onClick={() => onHideChrome("downloads")}>
 										<EyeOff className="mr-2 size-4" />
 										Hide downloads
-									</ContextMenuItem>
-								</ContextMenuContent>
-							</ContextMenu>
-						)}
-						{showSettings && (
-							<ContextMenu>
-								<ContextMenuTrigger>
-									<Tooltip>
-										<TooltipTrigger
-											render={
-												<button
-													aria-label="Settings"
-													className="gooey-tap flex h-7 w-7 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-													onClick={() => openSettings()}
-													type="button"
-												>
-													<Settings className="size-4" />
-												</button>
-											}
-										/>
-										<TooltipContent>Settings</TooltipContent>
-									</Tooltip>
-								</ContextMenuTrigger>
-								<ContextMenuContent>
-									<ContextMenuItem onClick={() => onHideChrome("settings")}>
-										<EyeOff className="mr-2 size-4" />
-										Hide settings
 									</ContextMenuItem>
 								</ContextMenuContent>
 							</ContextMenu>

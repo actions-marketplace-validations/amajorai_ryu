@@ -755,7 +755,10 @@ fn resolve_subdir(extract_root: &Path, subdir: Option<&str>) -> Result<PathBuf> 
 /// `pub(crate)`: the setup-import engine (`crate::import`) reuses this exact
 /// copy + activate path when importing a skill found in a scanned folder, so an
 /// imported skill is byte-for-byte the same install a URL/source install produces.
-pub(crate) fn install_from_dir(dir: &Path, root_name_hint: Option<String>) -> Result<InstallResult> {
+pub(crate) fn install_from_dir(
+    dir: &Path,
+    root_name_hint: Option<String>,
+) -> Result<InstallResult> {
     let mut found = find_skills(dir);
     if found.is_empty() {
         anyhow::bail!("no SKILL.md found in source (looked for SKILL.md, skills/<name>/, skills/<category>/<name>/)");
@@ -791,6 +794,14 @@ pub(crate) fn install_from_dir(dir: &Path, root_name_hint: Option<String>) -> Re
     // A skill installed through Ryu is active by default (consistent with the
     // skills.sh catalog install path).
     ryu_skills::set_active(&name, true);
+    // A from-source install is a user choice → user-owned, so the bundled-system
+    // sync never auto-removes it. The sync's own installs call this same path and
+    // immediately re-record origin `System`, which is what makes a user's
+    // reinstall of a bundled skill stick.
+    crate::skills_catalog::system_skills::record_origin(
+        &name,
+        crate::skills_catalog::system_skills::SkillOrigin::User,
+    );
 
     Ok(InstallResult {
         slug: name.clone(),
@@ -1009,7 +1020,10 @@ mod tests {
             skill_name_from_md_url("https://example.com/a/b/my-skill/SKILL.md?x=1"),
             "my-skill"
         );
-        assert_eq!(skill_name_from_md_url("https://example.com/SKILL.md"), "skill");
+        assert_eq!(
+            skill_name_from_md_url("https://example.com/SKILL.md"),
+            "skill"
+        );
     }
 
     #[test]

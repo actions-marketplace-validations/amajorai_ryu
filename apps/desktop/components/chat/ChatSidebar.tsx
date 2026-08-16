@@ -76,14 +76,14 @@ export function ChatSidebar({
 					className="w-full"
 					onClick={onNewConversation}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					<HugeiconsIcon className="mr-2" icon={Add01Icon} size={14} />
 					New chat
 				</Button>
 			</div>
 
-			<div className="flex-1 overflow-y-auto p-2">
+			<div className="scroll-fade flex-1 overflow-y-auto p-2">
 				{conversations.length === 0 ? (
 					<p className="py-8 text-center text-muted-foreground text-xs">
 						No chats yet

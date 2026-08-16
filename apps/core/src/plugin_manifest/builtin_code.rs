@@ -43,6 +43,7 @@
 /// contribute a turn hook exactly like a plugin can (`packaged_code_file_refs` walks
 /// both, and `tools/mirror-public.sh` step 1c vendors `apps-store/*/hooks/*.js`
 /// alongside the plugins-store ones). Sorted by root, then package dir, then path.
+#[cfg(test)]
 pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     // ── apps-store ───────────────────────────────────────────────────────────
     // reasoning
@@ -70,6 +71,23 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         include_str!("../../../../apps-store/rlm/hooks/deep-read.js"),
     ),
     // ── plugins-store ────────────────────────────────────────────────────────
+    // effort-escalator
+    (
+        "@ryu/effort-escalator",
+        "hooks/judge.js",
+        include_str!("../../../../plugins-store/effort-escalator/hooks/judge.js"),
+    ),
+    (
+        "@ryu/effort-escalator",
+        "hooks/select-model.js",
+        include_str!("../../../../plugins-store/effort-escalator/hooks/select-model.js"),
+    ),
+    // usage-pacer
+    (
+        "@ryu/usage-pacer",
+        "hooks/select-model.js",
+        include_str!("../../../../plugins-store/usage-pacer/hooks/select-model.js"),
+    ),
     // advisor
     (
         "@ryu/advisor",
@@ -86,6 +104,18 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
         "@ryu/agent-comms",
         "hooks/directory.js",
         include_str!("../../../../plugins-store/agent-comms/hooks/directory.js"),
+    ),
+    // agents-md-tail
+    (
+        "@ryu/agents-md-tail",
+        "hooks/inject.js",
+        include_str!("../../../../plugins-store/agents-md-tail/hooks/inject.js"),
+    ),
+    // rules
+    (
+        "@ryu/rules",
+        "hooks/inject.js",
+        include_str!("../../../../plugins-store/rules/hooks/inject.js"),
     ),
     // agentbrowser
     (
@@ -269,6 +299,25 @@ pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+#[cfg(not(test))]
+pub(crate) const BUILTIN_CODE_FILES: &[(&str, &str, &str)] = &[
+    (
+        "@ryu/agentbrowser",
+        "adapters/browser__type.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__type.js"),
+    ),
+    (
+        "@ryu/agentbrowser",
+        "adapters/browser__snapshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__snapshot.js"),
+    ),
+    (
+        "@ryu/agentbrowser",
+        "adapters/browser__screenshot.js",
+        include_str!("../../../../plugins-store/agentbrowser/adapters/browser__screenshot.js"),
+    ),
+];
+
 /// The embedded contents of `rel` for built-in plugin `plugin_id`, or `None` when
 /// the manifest names a file that was never added to [`BUILTIN_CODE_FILES`].
 ///
@@ -300,6 +349,7 @@ pub(crate) fn lookup(plugin_id: &str, rel: &str) -> Option<&'static str> {
 /// test. Everything else about the mechanism — hand-written `include_str!` so
 /// `tools/mirror-public.sh` step 3b can grep the literal paths, and a `None` lookup
 /// being a visible skip rather than an empty file — is identical.
+#[cfg(test)]
 pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[
     // pi-shell
     (
@@ -320,6 +370,9 @@ pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[
         include_str!("../../../../plugins-store/pi-monitor/pi-extensions/ryu-monitor.ts"),
     ),
 ];
+
+#[cfg(not(test))]
+pub(crate) const BUILTIN_PI_EXTENSIONS: &[(&str, &str, &str)] = &[];
 
 /// The embedded contents of `rel` for built-in plugin `plugin_id`, or `None` when
 /// nothing in [`BUILTIN_PI_EXTENSIONS`] matches.
@@ -364,6 +417,7 @@ pub(crate) fn lookup_pi_extension(plugin_id: &str, rel: &str) -> Option<&'static
 /// fall over too — see the module doc.
 ///
 /// Rows are sorted by path within the plugin, matching [`BUILTIN_CODE_FILES`].
+#[cfg(test)]
 pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     // ── apps-store ───────────────────────────────────────────────────────────
     // blueprint — the "Visual planning" style. This row is what makes the app
@@ -424,10 +478,18 @@ pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[
     ),
     (
         "@ryu/output-styles",
+        "output-styles/plain-technical.md",
+        include_str!("../../../../plugins-store/output-styles/output-styles/plain-technical.md"),
+    ),
+    (
+        "@ryu/output-styles",
         "output-styles/proactive.md",
         include_str!("../../../../plugins-store/output-styles/output-styles/proactive.md"),
     ),
 ];
+
+#[cfg(not(test))]
+pub(crate) const BUILTIN_OUTPUT_STYLES: &[(&str, &str, &str)] = &[];
 
 /// The embedded contents of `rel` for built-in plugin `plugin_id`, or `None` when
 /// nothing in [`BUILTIN_OUTPUT_STYLES`] matches.

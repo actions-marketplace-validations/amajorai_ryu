@@ -35,6 +35,7 @@ import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
 /** Stable empty payload so a missing/old Core (or an in-flight fetch) yields an
  *  identical reference every render — keeps the registration effect from looping. */
 const EMPTY: PluginContributions = {
+	agent_edit_panels: [],
 	composer_controls: [],
 	settings_tabs: [],
 	message_actions: [],

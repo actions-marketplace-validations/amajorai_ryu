@@ -5,7 +5,9 @@ import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
 export default defineConfig({
 	main: {
-		plugins: [externalizeDepsPlugin()],
+		// Workspace packages publish TypeScript source. Keep the Node-only token
+		// resolver in the main bundle instead of asking Electron to load .ts.
+		plugins: [externalizeDepsPlugin({ exclude: ["@ryuhq/core-client"] })],
 		build: {
 			rollupOptions: {
 				input: resolve(import.meta.dirname, "src/main/index.ts"),

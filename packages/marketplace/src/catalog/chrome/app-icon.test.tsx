@@ -20,7 +20,9 @@ function swatchBarStyles(html: string): string[] {
 	// Pull the three inline `background-color`s off the bars (bg fills the rest of
 	// the tile; surface/primary are the bottom two bars). React renders the style
 	// without a trailing `;`, so stop at the closing quote.
-	return [...html.matchAll(/background-color:([^"']+)/g)].map((m) => m[1]);
+	return [...html.matchAll(/background-color:([^"']+)/g)].flatMap((m) =>
+		m[1] ? [m[1]] : []
+	);
 }
 
 describe("AppIcon theme preview", () => {

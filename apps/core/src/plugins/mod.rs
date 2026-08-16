@@ -131,6 +131,7 @@ impl PluginStore {
         let conn = Connection::open(&path)
             .with_context(|| format!("opening plugins db at {}", path.display()))?;
         Self::migrate(&conn)?;
+        Self::record_verified_official_packages(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -141,6 +142,7 @@ impl PluginStore {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::migrate(&conn)?;
+        Self::record_verified_official_packages(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -197,6 +199,23 @@ impl PluginStore {
             let msg = e.to_string();
             if !msg.contains("duplicate column name") {
                 return Err(e).context("adding apps.provenance column");
+            }
+        }
+        Ok(())
+    }
+
+    fn record_verified_official_packages(conn: &Connection) -> Result<()> {
+        let mut stmt =
+            conn.prepare("SELECT id, provenance FROM apps WHERE provenance IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, json) = row?;
+            if let Ok(provenance) = serde_json::from_str::<isolation::PluginProvenance>(&json) {
+                // The manifest fingerprint is checked when the loaded manifest
+                // asks for tier; the store only rehydrates the captured digest.
+                crate::plugins::builtins::record_verified_official_digest(&id, &provenance);
             }
         }
         Ok(())
@@ -321,6 +340,12 @@ impl PluginStore {
             created_at: Some(now.clone()),
             updated_at: Some(now),
         })
+        .inspect(|_| {
+            crate::plugins::builtins::clear_verified_official_digest(id);
+            if let Some(provenance) = provenance {
+                crate::plugins::builtins::record_verified_official_digest(id, provenance);
+            }
+        })
     }
 
     /// Record (or refresh) an install's provenance.
@@ -345,6 +370,10 @@ impl PluginStore {
                 return Ok(None);
             }
         }
+        crate::plugins::builtins::clear_verified_official_digest(id);
+        if let Some(provenance) = provenance {
+            crate::plugins::builtins::record_verified_official_digest(id, provenance);
+        }
         self.get_record(id).await
     }
 
@@ -359,7 +388,11 @@ impl PluginStore {
     ///
     /// Does NOT touch `version`: pinning a channel expresses which train to follow
     /// from now on, and the move onto that train is a separate, explicit update.
-    pub async fn set_channel(&self, id: &str, channel: Option<&str>) -> Result<Option<PluginRecord>> {
+    pub async fn set_channel(
+        &self,
+        id: &str,
+        channel: Option<&str>,
+    ) -> Result<Option<PluginRecord>> {
         let normalized = channel
             .map(|c| c.trim().to_ascii_lowercase())
             .filter(|c| !c.is_empty());
@@ -506,6 +539,10 @@ impl PluginStore {
     pub async fn remove(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
         let n = conn.execute("DELETE FROM apps WHERE id = ?1", params![id])?;
+        drop(conn);
+        if n > 0 {
+            crate::plugins::builtins::clear_verified_official_digest(id);
+        }
         Ok(n > 0)
     }
 
@@ -653,6 +690,7 @@ mod tests {
             signature_verified: true,
             builtin: false,
             captured_at: Some("2026-08-14T00:00:00Z".to_owned()),
+            ..isolation::PluginProvenance::default()
         };
         s.insert_with_provenance("com.acme.app", "1.0.0", Some(&captured))
             .await
@@ -661,7 +699,8 @@ mod tests {
         let record = s.get_record("com.acme.app").await.unwrap().unwrap();
         assert_eq!(record.provenance.as_ref(), Some(&captured));
         assert!(matches!(
-            isolation::TrustPolicy::default().resolve_trust("com.acme.app", record.provenance.as_ref()),
+            isolation::TrustPolicy::default()
+                .resolve_trust("com.acme.app", record.provenance.as_ref()),
             isolation::TrustBasis::VerifiedPublisher { .. }
         ));
     }
@@ -693,7 +732,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(updated.provenance.as_ref().map(|p| p.org_verified), Some(false));
+        assert_eq!(
+            updated.provenance.as_ref().map(|p| p.org_verified),
+            Some(false)
+        );
         assert_eq!(
             isolation::TrustPolicy::default()
                 .resolve_trust("com.acme.app", updated.provenance.as_ref()),

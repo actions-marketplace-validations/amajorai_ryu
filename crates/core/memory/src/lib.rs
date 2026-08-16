@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use ryu_kernel_contracts::ResourceKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -239,6 +239,104 @@ pub enum MemoryCategory {
     Other,
 }
 
+/// Where a memory came from. This is provenance, not an access-control decision.
+/// Source references live inside the encrypted payload because conversation and
+/// message ids can reveal more than the fact's classification alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySource {
+    /// A user or existing chat path wrote the fact directly.
+    #[default]
+    User,
+    /// The fact was captured from a conversation turn.
+    Conversation,
+    /// The fact was imported from another memory store.
+    Import,
+    /// The fact was derived from explicit message feedback.
+    Feedback,
+    /// The fact was created by a reviewed dream/consolidation proposal.
+    Consolidation,
+}
+
+impl MemorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Conversation => "conversation",
+            Self::Import => "import",
+            Self::Feedback => "feedback",
+            Self::Consolidation => "consolidation",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "conversation" => Self::Conversation,
+            "import" => Self::Import,
+            "feedback" => Self::Feedback,
+            "consolidation" => Self::Consolidation,
+            _ => Self::User,
+        }
+    }
+}
+
+/// Lifecycle of a durable memory row. Recall only uses `Active` rows; the other
+/// states retain an audit trail so a reviewed consolidation can be reversed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLifecycle {
+    #[default]
+    Active,
+    Superseded,
+    Archived,
+    Retracted,
+}
+
+impl MemoryLifecycle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Archived => "archived",
+            Self::Retracted => "retracted",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "superseded" => Self::Superseded,
+            "archived" => Self::Archived,
+            "retracted" => Self::Retracted,
+            _ => Self::Active,
+        }
+    }
+}
+
+/// Encrypted provenance attached to a memory row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MemoryProvenance {
+    pub source: MemorySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+}
+
+/// Metadata used when recording a memory without changing the legacy `NewMemory`
+/// constructor shape used by existing chat and import paths.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MemoryMetadata {
+    pub provenance: MemoryProvenance,
+    #[serde(default)]
+    pub lifecycle: MemoryLifecycle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_id: Option<String>,
+}
+
 impl MemoryCategory {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -311,6 +409,16 @@ pub struct LongTermEntry {
     /// backfill re-stamps to the real owner. Provenance for the ACL, not display.
     #[serde(default)]
     pub owner_user_id: Option<String>,
+    /// Why this row exists and which encrypted source references support it.
+    #[serde(default)]
+    pub provenance: MemoryProvenance,
+    /// Active rows participate in recall. Other states remain reviewable for
+    /// audit and rollback but are never silently injected into a prompt.
+    #[serde(default)]
+    pub lifecycle: MemoryLifecycle,
+    /// The prior active row replaced by this revision, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_id: Option<String>,
     /// Unix milliseconds.
     pub created_at: i64,
     /// Unix milliseconds of the last edit (equals `created_at` when never edited).
@@ -370,6 +478,138 @@ pub struct MemoryFilter {
     pub scope_id: Option<String>,
     pub category: Option<MemoryCategory>,
     pub limit: Option<usize>,
+    pub lifecycle: Option<MemoryLifecycle>,
+}
+
+/// The only mutations a dream may propose. `Revise` is applied as a new row that
+/// supersedes the target, never as an in-place edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProposalOperation {
+    Create,
+    Revise,
+}
+
+impl MemoryProposalOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Revise => "revise",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "revise" => Self::Revise,
+            _ => Self::Create,
+        }
+    }
+}
+
+/// Review state for an encrypted revision proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryProposalStatus {
+    #[default]
+    Pending,
+    Applied,
+    Rejected,
+    RolledBack,
+}
+
+impl MemoryProposalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+            Self::RolledBack => "rolled_back",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "applied" => Self::Applied,
+            "rejected" => Self::Rejected,
+            "rolled_back" => Self::RolledBack,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// The proposed memory body held inside an encrypted proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryProposalDraft {
+    pub content: String,
+    #[serde(default)]
+    pub scope: MemoryScope,
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    #[serde(default)]
+    pub category: MemoryCategory,
+    #[serde(default = "default_importance")]
+    pub importance: i32,
+    #[serde(default)]
+    pub when_to_use: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub author_agent_id: Option<String>,
+    #[serde(default)]
+    pub metadata: MemoryMetadata,
+}
+
+impl MemoryProposalDraft {
+    pub fn into_new_memory(self) -> NewMemory {
+        NewMemory {
+            content: self.content,
+            scope: self.scope,
+            scope_id: self.scope_id,
+            category: self.category,
+            importance: self.importance,
+            when_to_use: self.when_to_use,
+            tags: self.tags,
+            author_agent_id: self.author_agent_id,
+        }
+    }
+}
+
+/// Input for creating a reviewable proposal.
+#[derive(Debug, Clone)]
+pub struct NewMemoryProposal {
+    pub owner_user_id: String,
+    pub agent_id: String,
+    pub target_memory_id: Option<String>,
+    pub operation: MemoryProposalOperation,
+    pub draft: MemoryProposalDraft,
+    pub rationale: String,
+}
+
+/// A decrypted, reviewable proposal returned by the Core API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRevisionProposal {
+    pub id: String,
+    pub owner_user_id: String,
+    pub agent_id: String,
+    pub target_memory_id: Option<String>,
+    pub operation: MemoryProposalOperation,
+    pub status: MemoryProposalStatus,
+    pub draft: MemoryProposalDraft,
+    pub rationale: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_memory_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MemoryProposalFilter {
+    pub status: Option<MemoryProposalStatus>,
+    pub limit: Option<usize>,
 }
 
 /// SQLite-backed long-term memory store. Cheap to clone (wraps `Arc`s).
@@ -386,28 +626,48 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Serialize the sensitive payload (content + when_to_use) to JSON for encryption.
-fn encode_payload(content: &str, when_to_use: Option<&str>) -> Vec<u8> {
-    serde_json::json!({ "content": content, "when_to_use": when_to_use })
-        .to_string()
-        .into_bytes()
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryPayload {
+    content: String,
+    #[serde(default)]
+    when_to_use: Option<String>,
+    #[serde(default)]
+    provenance: MemoryProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MemoryProposalPayload {
+    draft: MemoryProposalDraft,
+    rationale: String,
+}
+
+/// Serialize sensitive content and source references to JSON for encryption.
+fn encode_payload(
+    content: &str,
+    when_to_use: Option<&str>,
+    provenance: &MemoryProvenance,
+) -> Vec<u8> {
+    serde_json::to_vec(&MemoryPayload {
+        content: content.to_owned(),
+        when_to_use: when_to_use.map(str::to_owned),
+        provenance: provenance.clone(),
+    })
+    .unwrap_or_else(|_| content.as_bytes().to_vec())
 }
 
 /// Decode a decrypted payload back into `(content, when_to_use)`. Falls back to
 /// treating the whole plaintext as `content` for legacy rows that stored the raw
 /// string (pre-JSON payloads).
-fn decode_payload(plain: &[u8]) -> (String, Option<String>) {
+fn decode_payload(plain: &[u8]) -> MemoryPayload {
     let text = String::from_utf8_lossy(plain).into_owned();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-        if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-            let when = v
-                .get("when_to_use")
-                .and_then(|w| w.as_str())
-                .map(str::to_string);
-            return (content.to_string(), when);
-        }
+    if let Ok(payload) = serde_json::from_str::<MemoryPayload>(&text) {
+        return payload;
     }
-    (text, None)
+    MemoryPayload {
+        content: text,
+        when_to_use: None,
+        provenance: MemoryProvenance::default(),
+    }
 }
 
 fn encode_tags(tags: &[String]) -> String {
@@ -531,10 +791,29 @@ impl MemoryStore {
                  agent_id    TEXT NOT NULL,
                  nonce       BLOB NOT NULL,
                  ciphertext  BLOB NOT NULL,
-                 created_at  INTEGER NOT NULL
+                 created_at  INTEGER NOT NULL,
+                 lifecycle   TEXT NOT NULL DEFAULT 'active',
+                 supersedes_id TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_memory_scope
-                 ON memory_entries(user_id, agent_id, created_at);",
+                 ON memory_entries(user_id, agent_id, created_at);
+             CREATE TABLE IF NOT EXISTS memory_proposals (
+                 id               TEXT PRIMARY KEY,
+                 owner_user_id    TEXT NOT NULL,
+                 agent_id         TEXT NOT NULL,
+                 target_memory_id TEXT,
+                 operation        TEXT NOT NULL,
+                 status           TEXT NOT NULL DEFAULT 'pending',
+                 nonce            BLOB NOT NULL,
+                 ciphertext       BLOB NOT NULL,
+                 created_at       INTEGER NOT NULL,
+                 updated_at       INTEGER NOT NULL,
+                 reviewed_at      INTEGER,
+                 reviewed_by      TEXT,
+                 applied_memory_id TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_memory_proposals_owner
+                 ON memory_proposals(owner_user_id, status, created_at);",
         )
         .context("initializing memory schema")?;
 
@@ -547,10 +826,14 @@ impl MemoryStore {
         Self::add_column_if_missing(conn, "importance", "INTEGER NOT NULL DEFAULT 3")?;
         Self::add_column_if_missing(conn, "tags", "TEXT NOT NULL DEFAULT '[]'")?;
         Self::add_column_if_missing(conn, "updated_at", "INTEGER NOT NULL DEFAULT 0")?;
+        Self::add_column_if_missing(conn, "lifecycle", "TEXT NOT NULL DEFAULT 'active'")?;
+        Self::add_column_if_missing(conn, "supersedes_id", "TEXT")?;
 
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_memory_scope_level
-                 ON memory_entries(scope, scope_id, category);",
+                 ON memory_entries(scope, scope_id, category);
+             CREATE INDEX IF NOT EXISTS idx_memory_lifecycle
+                 ON memory_entries(lifecycle, updated_at);",
         )
         .context("creating memory level index")?;
         Ok(())
@@ -603,6 +886,20 @@ impl MemoryStore {
         agent_id: &str,
         mem: NewMemory,
     ) -> Result<Option<String>> {
+        self.record_full_with_metadata(user_id, agent_id, mem, MemoryMetadata::default())
+            .await
+    }
+
+    /// Record a fully-classified fact with provenance/lifecycle metadata. This is
+    /// the additive path used by reviewed consolidation; legacy callers continue
+    /// through [`Self::record_full`] and receive active, user-sourced metadata.
+    pub async fn record_full_with_metadata(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        mem: NewMemory,
+        metadata: MemoryMetadata,
+    ) -> Result<Option<String>> {
         let trimmed = mem.content.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -629,7 +926,8 @@ impl MemoryStore {
             .as_deref()
             .map(str::trim)
             .filter(|w| !w.is_empty());
-        let (nonce, ciphertext) = self.encrypt(&encode_payload(trimmed, when))?;
+        let (nonce, ciphertext) =
+            self.encrypt(&encode_payload(trimmed, when, &metadata.provenance))?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_millis();
         let importance = mem.importance.clamp(1, 5);
@@ -638,8 +936,9 @@ impl MemoryStore {
         conn.execute(
             "INSERT INTO memory_entries
                 (id, user_id, agent_id, nonce, ciphertext, created_at,
-                 scope, scope_id, category, importance, tags, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 scope, scope_id, category, importance, tags, updated_at,
+                 lifecycle, supersedes_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 id,
                 user_id,
@@ -653,6 +952,8 @@ impl MemoryStore {
                 importance,
                 tags,
                 now,
+                metadata.lifecycle.as_str(),
+                metadata.supersedes_id,
             ],
         )
         .context("inserting memory entry")?;
@@ -672,9 +973,10 @@ impl MemoryStore {
             let conn = self.conn.lock().await;
             let mut stmt = conn.prepare(
                 "SELECT id, nonce, ciphertext, created_at, scope, scope_id,
-                        category, importance, tags, agent_id, updated_at, user_id
+                        category, importance, tags, agent_id, updated_at, user_id,
+                        lifecycle, supersedes_id
                  FROM memory_entries
-                 WHERE user_id = ?1 AND agent_id = ?2
+                 WHERE user_id = ?1 AND agent_id = ?2 AND lifecycle = 'active'
                  ORDER BY created_at DESC, rowid DESC
                  LIMIT ?3",
             )?;
@@ -705,9 +1007,10 @@ impl MemoryStore {
             .join(", ");
         let sql = format!(
             "SELECT id, nonce, ciphertext, created_at, scope, scope_id,
-                    category, importance, tags, agent_id, updated_at, user_id
+                    category, importance, tags, agent_id, updated_at, user_id,
+                    lifecycle, supersedes_id
              FROM memory_entries
-             WHERE scope IN ({level_list})
+             WHERE scope IN ({level_list}) AND lifecycle = 'active'
                AND (scope != 'project' OR scope_id IS ?1)
              ORDER BY importance DESC, created_at DESC, rowid DESC
              LIMIT ?2"
@@ -727,8 +1030,10 @@ impl MemoryStore {
             let conn = self.conn.lock().await;
             let mut stmt = conn.prepare(
                 "SELECT id, nonce, ciphertext, created_at, scope, scope_id,
-                        category, importance, tags, agent_id, updated_at, user_id
+                        category, importance, tags, agent_id, updated_at, user_id,
+                        lifecycle, supersedes_id
                  FROM memory_entries
+                 WHERE lifecycle = 'active'
                  ORDER BY created_at DESC, rowid DESC
                  LIMIT ?1",
             )?;
@@ -759,11 +1064,13 @@ impl MemoryStore {
         let limit = filter.limit.unwrap_or(500) as i64;
         let sql = format!(
             "SELECT id, nonce, ciphertext, created_at, scope, scope_id,
-                    category, importance, tags, agent_id, updated_at, user_id
+                    category, importance, tags, agent_id, updated_at, user_id,
+                    lifecycle, supersedes_id
              FROM memory_entries
              WHERE (:scope IS NULL OR scope = :scope)
                AND (:scope_id IS NULL OR scope_id = :scope_id)
                AND (:category IS NULL OR category = :category)
+               AND (:lifecycle IS NULL OR lifecycle = :lifecycle)
                AND {MEMORY_VISIBLE_PREDICATE}
              ORDER BY created_at DESC, rowid DESC
              LIMIT :limit"
@@ -777,6 +1084,7 @@ impl MemoryStore {
                     ":scope": filter.scope.map(|s| s.as_str()),
                     ":scope_id": filter.scope_id,
                     ":category": filter.category.map(|c| c.as_str()),
+                    ":lifecycle": filter.lifecycle.map(|l| l.as_str()),
                     ":bound": i64::from(vis.node_bound),
                     ":uid": vis.caller_user_id,
                     ":org": vis.caller_org_id,
@@ -793,7 +1101,8 @@ impl MemoryStore {
             let conn = self.conn.lock().await;
             let mut stmt = conn.prepare(
                 "SELECT id, nonce, ciphertext, created_at, scope, scope_id,
-                        category, importance, tags, agent_id, updated_at, user_id
+                        category, importance, tags, agent_id, updated_at, user_id,
+                        lifecycle, supersedes_id
                  FROM memory_entries WHERE id = ?1",
             )?;
             Self::collect_rows(&mut stmt, params![id])?
@@ -825,7 +1134,8 @@ impl MemoryStore {
             .as_deref()
             .map(str::trim)
             .filter(|w| !w.is_empty());
-        let (nonce, ciphertext) = self.encrypt(&encode_payload(content.trim(), when))?;
+        let (nonce, ciphertext) =
+            self.encrypt(&encode_payload(content.trim(), when, &existing.provenance))?;
         let now = now_millis();
         {
             let conn = self.conn.lock().await;
@@ -849,6 +1159,249 @@ impl MemoryStore {
             .context("updating memory entry")?;
         }
         self.get(id).await
+    }
+
+    /// Persist a proposed create/revision without changing the active memory set.
+    /// The draft and rationale are encrypted; only ownership, operation, and review
+    /// state are queryable without opening the payload.
+    pub async fn create_proposal(&self, proposal: NewMemoryProposal) -> Result<String> {
+        if proposal.draft.content.trim().is_empty() {
+            anyhow::bail!("a memory proposal requires non-empty content");
+        }
+        if proposal.operation == MemoryProposalOperation::Revise
+            && proposal.target_memory_id.is_none()
+        {
+            anyhow::bail!("a revision proposal requires a target memory id");
+        }
+        if proposal.draft.scope == MemoryScope::Org
+            && proposal
+                .draft
+                .scope_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+        {
+            anyhow::bail!("an org-scope proposal requires a scope id");
+        }
+        let payload = serde_json::to_vec(&MemoryProposalPayload {
+            draft: proposal.draft,
+            rationale: proposal.rationale,
+        })
+        .context("serializing memory proposal")?;
+        let (nonce, ciphertext) = self.encrypt(&payload)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO memory_proposals
+                (id, owner_user_id, agent_id, target_memory_id, operation, status,
+                 nonce, ciphertext, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8, ?8)",
+            params![
+                id,
+                proposal.owner_user_id,
+                proposal.agent_id,
+                proposal.target_memory_id,
+                proposal.operation.as_str(),
+                nonce,
+                ciphertext,
+                now,
+            ],
+        )
+        .context("inserting memory proposal")?;
+        Ok(id)
+    }
+
+    /// List proposals for one owner. Pending is the default so callers do not
+    /// accidentally expose the full historical proposal ledger.
+    pub async fn list_proposals(
+        &self,
+        owner_user_id: &str,
+        filter: &MemoryProposalFilter,
+    ) -> Result<Vec<MemoryRevisionProposal>> {
+        let limit = filter.limit.unwrap_or(100).min(500) as i64;
+        let rows = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare(
+                "SELECT id, owner_user_id, agent_id, target_memory_id, operation,
+                        status, nonce, ciphertext, created_at, updated_at,
+                        reviewed_at, reviewed_by, applied_memory_id
+                 FROM memory_proposals
+                 WHERE owner_user_id = ?1
+                   AND (?2 IS NULL OR status = ?2)
+                 ORDER BY created_at DESC
+                 LIMIT ?3",
+            )?;
+            let status = filter.status.map(|s| s.as_str());
+            let mapped = stmt.query_map(params![owner_user_id, status, limit], proposal_row)?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        rows.into_iter()
+            .map(|row| self.decrypt_proposal(row))
+            .collect()
+    }
+
+    /// Fetch a proposal by id. The Core layer applies the owner/tenancy gate.
+    pub async fn get_proposal(&self, id: &str) -> Result<Option<MemoryRevisionProposal>> {
+        let row = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT id, owner_user_id, agent_id, target_memory_id, operation,
+                        status, nonce, ciphertext, created_at, updated_at,
+                        reviewed_at, reviewed_by, applied_memory_id
+                 FROM memory_proposals WHERE id = ?1",
+                params![id],
+                proposal_row,
+            )
+            .optional()
+            .context("reading memory proposal")?
+        };
+        row.map(|row| self.decrypt_proposal(row)).transpose()
+    }
+
+    /// Approve or reject a pending proposal. Approval is a transaction: a revision
+    /// is inserted, the old row is superseded, and the proposal is marked applied
+    /// together. Repeated review is idempotent and returns the current proposal.
+    pub async fn review_proposal(
+        &self,
+        id: &str,
+        approve: bool,
+        reviewer: Option<&str>,
+    ) -> Result<Option<MemoryRevisionProposal>> {
+        let Some(proposal) = self.get_proposal(id).await? else {
+            return Ok(None);
+        };
+        if proposal.status != MemoryProposalStatus::Pending {
+            return Ok(Some(proposal));
+        }
+        let now = now_millis();
+        if !approve {
+            let conn = self.conn.lock().await;
+            conn.execute(
+                "UPDATE memory_proposals SET status = 'rejected', updated_at = ?1,
+                    reviewed_at = ?1, reviewed_by = ?2
+                 WHERE id = ?3 AND status = 'pending'",
+                params![now, reviewer, id],
+            )?;
+            drop(conn);
+            return self.get_proposal(id).await;
+        }
+
+        let target = if let Some(target_id) = proposal.target_memory_id.as_deref() {
+            let Some(target) = self.get(target_id).await? else {
+                anyhow::bail!("target memory no longer exists");
+            };
+            if target.lifecycle != MemoryLifecycle::Active {
+                anyhow::bail!("target memory is no longer active");
+            }
+            Some(target)
+        } else {
+            None
+        };
+        if proposal.operation == MemoryProposalOperation::Revise && target.is_none() {
+            anyhow::bail!("revision proposal target is missing");
+        }
+
+        // The proposal is re-checked under the transaction so two reviewers cannot
+        // apply the same pending row concurrently.
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("starting proposal approval")?;
+        let current_status: String = tx.query_row(
+            "SELECT status FROM memory_proposals WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if MemoryProposalStatus::from_str(&current_status) != MemoryProposalStatus::Pending {
+            tx.rollback()?;
+            return self.get_proposal(id).await;
+        }
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let draft = &proposal.draft;
+        let content = draft.content.trim();
+        let when = draft
+            .when_to_use
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (nonce, ciphertext) =
+            self.encrypt(&encode_payload(content, when, &draft.metadata.provenance))?;
+        let supersedes_id = target.as_ref().map(|entry| entry.id.clone());
+        tx.execute(
+            "INSERT INTO memory_entries
+                (id, user_id, agent_id, nonce, ciphertext, created_at,
+                 scope, scope_id, category, importance, tags, updated_at,
+                 lifecycle, supersedes_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?6, 'active', ?12)",
+            params![
+                new_id,
+                proposal.owner_user_id,
+                proposal.agent_id,
+                nonce,
+                ciphertext,
+                now,
+                draft.scope.as_str(),
+                draft.scope_id,
+                draft.category.as_str(),
+                draft.importance.clamp(1, 5),
+                encode_tags(&draft.tags),
+                supersedes_id,
+            ],
+        )?;
+        if let Some(target_id) = proposal.target_memory_id.as_deref() {
+            tx.execute(
+                "UPDATE memory_entries SET lifecycle = 'superseded', updated_at = ?1
+                 WHERE id = ?2 AND lifecycle = 'active'",
+                params![now, target_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE memory_proposals SET status = 'applied', updated_at = ?1,
+                reviewed_at = ?1, reviewed_by = ?2, applied_memory_id = ?3
+             WHERE id = ?4 AND status = 'pending'",
+            params![now, reviewer, new_id, id],
+        )?;
+        tx.commit().context("committing proposal approval")?;
+        drop(conn);
+        self.get_proposal(id).await
+    }
+
+    /// Reverse an applied proposal without deleting its audit records.
+    pub async fn rollback_proposal(
+        &self,
+        id: &str,
+        reviewer: Option<&str>,
+    ) -> Result<Option<MemoryRevisionProposal>> {
+        let Some(proposal) = self.get_proposal(id).await? else {
+            return Ok(None);
+        };
+        if proposal.status != MemoryProposalStatus::Applied {
+            return Ok(Some(proposal));
+        }
+        let Some(applied_id) = proposal.applied_memory_id.as_deref() else {
+            anyhow::bail!("applied proposal has no revision id");
+        };
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE memory_entries SET lifecycle = 'retracted', updated_at = ?1
+             WHERE id = ?2 AND lifecycle = 'active'",
+            params![now, applied_id],
+        )?;
+        if let Some(target_id) = proposal.target_memory_id.as_deref() {
+            conn.execute(
+                "UPDATE memory_entries SET lifecycle = 'active', updated_at = ?1
+                 WHERE id = ?2 AND lifecycle = 'superseded'",
+                params![now, target_id],
+            )?;
+        }
+        conn.execute(
+            "UPDATE memory_proposals SET status = 'rolled_back', updated_at = ?1,
+                reviewed_at = ?1, reviewed_by = ?2 WHERE id = ?3 AND status = 'applied'",
+            params![now, reviewer, id],
+        )?;
+        drop(conn);
+        self.get_proposal(id).await
     }
 
     /// Delete a single entry. Returns whether a row was removed.
@@ -928,6 +1481,8 @@ impl MemoryStore {
                 author_agent_id: row.get(9)?,
                 updated_at: row.get(10)?,
                 owner_user_id: row.get(11)?,
+                lifecycle: row.get(12)?,
+                supersedes_id: row.get(13)?,
             })
         })?;
         let mut out = Vec::new();
@@ -943,18 +1498,21 @@ impl MemoryStore {
         for r in rows {
             match self.decrypt(&r.nonce, &r.ciphertext) {
                 Ok(plain) => {
-                    let (content, when_to_use) = decode_payload(&plain);
+                    let payload = decode_payload(&plain);
                     out.push(LongTermEntry {
                         id: r.id,
-                        content,
+                        content: payload.content,
                         scope: MemoryScope::from_str(&r.scope),
                         scope_id: r.scope_id,
                         category: MemoryCategory::from_str(&r.category),
                         importance: r.importance,
-                        when_to_use,
+                        when_to_use: payload.when_to_use,
                         tags: decode_tags(&r.tags),
                         author_agent_id: r.author_agent_id,
                         owner_user_id: r.owner_user_id,
+                        provenance: payload.provenance,
+                        lifecycle: MemoryLifecycle::from_str(&r.lifecycle),
+                        supersedes_id: r.supersedes_id,
                         created_at: r.created_at,
                         updated_at: if r.updated_at == 0 {
                             r.created_at
@@ -976,6 +1534,61 @@ impl MemoryStore {
     fn decrypt(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         self.cipher.decrypt(nonce, ciphertext)
     }
+
+    fn decrypt_proposal(&self, row: ProposalRow) -> Result<MemoryRevisionProposal> {
+        let plain = self.decrypt(&row.nonce, &row.ciphertext)?;
+        let payload: MemoryProposalPayload =
+            serde_json::from_slice(&plain).context("decoding memory proposal payload")?;
+        Ok(MemoryRevisionProposal {
+            id: row.id,
+            owner_user_id: row.owner_user_id,
+            agent_id: row.agent_id,
+            target_memory_id: row.target_memory_id,
+            operation: MemoryProposalOperation::from_str(&row.operation),
+            status: MemoryProposalStatus::from_str(&row.status),
+            draft: payload.draft,
+            rationale: payload.rationale,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            reviewed_at: row.reviewed_at,
+            reviewed_by: row.reviewed_by,
+            applied_memory_id: row.applied_memory_id,
+        })
+    }
+}
+
+struct ProposalRow {
+    id: String,
+    owner_user_id: String,
+    agent_id: String,
+    target_memory_id: Option<String>,
+    operation: String,
+    status: String,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+    created_at: i64,
+    updated_at: i64,
+    reviewed_at: Option<i64>,
+    reviewed_by: Option<String>,
+    applied_memory_id: Option<String>,
+}
+
+fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
+    Ok(ProposalRow {
+        id: row.get(0)?,
+        owner_user_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        target_memory_id: row.get(3)?,
+        operation: row.get(4)?,
+        status: row.get(5)?,
+        nonce: row.get(6)?,
+        ciphertext: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        reviewed_at: row.get(10)?,
+        reviewed_by: row.get(11)?,
+        applied_memory_id: row.get(12)?,
+    })
 }
 
 /// An encrypted row + its plaintext metadata, straight from SQL.
@@ -992,6 +1605,8 @@ struct EncryptedRow {
     author_agent_id: Option<String>,
     updated_at: i64,
     owner_user_id: Option<String>,
+    lifecycle: String,
+    supersedes_id: Option<String>,
 }
 
 #[cfg(test)]

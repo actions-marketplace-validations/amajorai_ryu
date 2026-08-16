@@ -336,6 +336,7 @@ function McpServerList({
 						description={s.description}
 						icon={<HugeiconsIcon className="size-5" icon={ServerStack01Icon} />}
 						key={s.id}
+						likeNamespace={`mcp:${s.id}`}
 						name={s.name}
 						onClick={() => onSelect(s.id)}
 						seedId={s.id}

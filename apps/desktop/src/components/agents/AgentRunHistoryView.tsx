@@ -40,6 +40,7 @@ import { useCallback, useMemo } from "react";
 import { useChatHistoryContext } from "@/src/contexts/ChatHistoryContext.tsx";
 import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { type RunSummary, useRuns } from "@/src/hooks/useRuns.ts";
+import { conversationRunStatusMeta } from "@/src/lib/conversation-run-status.ts";
 
 /** Prefix Core uses for the ephemeral conversation id of a workflow node run. */
 const WORKFLOW_RUN_PREFIX = "wfrun-";
@@ -51,7 +52,7 @@ interface HistoryEntry {
 	id: string;
 	/** Message count when known (only automated runs carry it in the stream). */
 	messageCount?: number;
-	/** "running" | "completed" | "failed" | undefined. */
+	/** Lifecycle status from Core, including awaiting_input and interrupted. */
 	runStatus?: string;
 	title: string;
 	/** Unix ms of the last activity — used for ordering and the relative label. */
@@ -86,6 +87,10 @@ function statusMeta(status: string | undefined): {
 			};
 		case "failed":
 			return { icon: AlertCircleIcon, label: "Failed", variant: "destructive" };
+		case "awaiting_input":
+			return { icon: AlertCircleIcon, label: "Needs input", variant: "outline" };
+		case "interrupted":
+			return { icon: AlertCircleIcon, label: "Interrupted", variant: "outline" };
 		default:
 			return null;
 	}
@@ -183,7 +188,7 @@ function HistoryRow({
 				</span>
 			</div>
 			{status ? (
-				<Badge variant={status.variant}>
+				<Badge title={conversationRunStatusMeta(entry.runStatus)?.description} variant={status.variant}>
 					<HugeiconsIcon
 						className={cn("size-3", status.spin && "animate-spin")}
 						icon={status.icon}

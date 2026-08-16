@@ -7,7 +7,12 @@
 
 import { THEME_PREF_KEY, type ThemePrefs } from "@ryu/ui/theme/prefs";
 import { type ApiTarget, request } from "./client.ts";
-import type { RouteStrategy, SmartRoutingConfig } from "./gateway.ts";
+import type {
+	CustomPattern,
+	CustomPatternKind,
+	RouteStrategy,
+	SmartRoutingConfig,
+} from "./gateway.ts";
 
 interface PreferenceWire {
 	key: string;
@@ -45,6 +50,132 @@ export async function setPreference(
 	} catch {
 		return false;
 	}
+}
+
+export const USER_PERSONALIZATION_PREF_KEY = "user-personalization";
+export interface UserPersonalization {
+	aboutOrganization: string;
+	aboutYou: string;
+	nickname: string;
+	occupation: string;
+}
+export const DEFAULT_USER_PERSONALIZATION: UserPersonalization = {
+	aboutOrganization: "",
+	aboutYou: "",
+	nickname: "",
+	occupation: "",
+};
+
+// --- Managed per-request routing ------------------------------------------
+
+/** Mirrors `apps/core/src/sidecar/gateway.rs::NODE_ROUTING_PREF_KEY`. */
+export const NODE_ROUTING_PREF_KEY = "node-routing-prefs";
+
+/** The preference subset that can safely ride on a managed request. */
+export interface NodeRoutingPreferences {
+	/** Provider ids, in preferred fallback order. */
+	fallback: string[];
+	/** Extra patterns are additive; the fleet still owns all enforcement dials. */
+	firewall: { custom_patterns: CustomPattern[] } | null;
+}
+
+export const EMPTY_NODE_ROUTING_PREFERENCES: NodeRoutingPreferences = {
+	fallback: [],
+	firewall: null,
+};
+
+const NODE_ROUTING_PATTERN_KINDS: readonly CustomPatternKind[] = [
+	"pii",
+	"secret",
+	"prompt_injection",
+];
+
+function isCustomPattern(value: unknown): value is CustomPattern {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+	const pattern = value as Record<string, unknown>;
+	return (
+		typeof pattern.kind === "string" &&
+		NODE_ROUTING_PATTERN_KINDS.includes(pattern.kind as CustomPatternKind) &&
+		typeof pattern.name === "string" &&
+		pattern.name.trim().length > 0 &&
+		typeof pattern.regex === "string" &&
+		pattern.regex.trim().length > 0
+	);
+}
+
+/** Parse the node-routing preference defensively; invalid edits mean no prefs. */
+export function parseNodeRoutingPreferences(
+	raw: string | null
+): NodeRoutingPreferences {
+	if (!raw?.trim()) {
+		return EMPTY_NODE_ROUTING_PREFERENCES;
+	}
+	try {
+		const value = JSON.parse(raw) as Record<string, unknown>;
+		const fallback = Array.isArray(value.fallback)
+			? value.fallback
+					.filter(
+						(entry): entry is string =>
+							typeof entry === "string" && entry.trim().length > 0
+					)
+					.map((entry) => entry.trim())
+			: [];
+		const rawPatterns =
+			value.firewall && typeof value.firewall === "object"
+				? (value.firewall as Record<string, unknown>).custom_patterns
+				: undefined;
+		const custom_patterns = Array.isArray(rawPatterns)
+			? rawPatterns.filter(isCustomPattern).map((pattern) => ({
+					...pattern,
+					name: pattern.name.trim(),
+					regex: pattern.regex.trim(),
+				}))
+			: [];
+		return {
+			fallback,
+			firewall: custom_patterns.length > 0 ? { custom_patterns } : null,
+		};
+	} catch {
+		return EMPTY_NODE_ROUTING_PREFERENCES;
+	}
+}
+
+/** Serialize the atomic node-routing envelope Core consumes. */
+export function serializeNodeRoutingPreferences(
+	prefs: NodeRoutingPreferences
+): string {
+	const fallback = prefs.fallback.map((entry) => entry.trim()).filter(Boolean);
+	const custom_patterns = (prefs.firewall?.custom_patterns ?? []).filter(
+		isCustomPattern
+	);
+	if (fallback.length === 0 && custom_patterns.length === 0) {
+		return "";
+	}
+	return JSON.stringify({
+		...(fallback.length > 0 ? { fallback } : {}),
+		...(custom_patterns.length > 0 ? { firewall: { custom_patterns } } : {}),
+	});
+}
+
+export async function getNodeRoutingPreferences(
+	target: ApiTarget
+): Promise<NodeRoutingPreferences> {
+	return parseNodeRoutingPreferences(
+		await getPreference(target, NODE_ROUTING_PREF_KEY)
+	);
+}
+
+export function setNodeRoutingPreferences(
+	target: ApiTarget,
+	prefs: NodeRoutingPreferences
+): Promise<boolean> {
+	return setPreference(
+		target,
+		NODE_ROUTING_PREF_KEY,
+		serializeNodeRoutingPreferences(prefs)
+	);
 }
 
 // --- Agent selection (the shared "who runs this" value) ---------------------
@@ -1349,16 +1480,16 @@ export function setLearningEnabled(
 export const LEARNING_SKILLS_ENABLED_PREF_KEY = "learning.skills-enabled";
 
 /**
- * Read whether the local skill-learning loop is enabled. Defaults to ON when
- * unset — it's fully on-device and inbox-gated, so it's the safe default,
- * distinct from the training opt-in (which defaults OFF).
+ * Read whether the local skill-learning loop is enabled. Defaults to OFF when
+ * unset because synthesis still turns conversation content into a durable
+ * artifact, distinct from the training opt-in (which also defaults OFF).
  */
 export async function getLearningSkillsEnabled(
 	target: ApiTarget
 ): Promise<boolean> {
 	const raw = await getPreference(target, LEARNING_SKILLS_ENABLED_PREF_KEY);
 	if (raw === null) {
-		return true;
+		return false;
 	}
 	const v = raw.trim().toLowerCase();
 	return v === "true" || v === "1" || v === "on" || v === "yes";

@@ -22,7 +22,7 @@ export function GalleryView({
 	createRow: (values?: Record<string, unknown>) => void;
 }) {
 	return (
-		<div className="h-full overflow-y-auto p-4">
+		<div className="scroll-fade h-full overflow-y-auto p-4">
 			<div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
 				{rows.map((row) => (
 					<RowCard

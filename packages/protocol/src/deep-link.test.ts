@@ -28,6 +28,31 @@ describe("parseRyuDeepLink", () => {
 		});
 	});
 
+	it("parses an app link with a scoped plugin id", () => {
+		expect(parseRyuDeepLink("ryu://apps/@ryu/clips")).toEqual({
+			kind: "app",
+			id: "@ryu/clips",
+			node: null,
+		});
+		expect(parseRyuDeepLink("ryu://apps/com.ryu.agentbrowser")).toEqual({
+			kind: "app",
+			id: "com.ryu.agentbrowser",
+			node: null,
+		});
+	});
+
+	it("parses an app link with an install-target node hint", () => {
+		expect(
+			parseRyuDeepLink(
+				"ryu://apps/@ryu/clips?node=https%3A%2F%2Fnode.example.com%3A7980%2F"
+			)
+		).toEqual({
+			kind: "app",
+			id: "@ryu/clips",
+			node: "https://node.example.com:7980",
+		});
+	});
+
 	it("tolerates a trailing slash and percent-encoding", () => {
 		expect(
 			parseRyuDeepLink("ryu://models/huggingface/unsloth/my%20model/")
@@ -73,6 +98,7 @@ describe("parseRyuDeepLink", () => {
 		expect(parseRyuDeepLink("ryu://agents/x/y")).toBeNull();
 		expect(parseRyuDeepLink("https://models/huggingface/x")).toBeNull();
 		expect(parseRyuDeepLink("ryu://models/huggingface")).toBeNull();
+		expect(parseRyuDeepLink("ryu://apps/")).toBeNull();
 		expect(parseRyuDeepLink("not a url")).toBeNull();
 	});
 
@@ -185,6 +211,12 @@ describe("buildRyuDeepLink round-trips with parseRyuDeepLink", () => {
 			source: "skills.sh",
 			id: "acme/pack/fix",
 			node: "http://192.168.1.50:7980",
+		},
+		{ kind: "app", id: "@ryu/clips", node: null },
+		{
+			kind: "app",
+			id: "com.ryu.agentbrowser",
+			node: "https://node.example.com:7980",
 		},
 		{
 			kind: "node",

@@ -236,7 +236,7 @@ export function defineTool<
  * ships its `run` body as Core's `inline_deno` backend. The emitted config
  * mirrors Core's `ToolConfig` (`apps/core/src/plugin_manifest/schema.rs`):
  * `{ slug, backend:"inline_deno", code, description?, input_schema }`. Core
- * registers it as `app__<slug>` — discoverable via `/api/tools/search` and
+ * registers it as `app.<slug>` — discoverable via `/api/tools/search` and
  * executed in the grant-gated sandbox.
  *
  * The plugin must declare the `tool:execute` grant (see `definePlugin`).

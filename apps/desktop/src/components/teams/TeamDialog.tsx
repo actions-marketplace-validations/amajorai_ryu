@@ -175,7 +175,7 @@ export function TeamDialog({
 									No members yet. Add agents below.
 								</p>
 							) : (
-								<ul className="flex max-h-40 flex-col gap-1 overflow-y-auto">
+								<ul className="scroll-fade flex max-h-40 flex-col gap-1 overflow-y-auto">
 									{members.map((memberId) => (
 										<li
 											className="flex h-8 items-center gap-2 rounded-md bg-muted/40 px-2"
@@ -207,7 +207,7 @@ export function TeamDialog({
 							{candidates.length > 0 ? (
 								<div className="flex flex-col gap-1">
 									<p className="text-muted-foreground text-xs">Add an agent</p>
-									<ul className="flex max-h-40 flex-col gap-1 overflow-y-auto">
+									<ul className="scroll-fade flex max-h-40 flex-col gap-1 overflow-y-auto">
 										{candidates.map((agent) => (
 											<li key={agent.id}>
 												<button

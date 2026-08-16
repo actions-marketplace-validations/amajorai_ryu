@@ -99,14 +99,21 @@
  * (scout, planner, reviewer) therefore loses `ryu_call_tool`; an unscoped one
  * (worker) keeps MCP and LSP. That is fine, and intentional.
  *
- * MODEL SELECTION: OMIT `--model` UNLESS SOMEONE NAMED ONE
+ * MODEL SELECTION: ONE NODE SETTING CAN FORCE EVERY CHILD
  * --------------------------------------------------------
  * The upstream sample agents pin `claude-sonnet-4-5` / `claude-haiku-4-5`, which
  * are passed to the child verbatim and will not resolve against Ryu's
  * gateway-pinned `models.json`. So no built-in agent below declares a model: the
  * child inherits `defaultModel` from the managed `settings.json`, which is the
- * model Ryu already decided this node should use. An override file may still
- * name one — that is the caller taking responsibility for resolvability.
+ * model Ryu already decided this node should use.
+ *
+ * The plugin registers the node preference `pi-subagent-model`. Empty/unset is
+ * the default and means "let the main agent decide": the Task schema exposes an
+ * optional requested model, and omitting that request still inherits Pi's
+ * managed default. A selected preference is fetched once per Task call and
+ * passed to EVERY child with `--model`; it wins over the request, so the main
+ * model cannot override an operator's choice. A persona in the optional override
+ * file may still name a fallback model, below both choices.
  *
  * SCOPING IS `--tools`, NOT THE GUARD EXTENSION
  * ----------------------------------------------
@@ -250,6 +257,20 @@ const ABORT_KILL_GRACE_MS = 5000;
 
 /** Optional override/extension file, read next to this extension. */
 const OVERRIDES_FILE_NAME = "ryu-subagents.json";
+
+/** Manifest-registered node preference that can force every child model. */
+const DEFAULT_MODEL_PREF_KEY = "pi-subagent-model";
+
+/** Core endpoint already injected for the managed Pi extension channel. */
+const CORE_URL = (
+	process.env.RYU_MCP_CORE_URL || "http://127.0.0.1:7980"
+).replace(/\/+$/, "");
+
+/** Optional node-admittance bearer for the generic preference endpoint. */
+const CORE_TOKEN = process.env.RYU_MCP_CORE_TOKEN || "";
+
+/** Bound preference lookup so unavailable Core never stalls delegation. */
+const PREFERENCE_TIMEOUT_MS = 5000;
 
 /** Default persona when the model names none. General-purpose, unrestricted. */
 const DEFAULT_SUBAGENT_TYPE = "worker";
@@ -491,6 +512,34 @@ function optionalTools(value: unknown): string[] | undefined {
 }
 
 /**
+ * Read the manifest-registered forced model. Best-effort: absent, empty,
+ * malformed or unreachable preferences all preserve the default inheritance
+ * behavior by returning undefined.
+ */
+async function loadDefaultModel(): Promise<string | undefined> {
+	try {
+		const headers: Record<string, string> = {};
+		if (CORE_TOKEN) {
+			headers.authorization = `Bearer ${CORE_TOKEN}`;
+		}
+		const response = await fetch(
+			`${CORE_URL}/api/preferences/${encodeURIComponent(DEFAULT_MODEL_PREF_KEY)}`,
+			{
+				headers,
+				signal: AbortSignal.timeout(PREFERENCE_TIMEOUT_MS),
+			}
+		);
+		if (!response.ok) {
+			return;
+		}
+		const body = (await response.json()) as { value?: unknown };
+		return optionalString(body.value);
+	} catch {
+		return;
+	}
+}
+
+/**
  * Merge `<agentDir>/extensions/ryu-subagents.json` over the built-ins.
  *
  * Best-effort by construction: an absent, unreadable or malformed file yields
@@ -583,10 +632,38 @@ interface UsageStats {
  * in an extension asset would give it two homes that drift.
  */
 interface RyuStep {
+	/** Stable suffix for Core's synthetic `<parent>:<id>` transaction id. */
+	id?: string;
 	input: Record<string, unknown>;
 	name: string;
 	output?: string;
 	status: "pending" | "completed" | "failed";
+}
+
+/**
+ * The lifecycle row for one child process.
+ *
+ * Core already turns every `ryuSteps` entry into a normal nested tool
+ * transaction. Naming this one `Agent` deliberately lands it on the desktop's
+ * existing subagent renderer, so a parallel `Task` exposes every child spawn
+ * independently instead of looking like one opaque parent call.
+ */
+function childLifecycleStep(
+	id: string,
+	agentName: string,
+	description: string,
+	prompt: string
+): RyuStep {
+	return {
+		id,
+		input: {
+			description,
+			prompt,
+			subagent_type: agentName,
+		},
+		name: "Agent",
+		status: "pending",
+	};
 }
 
 interface SingleResult {
@@ -767,8 +844,11 @@ interface RunSingleAgentOptions {
 	agents: Record<string, AgentConfig>;
 	cwd: string | undefined;
 	defaultCwd: string;
+	lifecycleId: string;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
+	modelOverride: string | undefined;
 	onUpdate: OnUpdateCallback | undefined;
+	requestedModel: string | undefined;
 	signal: AbortSignal | undefined;
 	task: string;
 }
@@ -791,7 +871,10 @@ async function runSingleAgent(
 		cwd,
 		defaultCwd,
 		makeDetails,
+		lifecycleId,
+		modelOverride,
 		onUpdate,
+		requestedModel,
 		signal,
 		task,
 	} = options;
@@ -801,11 +884,14 @@ async function runSingleAgent(
 			: undefined;
 
 	if (!agent) {
+		const lifecycle = childLifecycleStep(lifecycleId, agentName, task, task);
+		lifecycle.output = `Unknown subagent_type: "${agentName}".`;
+		lifecycle.status = "failed";
 		return {
 			agent: agentName,
 			exitCode: 1,
 			messages: [],
-			ryuSteps: [],
+			ryuSteps: [lifecycle],
 			stderr: `Unknown subagent_type: "${agentName}". Available: ${renderAgentList(agents)}.`,
 			task,
 			usage: emptyUsage(),
@@ -813,10 +899,11 @@ async function runSingleAgent(
 	}
 
 	const args = ["--mode", "json", "-p", "--no-session"];
-	// Only when someone explicitly named one — see the preamble. Omitting this
-	// makes the child inherit the node's managed `defaultModel`.
-	if (agent.model) {
-		args.push("--model", agent.model);
+	// The node setting is an operator choice and therefore wins over a persona's
+	// optional model. With neither, omission inherits the managed default model.
+	const childModel = modelOverride ?? requestedModel ?? agent.model;
+	if (childModel) {
+		args.push("--model", childModel);
 	}
 	// Scoping is the child's own allowlist, NOT the guard extension, which
 	// deliberately no-ops in children.
@@ -824,12 +911,15 @@ async function runSingleAgent(
 		args.push("--tools", agent.tools.join(","));
 	}
 
+	const lifecycle = childLifecycleStep(lifecycleId, agentName, task, task);
 	const currentResult: SingleResult = {
 		agent: agentName,
-		exitCode: 0,
+		// The process has been declared but has not exited yet. This exact value is
+		// also what parallel progress uses to count running children.
+		exitCode: -1,
 		messages: [],
-		model: agent.model,
-		ryuSteps: [],
+		model: childModel,
+		ryuSteps: [lifecycle],
 		stderr: "",
 		task,
 		usage: emptyUsage(),
@@ -888,6 +978,11 @@ async function runSingleAgent(
 			details: makeDetails([currentResult]),
 		});
 	};
+
+	// Publish the lifecycle row before creating the process. Without this first
+	// update a quiet child has no visible transaction until its first assistant
+	// or tool event, which can be minutes after it was actually spawned.
+	emitUpdate();
 
 	let tmpPromptDir: string | undefined;
 	let tmpPromptPath: string | undefined;
@@ -1023,6 +1118,12 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
+		lifecycle.status = isFailedResult(currentResult) ? "failed" : "completed";
+		lifecycle.output =
+			lifecycle.status === "completed"
+				? `Subagent completed with exit code ${exitCode}.`
+				: getResultOutput(currentResult);
+		emitUpdate();
 		if (wasAborted) {
 			throw new Error("Subagent was aborted");
 		}
@@ -1077,6 +1178,12 @@ const TaskItem = Type.Object({
 		description:
 			"The full instruction for this child. It is autonomous and cannot ask follow-up questions, so state everything it needs and what to return.",
 	}),
+	model: Type.Optional(
+		Type.String({
+			description:
+				"Model requested for this child when the node setting lets the main agent decide. A configured default subagent model overrides it.",
+		})
+	),
 	subagent_type: Type.Optional(
 		Type.String({
 			description: "Which persona runs this child. Defaults to worker.",
@@ -1099,6 +1206,12 @@ const TaskParams = Type.Object({
 		description:
 			"The full instruction for the subagent. It runs autonomously in its own context with no access to this conversation and cannot ask follow-up questions, so state everything it needs and exactly what it should return. In parallel mode, describe the overall job here.",
 	}),
+	model: Type.Optional(
+		Type.String({
+			description:
+				"Model requested for this child when the node setting lets you decide. A configured default subagent model overrides it.",
+		})
+	),
 	// Deliberately a free string, not a closed StringEnum: the optional
 	// `ryu-subagents.json` override file may add personas this schema cannot know
 	// about, and a closed enum would make every custom persona unreachable. The
@@ -1194,7 +1307,10 @@ export default async function (pi: ExtensionAPI) {
 			try {
 				// Re-read per call so an edited override file is picked up without a new
 				// conversation. `loadAgents` never rejects; worst case it is the built-ins.
-				const agents = await loadAgents();
+				const [agents, modelOverride] = await Promise.all([
+					loadAgents(),
+					loadDefaultModel(),
+				]);
 				const tasks = params.tasks ?? [];
 				const mode: SubagentDetails["mode"] =
 					tasks.length > 0 ? "parallel" : "single";
@@ -1261,6 +1377,8 @@ export default async function (pi: ExtensionAPI) {
 								cwd: task.cwd ?? params.cwd,
 								defaultCwd: ctx.cwd,
 								makeDetails: makeDetails("parallel"),
+								lifecycleId: `agent-${index}`,
+								modelOverride,
 								onUpdate: (partial) => {
 									const partialResult = partial.details?.results[0];
 									if (partialResult) {
@@ -1269,6 +1387,7 @@ export default async function (pi: ExtensionAPI) {
 									}
 								},
 								signal,
+								requestedModel: task.model ?? params.model,
 								task: task.prompt,
 							});
 							allResults[index] = result;
@@ -1304,7 +1423,10 @@ export default async function (pi: ExtensionAPI) {
 					cwd: params.cwd,
 					defaultCwd: ctx.cwd,
 					makeDetails: makeDetails("single"),
+					lifecycleId: "agent-0",
+					modelOverride,
 					onUpdate,
+					requestedModel: params.model,
 					signal,
 					task: params.prompt,
 				});

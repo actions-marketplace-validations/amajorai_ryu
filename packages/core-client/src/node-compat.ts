@@ -68,8 +68,10 @@ export function compareSemver(a: string, b: string): number {
 		return 0;
 	}
 	for (let i = 0; i < 3; i++) {
-		if (pa[i] !== pb[i]) {
-			return pa[i] < pb[i] ? -1 : 1;
+		const aPart = pa[i] ?? 0;
+		const bPart = pb[i] ?? 0;
+		if (aPart !== bPart) {
+			return aPart < bPart ? -1 : 1;
 		}
 	}
 	return 0;

@@ -320,7 +320,7 @@ export function TodoList({
 				role="region"
 			>
 				<div
-					className="scrollbar-hide overflow-y-auto px-2 pb-2"
+					className="scroll-fade scrollbar-hide overflow-y-auto px-2 pb-2"
 					ref={viewportRef}
 					style={{ maxHeight }}
 				>

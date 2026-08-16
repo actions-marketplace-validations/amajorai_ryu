@@ -75,38 +75,38 @@ static LIVE_PORT: AtomicU16 = AtomicU16::new(0);
 
 #[derive(Default, Deserialize, Serialize)]
 struct Persisted {
-	enabled: bool,
+    enabled: bool,
 }
 
 fn state_path() -> PathBuf {
-	crate::profile::ryu_home_dir().join(STATE_FILE)
+    crate::profile::ryu_home_dir().join(STATE_FILE)
 }
 
 /// Missing / unreadable / malformed all mean "not opted in" — this file gates a
 /// debug channel, so anything we cannot positively read as `true` fails closed.
 fn read_persisted() -> Persisted {
-	std::fs::read_to_string(state_path())
-		.ok()
-		.and_then(|raw| serde_json::from_str(&raw).ok())
-		.unwrap_or_default()
+    std::fs::read_to_string(state_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
 fn write_persisted(state: &Persisted) -> Result<(), String> {
-	let path = state_path();
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-	}
-	let body = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
-	std::fs::write(&path, body).map_err(|e| e.to_string())?;
-	// Owner-only: this flag decides whether a socket that can drive the app
-	// comes up on next launch, so another local account must not be able to
-	// flip it.
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::PermissionsExt;
-		let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-	}
-	Ok(())
+    let path = state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    // Owner-only: this flag decides whether a socket that can drive the app
+    // comes up on next launch, so another local account must not be able to
+    // flip it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// The startup question: should `run()` register the bridge plugin?
@@ -116,66 +116,66 @@ fn write_persisted(state: &Persisted) -> Result<(), String> {
 /// mirror of Developer Mode cannot persist. See the module docs for the
 /// escalation this closes.
 pub fn take_enabled() -> bool {
-	let enabled = read_persisted().enabled;
-	if enabled {
-		// Best-effort: a failure here means the flag survives to the next launch,
-		// which is the pre-existing behaviour, not a new hole.
-		let _ = write_persisted(&Persisted { enabled: false });
-	}
-	enabled
+    let enabled = read_persisted().enabled;
+    if enabled {
+        // Best-effort: a failure here means the flag survives to the next launch,
+        // which is the pre-existing behaviour, not a new hole.
+        let _ = write_persisted(&Persisted { enabled: false });
+    }
+    enabled
 }
 
 /// The flag as it currently sits on disk, without consuming it. Only the status
 /// read-out uses this; the startup decision goes through [`take_enabled`].
 pub fn is_enabled() -> bool {
-	read_persisted().enabled
+    read_persisted().enabled
 }
 
 /// Records that this process registered the plugin, on `port`. Called from
 /// `run()` right after the registration so the two can never disagree.
 pub fn mark_live(port: u16) {
-	LIVE_PORT.store(port, Ordering::Relaxed);
-	LIVE.store(true, Ordering::Relaxed);
+    LIVE_PORT.store(port, Ordering::Relaxed);
+    LIVE.store(true, Ordering::Relaxed);
 }
 
 #[derive(Serialize)]
 pub struct BridgeStatus {
-	/// The persisted opt-in — what the next launch will do.
-	pub enabled: bool,
-	/// Whether the bridge is actually listening in *this* process.
-	pub live: bool,
-	/// `enabled != live`: the user changed the opt-in since launch, so the
-	/// change only takes effect after a relaunch.
-	pub needs_relaunch: bool,
-	pub host: String,
-	pub port: u16,
+    /// The persisted opt-in — what the next launch will do.
+    pub enabled: bool,
+    /// Whether the bridge is actually listening in *this* process.
+    pub live: bool,
+    /// `enabled != live`: the user changed the opt-in since launch, so the
+    /// change only takes effect after a relaunch.
+    pub needs_relaunch: bool,
+    pub host: String,
+    pub port: u16,
 }
 
 fn status() -> BridgeStatus {
-	// `enabled` is the flag for the NEXT launch. Because startup consumes it, a
-	// live bridge normally shows `enabled: false` until the frontend re-mirrors
-	// Developer Mode — so `live` is what the UI must key "the socket is open" on,
-	// never `enabled`.
-	let enabled = is_enabled();
-	let live = LIVE.load(Ordering::Relaxed);
-	let live_port = LIVE_PORT.load(Ordering::Relaxed);
-	BridgeStatus {
-		enabled,
-		live,
-		needs_relaunch: enabled != live,
-		host: "127.0.0.1".to_string(),
-		// Off: the port the next launch will try. On: the one it actually took.
-		port: if live_port == 0 {
-			crate::profile::mcp_bridge_port()
-		} else {
-			live_port
-		},
-	}
+    // `enabled` is the flag for the NEXT launch. Because startup consumes it, a
+    // live bridge normally shows `enabled: false` until the frontend re-mirrors
+    // Developer Mode — so `live` is what the UI must key "the socket is open" on,
+    // never `enabled`.
+    let enabled = is_enabled();
+    let live = LIVE.load(Ordering::Relaxed);
+    let live_port = LIVE_PORT.load(Ordering::Relaxed);
+    BridgeStatus {
+        enabled,
+        live,
+        needs_relaunch: enabled != live,
+        host: "127.0.0.1".to_string(),
+        // Off: the port the next launch will try. On: the one it actually took.
+        port: if live_port == 0 {
+            crate::profile::mcp_bridge_port()
+        } else {
+            live_port
+        },
+    }
 }
 
 #[tauri::command]
 pub fn mcp_bridge_status() -> BridgeStatus {
-	status()
+    status()
 }
 
 /// Mirror the Developer Mode master toggle into the on-disk opt-in.
@@ -185,42 +185,42 @@ pub fn mcp_bridge_status() -> BridgeStatus {
 /// launch with the UI showing Developer Mode off).
 #[tauri::command]
 pub fn set_mcp_bridge_enabled(enabled: bool) -> Result<BridgeStatus, String> {
-	if is_enabled() != enabled {
-		write_persisted(&Persisted { enabled })?;
-	}
-	Ok(status())
+    if is_enabled() != enabled {
+        write_persisted(&Persisted { enabled })?;
+    }
+    Ok(status())
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	// The gate must fail closed on every unreadable shape, because each of these
-	// is what a partially-written or hand-edited file looks like, and the failure
-	// mode of the other direction is a listening debug socket nobody asked for.
-	#[test]
-	fn unreadable_state_is_not_enabled() {
-		for raw in ["", "{}", "not json", r#"{"enabled":"yes"}"#] {
-			let parsed: Persisted = serde_json::from_str(raw).unwrap_or_default();
-			assert!(!parsed.enabled, "{raw:?} must not arm the bridge");
-		}
-	}
+    // The gate must fail closed on every unreadable shape, because each of these
+    // is what a partially-written or hand-edited file looks like, and the failure
+    // mode of the other direction is a listening debug socket nobody asked for.
+    #[test]
+    fn unreadable_state_is_not_enabled() {
+        for raw in ["", "{}", "not json", r#"{"enabled":"yes"}"#] {
+            let parsed: Persisted = serde_json::from_str(raw).unwrap_or_default();
+            assert!(!parsed.enabled, "{raw:?} must not arm the bridge");
+        }
+    }
 
-	#[test]
-	fn only_explicit_true_enables() {
-		let parsed: Persisted = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
-		assert!(parsed.enabled);
-	}
+    #[test]
+    fn only_explicit_true_enables() {
+        let parsed: Persisted = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(parsed.enabled);
+    }
 
-	// Release must stay on the documented port and every other profile must get
-	// its own, or two installs debugged side by side would fight over one socket.
-	#[test]
-	fn port_is_profile_shifted() {
-		assert_eq!(crate::profile::MCP_BRIDGE_BASE_PORT, 8400);
-		assert_eq!(
-			crate::profile::MCP_BRIDGE_BASE_PORT
-				+ crate::profile::offset_of("dev").expect("dev is a known profile"),
-			9400
-		);
-	}
+    // Release must stay on the documented port and every other profile must get
+    // its own, or two installs debugged side by side would fight over one socket.
+    #[test]
+    fn port_is_profile_shifted() {
+        assert_eq!(crate::profile::MCP_BRIDGE_BASE_PORT, 8400);
+        assert_eq!(
+            crate::profile::MCP_BRIDGE_BASE_PORT
+                + crate::profile::offset_of("dev").expect("dev is a known profile"),
+            9400
+        );
+    }
 }

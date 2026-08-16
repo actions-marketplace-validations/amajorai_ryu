@@ -464,18 +464,48 @@ pub async fn run_sandboxed_with_augment(
     permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
     augment: &SandboxAugment,
 ) -> ExecOutcome {
+    run_sandboxed_with_augment_and_deadline(
+        program,
+        invoker,
+        agent_id,
+        permissions,
+        augment,
+        std::time::Duration::from_secs(DEFAULT_DEADLINE_SECS),
+    )
+    .await
+}
+
+/// Run a sandboxed program with a scoped active-compute deadline. Existing
+/// callers retain the 30-second default; manifest-owned tools can request a
+/// bounded larger budget without a plugin-id special case.
+pub async fn run_sandboxed_with_augment_and_deadline(
+    program: String,
+    invoker: Arc<SandboxToolInvoker>,
+    agent_id: &str,
+    permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
+    augment: &SandboxAugment,
+    deadline: std::time::Duration,
+) -> ExecOutcome {
     let executor = CodeExecutor::default_backend();
     match executor {
         #[cfg(feature = "tool-exec-deno")]
         CodeExecutor::Deno(exec) => {
-            exec.execute_with_augment(&program, invoker, agent_id, permissions, augment)
-                .await
+            exec.execute_with_augment_and_deadline(
+                &program,
+                invoker,
+                agent_id,
+                permissions,
+                augment,
+                deadline,
+            )
+            .await
         }
         #[cfg(feature = "tool-exec-securexec")]
         CodeExecutor::SecureExec(exec) => {
             // secure-exec keeps its deny-all posture (no per-run flags in v1).
             let _ = (permissions, augment);
-            exec.execute(&program, invoker, agent_id).await
+            exec.execute_with_deadline(&program, invoker, deadline)
+                .await
         }
         CodeExecutor::Unavailable => {
             let _ = (permissions, augment);
@@ -563,6 +593,7 @@ const caller = {caller};
 const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
+  runFanout: (a) => tools.host.runFanout(a ?? {{}}),
   storage: {{
     get: (k, ns) => tools.host.storage_get({{ key: String(k), namespace: ns }}),
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),

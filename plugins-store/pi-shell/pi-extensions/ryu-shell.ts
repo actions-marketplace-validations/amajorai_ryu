@@ -13,16 +13,20 @@
  * blocks until a timeout or is impossible. This extension adds the missing half:
  * three tools that spawn, poll and stop detachable work WITHOUT holding the turn.
  *
- * DESIGN: PULL, NOT PUSH
- * ----------------------
+ * DESIGN: PULL OUTPUT, PUSH LIFECYCLE
+ * -----------------------------------
  * `bash_background` returns the instant the child is spawned, handing back a
  * shell id. Output is PULLED afterwards with `bash_output`, which drains a capped
- * ring buffer and reports the exit code once the process has ended. There is no
- * push channel and there cannot be one: `onUpdate` is scoped to the live
+ * ring buffer and reports the exit code once the process has ended. `onUpdate`
+ * cannot carry a later completion because it is scoped to the live
  * `execute()` invocation (`pi-agent-core/dist/types.d.ts` — "Calls made after the
- * tool promise settles are ignored"), so a tool that returns immediately has no
- * way to stream anything later. Polling is not a compromise here, it is the only
- * shape the runtime allows.
+ * tool promise settles are ignored"). Pi's extension-level `sendMessage` IS the
+ * later lifecycle channel: a natural exit/failure/TTL stop injects a displayed
+ * custom message and triggers (or queues behind) a parent turn. That turn is
+ * told to collect `bash_output`, so the final bytes and exit state travel through
+ * the same visible tool transaction as an explicit poll. Manual `bash_kill` and
+ * `bash_output(kill=true)` already return that state synchronously and therefore
+ * suppress the duplicate wake-up.
  *
  * Shells deliberately SURVIVE ACROSS TURNS inside one conversation. Core's ACP
  * pool keys on the conversation id and builds one pi-acp instance per pooled
@@ -284,6 +288,8 @@ interface BackgroundShell {
 	pendingReason?: string;
 	pid?: number;
 	startedAt: number;
+	/** Manual/session teardown already reports elsewhere; avoid a duplicate turn. */
+	suppressCompletionNotification?: boolean;
 	/** The lifetime cap. Always `unref`'d; cleared the moment the child exits. */
 	timer?: ReturnType<typeof setTimeout>;
 }
@@ -344,6 +350,9 @@ let ledgerDir: string | undefined;
  * notice appear exactly once per process.
  */
 let orphanScanDone = false;
+
+/** Bound by the extension factory; undefined while the session is tearing down. */
+let reportCompletion: ((shell: BackgroundShell) => void) | undefined;
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -797,6 +806,9 @@ function finish(shell: BackgroundShell, exit: ShellExit): void {
 	// Persist the completion so a later process does not mistake this shell for
 	// an orphan (see the durable-ledger section). No-op when no ledger exists.
 	recordFinished(shell);
+	if (!shell.suppressCompletionNotification) {
+		reportCompletion?.(shell);
+	}
 }
 
 /**
@@ -808,8 +820,13 @@ function finish(shell: BackgroundShell, exit: ShellExit): void {
  * The grace timer is `unref`'d: a pending kill must never be the reason Node
  * keeps the Pi process alive.
  */
-function terminate(shell: BackgroundShell, reason: string): Promise<void> {
+function terminate(
+	shell: BackgroundShell,
+	reason: string,
+	wakeAgentOnFinish = false
+): Promise<void> {
 	clearTtl(shell);
+	shell.suppressCompletionNotification = !wakeAgentOnFinish;
 	const child = shell.child;
 	if (!(child && isLive(shell))) {
 		return Promise.resolve();
@@ -999,7 +1016,8 @@ function startShell(shell: BackgroundShell, cwd: string): BackgroundShell {
 		log(`${id}: lifetime cap reached, terminating — ${command}`);
 		terminate(
 			shell,
-			`exceeded the ${formatDuration(SHELL_TTL_MS)} lifetime cap`
+			`exceeded the ${formatDuration(SHELL_TTL_MS)} lifetime cap`,
+			true
 		).catch(() => {
 			// `terminate` never rejects; this is belt-and-braces so a detached
 			// timer can never become an unhandled rejection in Pi's process.
@@ -1099,6 +1117,28 @@ export default function (pi: ExtensionAPI) {
 		log("running as a subagent child; background shells are not registered");
 		return;
 	}
+
+	// A background completion happens after `bash_background.execute` has
+	// returned, so only the extension-level session channel can both preserve it
+	// for the model and wake the parent. `deliverAs: followUp` queues safely when
+	// the shell exits during an active turn; `triggerTurn` handles an idle parent.
+	reportCompletion = (shell) => {
+		const state = describeExit(shell);
+		pi.sendMessage(
+			{
+				customType: "ryu-background-shell-lifecycle",
+				content: [
+					`Background shell ${shell.id} ${state}.`,
+					`command: ${shell.command}`,
+					`cwd: ${shell.cwd}`,
+					`Call bash_output with shell_id "${shell.id}" now to collect its final output and surface the completed lifecycle transaction to the user.`,
+				].join("\n"),
+				details: shellDetails(shell, 0),
+				display: true,
+			},
+			{ deliverAs: "followUp", triggerTurn: true }
+		);
+	};
 
 	pi.registerTool({
 		name: "bash_background",
@@ -1289,6 +1329,7 @@ export default function (pi: ExtensionAPI) {
 	// last of four defences rather than the only one.
 	pi.on("session_shutdown", async () => {
 		await stopAllShells("the session ended");
+		reportCompletion = undefined;
 	});
 
 	// The restart-notification seam (Claude Code's "background task(s) from the

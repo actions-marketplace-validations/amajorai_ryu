@@ -144,7 +144,7 @@ function Story() {
 	return (
 		<QueryClientProvider client={queryClient}>
 			<div style={{ padding: 40 }}>
-				<div style={{ width: 260 }}>
+				<div data-sidebar-preview-boundary="" style={{ width: 260 }}>
 					<ChatRow conv={CONV} handlers={handlers} />
 				</div>
 				<pre data-testid="invoked" id="invoked" />

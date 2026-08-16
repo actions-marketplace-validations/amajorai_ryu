@@ -31,7 +31,7 @@ export function ListView({
 		.slice(0, MAX_LIST_PROPERTIES);
 
 	return (
-		<div className="h-full overflow-y-auto p-4">
+		<div className="scroll-fade h-full overflow-y-auto p-4">
 			<div className="mx-auto flex max-w-3xl flex-col divide-y rounded-lg border">
 				{rows.map((row) => {
 					const titleValue = titleColumn ? row[titleColumn.id] : undefined;

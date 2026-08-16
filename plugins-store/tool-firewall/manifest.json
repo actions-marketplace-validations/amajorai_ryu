@@ -2,6 +2,7 @@
   "id": "@ryu/tool-firewall",
   "name": "Tool Firewall",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "A worked reference for pre- and post-tool hooks: the pre hook denies any tool call whose input matches a destructive pattern (`rm -rf`, `DROP TABLE`, `mkfs`), and the post hook notes what each tool returned. The pattern set is deliberately tiny — copy this directory as the starting point for your own tool policy.",
   "tagline": "Reference plugin: block destructive tool calls",
   "keywords": ["security", "tools", "hooks", "example"],

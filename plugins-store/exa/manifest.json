@@ -2,6 +2,7 @@
   "id": "@ryu/exa",
   "name": "Exa Search",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Neural and keyword web search via the Exa API (https://exa.ai), exposed as two declarative HTTP tools: search and find-similar. Requires a BYOK Exa API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/77906174?v=4",
   "iconDither": { "from": 213, "to": "transparent", "direction": "down" },

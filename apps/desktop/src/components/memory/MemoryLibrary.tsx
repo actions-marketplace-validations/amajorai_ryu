@@ -44,6 +44,7 @@ import {
 } from "@ryu/ui/components/select";
 import { toast } from "@ryu/ui/components/sileo";
 import { Spinner } from "@ryu/ui/components/spinner";
+import { BarChart3, Sparkles } from "lucide-react";
 import {
 	type ChangeEvent,
 	useCallback,
@@ -65,9 +66,49 @@ import {
 	memoryCategoryLabels,
 	memoryScopeLabels,
 } from "@/src/lib/api/memory.ts";
+import { MemoryDreamReview } from "./MemoryDreamReview.tsx";
 import { MemoryEditor } from "./MemoryEditor.tsx";
+import { MemoryReflectDashboard } from "./MemoryReflectDashboard.tsx";
 
 const ALL = "all";
+export type MemoryView = "library" | "dream" | "reflect";
+
+function MemoryViewNav({
+	onChange,
+	value,
+}: {
+	onChange: (value: MemoryView) => void;
+	value: MemoryView;
+}) {
+	return (
+		<div
+			aria-label="Memory views"
+			className="flex flex-wrap gap-1 rounded-lg bg-muted/45 p-1"
+			role="tablist"
+		>
+			{[
+				{ icon: null, label: "Library", value: "library" as const },
+				{ icon: Sparkles, label: "Dream", value: "dream" as const },
+				{ icon: BarChart3, label: "Reflect", value: "reflect" as const },
+			].map((item) => {
+				const Icon = item.icon;
+				return (
+					<button
+						aria-selected={value === item.value}
+						className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium text-xs transition-colors ${value === item.value ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+						key={item.value}
+						onClick={() => onChange(item.value)}
+						role="tab"
+						type="button"
+					>
+						{Icon ? <Icon className="size-3.5" /> : null}
+						{item.label}
+					</button>
+				);
+			})}
+		</div>
+	);
+}
 
 // A Select's closed trigger takes its text from `items`, so the sentinel row has
 // to be in here too — otherwise the filter reads "all"/"preference" once picked.
@@ -148,7 +189,11 @@ function MemoryRow({
 	);
 }
 
-export function MemoryLibrary() {
+export function MemoryLibrary({
+	initialView = "library",
+}: {
+	initialView?: MemoryView;
+} = {}) {
 	const activeNode = useActiveNode();
 	// Both vocabularies come from the one shared table; which one shows is the
 	// app-wide "Friendly names" toggle.
@@ -160,6 +205,8 @@ export function MemoryLibrary() {
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
 	);
+	const [view, setView] = useState<MemoryView>(initialView);
+	useEffect(() => setView(initialView), [initialView]);
 
 	const [memories, setMemories] = useState<Memory[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -289,10 +336,28 @@ export function MemoryLibrary() {
 		});
 	}, [memories, query, scopeFilter, categoryFilter, tagFilter]);
 
+	if (view !== "library") {
+		return (
+			<div className="relative flex h-full flex-col overflow-hidden">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
+					<div className="mx-auto flex max-w-3xl flex-col gap-6">
+						<MemoryViewNav onChange={setView} value={view} />
+						{view === "dream" ? (
+							<MemoryDreamReview target={target} />
+						) : (
+							<MemoryReflectDashboard target={target} />
+						)}
+					</div>
+				</div>
+			</div>
+		);
+	}
+
 	return (
 		<div className="relative flex h-full flex-col overflow-hidden">
-			<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-4 pt-12 pb-24">
 				<div className="mx-auto flex max-w-3xl flex-col gap-4">
+					<MemoryViewNav onChange={setView} value={view} />
 					<div className="flex items-center justify-between gap-3">
 						<div>
 							<h1 className="font-semibold text-lg">Memory</h1>
@@ -396,7 +461,7 @@ export function MemoryLibrary() {
 								<EmptyTitle>Couldn't load memories</EmptyTitle>
 								<EmptyDescription>{loadError}</EmptyDescription>
 							</EmptyHeader>
-							<Button onClick={reload} variant="outline">
+							<Button onClick={reload} variant="ghost">
 								Try again
 							</Button>
 						</Empty>
@@ -474,4 +539,13 @@ export function MemoryLibrary() {
 			</AlertDialog>
 		</div>
 	);
+}
+
+/** Route adapters keep the registry's JSX-free route table prop-free. */
+export function MemoryDreamPage() {
+	return <MemoryLibrary initialView="dream" />;
+}
+
+export function MemoryReflectPage() {
+	return <MemoryLibrary initialView="reflect" />;
 }

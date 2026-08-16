@@ -122,6 +122,10 @@ impl LearningHost for SidecarLearningHost {
     async fn dispatch_finetune(&self, _body: Value) -> Result<Value, String> {
         Err(DEGRADED.to_string())
     }
+
+    async fn merge_finetune(&self, _body: Value) -> Result<Value, String> {
+        Err(DEGRADED.to_string())
+    }
 }
 
 #[tokio::main]

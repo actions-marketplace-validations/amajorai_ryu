@@ -25,6 +25,7 @@
 import { ArrowUpRight01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { PullToRefresh } from "@ryu/ui/components/pull-to-refresh.tsx";
 import {
 	Tooltip,
 	TooltipContent,
@@ -587,6 +588,7 @@ export function TrayRow({
 	actions,
 	busy,
 	icon,
+	iconNode,
 	meta,
 	metaTone = "default",
 	onOpen,
@@ -599,7 +601,10 @@ export function TrayRow({
 	actions?: ReactNode;
 	/** Swaps the whole action slot for a spinner, keeping the row's width. */
 	busy?: boolean;
-	icon: IconSvgElement;
+	icon?: IconSvgElement;
+	/** A custom lead tile (an `<AppIcon/>`, a brand mark) that replaces the glyph.
+	 *  When set, `tone` is ignored for the tile — the custom node owns its plate. */
+	iconNode?: ReactNode;
 	meta?: ReactNode;
 	metaTone?: "default" | "danger";
 	onOpen?: () => void;
@@ -627,7 +632,7 @@ export function TrayRow({
 					type="button"
 				/>
 			)}
-			<TrayRowIcon icon={icon} tone={tone} />
+			{iconNode ?? (icon && <TrayRowIcon icon={icon} tone={tone} />)}
 			{/* Text ignores the pointer only when there's an underlay button to fall
 			    through to; otherwise it would swallow its own `title` tooltip. */}
 			<div
@@ -697,9 +702,11 @@ export function TrayRow({
 export function TrayScroll({
 	children,
 	className,
+	onRefresh,
 }: {
 	children: ReactNode;
 	className?: string;
+	onRefresh?: () => void | Promise<void>;
 }) {
 	const ref = useRef<HTMLDivElement | null>(null);
 	const [fade, setFade] = useState({ bottom: false, top: false });
@@ -741,10 +748,10 @@ export function TrayScroll({
 		mask = "linear-gradient(to bottom, transparent 0, black 1.25rem)";
 	}
 
-	return (
+	const content = (
 		<div
 			className={cn(
-				"flex max-h-[20rem] flex-col overflow-y-auto overscroll-contain [scrollbar-width:thin]",
+				"flex max-h-[20rem] flex-col overscroll-contain [scrollbar-width:thin]",
 				className
 			)}
 			onScroll={measure}
@@ -754,6 +761,17 @@ export function TrayScroll({
 			{children}
 		</div>
 	);
+	return onRefresh ? (
+		<PullToRefresh
+			ariaLabel="Refresh tray"
+			className={cn("max-h-[20rem] [scrollbar-width:thin]", className)}
+			onRefresh={onRefresh}
+			onScroll={measure}
+			scrollRef={ref}
+		>
+			{content}
+		</PullToRefresh>
+	) : content;
 }
 
 /** Centred nothing-here state, sized for a popover rather than a page. */

@@ -345,7 +345,10 @@ mod tests {
     fn cli_args_scope_the_install_to_one_agent() {
         let args = cli_args(&["pdf"]);
         let agent_at = args.iter().position(|a| a == "-a").expect("no -a flag");
-        assert_eq!(args.get(agent_at + 1).map(String::as_str), Some("claude-code"));
+        assert_eq!(
+            args.get(agent_at + 1).map(String::as_str),
+            Some("claude-code")
+        );
     }
 
     /// `-s a,b` is parsed as one unknown skill name and installs nothing, so each

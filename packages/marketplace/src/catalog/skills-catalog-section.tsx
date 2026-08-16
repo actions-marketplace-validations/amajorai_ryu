@@ -59,6 +59,7 @@ import {
 	ORG_ICON,
 } from "./chrome/catalog-badges.tsx";
 import InfiniteSentinel from "./chrome/infinite-sentinel.tsx";
+import PacksShelf from "./chrome/packs-shelf.tsx";
 import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
@@ -376,21 +377,28 @@ export default function SkillsCatalogSection({
 				// one that did not.
 				hasSelection={Boolean(selectedId)}
 				list={
-					<SkillList
-						cardInstall={cardInstall}
-						enabledByKey={enabledByKey}
-						error={error}
-						fetchNextPage={fetchNextPage}
-						hasNextPage={hasNextPage}
-						installing={installing}
-						loading={loading}
-						onSelect={select}
-						selectedId={selectedId}
-						setSkillEnabled={setSkillEnabled}
-						settingsOpener={settingsOpener}
-						skills={skills}
-						togglingSkill={togglingSkill}
-					/>
+					<>
+						{/* The Packs shelf rides above the searchable grid — packs are the
+						    curated "get a whole collection at once" surface, skills the
+						    individual rows. It renders nothing when the host has no pack
+						    seam (a read-only web host before packs federate). */}
+						<PacksShelf />
+						<SkillList
+							cardInstall={cardInstall}
+							enabledByKey={enabledByKey}
+							error={error}
+							fetchNextPage={fetchNextPage}
+							hasNextPage={hasNextPage}
+							installing={installing}
+							loading={loading}
+							onSelect={select}
+							selectedId={selectedId}
+							setSkillEnabled={setSkillEnabled}
+							settingsOpener={settingsOpener}
+							skills={skills}
+							togglingSkill={togglingSkill}
+						/>
+					</>
 				}
 				onCloseDetail={() => select("")}
 				search={{
@@ -444,7 +452,7 @@ function SkillsFilterPanel({
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<div className="flex flex-wrap items-center gap-2">
 					{canAuthor ? (
-						<Button onClick={onCreate} size="sm" variant="outline">
+						<Button onClick={onCreate} size="sm" variant="ghost">
 							<HugeiconsIcon className="size-4" icon={Add01Icon} />
 							New skill
 						</Button>
@@ -709,6 +717,7 @@ function SkillList({
 						action={
 							<SkillCardAction
 								card={s}
+								downloadCount={s.downloads}
 								enabled={enabledByKey[s.id]}
 								installBusy={installing === s.id}
 								onDisable={() => {
@@ -778,6 +787,7 @@ function SkillCardAction({
 	card,
 	enabled,
 	installBusy,
+	downloadCount,
 	toggleBusy,
 	onInstall,
 	onEnable,
@@ -787,6 +797,7 @@ function SkillCardAction({
 	card: SkillCard;
 	enabled: boolean | undefined;
 	installBusy: boolean;
+	downloadCount?: number | null;
 	toggleBusy: boolean;
 	onInstall: () => void;
 	onEnable: () => void;
@@ -798,6 +809,7 @@ function SkillCardAction({
 	return (
 		<StoreItemAction
 			busy={installBusy || toggleBusy}
+			downloadCount={downloadCount}
 			enabled={card.installed ? enabled : undefined}
 			installed={card.installed}
 			onDisable={onDisable}
@@ -1161,7 +1173,7 @@ function SkillDetailAction({
 	return (
 		<div className="flex shrink-0 items-center gap-3">
 			{canAuthor && skillKey !== null ? (
-				<Button onClick={() => onEdit(skillKey)} size="sm" variant="outline">
+				<Button onClick={() => onEdit(skillKey)} size="sm" variant="ghost">
 					<HugeiconsIcon className="size-4" icon={PencilEdit01Icon} />
 					Edit
 				</Button>

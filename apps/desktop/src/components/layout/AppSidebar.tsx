@@ -231,6 +231,10 @@ import {
 	type TitleHistoryEntry,
 } from "@/src/lib/api/conversation-flags.ts";
 import {
+	getConversationLearningExclusion,
+	setConversationLearningExclusion,
+} from "@/src/lib/api/learn.ts";
+import {
 	type PluginContextMenuItem,
 	type PluginSidebarButton,
 	type PluginSidebarSection,
@@ -238,6 +242,7 @@ import {
 } from "@/src/lib/api/plugins.ts";
 import { listSkills } from "@/src/lib/api/skills.ts";
 import type { Space, SpaceDocument } from "@/src/lib/api/spaces.ts";
+import { conversationRunStatusMeta } from "@/src/lib/conversation-run-status.ts";
 import { copyChatTranscript } from "@/src/lib/copy-chat-transcript.ts";
 import {
 	DEFAULT_HIDDEN_CHROME,
@@ -398,17 +403,6 @@ function saveIdSet(key: string, ids: Set<string>) {
 const PATH_SEP_RE = /[\\/]/;
 /** Trailing `/` or `\` runs, stripped before taking a path's leaf. */
 const TRAILING_SEPARATORS_RE = /[\\/]+$/;
-
-/** Status-dot color class for a conversation's run status. */
-function runStatusDotClass(status: string | undefined): string {
-	if (status === "failed") {
-		return "bg-destructive";
-	}
-	if (status === "running") {
-		return "animate-pulse bg-primary";
-	}
-	return "bg-primary";
-}
 
 /** Leaf folder name from a workspace path, used as a project's default label.
  *
@@ -753,7 +747,7 @@ export function SidebarScopePicker({
 				onValueChange={(next) => onValueChange(next ?? ALL_SELECTION)}
 				value={value}
 			>
-				<SelectTrigger className="h-7 min-w-0 flex-1 text-xs">
+				<SelectTrigger className="h-7 min-w-0 flex-1 text-xs" variant="ghost">
 					<span className="flex min-w-0 items-center gap-2">
 						{icon ? (
 							<HugeiconsIcon
@@ -1361,12 +1355,12 @@ export function ChatRow({
 	const isUnread = unreadIds.has(conv.id);
 	const isPinned = pinnedIds.has(conv.id);
 	const isArchived = archivedIds.has(conv.id);
-	// Unread badge always shows when marked unread; a failed run badges itself too
-	// (in destructive red, via runStatusDotClass) — a run that died is exactly the
-	// thing a glance down the sidebar has to catch, and it does not need the chat
-	// to also be marked unread to be worth pointing at.
-	const showDot = isUnread || conv.runStatus === "failed";
-	const isRunning = conv.runStatus === "running";
+	const runStatus = conversationRunStatusMeta(conv.runStatus);
+	// A state that cannot make progress without attention badges itself even when
+	// the chat is read. In particular, interrupted is not failed: it is a partial
+	// reply Core recovered after the local engine stopped, and it cannot auto-resume.
+	const showDot = isUnread || runStatus?.needsAttention === true;
+	const isRunning = runStatus?.isRunning === true;
 	// Who last took this thread. The row leads with that agent's mark — the same
 	// avatar the Messages sub-accordion puts on each turn — so a sidebar full of
 	// chats says WHO is on each one before it says anything else.
@@ -1396,6 +1390,35 @@ export function ChatRow({
 	const archiveLabel = isArchived ? "Unarchive" : "Archive";
 	const archiveIcon = isArchived ? ArchiveRestoreIcon : Archive01Icon;
 	const readLabel = isUnread ? "Mark as read" : "Mark as unread";
+	const [learningExcluded, setLearningExcluded] = useState(false);
+
+	useEffect(() => {
+		let cancelled = false;
+		getConversationLearningExclusion(target, conv.id)
+			.then(({ excluded }) => {
+				if (!cancelled) {
+					setLearningExcluded(excluded);
+				}
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [conv.id, target.token, target.url]);
+
+	const toggleLearningExclusion = useCallback(() => {
+		const next = !learningExcluded;
+		setLearningExcluded(next);
+		setConversationLearningExclusion(target, conv.id, next).catch(() => {
+			setLearningExcluded(!next);
+			toast.error("Couldn't update this chat's learning privacy", {
+				description: "Check your connection and try again.",
+			});
+		});
+	}, [conv.id, learningExcluded, target.token, target.url]);
+	const learningLabel = learningExcluded
+		? "Include in learning"
+		: "Exclude from learning";
 
 	// App-registered conversation-menu rows from the contributions feed, filtered
 	// to the `conversation` anchor. The "Make a skill from this chat" row is a
@@ -1446,6 +1469,7 @@ export function ChatRow({
 	const [isEditing, setIsEditing] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(conv.title);
 	const inputRef = useRef<HTMLInputElement | null>(null);
+	const [isRowHovered, setIsRowHovered] = useState(false);
 
 	// Row disclosure expands nested Messages + Side chats sub-accordions.
 	const [rowExpanded, setRowExpanded] = useState(false);
@@ -1534,13 +1558,7 @@ export function ChatRow({
 			{conv.runStatus ? (
 				<SidebarPreviewMeta
 					label="Status"
-					value={
-						conv.runStatus === "running"
-							? "In progress"
-							: conv.runStatus === "failed"
-								? "Failed"
-								: "Completed"
-					}
+					value={runStatus?.label ?? conv.runStatus}
 				/>
 			) : null}
 			<ChatTitleHistoryPreview conversationId={conv.id} target={target} />
@@ -1567,6 +1585,8 @@ export function ChatRow({
 								onSelectConversation(conv.id);
 							}
 						}}
+						onMouseEnter={() => setIsRowHovered(true)}
+						onMouseLeave={() => setIsRowHovered(false)}
 						role="button"
 						tabIndex={0}
 					>
@@ -1610,15 +1630,19 @@ export function ChatRow({
 							{showDot &&
 								(latestAgent ? (
 									<span
-										className={`absolute -top-0.5 -right-0.5 size-1.5 rounded-full ${dotRingClass} ${runStatusDotClass(conv.runStatus)}`}
+										aria-label={runStatus?.description ?? "Unread"}
+										className={`absolute -top-0.5 -right-0.5 size-1.5 rounded-full ${dotRingClass} ${runStatus?.dotClass ?? "bg-primary"}`}
+										title={runStatus?.description ?? "Unread"}
 									/>
 								) : (
 									<span
+										aria-label={runStatus?.description ?? "Unread"}
 										className={`absolute inset-0 m-auto size-1.5 rounded-full transition-opacity ${
 											rowExpanded
 												? "opacity-0"
 												: "opacity-100 group-hover/row:opacity-0"
-										} ${runStatusDotClass(conv.runStatus)}`}
+										} ${runStatus?.dotClass ?? "bg-primary"}`}
+										title={runStatus?.description ?? "Unread"}
 									/>
 								))}
 							{/* Chevron: hidden at rest, fades in on hover; always shown (and
@@ -1676,8 +1700,9 @@ export function ChatRow({
 								    popup would fight it). Running only swaps the shimmer onto
 								    the same clipped line, so the title dissolves at the edge in
 								    either state and the row cannot jump when a run starts. */}
-								<SidebarItemPreview content={previewContent}>
+								<SidebarItemPreview className="p-1" content={previewContent}>
 									<FadeLabel
+										autoScroll={isRowHovered}
 										className={`flex-1 text-sm ${isUnread ? "font-medium" : ""}`}
 										shimmer={isRunning}
 										text={conv.title}
@@ -1693,11 +1718,46 @@ export function ChatRow({
 								aria-label="Running"
 								className="size-3.5 shrink-0 text-muted-foreground/70 group-hover/row:hidden"
 							/>
+						) : runStatus?.needsAttention ? (
+							<span
+								className={`shrink-0 text-[10px] tabular-nums ${
+									conv.runStatus === "failed"
+										? "text-destructive"
+										: "text-amber-600 dark:text-amber-400"
+								}`}
+								title={runStatus.description}
+							>
+								{runStatus.label}
+							</span>
 						) : (
 							<span className="shrink-0 text-muted-foreground/70 text-xs tabular-nums group-hover/row:hidden">
 								{compactAge(conv.updatedAt)}
 							</span>
 						)}
+						<button
+							aria-label={pinLabel}
+							aria-pressed={isPinned}
+							className="hidden h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent group-hover/row:inline-flex"
+							onClick={(e) => {
+								e.stopPropagation();
+								onTogglePin(conv.id);
+							}}
+							type="button"
+						>
+							<HugeiconsIcon icon={pinIcon} size={12} />
+						</button>
+						<button
+							aria-label={archiveLabel}
+							aria-pressed={isArchived}
+							className="hidden h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-accent group-hover/row:inline-flex"
+							onClick={(e) => {
+								e.stopPropagation();
+								onToggleArchive(conv.id);
+							}}
+							type="button"
+						>
+							<HugeiconsIcon icon={archiveIcon} size={12} />
+						</button>
 						<DropdownMenu>
 							{/* data-[popup-open] keeps the trigger visible while the menu is
 							    open. Without it, moving onto the menu drops group-hover, the
@@ -1798,6 +1858,19 @@ export function ChatRow({
 									/>
 									{archiveLabel}
 								</DropdownMenuItem>
+								<DropdownMenuItem
+									onClick={(e) => {
+										e.stopPropagation();
+										toggleLearningExclusion();
+									}}
+								>
+									<HugeiconsIcon
+										className="mr-2"
+										icon={ViewOffSlashIcon}
+										size={12}
+									/>
+									{learningLabel}
+								</DropdownMenuItem>
 								{contributedMenuRows.length > 0 && <DropdownMenuSeparator />}
 								{contributedMenuRows.map((item) => (
 									<DropdownMenuItem
@@ -1874,6 +1947,10 @@ export function ChatRow({
 					<ContextMenuItem onClick={() => onToggleArchive(conv.id)}>
 						<HugeiconsIcon className="mr-2 size-4" icon={archiveIcon} />
 						{archiveLabel}
+					</ContextMenuItem>
+					<ContextMenuItem onClick={toggleLearningExclusion}>
+						<HugeiconsIcon className="mr-2 size-4" icon={ViewOffSlashIcon} />
+						{learningLabel}
 					</ContextMenuItem>
 					{/* Same contributed rows the ⋯ dropdown renders, in the same slot and
 					    order. Right-clicking a chat is the more discoverable gesture of the
@@ -2435,6 +2512,7 @@ function VerticalTabRow({ tab, isActive }: { tab: Tab; isActive: boolean }) {
 						>
 							<TabGlyph
 								busy={busy}
+								busySpeed={tab.busySpeed}
 								className="absolute size-4 transition-all duration-150 group-hover/row:scale-50 group-hover/row:opacity-0"
 								icon={tab.icon}
 								logoSize="16px"
@@ -9185,7 +9263,7 @@ export function AppSidebar({
 }: AppSidebarProps) {
 	const [sidebarVariant] = useSidebarVariant();
 	return (
-		<Sidebar variant={sidebarVariant}>
+		<Sidebar data-sidebar-preview-boundary="" variant={sidebarVariant}>
 			<SidebarPanelContent
 				activeConversationId={activeConversationId}
 				onDeleteConversation={onDeleteConversation}

@@ -189,7 +189,12 @@ mod tests {
     /// from silently breaking the sidecar. The app-side counterpart lives in
     /// `apps-store/recipes/backend/src/lib.rs` and deserializes these exact shapes.
     fn keys(v: &Value) -> Vec<&str> {
-        let mut k: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
+        let mut k: Vec<&str> = v
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
         k.sort_unstable();
         k
     }

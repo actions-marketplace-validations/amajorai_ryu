@@ -1,4 +1,5 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use ryu_crypto::{global_cipher, FieldCipher};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -241,6 +242,70 @@ pub struct AccountVault {
     pub active_user_id: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedAccount {
+    token: String,
+    #[serde(rename = "userId")]
+    user_id: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedAccountVault {
+    #[serde(default)]
+    accounts: Vec<PersistedAccount>,
+    #[serde(rename = "activeUserId", default)]
+    active_user_id: Option<String>,
+}
+
+fn master_cipher() -> Result<FieldCipher> {
+    crate::crypto_host::install();
+    global_cipher().context("loading auth encryption key")
+}
+
+fn persisted_vault(vault: &AccountVault, cipher: &FieldCipher) -> Result<PersistedAccountVault> {
+    Ok(PersistedAccountVault {
+        accounts: vault
+            .accounts
+            .iter()
+            .map(|account| {
+                Ok(PersistedAccount {
+                    token: cipher.seal(&account.token)?,
+                    user_id: account.user_id.clone(),
+                    email: account.email.clone(),
+                    name: account.name.clone(),
+                    image: account.image.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        active_user_id: vault.active_user_id.clone(),
+    })
+}
+
+fn runtime_vault(stored: PersistedAccountVault, cipher: &FieldCipher) -> Result<AccountVault> {
+    Ok(AccountVault {
+        accounts: stored
+            .accounts
+            .into_iter()
+            .map(|account| {
+                Ok(Account {
+                    token: cipher.open(&account.token)?,
+                    user_id: account.user_id,
+                    email: account.email,
+                    name: account.name,
+                    image: account.image,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        active_user_id: stored.active_user_id,
+    })
+}
+
 impl AccountVault {
     /// The active account, if the pointer resolves to one in the list.
     pub fn active(&self) -> Option<&Account> {
@@ -259,14 +324,29 @@ pub fn load_accounts() -> AccountVault {
     let Ok(bytes) = std::fs::read(accounts_path()) else {
         return AccountVault::default();
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    let Ok(stored) = serde_json::from_slice::<PersistedAccountVault>(&bytes) else {
+        return AccountVault::default();
+    };
+    let Ok(cipher) = master_cipher() else {
+        tracing::warn!("auth account vault unavailable: master key could not be loaded");
+        return AccountVault::default();
+    };
+    match runtime_vault(stored, &cipher) {
+        Ok(vault) => vault,
+        Err(error) => {
+            tracing::warn!(error = %error, "auth account vault could not be decrypted");
+            AccountVault::default()
+        }
+    }
 }
 
 /// Persist the vault to `accounts.json` (0600) and mirror the active account's
 /// token into the legacy `auth.json` so single-token consumers keep working.
 pub fn save_accounts(vault: &AccountVault) -> Result<()> {
     let path = accounts_path();
-    write_secret_file(&path, &serde_json::to_string_pretty(vault)?)?;
+    let cipher = master_cipher()?;
+    let stored = persisted_vault(vault, &cipher)?;
+    write_secret_file(&path, &serde_json::to_string_pretty(&stored)?)?;
     match vault.active().map(|a| a.token.clone()) {
         Some(token) => save_token(&token)?,
         None => {
@@ -370,7 +450,8 @@ async fn fetch_profile(
 
 pub fn save_token(token: &str) -> Result<()> {
     let path = token_path();
-    let data = serde_json::json!({ "token": token });
+    let cipher = master_cipher()?;
+    let data = serde_json::json!({ "token": cipher.seal(token)? });
     write_secret_file(&path, &serde_json::to_string(&data)?)?;
     Ok(())
 }
@@ -381,12 +462,13 @@ pub fn load_token() -> Option<String> {
     if let Some(token) = active_token() {
         return Some(token);
     }
+    let cipher = master_cipher().ok()?;
     let bytes = std::fs::read(token_path()).ok()?;
     let data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    data["token"]
+    let stored = data["token"]
         .as_str()
-        .or_else(|| data["access_token"].as_str())
-        .map(str::to_string)
+        .or_else(|| data["access_token"].as_str())?;
+    cipher.open(stored).ok()
 }
 
 pub fn clear_token() -> Result<()> {
@@ -438,6 +520,10 @@ fn write_secret_file(path: &std::path::Path, body: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_cipher() -> FieldCipher {
+        FieldCipher::new(&[0x52; 32])
+    }
 
     fn account(user_id: &str, token: &str) -> Account {
         Account {
@@ -509,5 +595,35 @@ mod tests {
         let vault: AccountVault = serde_json::from_slice(b"not json").unwrap_or_default();
         assert!(vault.accounts.is_empty());
         assert!(vault.active_user_id.is_none());
+    }
+
+    #[test]
+    fn persisted_account_tokens_are_sealed_and_round_trip() {
+        let vault = AccountVault {
+            accounts: vec![account("u1", "account-token-secret")],
+            active_user_id: Some("u1".to_owned()),
+        };
+        let cipher = test_cipher();
+        let stored = persisted_vault(&vault, &cipher).unwrap();
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(json.contains("enc:v1:"));
+        assert!(!json.contains("account-token-secret"));
+        assert_eq!(
+            runtime_vault(stored, &cipher)
+                .unwrap()
+                .active()
+                .unwrap()
+                .token,
+            "account-token-secret"
+        );
+    }
+
+    #[test]
+    fn auth_token_envelope_never_contains_plaintext() {
+        let cipher = test_cipher();
+        let sealed = cipher.seal("device-token-secret").unwrap();
+        assert!(sealed.starts_with("enc:v1:"));
+        assert!(!sealed.contains("device-token-secret"));
+        assert_eq!(cipher.open(&sealed).unwrap(), "device-token-secret");
     }
 }

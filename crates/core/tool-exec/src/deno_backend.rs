@@ -157,6 +157,29 @@ impl DenoExecutor {
         permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
         augment: &crate::SandboxAugment,
     ) -> ExecOutcome {
+        self.execute_with_augment_and_deadline(
+            code,
+            invoker,
+            agent_id,
+            permissions,
+            augment,
+            Duration::from_secs(super::DEFAULT_DEADLINE_SECS),
+        )
+        .await
+    }
+
+    /// Like [`Self::execute_with_augment`] with a caller-selected active-compute
+    /// deadline. The default wrapper remains 30 seconds; plugin tools may opt into
+    /// a larger manifest-configured budget for bounded fan-outs.
+    pub async fn execute_with_augment_and_deadline(
+        &self,
+        code: &str,
+        invoker: Arc<SandboxToolInvoker>,
+        agent_id: &str,
+        permissions: Option<&ryu_kernel_contracts::manifest::PermissionSet>,
+        augment: &crate::SandboxAugment,
+        deadline: Duration,
+    ) -> ExecOutcome {
         if !deno_on_path() {
             return ExecOutcome::error(
                 "deno is not installed (the tool_exec sandbox backend requires the deno binary on PATH)",
@@ -213,7 +236,7 @@ impl DenoExecutor {
             agent_id: agent_id.to_owned(),
             suspended_call_id: Value::Null,
         };
-        pump(state).await
+        pump(state, deadline).await
     }
 }
 
@@ -227,8 +250,8 @@ impl DenoExecutor {
 /// a Composio pause does not count against it (that wait is bounded separately
 /// by the parked-store TTL). Conflating the two would kill every real resume
 /// (a connect step routinely exceeds [`DEFAULT_DEADLINE_SECS`]).
-async fn pump(mut state: ParkedExec) -> ExecOutcome {
-    let deadline = std::time::Instant::now() + Duration::from_secs(super::DEFAULT_DEADLINE_SECS);
+async fn pump(mut state: ParkedExec, active_deadline: Duration) -> ExecOutcome {
+    let deadline = std::time::Instant::now() + active_deadline;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -419,7 +442,7 @@ pub async fn resume_parked(
         return Some(ExecOutcome::error(format!("failed to resume sandbox: {e}")));
     }
 
-    Some(pump(state).await)
+    Some(pump(state, Duration::from_secs(super::DEFAULT_DEADLINE_SECS)).await)
 }
 
 /// Build the final program: the bootstrap (a stdio `tools` proxy) followed by
@@ -950,7 +973,10 @@ mod tests {
     /// line already drawn, still goes.
     #[test]
     fn strip_control_keeps_newlines_and_drops_carriage_returns() {
-        assert_eq!(strip_control("para one\n\npara two"), "para one\n\npara two");
+        assert_eq!(
+            strip_control("para one\n\npara two"),
+            "para one\n\npara two"
+        );
         assert_eq!(strip_control("kept\r\ngone"), "kept\ngone");
         assert_eq!(
             sanitize_tool_value(&json!({ "text": "a\nb" }))["text"],

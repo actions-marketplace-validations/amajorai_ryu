@@ -102,6 +102,7 @@ export interface AgentTemplate {
 		description: string | null;
 		system_prompt: string | null;
 		tools: string[];
+		required_plugins?: string[];
 		engine: string | null;
 		model: string | null;
 	};
@@ -511,6 +512,8 @@ export interface AgentInstallDisclosure {
 	policyId: string | null;
 	/** A remote avatar URL the template shipped. Removed (install-time beacon). */
 	remoteAvatarUrl: string | null;
+	/** Ryu plugin ids requested by the publisher; never auto-installed or enabled. */
+	requiredPlugins: string[];
 	/** True when the published instructions were truncated to Core's cap. */
 	systemPromptTruncated: boolean;
 	/** Tool / MCP-server ids the agent expects to reach. KEPT on the record (an
@@ -526,6 +529,7 @@ interface AgentInstallDisclosureWire {
 	memory_write_enabled?: boolean;
 	policy_id?: string | null;
 	remote_avatar_url?: string | null;
+	required_plugins?: string[];
 	space_ids?: string[];
 	system_prompt_truncated?: boolean;
 	tools?: string[];
@@ -553,14 +557,15 @@ export interface PublishedAgentInstallResult {
  */
 export async function installPublishedAgent(
 	target: ApiTarget,
-	id: string
+	id: string,
+	idempotencyKey: string
 ): Promise<PublishedAgentInstallResult> {
 	const json = await request<{
 		agent: AgentRecordWire;
 		requires?: AgentInstallDisclosureWire;
 	}>(target, "/api/agents/published/install", {
 		method: "POST",
-		body: { id },
+		body: { id, idempotency_key: idempotencyKey },
 		// A published agent may be PAID. Core forwards this control-plane bearer to
 		// the marketplace install handoff so the entitlement check can resolve the
 		// buyer org; without it a bought listing is denied as if unowned.
@@ -579,6 +584,7 @@ export async function installPublishedAgent(
 			remoteAvatarUrl: wire.remote_avatar_url ?? null,
 			systemPromptTruncated: wire.system_prompt_truncated ?? false,
 			tools: wire.tools ?? [],
+			requiredPlugins: wire.required_plugins ?? [],
 		},
 		requestedSpaceCount: (wire.space_ids ?? []).length,
 	};
@@ -830,12 +836,12 @@ export async function fetchAgentTools(
 /** One account an ACP agent holds (labels only — never a credential). */
 export interface AgentAccount {
 	accountId: string;
-	/** Display name (email, provider label, or "Signed-in account"). */
-	label: string;
-	/** "api_key" | "oauth" | "opaque". */
-	kind: string;
 	/** Whether this is the account the agent uses. */
 	active: boolean;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Display name (email, provider label, or "Signed-in account"). */
+	label: string;
 	/** For the managed Pi agent, the provider id this account belongs to. */
 	provider?: string;
 }
@@ -862,15 +868,15 @@ export async function switchAgentAccount(
 	id: string,
 	input: SwitchAgentAccountInput
 ): Promise<{ reauthenticate?: boolean }> {
-	const json = await request<{ switched: boolean; reauthenticate?: boolean; error?: string }>(
-		target,
-		`/api/agents/${id}/accounts/switch`,
-		{
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(input),
-		}
-	);
+	const json = await request<{
+		switched: boolean;
+		reauthenticate?: boolean;
+		error?: string;
+	}>(target, `/api/agents/${id}/accounts/switch`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(input),
+	});
 	if (!json.switched) {
 		throw new Error(json.error ?? "Could not switch account");
 	}

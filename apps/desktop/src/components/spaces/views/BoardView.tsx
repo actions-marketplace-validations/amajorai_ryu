@@ -121,7 +121,7 @@ export function BoardView({
 	};
 
 	return (
-		<div className="flex h-full gap-3 overflow-x-auto p-4">
+		<div className="scroll-fade-x flex h-full gap-3 overflow-x-auto p-4">
 			{groups.map((group) => (
 				<div
 					className={cn(
@@ -160,7 +160,7 @@ export function BoardView({
 							{group.rows.length}
 						</span>
 					</div>
-					<div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
+					<div className="scroll-fade flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
 						{group.rows.map((row) => (
 							<RowCard
 								columns={columns}

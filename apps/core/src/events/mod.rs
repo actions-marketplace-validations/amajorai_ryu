@@ -36,6 +36,11 @@ pub struct DesktopNotification {
     /// OS toast straight to the inbox item (and its Ack action).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_id: Option<String>,
+    /// The app/plugin that raised this notification (resolved from the minted
+    /// sidecar token, never from a body field). Lets a surface name/icon the
+    /// toast's source; `None` for Core-internal producers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_app_id: Option<String>,
 }
 
 static EVENTS: OnceLock<broadcast::Sender<DesktopNotification>> = OnceLock::new();

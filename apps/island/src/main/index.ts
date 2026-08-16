@@ -25,6 +25,7 @@ import {
 	parseHideOnFullscreen,
 } from "../shared/hide-on-fullscreen.ts";
 import { type ConsentState, IPC } from "../shared/ipc.ts";
+import { parseKeybindingOverrides } from "../shared/keybindings.ts";
 import {
 	DEFAULT_SCREEN_PRIVACY,
 	parseScreenPrivacy,
@@ -57,6 +58,7 @@ import {
 	getEdgeOffsetRaw,
 	subscribeEdgeOffsetChanges,
 } from "./services/edge-offset.ts";
+import { pluginContributions } from "./services/plugin-host.ts";
 import {
 	getPreferenceRaw,
 	setPreferenceRaw,
@@ -120,6 +122,88 @@ let dictationShortcut: string | null = null;
 // The currently-registered agent-ask accelerator (null when disabled/unset).
 // Agent-ask shares the dictation capture pipeline but pastes an agent answer.
 let dictationAskShortcut: string | null = null;
+const pluginShortcuts = new Map<string, string>();
+
+function toElectronAccelerator(shortcut: string): string | null {
+	const parts = shortcut
+		.toLowerCase()
+		.split("+")
+		.map((part) => part.trim());
+	const key = parts.pop();
+	if (!key || parts.length === 0) {
+		return null;
+	}
+	const modifiers = parts.map((part) => {
+		if (part === "ctrl" || part === "control" || part === "mod") {
+			return "CommandOrControl";
+		}
+		if (part === "cmd" || part === "command") {
+			return "Command";
+		}
+		if (part === "alt" || part === "option") {
+			return "Alt";
+		}
+		if (part === "shift") {
+			return "Shift";
+		}
+		return null;
+	});
+	if (modifiers.some((part) => part === null)) {
+		return null;
+	}
+	return [
+		...new Set(modifiers as string[]),
+		key.length === 1 ? key.toUpperCase() : key,
+	].join("+");
+}
+
+async function applyPluginShortcuts(): Promise<void> {
+	for (const accelerator of pluginShortcuts.values()) {
+		globalShortcut.unregister(accelerator);
+	}
+	pluginShortcuts.clear();
+	const occupied = new Set(
+		[
+			commandShortcut,
+			voiceShortcut,
+			dictationShortcut,
+			dictationAskShortcut,
+		].filter((value): value is string => value !== null)
+	);
+	const result = await pluginContributions();
+	if (!result.available) {
+		return;
+	}
+	const overrides = parseKeybindingOverrides(
+		await getPreferenceRaw("keybindings")
+	);
+	for (const companion of result.companions) {
+		const actionId = `plugin:${companion.pluginId}`;
+		const configured = Object.hasOwn(overrides, actionId)
+			? overrides[actionId]
+			: companion.shortcut;
+		if (!configured) {
+			continue;
+		}
+		const accelerator = toElectronAccelerator(configured);
+		if (!accelerator || occupied.has(accelerator)) {
+			continue;
+		}
+		try {
+			if (
+				globalShortcut.register(accelerator, () => {
+					focusForCommand();
+					islandWindow?.webContents.send(IPC.plugins.shortcut, companion.id);
+				})
+			) {
+				pluginShortcuts.set(companion.id, accelerator);
+				occupied.add(accelerator);
+			}
+		} catch {
+			/* invalid or unavailable accelerator: leave the app usable */
+		}
+	}
+}
 
 // The latest raw dictation preference blob, kept so a command- or voice-shortcut
 // change can re-reconcile dictation (which defers to both) without a fresh read.
@@ -572,6 +656,10 @@ async function bootstrap(): Promise<void> {
 	subscribePreferenceChanges(DICTATION_PREF_KEY, (raw) => {
 		lastDictationRaw = raw;
 		applyDictationPrefs(raw);
+	});
+	await applyPluginShortcuts();
+	subscribePreferenceChanges("keybindings", () => {
+		applyPluginShortcuts().catch(() => undefined);
 	});
 
 	// The renderer owns the recording lifecycle (it drives the mic + waveform), so

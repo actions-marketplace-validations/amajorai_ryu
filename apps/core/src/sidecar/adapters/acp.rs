@@ -14,16 +14,16 @@ use agent_client_protocol::schema::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigOptionValue, SessionConfigSelectOption, SessionId, SessionNotification,
-    SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
-    SetSessionModelRequest, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation,
-    ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModelRequest, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{Agent, Client, ConnectionTo, SessionMessage};
 use agent_client_protocol_tokio::AcpAgent;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
@@ -35,6 +35,36 @@ use crate::sidecar::gateway::{check_exec_scan, ExecScanOutcome};
 use crate::sidecar::mcp::McpRegistry;
 use crate::sidecar::BoxFuture;
 use crate::win_process::NoWindow;
+
+/// ACP's elicitation request was added after the 0.11 schema dependency this
+/// crate currently uses. Keep the wire-level request local until the dependency
+/// can be upgraded; unlike a `ToolCall` notification, this is a real
+/// request/response exchange and the response is what resumes the agent's tool
+/// loop.
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcRequest)]
+#[request(method = "elicitation/create", response = ElicitationCreateResponse)]
+pub struct ElicitationCreateRequest {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub mode: serde_json::Value,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcResponse)]
+pub struct ElicitationCreateResponse {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+}
+
+impl ElicitationCreateResponse {
+    fn cancelled() -> Self {
+        Self {
+            action: "cancel".to_owned(),
+            content: None,
+        }
+    }
+}
 
 /// A single event emitted by a running ACP session.
 ///
@@ -148,6 +178,10 @@ pub enum AcpEvent {
     /// - `SessionUpdate::ConfigOptionUpdate`, the agent volunteering the same
     ///   list unprompted.
     ConfigOptions(serde_json::Value),
+    /// ACP session metadata changed (title and/or last-activity timestamp).
+    /// The desktop can use this to keep the tab title and transcript chrome in
+    /// sync with agents that rename their sessions.
+    SessionInfo(serde_json::Value),
     /// The agent is asking the user to approve a tool call because the active
     /// permission mode requires it. The client renders the `options` as
     /// allow/reject buttons and echoes the chosen `option_id` back via
@@ -159,6 +193,13 @@ pub enum AcpEvent {
         tool_call: serde_json::Value,
         /// Serialized `Vec<PermissionOption>` ({ optionId, name, kind }).
         options: serde_json::Value,
+    },
+    /// A structured ACP elicitation request. The client answers this through
+    /// `/api/chat/question`; the request handler owns the ACP responder and
+    /// therefore resumes the agent directly when the waiter resolves.
+    QuestionRequest {
+        tool_call_id: String,
+        input: serde_json::Value,
     },
     /// Token / context-window usage for the turn (ACP `unstable_session_usage`).
     /// Carries whatever the agent reported as a loosely-typed object — a live
@@ -979,9 +1020,105 @@ type PermissionWaiters = Mutex<
     >,
 >;
 
+/// `conversation_id/tool_call_id → (answer waiter, host conversation id)`.
+///
+/// Question tools are surfaced as ACP tool calls, but their answer is a
+/// client-side interaction. Keep the waiter separate from permission waiters:
+/// an answer is structured data, not an option id, and must never be accepted
+/// by the permission endpoint by accident.
+type QuestionWaiters = Mutex<
+    std::collections::HashMap<String, (tokio::sync::oneshot::Sender<serde_json::Value>, String)>,
+>;
+
 fn pending_permissions() -> &'static PermissionWaiters {
     static WAITERS: OnceLock<PermissionWaiters> = OnceLock::new();
     WAITERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn pending_questions() -> &'static QuestionWaiters {
+    static WAITERS: OnceLock<QuestionWaiters> = OnceLock::new();
+    WAITERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn question_key(conversation_id: &str, tool_call_id: &str) -> String {
+    format!("{conversation_id}\u{1f}{tool_call_id}")
+}
+
+fn elicitation_tool_call_id(request: &ElicitationCreateRequest) -> String {
+    request
+        .mode
+        .get("scope")
+        .and_then(|scope| scope.get("toolCallId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("elicitation-{}", next_permission_id()))
+}
+
+fn elicitation_question_input(
+    request: &ElicitationCreateRequest,
+    tool_call_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "toolCallId": tool_call_id,
+        "questions": [{
+            "id": "q-0",
+            "title": request.message,
+            "kind": "text",
+            "options": [],
+        }],
+        "schema": request.mode,
+    })
+}
+
+/// Register the answer channel for a Question tool call. The ACP tool-call id
+/// is stable for the life of the session and is also sent on the wire as
+/// `toolCallId`, so reconnecting clients can answer the exact pending call.
+pub fn register_question(
+    conversation_id: String,
+    tool_call_id: String,
+) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if !conversation_id.is_empty() && !tool_call_id.is_empty() {
+        if let Ok(mut map) = pending_questions().lock() {
+            map.insert(
+                question_key(&conversation_id, &tool_call_id),
+                (tx, conversation_id),
+            );
+        }
+    }
+    rx
+}
+
+/// Return the conversation owning a pending Question, without consuming it.
+pub fn peek_question_scope(conversation_id: &str, tool_call_id: &str) -> Option<String> {
+    pending_questions().lock().ok().and_then(|map| {
+        map.get(&question_key(conversation_id, tool_call_id))
+            .map(|(_, scope)| scope.clone())
+    })
+}
+
+/// Deliver a structured answer to a pending Question tool call.
+pub fn resolve_question(
+    conversation_id: &str,
+    tool_call_id: &str,
+    answers: serde_json::Value,
+) -> bool {
+    let sender = pending_questions()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&question_key(conversation_id, tool_call_id)));
+    match sender {
+        Some((tx, _scope)) => tx.send(answers).is_ok(),
+        None => false,
+    }
+}
+
+/// Drop a pending Question when its ACP stream ends or the client disconnects.
+pub fn cancel_question(conversation_id: &str, tool_call_id: &str) {
+    if let Ok(mut map) = pending_questions().lock() {
+        map.remove(&question_key(conversation_id, tool_call_id));
+    }
 }
 
 /// Mint a unique permission request id (process-local, collision-free).
@@ -1597,8 +1734,10 @@ pub async fn close_acp_session(spawn_cmd: String, session_id: String) -> anyhow:
                     // 502. Read the capability instead and report "unsupported"
                     // honestly — a delete that cannot work should not look like a
                     // node that is broken.
-                    let init: InitializeResponse =
-                        cx.send_request(ryu_initialize_request()).block_task().await?;
+                    let init: InitializeResponse = cx
+                        .send_request(ryu_initialize_request())
+                        .block_task()
+                        .await?;
                     if !read_agent_caps(&init).session_close {
                         return Ok(false);
                     }
@@ -1862,8 +2001,13 @@ pub fn spawn_acp_task(
     // Raw new user message (no history). Sent instead of `prompt` on every turn
     // after a live ACP session's first, so history is not double-counted.
     delta_prompt: String,
+    // When true, do not reuse the pooled ACP session: this turn must receive the
+    // complete rewritten prompt so prior hidden context injections are absent.
+    // `permission_scope_id` is still carried on the turn for ACL/cancel scope.
+    fresh_session: bool,
     images: Vec<ImagePart>,
     cwd: PathBuf,
+    environment: Vec<(String, String)>,
     mcp: Option<Arc<McpRegistry>>,
     allowlist: Option<Vec<String>>,
     // Per-agent Composio action slugs + the effective agent id, threaded into the
@@ -1909,11 +2053,28 @@ pub fn spawn_acp_task(
     // turn. `is_closed()` detects an instance that hit its idle TTL or crashed, so
     // the chat's next message transparently respawns it (auto-restore).
     let conversation = permission_scope_id.unwrap_or_default();
-    if conversation.is_empty() {
+    let environment_key = environment
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("\u{2}");
+    if !should_reuse_acp_session(&conversation, fresh_session) {
+        // A fresh context turn must not leave the old pooled sender eligible for
+        // a later request: drop it before spawning the unpooled instance. The
+        // in-flight task retains its own permission scope and drains naturally.
+        if fresh_session && !conversation.is_empty() {
+            let key = format!(
+                "{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}\u{1}{environment_key}",
+                cwd.display(),
+            );
+            if let Ok(mut pool) = acp_pool().lock() {
+                pool.remove(&key);
+            }
+        }
         let (turns_tx, turns_rx) = mpsc::unbounded_channel();
         let _ = turns_tx.send(acp_turn); // drop tx → instance ends after this turn
         tokio::spawn(async move {
-            if let Err(e) = run_acp_instance(spawn_cmd, cwd, turns_rx).await {
+            if let Err(e) = run_acp_instance(spawn_cmd, cwd, environment, turns_rx).await {
                 tracing::error!("ACP instance error: {e}");
             }
         });
@@ -1921,7 +2082,7 @@ pub fn spawn_acp_task(
     }
 
     let key = format!(
-        "{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}",
+        "{conversation}\u{1}{agent_key}\u{1}{spawn_cmd}\u{1}{}\u{1}{environment_key}",
         cwd.display()
     );
     let mut pool = acp_pool().lock().expect("acp pool mutex poisoned");
@@ -1953,12 +2114,19 @@ pub fn spawn_acp_task(
     let spawn_cmd_task = spawn_cmd.clone();
     let cwd_task = cwd.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_acp_instance(spawn_cmd_task, cwd_task, turns_rx).await {
+        if let Err(e) = run_acp_instance(spawn_cmd_task, cwd_task, environment, turns_rx).await {
             tracing::error!("ACP instance error: {e}");
         }
     });
     pool.insert(key, turns_tx);
     events_rx
+}
+
+/// A fresh context request is deliberately unpooled even when it has a normal
+/// conversation id. The id remains on [`AcpTurn`] so permissions/cancellation
+/// stay scoped to the same chat while the model receives no prior ACP session.
+fn should_reuse_acp_session(conversation: &str, fresh_session: bool) -> bool {
+    !conversation.is_empty() && !fresh_session
 }
 
 /// Per-chat pool of live ACP instances: conversation id -> that chat's turn queue.
@@ -2005,8 +2173,10 @@ impl AgentAdapter for AcpAdapter {
                 // Legacy one-shot path: an ephemeral, un-pooled instance whose
                 // only turn is the first, so `delta_prompt` is never consulted.
                 prompt,
+                false,
                 vec![],
                 cwd,
+                vec![],
                 None,
                 None,
                 vec![],
@@ -2082,8 +2252,10 @@ impl AgentAdapter for AcpAdapter {
                     | AcpEvent::ToolSteps { .. }
                     | AcpEvent::ConfigUpdate(_)
                     | AcpEvent::ConfigOptions(_)
+                    | AcpEvent::SessionInfo(_)
                     | AcpEvent::AuthNeeded { .. }
-                    | AcpEvent::PermissionRequest { .. } => {}
+                    | AcpEvent::PermissionRequest { .. }
+                    | AcpEvent::QuestionRequest { .. } => {}
                 }
             }
             chunks.push(ChatChunk {
@@ -2380,6 +2552,7 @@ fn acp_tool_bridge_enabled(spawn_cmd: &str, agent_id: &str) -> bool {
 pub async fn run_acp_instance(
     spawn_cmd: String,
     cwd: PathBuf,
+    environment: Vec<(String, String)>,
     turns_rx: mpsc::UnboundedReceiver<AcpTurn>,
 ) -> anyhow::Result<()> {
     // The spawn command is consumed below (`AcpAgent::from_str` then the move into
@@ -2449,8 +2622,20 @@ pub async fn run_acp_instance(
         crate::pi_config::app_extensions::ensure_pi_extensions_materialized().await;
     }
 
-    let agent = AcpAgent::from_str(&spawn_cmd)
-        .map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?
+    let parsed_agent =
+        AcpAgent::from_str(&spawn_cmd).map_err(|e| anyhow::anyhow!("ACP spawn parse: {e}"))?;
+    let server = match parsed_agent.into_server() {
+        agent_client_protocol::schema::McpServer::Stdio(mut stdio) => {
+            for (name, value) in environment {
+                stdio
+                    .env
+                    .push(agent_client_protocol::schema::EnvVariable::new(name, value));
+            }
+            agent_client_protocol::schema::McpServer::Stdio(stdio)
+        }
+        other => other,
+    };
+    let agent = AcpAgent::new(server)
         // Surface the ACP subprocess's own output. Without this the agent's
         // stderr is piped-and-dropped, so a crash inside pi-acp / the engine only
         // reaches us as an opaque "stream was destroyed". Stderr is logged at WARN
@@ -2833,6 +3018,7 @@ pub async fn run_acp_instance(
                         SessionMessage::SessionMessage(message) => {
                             let tx_chunk = tx.clone();
                             let tx_perm = tx.clone();
+                            let tx_question = tx.clone();
                             // Per-message copies for the managed-Pi widget synthesis
                             // in the `ToolCallUpdate` arm (the closure is `move`).
                             let widget_mcp = widget_mcp.clone();
@@ -2856,6 +3042,7 @@ pub async fn run_acp_instance(
                             let fs_cwd_read = terminal_cwd.clone();
                             let fs_cwd_write = terminal_cwd.clone();
                             let term_scan_agent = scan_agent.clone();
+                            let question_conversation = perm_conversation.clone();
                             // Per-message handle on the session's undelivered startup
                             // banner (the notification closure below is `move`).
                             let banner_slot = Arc::clone(&startup_banner);
@@ -3125,7 +3312,15 @@ pub async fn run_acp_instance(
                                                 serde_json::to_value(&u.config_options)
                                             {
                                                 let _ = tx_chunk
-                                                    .send(AcpEvent::ConfigOptions(json));
+                                                .send(AcpEvent::ConfigOptions(json));
+                                            }
+                                        }
+                                        SessionUpdate::SessionInfoUpdate(u) => {
+                                            // Session metadata is a real ACP update, not
+                                            // agent text. Preserve the partial-update shape
+                                            // (including explicit nulls) for the desktop.
+                                            if let Ok(json) = serde_json::to_value(&u) {
+                                                let _ = tx_chunk.send(AcpEvent::SessionInfo(json));
                                             }
                                         }
                                         SessionUpdate::UserMessageChunk(chunk) => {
@@ -3141,6 +3336,46 @@ pub async fn run_acp_instance(
                                         }
                                         _ => {}
                                     }
+                                    Ok(())
+                                })
+                                .await
+                                // ── structured user input ─────────────────────
+                                // Unlike a ToolCall notification, elicitation is
+                                // an ACP request. Keep the responder open while
+                                // the HTTP question route resolves the shared
+                                // waiter; responding here is what lets the
+                                // agent's in-flight tool call continue.
+                                .if_request(async move |req: ElicitationCreateRequest, responder| {
+                                    let question_id = elicitation_tool_call_id(&req);
+                                    let input = elicitation_question_input(&req, &question_id);
+                                    let rx = register_question(
+                                        question_conversation.clone(),
+                                        question_id.clone(),
+                                    );
+                                    let _ = tx_question.send(AcpEvent::QuestionRequest {
+                                        tool_call_id: question_id.clone(),
+                                        input,
+                                    });
+                                    let result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(600),
+                                        rx,
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok);
+                                    let response = match result {
+                                        Some(answers) => ElicitationCreateResponse {
+                                            action: "accept".to_owned(),
+                                            content: Some(serde_json::json!({
+                                                "answers": answers,
+                                            })),
+                                        },
+                                        None => {
+                                            cancel_question(&question_conversation, &question_id);
+                                            ElicitationCreateResponse::cancelled()
+                                        }
+                                    };
+                                    responder.respond(response)?;
                                     Ok(())
                                 })
                                 .await
@@ -7019,7 +7254,10 @@ mod tests {
         assert!(caps.session_close);
 
         let json = agent_caps_json(&caps);
-        assert_eq!(json["sessionCapabilities"]["close"], serde_json::json!(true));
+        assert_eq!(
+            json["sessionCapabilities"]["close"],
+            serde_json::json!(true)
+        );
     }
 
     #[test]
@@ -7137,6 +7375,38 @@ mod tests {
         assert!(peek_permission_scope(&unknown).is_none());
     }
 
+    #[tokio::test]
+    async fn question_waiter_round_trips_structured_answers_by_stable_tool_id() {
+        let conversation_id = format!("question-conv-{}", line!());
+        let tool_call_id = format!("question-tool-{}", line!());
+        let rx = register_question(conversation_id.clone(), tool_call_id.clone());
+        assert_eq!(
+            peek_question_scope(&conversation_id, &tool_call_id).as_deref(),
+            Some(conversation_id.as_str())
+        );
+
+        let answers = serde_json::json!([{
+            "question_id": "q-0",
+            "kind": "single",
+            "selected_ids": ["option-a"]
+        }]);
+        assert!(resolve_question(
+            &conversation_id,
+            &tool_call_id,
+            answers.clone()
+        ));
+        assert_eq!(
+            rx.await.expect("question answer sender remains alive"),
+            answers
+        );
+        assert!(peek_question_scope(&conversation_id, &tool_call_id).is_none());
+        assert!(!resolve_question(
+            &conversation_id,
+            &tool_call_id,
+            serde_json::json!([])
+        ));
+    }
+
     // ── Gateway command wrapping ────────────────────────────────────────────
 
     #[test]
@@ -7151,5 +7421,13 @@ mod tests {
             "must not inject an API key or auth token: {cmd}"
         );
         assert!(cmd.contains("claude-code-acp"), "base command is preserved");
+    }
+
+    #[test]
+    fn fresh_session_disables_pool_reuse_but_keeps_conversation_scope() {
+        assert!(should_reuse_acp_session("conv-1", false));
+        assert!(!should_reuse_acp_session("conv-1", true));
+        assert!(!should_reuse_acp_session("", false));
+        assert!(!should_reuse_acp_session("", true));
     }
 }

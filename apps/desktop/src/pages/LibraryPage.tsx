@@ -1147,7 +1147,7 @@ function LibraryCollections({
 				/* Centered, capped-width column mirroring the Store catalog layout —
 			    the cards read as the same 2-column grid rather than a full-bleed
 			    wall. */
-				<div className="min-h-0 flex-1 overflow-y-auto px-4 pt-2 pb-24">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-4 pt-2 pb-24">
 					<div className="mx-auto w-full max-w-4xl">
 						{activeContributed ? (
 							<ContributedLibrarySection
@@ -1292,7 +1292,7 @@ function LibraryCollections({
 						<Button
 							onClick={() => setRenaming(null)}
 							type="button"
-							variant="outline"
+							variant="ghost"
 						>
 							Cancel
 						</Button>

@@ -1,6 +1,7 @@
 import type { ChatStatus, UIMessage } from "ai";
 import type React from "react";
 import type { SuggestionItem } from "./input/suggestions.tsx";
+import type { LinkPreviewResolvers } from "./link-preview.tsx";
 import type { MessageReactionBucket } from "./message-reactions.tsx";
 import type {
 	QuestionAnswer,
@@ -14,6 +15,15 @@ export type InputSuggestions =
 			className?: string;
 			itemClassName?: string;
 	  };
+
+export type AgentUiSubmit = (value: unknown) => void | Promise<void>;
+
+export interface MentionItem {
+	icon?: React.ReactNode;
+	id?: string;
+	kind: string;
+	label: string;
+}
 
 export interface ChatTheme {
 	dark: Record<string, string>;
@@ -76,6 +86,54 @@ export interface WidgetAvailablePart {
 	type: "data-tool-widget-available";
 }
 
+/** Server-verified attribution for a widget-injected user turn. */
+export interface WidgetMessageAttribution {
+	origin_server: string;
+	source: "widget";
+	widget_instance_id: string;
+}
+
+/** Read the server-verified widget provenance carried by a user message. */
+export function getWidgetMessageAttribution(
+	message: UIMessage
+): WidgetMessageAttribution | null {
+	const value = message as UIMessage & {
+		metadata?: unknown;
+		originServer?: unknown;
+		source?: unknown;
+		widgetInstanceId?: unknown;
+	};
+	const metadata =
+		typeof value.metadata === "object" && value.metadata !== null
+			? (value.metadata as Record<string, unknown>)
+			: null;
+	const source = metadata?.source ?? value.source;
+	const instanceId = metadata?.widget_instance_id ?? value.widgetInstanceId;
+	const originServer = metadata?.origin_server ?? value.originServer;
+	if (
+		source !== "widget" ||
+		typeof instanceId !== "string" ||
+		typeof originServer !== "string" ||
+		instanceId.length === 0 ||
+		originServer.length === 0
+	) {
+		return null;
+	}
+	return {
+		origin_server: originServer,
+		source: "widget",
+		widget_instance_id: instanceId,
+	};
+}
+
+/** Stable comparison key used to keep widget labels inside their own run. */
+export function widgetMessageProvenanceKey(message: UIMessage): string | null {
+	const attribution = getWidgetMessageAttribution(message);
+	return attribution
+		? `${attribution.source}:${attribution.origin_server}:${attribution.widget_instance_id}`
+		: null;
+}
+
 /** The desktop-authored component that renders a live app widget in a sandboxed
  *  iframe. `packages/blocks` cannot import it (it lives in `apps/desktop`), so it
  *  is injected via `slots.WidgetRenderer` and the WidgetHostContext. */
@@ -120,6 +178,9 @@ export interface ChatSlots {
 		actions?: React.ReactNode;
 		message: UIMessage;
 		className?: string;
+		onOpenFile?: (path: string) => void;
+		onOpenLink?: (url: string) => void;
+		previewResolvers?: LinkPreviewResolvers;
 	}>;
 	/** Renders a live app widget for `data-tool-widget-available` parts. Supplied
 	 *  by apps/desktop (the concrete `AppWidget`), reached inside the default tool
@@ -195,6 +256,8 @@ export interface AgentChatProps {
 		name?: string;
 		id?: string;
 	};
+	/** Project-scoped saved drafts exposed by the host composer. */
+	draftControls?: import("./input-bar.tsx").ComposerDraftControls;
 	/** Rendered below the composer in the centered empty state (e.g. a recent
 	 * chats list, Codex-style). Ignored once the thread has messages. */
 	emptyStateFooter?: React.ReactNode;
@@ -244,12 +307,16 @@ export interface AgentChatProps {
 		}[];
 	};
 	initialScrollBehavior?: "bottom" | "top";
+	/** Resolved @ mentions used by the composer and transcript renderer. */
+	mentionItems?: MentionItem[];
 	/** Contributed per-message toolbar actions (resolved by the shell from
 	 *  `contributes.message_actions`, filtered to the message's `target`), rendered
 	 *  after the built-in toolbar buttons. Dispatches through
 	 *  {@link AgentChatProps.onContributedMessageAction}. */
 	messageActions?: ContributedMessageAction[];
 	messages: UIMessage[];
+	/** Submit a value from an agent-rendered UI as a new chat message. */
+	onAgentUiSubmit?: AgentUiSubmit;
 	/** Branch ("fork into new chat") from a message; receives the message id to
 	 * branch from. When omitted, no branch button is shown. */
 	onBranch?: (messageId: string) => void;
@@ -292,6 +359,8 @@ export interface AgentChatProps {
 	onOpenContext?: () => void;
 	/** Open a project file referenced by assistant output or tool summaries. */
 	onOpenFile?: (path: string) => void;
+	/** Open an external website link through the host's preferred browser surface. */
+	onOpenLink?: (url: string) => void;
 	/** Quote a text selection in a message. When provided, selecting message text
 	 * surfaces a floating "Quote" button; clicking it calls this with the selected
 	 * plain text (the surface stashes it as the pending `quote`). */
@@ -321,6 +390,11 @@ export interface AgentChatProps {
 	/** Toggle an emoji reaction on a message. Omit to hide the feature entirely —
 	 * which is what a surface with no realtime room (island, storyboard) wants. */
 	onToggleReaction?: (messageId: string, emoji: string) => void;
+	/** Resume a workflow suspended at a human-input gate. The host owns the
+	 *  Core-backed API; blocks only renders and forwards the response payload. */
+	onWorkflowResume?: (runId: string, payload: string) => Promise<unknown>;
+	/** Lazy metadata/file loaders used by link hover previews. */
+	previewResolvers?: LinkPreviewResolvers;
 
 	questionTool?: {
 		submitLabel?: string;

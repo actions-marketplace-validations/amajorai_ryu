@@ -22,7 +22,8 @@
 // The money layer being unavailable (signed out, no org, network) must never
 // break the Agents tab, so the browse error is reported, not thrown.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getActiveUserId } from "@/lib/auth-client.ts";
 import {
 	installPublishedAgent,
 	type PublishedAgentInstallResult,
@@ -48,6 +49,33 @@ export interface UseCommunityAgentsResult {
 	refresh: () => Promise<void>;
 }
 
+/** Scope an install result to the identity that Core and the marketplace saw. */
+export function communityAgentInstallCacheKey(
+	target: ApiTarget,
+	accountId: string | null,
+	id: string
+): string {
+	return JSON.stringify({
+		accountId,
+		id,
+		token: target.token,
+		url: target.url.replace(/\/$/, ""),
+	});
+}
+
+/** The wire key is stable across remounts, but excludes the node bearer token. */
+export function communityAgentInstallIdempotencyKey(
+	target: ApiTarget,
+	accountId: string | null,
+	id: string
+): string {
+	return `community-agent-v1:${JSON.stringify({
+		accountId,
+		id,
+		node: target.url.replace(/\/$/, ""),
+	})}`;
+}
+
 export function useCommunityAgents(): UseCommunityAgentsResult {
 	const activeNode = useActiveNode();
 	const target: ApiTarget = {
@@ -55,11 +83,18 @@ export function useCommunityAgents(): UseCommunityAgentsResult {
 		token: activeNode.token ?? null,
 	};
 	const { url, token } = target;
+	const accountId = getActiveUserId();
 
 	const [agents, setAgents] = useState<MarketplaceCard[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
 	const [pendingId, setPendingId] = useState<string | null>(null);
+	// This is intentionally only an in-flight deduplication map. A completed
+	// install can be deleted by another mounted surface and must be installable
+	// again without remounting this hook.
+	const inFlightInstalls = useRef(
+		new Map<string, Promise<PublishedAgentInstallResult>>()
+	);
 
 	const load = useCallback(async () => {
 		setLoading(true);
@@ -82,19 +117,44 @@ export function useCommunityAgents(): UseCommunityAgentsResult {
 
 	const install = useCallback(
 		async (id: string) => {
-			setPendingId(id);
+			const cacheKey = communityAgentInstallCacheKey(target, accountId, id);
+			const inFlight = inFlightInstalls.current.get(cacheKey);
+			if (inFlight) {
+				return inFlight;
+			}
+
+			const operation = (async () => {
+				setPendingId(id);
+				try {
+					const result = await installPublishedAgent(
+						{ url, token },
+						id,
+						communityAgentInstallIdempotencyKey(target, accountId, id)
+					);
+					// Core's response is the complete install transaction. In particular,
+					// requiredPlugins is disclosure for the user, never an instruction to
+					// install third-party plugins. Keeping dependency handling out of this
+					// path also means a dependency failure cannot turn a successful agent
+					// creation into a retry that creates a duplicate agent record.
+					// A published agent lands as a new local agent record, so the roster
+					// every always-mounted surface reads (sidebar, picker, Library) is now
+					// stale — the same refresh the runtime catalog fires on install.
+					triggerAgentsRefresh();
+					return result;
+				} finally {
+					setPendingId(null);
+				}
+			})();
+			inFlightInstalls.current.set(cacheKey, operation);
 			try {
-				const result = await installPublishedAgent({ url, token }, id);
-				// A published agent lands as a new local agent record, so the roster
-				// every always-mounted surface reads (sidebar, picker, Library) is now
-				// stale — the same refresh the runtime catalog fires on install.
-				triggerAgentsRefresh();
-				return result;
+				return await operation;
 			} finally {
-				setPendingId(null);
+				if (inFlightInstalls.current.get(cacheKey) === operation) {
+					inFlightInstalls.current.delete(cacheKey);
+				}
 			}
 		},
-		[url, token]
+		[url, token, accountId]
 	);
 
 	return { agents, error, install, loading, pendingId, refresh: load };

@@ -25,7 +25,9 @@ const GITHUB_CACHE_TTL_SECONDS: u64 = 60 * 60 * 24;
 
 pub mod default_skills;
 pub mod from_source;
+pub mod packs;
 pub mod plugin_skills;
+pub mod system_skills;
 
 pub(crate) const USER_AGENT: &str = "ryu-core/0.1 (+https://ryu.app)";
 
@@ -982,6 +984,12 @@ pub async fn install_skill(client: &reqwest::Client, id: &str) -> Result<Install
     // on the default chat route (bulk-discovered shared-dir skills do not until
     // the user activates them).
     ryu_skills::set_active(&slug, true);
+    // A catalog install is a user choice, so the skill is user-owned — the
+    // bundled-system sync must never auto-remove it.
+    crate::skills_catalog::system_skills::record_origin(
+        &slug,
+        crate::skills_catalog::system_skills::SkillOrigin::User,
+    );
 
     Ok(InstallResult {
         slug,

@@ -56,6 +56,7 @@ import {
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import { Progress } from "@ryu/ui/components/progress.tsx";
+import { ExpandableQRCode } from "@ryu/ui/components/qr-code.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
 import {
 	Tooltip,
@@ -65,7 +66,6 @@ import {
 import { buildRyuDeepLink, parseRyuDeepLink } from "@ryuhq/protocol/deep-link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useState } from "react";
-import QRCode from "react-qr-code";
 import { sileo } from "sileo";
 import { WEB_URL } from "@/lib/app-urls.ts";
 import { openExternal } from "@/lib/tauri-bridge.ts";
@@ -81,6 +81,7 @@ import {
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { useNodeSandboxes } from "@/src/hooks/useNodeSandboxes.ts";
+import { useNodeSelectorDetail } from "@/src/hooks/useNodeSelectorDetail.ts";
 import { useNodeSystemInfo } from "@/src/hooks/useNodeSystemInfo.ts";
 import { useNodeVersion } from "@/src/hooks/useNodeVersion.ts";
 import {
@@ -545,7 +546,7 @@ function NodeDependenciesSection({ target }: { target: ApiTarget }) {
 						installMissing().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{installing ? "Installing…" : `Install ${missing.length} missing`}
 				</Button>
@@ -604,7 +605,7 @@ function NodeHardwareDialog({
 						Hardware{node ? ` · ${displayName(node.name)}` : ""}
 					</DialogTitle>
 				</DialogHeader>
-				<div className="-mr-2 min-h-0 flex-1 space-y-5 overflow-y-auto pr-2">
+				<div className="scroll-fade -mr-2 min-h-0 flex-1 space-y-5 overflow-y-auto pr-2">
 					{body}
 					{node !== null && <NodeDependenciesSection target={target} />}
 				</div>
@@ -944,9 +945,7 @@ function ShareNodeDialog({
 								</Button>
 							</div>
 							<div className="flex flex-col items-center gap-2 pt-1">
-								<div className="rounded-lg bg-white p-3">
-									<QRCode size={160} value={link} />
-								</div>
+								<ExpandableQRCode size={160} value={link} />
 								<p className="text-[11px] text-muted-foreground">
 									Scan with the Ryu mobile app
 								</p>
@@ -3228,6 +3227,7 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 	const openGateway = useGatewayDialog((s) => s.openGateway);
 	const [shareNode, setShareNode] = useState<Node | null>(null);
 	const [hardwareNode, setHardwareNode] = useState<Node | null>(null);
+	const [showDetail] = useNodeSelectorDetail();
 	const activeNode = nodes.find((n) => n.name === defaultNode) ?? nodes[0];
 
 	const {
@@ -3444,62 +3444,102 @@ export function NodeSelector({ mode }: NodeSelectorProps) {
 						size={12}
 					/>
 				</DropdownMenuTrigger>
-				<DropdownMenuContent align="start" className="w-72 bg-popover/70">
-					{nodes.map((node) => (
-						<DropdownMenuItem
-							key={node.name}
-							onClick={() => setDefault(node.name)}
-						>
-							{isLocalNode(node) ? (
-								<HugeiconsIcon
-									className={cn(
-										"size-3.5 shrink-0",
-										node.name === defaultNode
-											? TONE_TEXT[tone]
-											: "text-muted-foreground/30"
-									)}
-									icon={LaptopIcon}
-									size={14}
-								/>
-							) : (
-								<HugeiconsIcon
-									className={cn(
-										"size-3.5 shrink-0",
-										node.name === defaultNode
-											? TONE_TEXT[tone]
-											: "text-muted-foreground/30"
-									)}
-									icon={Link01Icon}
-									size={14}
-								/>
-							)}
-							<span className="flex-1">{displayName(node.name)}</span>
-							{node.name === defaultNode && (
-								<span className="text-muted-foreground text-xs">active</span>
-							)}
-							<button
-								aria-label={`Share ${node.name}`}
-								className="shrink-0 text-muted-foreground hover:text-foreground"
-								onClick={(e) => {
-									// Don't switch the active node or close the menu — just share.
-									e.preventDefault();
-									e.stopPropagation();
-									setShareNode(node);
-								}}
-								type="button"
+				<DropdownMenuContent
+					align="start"
+					className="w-[380px] overflow-hidden p-0"
+				>
+					<div className="border-border/60 border-b bg-muted/20 px-3 py-3">
+						<div className="flex items-start justify-between gap-3">
+							<div>
+								<p className="font-semibold text-sm">Choose a node</p>
+								<p className="mt-0.5 text-muted-foreground text-xs">
+									Where should Ryu run this conversation?
+								</p>
+							</div>
+							<span className="rounded-full bg-primary/10 px-2 py-1 font-medium text-[10px] text-primary uppercase tracking-wide">
+								{nodes.length} connected
+							</span>
+						</div>
+					</div>
+					<div className="max-h-[min(68vh,520px)] overflow-y-auto p-2">
+						<p className="px-2 pt-0.5 pb-1 font-medium text-[10px] text-muted-foreground/60 uppercase tracking-wider">
+							Available nodes
+						</p>
+						{nodes.map((node) => (
+							<DropdownMenuItem
+								className={cn(
+									"mb-1 items-start gap-2 rounded-lg px-2.5 py-2.5",
+									node.name === defaultNode && "bg-accent"
+								)}
+								key={node.name}
+								onClick={() => setDefault(node.name)}
 							>
-								<HugeiconsIcon icon={Share08Icon} size={12} />
-							</button>
-						</DropdownMenuItem>
-					))}
-					{activeInfo && (
+								{isLocalNode(node) ? (
+									<HugeiconsIcon
+										className={cn(
+											"size-3.5 shrink-0",
+											node.name === defaultNode
+												? TONE_TEXT[tone]
+												: "text-muted-foreground/30"
+										)}
+										icon={LaptopIcon}
+										size={14}
+									/>
+								) : (
+									<HugeiconsIcon
+										className={cn(
+											"size-3.5 shrink-0",
+											node.name === defaultNode
+												? TONE_TEXT[tone]
+												: "text-muted-foreground/30"
+										)}
+										icon={Link01Icon}
+										size={14}
+									/>
+								)}
+								<span className="min-w-0 flex-1">
+									<span className="block truncate font-medium">
+										{displayName(node.name)}
+									</span>
+									{showDetail && (
+										<span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+											{node.managed
+												? "Ryu Cloud"
+												: isLocalNode(node)
+													? "This computer"
+													: node.url}
+										</span>
+									)}
+								</span>
+								{node.name === defaultNode && (
+									<span className="rounded-full bg-primary/10 px-1.5 py-0.5 font-medium text-[10px] text-primary">
+										Active
+									</span>
+								)}
+								<button
+									aria-label={`Share ${node.name}`}
+									className="shrink-0 text-muted-foreground hover:text-foreground"
+									onClick={(e) => {
+										// Don't switch the active node or close the menu — just share.
+										e.preventDefault();
+										e.stopPropagation();
+										setShareNode(node);
+									}}
+									type="button"
+								>
+									<HugeiconsIcon icon={Share08Icon} size={12} />
+								</button>
+							</DropdownMenuItem>
+						))}
+					</div>
+					{showDetail && activeInfo && (
 						<div className="px-3 pt-1 pb-1.5">
 							<NodeStats info={activeInfo} />
 						</div>
 					)}
 					{/* Full hardware detail sits right beneath the live usage bars it
 					    expands on. */}
-					{activeNode && (
+					{showDetail && activeNode && (
 						<DropdownMenuItem onClick={() => setHardwareNode(activeNode)}>
 							<HugeiconsIcon icon={CpuIcon} size={12} />
 							<span className="flex-1">Hardware</span>

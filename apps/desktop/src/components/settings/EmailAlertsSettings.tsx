@@ -189,7 +189,7 @@ function SmtpTransportCard() {
 						load().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{loading ? "Retrying…" : "Retry"}
 				</Button>
@@ -297,7 +297,7 @@ function SmtpTransportCard() {
 						disabled={loading || testing || saving}
 						onClick={handleTest}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						{testing ? "Sending…" : "Send test"}
 					</Button>
@@ -400,7 +400,7 @@ function AlertDeliveryCard() {
 						load().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{loading ? "Retrying…" : "Retry"}
 				</Button>
@@ -436,7 +436,7 @@ function AlertDeliveryCard() {
 					disabled={loading || saving}
 					onClick={addEmail}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Add email
 				</Button>
@@ -472,7 +472,7 @@ function AlertDeliveryCard() {
 					disabled={loading || saving}
 					onClick={addWebhook}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Add webhook
 				</Button>

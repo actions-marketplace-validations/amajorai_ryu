@@ -355,7 +355,7 @@ export type WidgetContribution = z.infer<typeof WidgetContributionSchema>;
  * derives `outputTemplate` / `toolInvocation` / `widgetAccessible`.
  */
 export const ToolAppConfigSchema = z.object({
-	/** MCP tool slug this runnable wraps — the fully-qualified `<server>__<name>` id. */
+	/** MCP tool slug this runnable wraps — the fully-qualified `<server>.<name>` id. */
 	slug: z.string().min(1),
 	/** The tool description the model reads when choosing it. Carried here because a
 	 *  packed app's manifest is the only channel (there is no `generated.rs`); Core's
@@ -622,6 +622,78 @@ export const EnginesReqSchema = z.object({
 
 export type EnginesReq = z.infer<typeof EnginesReqSchema>;
 
+export const McpServerAuthSchema = z
+	.object({
+		client_id: z.string().min(1).optional(),
+		type: z.literal("oauth"),
+	})
+	.strict();
+
+export const McpServerDeclSchema = z
+	.object({
+		args: z.array(z.string()).default([]),
+		auth: McpServerAuthSchema.optional(),
+		command: z.string().optional(),
+		command_env: z.string().optional(),
+		description: z.string().optional(),
+		enabled: z.boolean().default(true),
+		env: z.record(z.string(), z.string()).default({}),
+		headers: z.record(z.string(), z.string()).default({}),
+		type: z
+			.enum(["stdio", "http", "streamable-http", "streamable_http", "sse"])
+			.optional(),
+		url: z.url().optional(),
+	})
+	.superRefine((server, context) => {
+		if (!(server.command || server.url)) {
+			context.addIssue({
+				code: "custom",
+				message: "an MCP server requires command or url",
+			});
+		}
+		if (!server.auth) {
+			return;
+		}
+		if (server.command || server.type === "stdio" || !server.url) {
+			context.addIssue({
+				code: "custom",
+				message: "OAuth is supported only for remote HTTP MCP servers",
+			});
+			return;
+		}
+		if (
+			Object.keys(server.headers).some(
+				(name) => name.toLowerCase() === "authorization"
+			)
+		) {
+			context.addIssue({
+				code: "custom",
+				message: "OAuth cannot be combined with a static Authorization header",
+			});
+		}
+		const url = new URL(server.url);
+		const loopback =
+			url.hostname === "localhost" ||
+			url.hostname.startsWith("127.") ||
+			url.hostname === "[::1]" ||
+			url.hostname === "::1";
+		if (url.username || url.password || url.hash) {
+			context.addIssue({
+				code: "custom",
+				message: "OAuth MCP URLs cannot contain credentials or fragments",
+			});
+		}
+		if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+			context.addIssue({
+				code: "custom",
+				message: "OAuth MCP URLs must use HTTPS except on loopback",
+			});
+		}
+	});
+
+export type McpServerAuth = z.infer<typeof McpServerAuthSchema>;
+export type McpServerDecl = z.infer<typeof McpServerDeclSchema>;
+
 // ── PluginManifest ───────────────────────────────────────────────────────────
 
 /**
@@ -634,203 +706,224 @@ export type EnginesReq = z.infer<typeof EnginesReqSchema>;
  * - `runnables` may be empty for a "surface-only" plugin, but each entry must be
  *   a valid `RunnableMeta`
  */
-export const PluginManifestSchema = z.object({
-	/** Reverse-domain unique identifier (e.g. `"com.example.my-plugin"`). */
-	id: z.string().min(1, "id is required"),
+export const PluginManifestSchema = z
+	.object({
+		/** Reverse-domain unique identifier (e.g. `"com.example.my-plugin"`). */
+		id: z.string().min(1, "id is required"),
 
-	/** Human-readable display name shown in the plugin store / launcher. */
-	name: z.string().min(1, "name is required"),
+		/** Human-readable display name shown in the plugin store / launcher. */
+		name: z.string().min(1, "name is required"),
 
-	/**
-	 * Semver version string (e.g. `"1.0.0"`). Core's loader rejects any manifest
-	 * whose version is not valid semver; the regex here enforces the same rule at
-	 * SDK-build time.
-	 */
-	version: z
-		.string()
-		.regex(
-			/^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/,
-			"version must be a valid semver string (e.g. 1.0.0)"
-		),
+		/**
+		 * Semver version string (e.g. `"1.0.0"`). Core's loader rejects any manifest
+		 * whose version is not valid semver; the regex here enforces the same rule at
+		 * SDK-build time.
+		 */
+		version: z
+			.string()
+			.regex(
+				/^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/,
+				"version must be a valid semver string (e.g. 1.0.0)"
+			),
 
-	/**
-	 * Lower-case hex `sha256(utf8_bytes(ui_code))` binding the plugin's bundled
-	 * sandboxed-UI code to this manifest. `ryu pack` / `ryu publish` compute it and
-	 * write it here BEFORE the manifest is signed, so the hash rides INSIDE the
-	 * Gateway-signed surface while the `ui_code` blob rides OUTSIDE it as payload;
-	 * Core's install path recomputes the hash over the fetched code and rejects a
-	 * mismatch fail-closed. Absent for a manifest-only plugin (no bundled UI).
-	 * Mirrors Core's `PluginManifest.ui_code_sha256`.
-	 */
-	ui_code_sha256: z.string().nullish(),
+		/**
+		 * Lower-case hex `sha256(utf8_bytes(ui_code))` binding the plugin's bundled
+		 * sandboxed-UI code to this manifest. `ryu pack` / `ryu publish` compute it and
+		 * write it here BEFORE the manifest is signed, so the hash rides INSIDE the
+		 * Gateway-signed surface while the `ui_code` blob rides OUTSIDE it as payload;
+		 * Core's install path recomputes the hash over the fetched code and rejects a
+		 * mismatch fail-closed. Absent for a manifest-only plugin (no bundled UI).
+		 * Mirrors Core's `PluginManifest.ui_code_sha256`.
+		 */
+		ui_code_sha256: z.string().nullish(),
 
-	/** The Runnables this plugin bundles. */
-	runnables: z.array(RunnableMetaSchema).default([]),
+		/** The Runnables this plugin bundles. */
+		runnables: z.array(RunnableMetaSchema).default([]),
 
-	/**
-	 * Permission grants this plugin declares it needs (e.g. `"mcp:web_search"`).
-	 * Declarations only — grant enforcement is the Gateway's responsibility.
-	 */
-	permission_grants: z.array(z.string()).default([]),
+		/**
+		 * Permission grants this plugin declares it needs (e.g. `"mcp:web_search"`).
+		 * Declarations only — grant enforcement is the Gateway's responsibility.
+		 */
+		permission_grants: z.array(z.string()).default([]),
 
-	/**
-	 * Optional Companion surface (an in-desktop overlay or sidebar panel).
-	 * Absent when the plugin has no Companion surface.
-	 */
-	companion: CompanionSurfaceSchema.optional(),
+		/** Remote or stdio MCP servers registered by this plugin. */
+		mcp_servers: z.record(z.string(), McpServerDeclSchema).optional(),
 
-	/**
-	 * VS-Code-style activation events (`"*"`, `"onStartup"`, `"onChat"`,
-	 * `"onCommand:<id>"`). Empty = eager. Turn-hook plugins are driven by their
-	 * enabled flag, so `["*"]` is the usual value.
-	 */
-	activation_events: z.array(z.string()).default([]),
+		/**
+		 * Optional Companion surface (an in-desktop overlay or sidebar panel).
+		 * Absent when the plugin has no Companion surface.
+		 */
+		companion: CompanionSurfaceSchema.optional(),
 
-	/**
-	 * Contribution points: server-side turn hooks + declarative UI widgets.
-	 * Absent for a plugin that contributes nothing here.
-	 */
-	contributes: ContributesSchema.optional(),
+		/**
+		 * VS-Code-style activation events (`"*"`, `"onStartup"`, `"onChat"`,
+		 * `"onCommand:<id>"`). Empty = eager. Turn-hook plugins are driven by their
+		 * enabled flag, so `["*"]` is the usual value.
+		 */
+		activation_events: z.array(z.string()).default([]),
 
-	/**
-	 * **Plugin-to-plugin dependencies** — the other plugins this one needs. Core
-	 * resolves them into a topological enable order (dependencies enable first;
-	 * disabling one is refused while an enabled dependent needs it).
-	 *
-	 * Absent = **no dependencies**, the backward-compatible default. Kept
-	 * `.optional()` (never defaulted) so a manifest that declares none serialises
-	 * with no `requires` key at all, exactly like Core's
-	 * `#[serde(skip_serializing_if = "Option::is_none")]`.
-	 */
-	requires: RequiresSchema.optional(),
+		/**
+		 * Contribution points: server-side turn hooks + declarative UI widgets.
+		 * Absent for a plugin that contributes nothing here.
+		 */
+		contributes: ContributesSchema.optional(),
 
-	/**
-	 * Host surfaces this plugin runs on. **Empty or absent = runs on EVERY
-	 * surface** — the backward-compatible default, which must never be read as
-	 * "runs nowhere". Core filters only when the list is explicitly non-empty, and
-	 * only at the read boundary (`GET /api/plugins`, keyed on `x-ryu-surface`), so
-	 * an unsupported-target plugin stays installable and inspectable.
-	 */
-	targets: z.array(SurfaceSchema).default([]),
+		/**
+		 * **Plugin-to-plugin dependencies** — the other plugins this one needs. Core
+		 * resolves them into a topological enable order (dependencies enable first;
+		 * disabling one is refused while an enabled dependent needs it).
+		 *
+		 * Absent = **no dependencies**, the backward-compatible default. Kept
+		 * `.optional()` (never defaulted) so a manifest that declares none serialises
+		 * with no `requires` key at all, exactly like Core's
+		 * `#[serde(skip_serializing_if = "Option::is_none")]`.
+		 */
+		requires: RequiresSchema.optional(),
 
-	/**
-	 * Host version floors — the semver requirement each surface must satisfy for
-	 * this plugin to install. Mirrors Core's `EnginesReq`
-	 * (`crates/core/kernel-contracts/src/manifest.rs`).
-	 *
-	 * `ryu` is the **Core** floor and the only required key (it is the legacy
-	 * spelling; every manifest in the wild carries just that one). The rest are
-	 * optional per-surface floors.
-	 *
-	 * REGRESSION THIS FIXES: `engines` was absent from this schema entirely, and
-	 * zod strips unlisted keys — so `ryu pack` silently dropped the whole block
-	 * from every bundle it produced. A plugin could declare a Core floor, publish,
-	 * and ship a bundle that declared none. Any new host floor MUST be added here
-	 * as well as in the Rust contract, or it does not survive packing.
-	 */
-	engines: EnginesReqSchema.optional(),
+		/**
+		 * Host surfaces this plugin runs on. **Empty or absent = runs on EVERY
+		 * surface** — the backward-compatible default, which must never be read as
+		 * "runs nowhere". Core filters only when the list is explicitly non-empty, and
+		 * only at the read boundary (`GET /api/plugins`, keyed on `x-ryu-surface`), so
+		 * an unsupported-target plugin stays installable and inspectable.
+		 */
+		targets: z.array(SurfaceSchema).default([]),
 
-	/**
-	 * Optional per-item AFFILIATE terms: the commission paid to a referrer when a
-	 * referred user buys this (paid) item. `value` is basis points for `percent`
-	 * (2000 = 20%) or minor units (cents) for `flat`. Absent (or `enabled:false`)
-	 * falls back to the seller org owner's default affiliate terms. This is the
-	 * authoring surface for the marketplace publish body's `affiliate` field (the
-	 * server re-validates it); it only takes effect on a paid item.
-	 */
-	affiliate: z
-		.object({
-			enabled: z.boolean().default(false),
-			rule: z
-				.object({
-					type: z.enum(["percent", "flat"]),
-					value: z.number().nonnegative(),
-					recurring: z.boolean().default(false),
-					durationMonths: z.number().int().positive().nullish(),
-					fundedBy: z.enum(["platform", "seller"]).default("platform"),
-				})
-				.optional(),
-		})
-		.optional(),
+		/**
+		 * Host version floors — the semver requirement each surface must satisfy for
+		 * this plugin to install. Mirrors Core's `EnginesReq`
+		 * (`crates/core/kernel-contracts/src/manifest.rs`).
+		 *
+		 * `ryu` is the **Core** floor and the only required key (it is the legacy
+		 * spelling; every manifest in the wild carries just that one). The rest are
+		 * optional per-surface floors.
+		 *
+		 * REGRESSION THIS FIXES: `engines` was absent from this schema entirely, and
+		 * zod strips unlisted keys — so `ryu pack` silently dropped the whole block
+		 * from every bundle it produced. A plugin could declare a Core floor, publish,
+		 * and ship a bundle that declared none. Any new host floor MUST be added here
+		 * as well as in the Rust contract, or it does not survive packing.
+		 */
+		engines: EnginesReqSchema.optional(),
 
-	// ── Rich listing metadata (Phase 1.5) ──────────────────────────────────────
-	// Optional store-listing fields a plugin author declares so the marketplace
-	// detail dialog renders a richer App-Store-style preview. Field names align
-	// with the Claude `.claude-plugin/marketplace.json` plugin-entry standard where
-	// one exists (`author`, `homepage`, `keywords`, `category`, `license`); the
-	// rest are Ryu extensions. `ryu publish` forwards these FLAT into the publish
-	// body (not inside the signed manifest blob) so the control plane stores them.
-	// All optional + additive: a manifest omitting them still validates.
+		/**
+		 * Optional per-item AFFILIATE terms: the commission paid to a referrer when a
+		 * referred user buys this (paid) item. `value` is basis points for `percent`
+		 * (2000 = 20%) or minor units (cents) for `flat`. Absent (or `enabled:false`)
+		 * falls back to the seller org owner's default affiliate terms. This is the
+		 * authoring surface for the marketplace publish body's `affiliate` field (the
+		 * server re-validates it); it only takes effect on a paid item.
+		 */
+		affiliate: z
+			.object({
+				enabled: z.boolean().default(false),
+				rule: z
+					.object({
+						type: z.enum(["percent", "flat"]),
+						value: z.number().nonnegative(),
+						recurring: z.boolean().default(false),
+						durationMonths: z.number().int().positive().nullish(),
+						fundedBy: z.enum(["platform", "seller"]).default("platform"),
+					})
+					.optional(),
+			})
+			.optional(),
 
-	/** Longer plain/markdown description shown in the detail dialog. */
-	description: z.string().optional(),
-	/** Short one-line pitch shown under the name (Ryu extension). */
-	tagline: z.string().optional(),
-	/**
-	 * Publisher identity. A bare string OR a Claude-style object; `ryu publish`
-	 * resolves it to the display `developer` (`author.name` when an object).
-	 */
-	author: z
-		.union([
-			z.string(),
-			z.object({
-				name: z.string(),
-				email: z.string().optional(),
-				url: z.string().optional(),
-			}),
-		])
-		.optional(),
-	/** Project/marketing homepage — maps to the listing `website` (Claude field). */
-	homepage: z.string().optional(),
-	/** Free-text search keywords (Claude field). */
-	keywords: z.array(z.string()).optional(),
-	/** Taxonomy category beyond the runnable kinds (Claude field). */
-	category: z.string().optional(),
-	/** SPDX-ish license identifier (Claude field). */
-	license: z.string().optional(),
-	/** Square logo/icon URL for the listing card + detail header. */
-	iconUrl: z.string().optional(),
-	/**
-	 * Icon-primitive id for the listing card (Ryu extension): an Iconify/icons0
-	 * `prefix:name`, a bare Hugeicons name, or a URL, resolved by the shared `Icon`
-	 * primitive. A monochrome GLYPH masked with the current text colour — distinct
-	 * from `iconUrl` (a raster logo). Falls back to `iconUrl` when omitted.
-	 */
-	icon: z.string().optional(),
-	/**
-	 * Dithered-gradient background for the card's icon square (Ryu extension),
-	 * mirroring dither-kit's `DitherGradient` props. `from`/`to` are a palette-colour
-	 * name (`green`, `blue`, `purple`, `pink`, `orange`, `red`, `grey`) or a hue
-	 * number (0–360); `direction` is where `to` ends up. Renders behind the glyph in
-	 * place of a flat `iconBackground`; the render layer validates + falls back.
-	 */
-	iconDither: z
-		.object({
-			from: z.union([z.string(), z.number()]),
-			to: z.union([z.string(), z.number()]).optional(),
-			direction: z.enum(["up", "down", "left", "right"]).optional(),
-		})
-		.optional(),
-	/** Ordered App-Store-style screenshot gallery URLs (Ryu extension). */
-	screenshots: z.array(z.string()).optional(),
-	/** Privacy policy URL surfaced on detail (Ryu extension). */
-	privacyPolicyUrl: z.string().optional(),
-	/** Terms-of-service URL surfaced on detail (Ryu extension). */
-	termsOfServiceUrl: z.string().optional(),
-	/**
-	 * Human-readable capability strings (Ryu extension). When omitted the control
-	 * plane derives a default from `permission_grants`, so declaring this is only
-	 * needed to override the derived labels.
-	 */
-	capabilities: z.array(z.string()).optional(),
-	/** Example prompt chips shown on detail (Ryu extension). */
-	examplePrompts: z.array(z.string()).optional(),
-	/**
-	 * Optional companion/config card (Ryu extension): a single setup step or an
-	 * array of steps guiding the user through post-install configuration.
-	 */
-	setup: z.union([SetupStepSchema, z.array(SetupStepSchema)]).optional(),
-});
+		// ── Rich listing metadata (Phase 1.5) ──────────────────────────────────────
+		// Optional store-listing fields a plugin author declares so the marketplace
+		// detail dialog renders a richer App-Store-style preview. Field names align
+		// with the Claude `.claude-plugin/marketplace.json` plugin-entry standard where
+		// one exists (`author`, `homepage`, `keywords`, `category`, `license`); the
+		// rest are Ryu extensions. `ryu publish` forwards these FLAT into the publish
+		// body (not inside the signed manifest blob) so the control plane stores them.
+		// All optional + additive: a manifest omitting them still validates.
+
+		/** Longer plain/markdown description shown in the detail dialog. */
+		description: z.string().optional(),
+		/** Short one-line pitch shown under the name (Ryu extension). */
+		tagline: z.string().optional(),
+		/**
+		 * Publisher identity. A bare string OR a Claude-style object; `ryu publish`
+		 * resolves it to the display `developer` (`author.name` when an object).
+		 */
+		author: z
+			.union([
+				z.string(),
+				z.object({
+					name: z.string(),
+					email: z.string().optional(),
+					url: z.string().optional(),
+				}),
+			])
+			.optional(),
+		/** Project/marketing homepage — maps to the listing `website` (Claude field). */
+		homepage: z.string().optional(),
+		/** Free-text search keywords (Claude field). */
+		keywords: z.array(z.string()).optional(),
+		/** Taxonomy category beyond the runnable kinds (Claude field). */
+		category: z.string().optional(),
+		/** SPDX-ish license identifier (Claude field). */
+		license: z.string().optional(),
+		/** Square logo/icon URL for the listing card + detail header. */
+		iconUrl: z.string().optional(),
+		/**
+		 * Icon-primitive id for the listing card (Ryu extension): an Iconify/icons0
+		 * `prefix:name`, a bare Hugeicons name, or a URL, resolved by the shared `Icon`
+		 * primitive. A monochrome GLYPH masked with the current text colour — distinct
+		 * from `iconUrl` (a raster logo). Falls back to `iconUrl` when omitted.
+		 */
+		icon: z.string().optional(),
+		/**
+		 * Dithered-gradient background for the card's icon square (Ryu extension),
+		 * mirroring dither-kit's `DitherGradient` props. `from`/`to` are a palette-colour
+		 * name (`green`, `blue`, `purple`, `pink`, `orange`, `red`, `grey`) or a hue
+		 * number (0–360); `direction` is where `to` ends up. Renders behind the glyph in
+		 * place of a flat `iconBackground`; the render layer validates + falls back.
+		 */
+		iconDither: z
+			.object({
+				from: z.union([z.string(), z.number()]),
+				to: z.union([z.string(), z.number()]).optional(),
+				direction: z.enum(["up", "down", "left", "right"]).optional(),
+			})
+			.optional(),
+		/** Ordered App-Store-style screenshot gallery URLs (Ryu extension). */
+		screenshots: z.array(z.string()).optional(),
+		/** Privacy policy URL surfaced on detail (Ryu extension). */
+		privacyPolicyUrl: z.string().optional(),
+		/** Terms-of-service URL surfaced on detail (Ryu extension). */
+		termsOfServiceUrl: z.string().optional(),
+		/**
+		 * Human-readable capability strings (Ryu extension). When omitted the control
+		 * plane derives a default from `permission_grants`, so declaring this is only
+		 * needed to override the derived labels.
+		 */
+		capabilities: z.array(z.string()).optional(),
+		/** Example prompt chips shown on detail (Ryu extension). */
+		examplePrompts: z.array(z.string()).optional(),
+		/**
+		 * Optional companion/config card (Ryu extension): a single setup step or an
+		 * array of steps guiding the user through post-install configuration.
+		 */
+		setup: z.union([SetupStepSchema, z.array(SetupStepSchema)]).optional(),
+	})
+	.superRefine((manifest, context) => {
+		const hasOAuthServer = Object.values(manifest.mcp_servers ?? {}).some(
+			(server) => server.auth?.type === "oauth"
+		);
+		if (!hasOAuthServer) {
+			return;
+		}
+		for (const grant of ["mcp:server", "identity.read"] as const) {
+			if (!manifest.permission_grants.includes(grant)) {
+				context.addIssue({
+					code: "custom",
+					message: `OAuth MCP servers require the ${grant} permission grant`,
+					path: ["permission_grants"],
+				});
+			}
+		}
+	});
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 

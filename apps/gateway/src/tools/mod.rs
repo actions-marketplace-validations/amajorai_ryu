@@ -34,7 +34,7 @@ pub const TOOL_SEARCH_NAME: &str = "tool_search";
 /// are the only tool executions the managed plan bills for — Composio charges per
 /// action execution, whereas builtin/MCP/app tools are free. The tool loop counts
 /// dispatched calls with this prefix so the pipeline can debit them at cost.
-pub const COMPOSIO_TOOL_PREFIX: &str = "composio__";
+pub const COMPOSIO_TOOL_PREFIX: &str = "composio.";
 
 /// FQ id of Core's Agent-Skill loader. Mirrors `skills_tool::LOAD_TOOL_ID`
 /// (`apps/core/src/sidecar/mcp/skills_tool.rs`) the same way

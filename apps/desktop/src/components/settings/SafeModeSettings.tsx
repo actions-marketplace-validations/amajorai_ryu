@@ -161,7 +161,7 @@ export function SafeModeSettings() {
 								disabled={busy}
 								onClick={() => handleToggle(false)}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Leave Safe Mode
 							</Button>

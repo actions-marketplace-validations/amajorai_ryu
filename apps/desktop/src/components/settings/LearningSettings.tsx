@@ -1,14 +1,14 @@
 // apps/desktop/src/components/settings/LearningSettings.tsx
 //
 // Consent controls for the Learning app: the on-device skill-synthesis loop
-// (`learning.skills-enabled`, default ON) and the heavier rate-and-retrain loop
+// (`learning.skills-enabled`, default OFF) and the heavier rate-and-retrain loop
 // (`learning.enabled`, default OFF). Both persist as Core preferences; the
 // defaults live in `lib/api/preferences.ts`, not here.
 //
 // The tab is manifest-registered — `contributes.settings_tabs` on
 // `@ryu/learning`, node scope — and bound to this component by plugin id in
 // EntitySettings. The app is default-on because Core's scheduler runs the skill
-// synthesis pass off `learning.skills-enabled` alone (default ON), regardless of
+// synthesis pass off `learning.skills-enabled` alone (default OFF), regardless of
 // the app record — only the HTTP surface is gated — so the consent control has to
 // exist wherever that capture does.
 
@@ -36,8 +36,8 @@ function activeTarget(): ApiTarget {
 export function LearningSettings() {
 	const [learningEnabled, setLearningEnabledState] = useState(false);
 	// The local skills loop defaults ON (on-device, inbox-gated); seed the
-	// optimistic state to match so the toggle doesn't flicker off on first paint.
-	const [skillsEnabled, setSkillsEnabledState] = useState(true);
+	// Seed both consent controls to OFF so no capture occurs before Core answers.
+	const [skillsEnabled, setSkillsEnabledState] = useState(false);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -96,7 +96,7 @@ export function LearningSettings() {
 								onCheckedChange={handleSkills}
 							/>
 						}
-						description="On by default. Ryu distills reusable skills from your chats, entirely on this device, and proposes them in your Inbox for you to approve before they go live. No conversation text ever leaves your machine."
+						description="Off by default. When enabled, Ryu distills reusable skills from your chats on this device and proposes them in your Inbox for approval before they go live."
 						title="Learn skills from my chats"
 					/>
 					<SettingsItem

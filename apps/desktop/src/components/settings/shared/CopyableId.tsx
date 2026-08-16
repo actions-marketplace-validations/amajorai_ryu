@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import { useState } from "react";
 import { sileo } from "sileo";
+import { TitleTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
 
 /** How long the copied checkmark stays before reverting to the copy icon. */
 const COPIED_RESET_MS = 1500;
@@ -43,12 +44,11 @@ export function CopyableId({
 		<div
 			className={`group flex items-center justify-end gap-2 ${className ?? ""}`}
 		>
-			<code
-				className="max-w-[240px] select-all truncate rounded bg-muted px-2 py-1 font-mono text-muted-foreground text-xs transition-[filter] duration-150 [filter:blur(5px)] group-focus-within:[filter:blur(0)] group-hover:[filter:blur(0)]"
-				title={value}
-			>
-				{value}
-			</code>
+			<TitleTooltip content={value}>
+				<code className="max-w-[240px] select-all truncate rounded bg-muted px-2 py-1 font-mono text-muted-foreground text-xs transition-[filter] duration-150 [filter:blur(5px)] group-focus-within:[filter:blur(0)] group-hover:[filter:blur(0)]">
+					{value}
+				</code>
+			</TitleTooltip>
 			<Button
 				aria-label={`Copy ${label}`}
 				className="shrink-0"

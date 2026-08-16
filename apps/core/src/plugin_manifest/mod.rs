@@ -52,12 +52,9 @@ pub use ryu_kernel_contracts::manifest::*;
 ///
 /// Two provenances, two sources, and the fork is not cosmetic:
 ///
-/// - **`code_base: None` — a compiled-in built-in.** Its package directory does not
-///   exist on the user's machine (Core embeds only the `manifest.json`), so the
-///   bodies come from the [`builtin_code`] tables, which embed them with the same
-///   `include_str!` mechanism. A path missing from a table is a hard error: the
-///   alternative is a hook that loads with an empty body and silently never acts, or
-///   a style that silently degrades to "no style".
+/// - **`code_base: None` — a Core system plugin.** Its package directory does not
+///   exist on the user's machine, so the small system-only code table supplies any
+///   required bodies. Marketplace packages always use the on-disk branch.
 /// - **`code_base: Some(dir)` — a manifest read off disk** (`~/.ryu/plugins/<id>/`,
 ///   a satellite checkout, a dev tree). Its files are right there next to it, so
 ///   they are read directly. [`validate_code_file_path`] /
@@ -190,7 +187,7 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///      required to be manifest runnables; nothing in `resolve_verbs` reads them.
 ///   2. It is **Core-tier but NOT in `CORE_DEFAULT_ON`**. Core-tier is a
 ///      requirement, not a promotion: `may_register_mcp_servers` auto-allows
-///      manifest `mcp_servers` only for compiled-in fixtures, while a Community-tier
+///      manifest `mcp_servers` for Core-tier packages, while a Community-tier
 ///      plugin needs the approved `mcp:server` grant — off the Gateway's default
 ///      allowlist and in a reserved namespace, so operator-only. A Community-tier
 ///      Scrapling would register nothing and be dead on arrival. It stays opt-in
@@ -423,6 +420,9 @@ pub const MANIFEST_FILE_NAME: &str = MANIFEST_FILE_NAMES[0];
 ///   the same trap `mem0`'s 204 DELETE documents. Nothing is `fail_open`: for a tool
 ///   that MOVES A POINTER, converting a dead daemon into `{available:false}` would
 ///   report "nothing happened" in the one place a caller must be told it failed.
+// Test-only catalog fixtures keep the manifest invariants hermetic without
+// putting the entire first-party catalog into production Core binaries.
+#[cfg(test)]
 const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/spider/manifest.json"),
     include_str!("../../../../plugins-store/scrapling/manifest.json"),
@@ -438,10 +438,15 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // Nothing to spawn, nothing to install: Core-tier so the server registers
     // (see the `CORE_PLUGINS` row), default-on so every agent can look up docs.
     include_str!("../../../../plugins-store/docs/manifest.json"),
+    // Generic workflow fan-out tool. Core owns the host bridge and delegation
+    // engine; the plugin contributes only the validated inline tool surface.
+    include_str!("../../../../plugins-store/dynamic-workflows/manifest.json"),
     include_str!("fixtures/layers.manifest.json"),
     include_str!("../../../../plugins-store/ghost/manifest.json"),
     include_str!("../../../../plugins-store/shadow/manifest.json"),
     include_str!("../../../../plugins-store/headroom/manifest.json"),
+    include_str!("../../../../plugins-store/usage-pacer/manifest.json"),
+    include_str!("../../../../plugins-store/effort-escalator/manifest.json"),
     // The other cost-reduction plugin, and the other shape: `headroom` compresses
     // gateway-routed messages through a Core-hosted transform, while `pxpipe` is a
     // loopback proxy the user points a provider at, imaging the static half of a
@@ -544,6 +549,17 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // `stateful` matches on the conversation), so it costs a sandbox spawn per
     // turn, and `agents__ask` spends a whole agent run per call.
     include_str!("../../../../plugins-store/agent-comms/manifest.json"),
+    // `rules` discovers Cursor- and Claude-style project rules and exposes the
+    // agent-edit panel contract. Its context hook injects normalized project
+    // rules plus per-agent base rules into the outbound context, deduplicating
+    // stale blocks for both OpenAI messages and ACP prompts.
+    include_str!("../../../../plugins-store/rules/manifest.json"),
+    // `agents-md-tail` is an experimental, opt-in context hook. It repeats the
+    // current project instructions at the outbound tail while keeping the
+    // chat-visible transcript unchanged; ACP requests a fresh session so old
+    // hidden tails cannot accumulate in the agent's private history. Rules runs
+    // first when both are enabled because context rewrites are first-writer-wins.
+    include_str!("../../../../plugins-store/agents-md-tail/manifest.json"),
     // `plan-continue` keeps a plan moving while the composer's plan-mode pill is
     // on, by injecting its own follow-up turn when one finishes. Community and
     // NOT in `CORE_DEFAULT_ON` for the reason the others are on: this one spends
@@ -1028,6 +1044,10 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     // buys only the optional narrative summary: every number the dashboard shows is an
     // indexed fact, so a node with no model still gets a working page.
     include_str!("../../../../apps-store/mission-control/manifest.json"),
+    // Pull Requests — a GitHub-first review inbox. The app-owned Bun sidecar invokes
+    // the user's authenticated `gh` CLI and is reached only through the generic
+    // ext-proxy; Core owns no GitHub client, route, port or provider behavior.
+    include_str!("../../../../apps-store/pull-requests/manifest.json"),
     // Blueprint — visual plan review. An agent publishes its plan over the app's own
     // MCP server (`blueprint__plan_publish`), a human reads it as rendered markdown
     // blocks plus a dependency graph derived from `steps[].depends_on`, annotates it,
@@ -1129,6 +1149,42 @@ const BUILTIN_MANIFESTS: &[&str] = &[
     include_str!("../../../../plugins-store/typescript-lsp/manifest.json"),
 ];
 
+// Production Core embeds only the small, uninstall-protected system set. Every
+// other official package is resolved, signature-checked, and installed from
+// the marketplace at runtime.
+#[cfg(not(test))]
+const BUILTIN_MANIFESTS: &[&str] = &[
+    include_str!("../../../../plugins-store/ghost/manifest.json"),
+    include_str!("../../../../plugins-store/shadow/manifest.json"),
+    include_str!("../../../../plugins-store/agentbrowser/manifest.json"),
+    include_str!("../../../../apps-store/browser/manifest.json"),
+];
+
+// Core constructs loopback clients before the default marketplace packages are
+// materialized. Keep the sidecar declarations needed for those clients available
+// during bootstrap without making the packages runtime-installed or default-on.
+const BOOTSTRAP_MANIFESTS: &[&str] = &[
+    include_str!("../../../../apps-store/finetune/manifest.json"),
+    include_str!("../../../../apps-store/meetings/manifest.json"),
+    include_str!("../../../../apps-store/dashboards/manifest.json"),
+    include_str!("../../../../apps-store/teams/manifest.json"),
+    include_str!("../../../../apps-store/quests/manifest.json"),
+    include_str!("../../../../apps-store/healing/manifest.json"),
+    include_str!("../../../../apps-store/monitors/manifest.json"),
+];
+
+/// IDs whose manifest bytes are trusted because they are compiled into Core.
+/// Keep this lookup independent of `parse_and_validate`: tier resolution can
+/// happen while a built-in manifest is being validated, so calling the loader
+/// here would recurse through the tier gate.
+pub(crate) fn compiled_manifest_ids() -> HashSet<String> {
+    BUILTIN_MANIFESTS
+        .iter()
+        .filter_map(|raw| serde_json::from_str::<PluginManifest>(raw).ok())
+        .map(|manifest| canonical_plugin_id(&manifest.id).to_owned())
+        .collect()
+}
+
 /// The Canvas app's plugin id (its Space documents are `kind = app:<this>`). Shared
 /// by the default-on seed (`main.rs`), the legacy file-store migration
 /// (`server/canvas_migrate.rs`), and the desktop create/route flow.
@@ -1211,6 +1267,11 @@ pub const NEWS_UI_HTML: &str = include_str!("fixtures/news.ui.html");
 /// next to the `CORE_PLUGINS` row that actually decides whether the sidecar spawns,
 /// which is where a reader looking for "why is this app Core-tier" will be.
 pub const BLUEPRINT_UI_HTML: &str = include_str!("fixtures/blueprint.ui.html");
+
+/// The Pull Requests app's prebuilt, self-contained companion. The frame reaches
+/// its own sidecar through `app.request`; refresh with
+/// `scripts/sync-app-fixtures.sh pull-requests`.
+pub const PULL_REQUESTS_UI_HTML: &str = include_str!("fixtures/pull-requests.ui.html");
 
 /// The Workflows app's plugin id (its sandboxed companion drives Core's DAG
 /// workflow engine + ghost record→replay). Re-exported from `plugins::builtins`
@@ -1483,12 +1544,21 @@ impl std::fmt::Display for ManifestRejection {
                             surface,
                             required,
                             present,
-                        } => format!("{} requires {required} but this node has {present}", surface.engines_key()),
+                        } => format!(
+                            "{} requires {required} but this node has {present}",
+                            surface.engines_key()
+                        ),
                         UnmetRequirement::InvalidRequirement {
                             surface, required, ..
-                        } => format!("{} has an invalid requirement '{required}'", surface.engines_key()),
+                        } => format!(
+                            "{} has an invalid requirement '{required}'",
+                            surface.engines_key()
+                        ),
                         UnmetRequirement::Unknown { surface, required } => {
-                            format!("{} requires {required} (version unknown)", surface.engines_key())
+                            format!(
+                                "{} requires {required} (version unknown)",
+                                surface.engines_key()
+                            )
                         }
                     })
                     .collect();
@@ -1562,6 +1632,69 @@ impl PluginManifestLoader {
         Self::load_all().compatible
     }
 
+    /// Load the manifests that are allowed to run in the active runtime.
+    ///
+    /// Runtime consumers receive only explicit system manifests plus packages
+    /// present in the user's plugin directory. Official marketplace listings
+    /// are catalog metadata, not runtime registrations.
+    pub fn load_runtime() -> Vec<PluginManifest> {
+        Self::load_runtime_from(&Self::plugins_dir())
+    }
+
+    fn load_runtime_from(dir: &Path) -> Vec<PluginManifest> {
+        let mut manifests = Vec::new();
+        let mut seen_ids = HashSet::new();
+
+        // Only the explicit system set is compiled into the runtime.
+        for manifest in Self::load_system_builtins() {
+            seen_ids.insert(manifest.id.clone());
+            manifests.push(manifest);
+        }
+
+        // Installed packages are parsed from disk and therefore take the
+        // runtime slot for ordinary plugins, even when the catalog index still
+        // contains a compiled copy for discovery.
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return manifests;
+        };
+        for entry in entries.flatten() {
+            let Some(manifest_path) = MANIFEST_FILE_NAMES
+                .iter()
+                .map(|name| entry.path().join(name))
+                .find(|path| path.exists())
+            else {
+                continue;
+            };
+            let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+                tracing::warn!(
+                    "could not read installed plugin manifest {}",
+                    manifest_path.display()
+                );
+                continue;
+            };
+            let raw = match Self::translate_agent_plugin(&raw, &manifest_path) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    tracing::warn!(
+                        "installed plugin {} skipped: {error}",
+                        manifest_path.display()
+                    );
+                    continue;
+                }
+            };
+            match Self::parse_and_validate(
+                &raw,
+                &manifest_path.to_string_lossy(),
+                manifest_path.parent(),
+                &mut seen_ids,
+            ) {
+                Ok(manifest) => manifests.push(manifest),
+                Err(error) => tracing::warn!("installed plugin skipped: {error}"),
+            }
+        }
+        manifests
+    }
+
     /// [`Self::load`] plus the manifests held back by an unsatisfied host floor.
     ///
     /// Only the catalog projection should call this. Everything that RUNS a plugin
@@ -1609,10 +1742,7 @@ impl PluginManifestLoader {
                             // `$schema`, which no native manifest has ever carried;
                             // translate it before the native parser sees a file with
                             // no `id`/`runnables` and rejects the plugin.
-                            let raw = match Self::translate_agent_plugin(
-                                &raw,
-                                &manifest_path,
-                            ) {
+                            let raw = match Self::translate_agent_plugin(&raw, &manifest_path) {
                                 Ok(translated) => translated,
                                 Err(e) => {
                                     tracing::warn!(
@@ -1671,9 +1801,9 @@ impl PluginManifestLoader {
         }
     }
 
-    /// Parse ONLY the compiled-in built-in manifests, ignoring `~/.ryu/plugins`.
+    /// Parse the compiled Core system manifests, ignoring `~/.ryu/plugins`.
     ///
-    /// Parse ONLY the compiled-in built-in manifests, synchronously and with no disk
+    /// Parse ONLY the compiled-in system manifests, synchronously and with no disk
     /// scan (unlike [`Self::load`], which also reads the user plugins directory). Two
     /// callers: hermetic built-in tests (a `load()`-based assertion would also depend
     /// on whatever the developer has installed locally), and router-build-time
@@ -1684,6 +1814,44 @@ impl PluginManifestLoader {
             .iter()
             .filter_map(|raw| Self::parse_and_validate(raw, "<built-in>", None, &mut seen_ids).ok())
             .collect()
+    }
+
+    /// Return only the Core-owned manifests from the compiled index.
+    pub(crate) fn load_system_builtins() -> Vec<PluginManifest> {
+        Self::load_builtins()
+            .into_iter()
+            .filter(|manifest| crate::plugins::builtins::is_system_plugin(&manifest.id))
+            .collect()
+    }
+
+    /// Load the manifest declarations required to construct Core's loopback
+    /// clients before marketplace packages have been installed.
+    pub(crate) fn load_bootstrap() -> Vec<PluginManifest> {
+        let mut seen_ids = HashSet::new();
+        BOOTSTRAP_MANIFESTS
+            .iter()
+            .filter_map(|raw| {
+                Self::parse_and_validate(raw, "<bootstrap>", None, &mut seen_ids).ok()
+            })
+            .collect()
+    }
+
+    /// Combine the manifests available before the HTTP listener starts.
+    /// Installed/runtime manifests win over bootstrap declarations so a
+    /// materialized package's current manifest is used for its public mount.
+    pub(crate) fn for_router(
+        installed: &[PluginManifest],
+        bootstrap: &[PluginManifest],
+    ) -> Vec<PluginManifest> {
+        let mut manifests = installed.to_vec();
+        let mut seen_ids: HashSet<String> = installed.iter().map(|m| m.id.clone()).collect();
+        manifests.extend(
+            bootstrap
+                .iter()
+                .filter(|manifest| seen_ids.insert(manifest.id.clone()))
+                .cloned(),
+        );
+        manifests
     }
 
     /// Translate an Agent Plugins v1 manifest into the native form, or pass a
@@ -1769,14 +1937,16 @@ impl PluginManifestLoader {
             return Err(format!(
                 "app '{}' has invalid semver version '{}' (source: {source})",
                 manifest.id, manifest.version
-            ).into());
+            )
+            .into());
         }
 
         if !seen_ids.insert(manifest.id.clone()) {
             return Err(format!(
                 "duplicate app id '{}' (source: {source}); first occurrence wins",
                 manifest.id
-            ).into());
+            )
+            .into());
         }
 
         // Host-floor gate: every requirement in `engines` must parse as semver, and
@@ -1843,13 +2013,15 @@ impl PluginManifestLoader {
                     return Err(format!(
                         "app '{}' cannot depend on itself (source: {source})",
                         manifest.id
-                    ).into());
+                    )
+                    .into());
                 }
                 if !seen_deps.insert(dep.id.as_str()) {
                     return Err(format!(
                         "app '{}' declares duplicate dependency '{}' (source: {source})",
                         manifest.id, dep.id
-                    ).into());
+                    )
+                    .into());
                 }
                 if let Some(min) = &dep.min_version {
                     parse_min_version(min).map_err(|e| {
@@ -1880,7 +2052,8 @@ impl PluginManifestLoader {
                     return Err(format!(
                         "app '{}' declares duplicate sidecar name '{}' (source: {source})",
                         manifest.id, spec.name
-                    ).into());
+                    )
+                    .into());
                 }
             }
         }
@@ -1893,7 +2066,8 @@ impl PluginManifestLoader {
                 return Err(format!(
                     "app '{}' companion label must not be empty (source: {source})",
                     manifest.id
-                ).into());
+                )
+                .into());
             }
             if crate::plugin_manifest::schema::label_impersonates_system_chrome(&companion.label) {
                 return Err(format!(
@@ -2054,10 +2228,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bootstrap_manifests_keep_loopback_clients_constructible_without_packages() {
+        let manifests = PluginManifestLoader::load_bootstrap();
+        let resolved = [
+            crate::dashboards_client::sidecar_port(&manifests),
+            crate::finetune_client::sidecar_port(&manifests),
+            crate::healing_client::sidecar_port(&manifests),
+            crate::meetings_client::sidecar_port(&manifests),
+            crate::monitors_client::sidecar_port(&manifests),
+            crate::quests_client::sidecar_port(&manifests),
+            crate::teams_client::sidecar_port(&manifests),
+        ];
+        assert!(resolved.iter().all(|port| *port != 0));
+    }
+
+    #[test]
+    fn runtime_loading_reserves_trusted_ids_without_promoting_disk_packages() {
+        let root = tempfile::tempdir().expect("create plugin directory");
+        let disk_plugin = root.path().join("spoofed-core");
+        std::fs::create_dir(&disk_plugin).expect("create plugin package");
+        std::fs::write(
+            disk_plugin.join(MANIFEST_FILE_NAME),
+            r#"{
+                "id": "@ryu/ghost",
+                "name": "Spoofed Ghost",
+                "version": "99.0.0",
+                "runnables": []
+            }"#,
+        )
+        .expect("write spoofed manifest");
+
+        let runtime = PluginManifestLoader::load_runtime_from(root.path());
+
+        let ghosts: Vec<_> = runtime
+            .iter()
+            .filter(|manifest| manifest.id == "@ryu/ghost")
+            .collect();
+        assert_eq!(
+            ghosts.len(),
+            1,
+            "a disk manifest must not replace the trusted id"
+        );
+        assert_eq!(ghosts[0].name, "Ghost");
+        assert_eq!(
+            crate::plugins::builtins::tier_for("@ryu/ghost"),
+            PluginTier::Core
+        );
+    }
+
     /// Every packaged app/plugin manifest has exactly ONE home — its package
-    /// directory (`<root>/<x>/manifest.json`, what the owning team edits) — and Core
-    /// compiles it in straight from there via
-    /// `include_str!("../../../../<root>/<x>/manifest.json")`.
+    /// directory (`<root>/<x>/manifest.json`, what the owning team edits). Only
+    /// the small Core system set is embedded; ordinary official packages are
+    /// installed from the signed marketplace package.
     ///
     /// It used to be duplicated as a byte-identical fixture copy under
     /// `src/plugin_manifest/fixtures/<x>.manifest.json`, purely so `apps/core` would
@@ -2065,8 +2288,7 @@ mod tests {
     /// `tools/mirror-public.sh` step 1c now vendors the `manifest.json` files into the
     /// published tree instead (and its step 3b refuses to emit a tree where any
     /// `include_str!` path fails to resolve). So there is nothing left to keep in sync
-    /// and no dead-edit trap — this guard's job changed from "the two copies match" to
-    /// "there is still only one copy, and Core really compiles it in".
+    /// and no dead-edit trap — this guard now verifies the system/package boundary.
     ///
     /// Deliberately a DIRECTORY WALK, not a hand-maintained table. The table this
     /// replaced had to be edited (and a hardcoded count bumped) for every new app,
@@ -2076,7 +2298,7 @@ mod tests {
     /// Read at runtime (not `include_str!`) and skipped per-root when that root is
     /// absent, so the OSS Core mirror still builds and tests green.
     #[test]
-    fn packaged_manifests_are_compiled_in_from_their_package_home() {
+    fn packaged_manifests_have_one_home_and_only_system_manifests_are_embedded() {
         let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = core.join("..").join("..");
         let fixtures = core.join("src").join("plugin_manifest").join("fixtures");
@@ -2140,7 +2362,11 @@ mod tests {
                     panic!("{} is not a valid manifest: {e}", pkg_path.display())
                 });
 
-                if !UNREGISTERED_BY_DESIGN.contains(&name.as_str()) {
+                let system = name == "ghost"
+                    || name == "shadow"
+                    || name == "agentbrowser"
+                    || (root == "apps-store" && name == "browser");
+                if system && !UNREGISTERED_BY_DESIGN.contains(&name.as_str()) {
                     // The exact relative path, not just the file name: a wrong number of
                     // `..` segments is a compile error, but a path pointing at the WRONG
                     // package root would silently compile in someone else's manifest.
@@ -2149,10 +2375,8 @@ mod tests {
                     let multiline = format!("\"../../../../{root}/{name}/manifest.json\"");
                     assert!(
                         sources.contains(&expected) || sources.contains(&multiline),
-                        "{root}/{name} is not compiled into Core — no `include_str!` names \
-                         `../../../../{root}/{name}/manifest.json`, so it does not exist at \
-                         runtime. Add it to BUILTIN_MANIFESTS, or to UNREGISTERED_BY_DESIGN if \
-                         that is intended."
+                        "system package {root}/{name} is not embedded in Core — no `include_str!` \
+                         names `../../../../{root}/{name}/manifest.json`"
                     );
                 }
                 checked += 1;
@@ -2213,7 +2437,7 @@ mod tests {
         let mut core_scheme_seen = 0_usize;
 
         for manifest in PluginManifestLoader::load_builtins() {
-            if crate::plugins::builtins::tier_for(&manifest.id) != PluginTier::Core {
+            if crate::plugins::builtins::tier_for_manifest(&manifest) != PluginTier::Core {
                 continue;
             }
             for entry in manifest.runnables() {
@@ -2314,8 +2538,10 @@ mod tests {
                         .expect("package dir has a name")
                         .to_string_lossy()
                 );
-                for rel in manifest.code_file_refs() {
-                    refs.push((manifest.id.clone(), name.clone(), rel));
+                if crate::plugins::builtins::is_system_plugin(&manifest.id) {
+                    for rel in manifest.code_file_refs() {
+                        refs.push((manifest.id.clone(), name.clone(), rel));
+                    }
                 }
             }
         }
@@ -2373,6 +2599,9 @@ mod tests {
             .map(|(id, _, rel)| (id.as_str(), rel.as_str()))
             .collect();
         for (id, rel, _) in builtin_code::BUILTIN_CODE_FILES {
+            if !crate::plugins::builtins::is_system_plugin(id) {
+                continue;
+            }
             assert!(
                 referenced.contains(&(*id, *rel)),
                 "plugin_manifest::builtin_code embeds ('{id}', '{rel}'), which no package \
@@ -2899,7 +3128,7 @@ mod tests {
 
         assert_eq!(manifest.id, "@example/research-assistant");
         assert_eq!(manifest.name, "Research Assistant");
-        assert_eq!(manifest.version, "1.0.0");
+        assert_eq!(manifest.version, "0.1.14");
         assert_eq!(
             manifest.permission_grants,
             vec!["mcp:web_search", "mcp:file_read"]
@@ -3242,7 +3471,10 @@ mod tests {
             ]
         }"#;
         let err = loader_parse(uppercase).unwrap_err();
-        assert!(err.contains("illegal characters"), "unexpected error: {err}");
+        assert!(
+            err.contains("illegal characters"),
+            "unexpected error: {err}"
+        );
     }
 
     /// The companion case: a well-formed vocabulary must survive the loader intact,
@@ -3625,13 +3857,9 @@ mod tests {
             "runnables": [],
             "engines": { "ryu": ">=9999.0.0" }
         }"#;
-        let err = PluginManifestLoader::parse_and_validate(
-            json,
-            "<test>",
-            None,
-            &mut HashSet::new(),
-        )
-        .unwrap_err();
+        let err =
+            PluginManifestLoader::parse_and_validate(json, "<test>", None, &mut HashSet::new())
+                .unwrap_err();
 
         let ManifestRejection::Incompatible(inc) = err else {
             panic!("an unsatisfied floor must be Incompatible, not Invalid: {err}");
@@ -3661,13 +3889,9 @@ mod tests {
             "runnables": [],
             "engines": { "ryu": "not-a-req" }
         }"#;
-        let err = PluginManifestLoader::parse_and_validate(
-            json,
-            "<test>",
-            None,
-            &mut HashSet::new(),
-        )
-        .unwrap_err();
+        let err =
+            PluginManifestLoader::parse_and_validate(json, "<test>", None, &mut HashSet::new())
+                .unwrap_err();
 
         assert!(
             matches!(err, ManifestRejection::Invalid(_)),

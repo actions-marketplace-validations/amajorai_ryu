@@ -177,7 +177,7 @@ export function ContextBreakdownPanel({
 	return (
 		<div
 			className={cn(
-				"flex h-full flex-col gap-4 overflow-y-auto p-4",
+				"scroll-fade flex h-full flex-col gap-4 overflow-y-auto p-4",
 				className
 			)}
 		>

@@ -5,6 +5,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button";
 import { PageHeader } from "@ryu/ui/components/page-header";
 import { motion } from "framer-motion";
 
@@ -29,7 +30,13 @@ const TIPS: { icon: IconSvgElement; title: string; description: string }[] = [
 	},
 ];
 
-export function TutorialStep() {
+export function TutorialStep({
+	onContinue,
+	onOpenExtensions,
+}: {
+	onContinue: () => void;
+	onOpenExtensions: () => void;
+}) {
 	return (
 		<div
 			className="flex flex-col items-center gap-8"
@@ -69,6 +76,29 @@ export function TutorialStep() {
 						</div>
 					</motion.div>
 				))}
+			</motion.div>
+
+			<motion.div
+				animate={{ opacity: 1, y: 0 }}
+				className="flex w-full max-w-sm flex-col gap-3 rounded-3xl bg-card p-4"
+				initial={{ opacity: 0, y: 10 }}
+				transition={{ delay: 0.9, duration: 0.4 }}
+			>
+				<div>
+					<p className="font-medium text-sm">Extend Ryu when you’re ready</p>
+					<p className="mt-0.5 text-muted-foreground text-xs">
+						Browse installed and available extensions from the Store. You can
+						come back to this later from Settings.
+					</p>
+				</div>
+				<div className="flex justify-end gap-2">
+					<Button onClick={onOpenExtensions} size="sm" variant="ghost">
+						Explore extensions
+					</Button>
+					<Button onClick={onContinue} size="sm">
+						Continue to Ryu
+					</Button>
+				</div>
 			</motion.div>
 		</div>
 	);

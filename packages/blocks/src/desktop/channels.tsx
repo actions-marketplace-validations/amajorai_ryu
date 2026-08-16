@@ -618,7 +618,7 @@ export function ChannelsView({
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
-			<div className="flex-1 overflow-y-auto">
+			<div className="scroll-fade flex-1 overflow-y-auto">
 				<div className="mx-auto max-w-xl space-y-5 p-6">
 					{error ? <p className="text-destructive text-sm">{error}</p> : null}
 					<h1 className="font-semibold text-lg">

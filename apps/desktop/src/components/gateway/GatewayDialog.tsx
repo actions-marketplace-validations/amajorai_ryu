@@ -95,6 +95,7 @@ import { ApiSection } from "@/src/components/gateway/ApiSection.tsx";
 import { AutoRetrySection } from "@/src/components/gateway/AutoRetrySection.tsx";
 import { FallbackRulesSection } from "@/src/components/gateway/FallbackRulesSection.tsx";
 import { McpSection } from "@/src/components/gateway/McpSection.tsx";
+import { ProviderControlCenter } from "@/src/components/gateway/ProviderControlCenter.tsx";
 import { UsageCostSection } from "@/src/components/gateway/UsageCostSection.tsx";
 import { WorkspaceSection } from "@/src/components/gateway/WorkspaceSection.tsx";
 import ResizableSettingsLayout from "@/src/components/ResizableSettingsLayout.tsx";
@@ -104,13 +105,13 @@ import { EmailAlertsSettings } from "@/src/components/settings/EmailAlertsSettin
 import { EncryptionSettings } from "@/src/components/settings/EncryptionSettings.tsx";
 import { EntitySettings } from "@/src/components/settings/EntitySettings.tsx";
 import { IntegrationsTab } from "@/src/components/settings/IntegrationsTab.tsx";
-import { LlmProvidersSettings } from "@/src/components/settings/LlmProvidersSettings.tsx";
 import {
 	ManagedInferenceSettings,
 	NetworkSettings,
 } from "@/src/components/settings/NetworkSettings.tsx";
 import { NodeAccessSettings } from "@/src/components/settings/NodeAccessSettings.tsx";
 import { NodePermissionsSettings } from "@/src/components/settings/NodePermissionsSettings.tsx";
+import { NodeRoutingSettings } from "@/src/components/settings/NodeRoutingSettings.tsx";
 import { PrivacySettings } from "@/src/components/settings/PrivacySettings.tsx";
 import { SettingsSearchResults } from "@/src/components/settings/SettingsSearchResults.tsx";
 import { StorageSettings } from "@/src/components/settings/StorageSettings.tsx";
@@ -4510,6 +4511,14 @@ function CustomPatternsEditor({ ctx }: { ctx: ScopeCtx }) {
 	);
 }
 
+function PipelineBadge({ active }: { active: boolean }) {
+	return active ? null : (
+		<Badge className="text-[10px]" variant="secondary">
+			Not in pipeline
+		</Badge>
+	);
+}
+
 function DlpCard({ ctx }: { ctx: ScopeCtx }) {
 	const resolvedPolicy = ctx.overlay.policy ?? ctx.node.policy;
 	const isSanitize = resolvedPolicy === "sanitize";
@@ -4584,7 +4593,15 @@ function FirewallCard({ ctx, caption }: { ctx: ScopeCtx; caption: string }) {
 	);
 }
 
-function InspectorCard({ ctx, target }: { ctx: ScopeCtx; target: ApiTarget }) {
+function InspectorCard({
+	ctx,
+	target,
+	pipelineStages,
+}: {
+	ctx: ScopeCtx;
+	target: ApiTarget;
+	pipelineStages?: string[];
+}) {
 	const nodeInspector = ctx.node.inspector ?? DEFAULT_INSPECTOR;
 	const broaderLocked = ctx.broaderLocked.has("inspector");
 	const overlayInspector = ctx.overlay.inspector ?? null;
@@ -4644,13 +4661,18 @@ function InspectorCard({ ctx, target }: { ctx: ScopeCtx; target: ApiTarget }) {
 		<SettingsSection
 			caption="An optional cheap-LLM traffic inspector that runs alongside the regex scanner on inbound turns. It is a swappable detection method, orthogonal to the policy action. Fail-open: any timeout or error allows the turn."
 			headerAction={
-				ctx.isOverlay ? undefined : (
-					<LockToggle
-						disabled={ctx.disabled}
-						locked={ctx.lockedHere.has("inspector")}
-						onToggle={() => ctx.toggleLock("inspector")}
+				<div className="flex items-center gap-2">
+					<PipelineBadge
+						active={pipelineStages?.includes("inspector") ?? true}
 					/>
-				)
+					{ctx.isOverlay ? null : (
+						<LockToggle
+							disabled={ctx.disabled}
+							locked={ctx.lockedHere.has("inspector")}
+							onToggle={() => ctx.toggleLock("inspector")}
+						/>
+					)}
+				</div>
 			}
 			title="LLM inspector"
 		>
@@ -4842,7 +4864,15 @@ function evalBindingFor(
 	return bindings.find((b) => b.id === id);
 }
 
-function EvaluatorsCard({ target, ctx }: { target: ApiTarget; ctx: ScopeCtx }) {
+function EvaluatorsCard({
+	target,
+	ctx,
+	pipelineStages,
+}: {
+	target: ApiTarget;
+	ctx: ScopeCtx;
+	pipelineStages?: string[];
+}) {
 	const [catalog, setCatalog] = useState<Evaluator[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
@@ -4997,6 +5027,11 @@ function EvaluatorsCard({ target, ctx }: { target: ApiTarget; ctx: ScopeCtx }) {
 	return (
 		<SettingsSection
 			caption="Enable typed evaluators as inline guardrails at this scope. Each runs on the request/response path with a Block / Warn / Sanitize action. Offline-only evaluators (quality, conversation, trajectory, voice) are not shown here; they live on the agent Evals surface. A ‘not yet enforced’ evaluator is catalogued but not wired to execution yet."
+			headerAction={
+				<PipelineBadge
+					active={pipelineStages?.includes("inline-input") ?? true}
+				/>
+			}
 			title="Evaluators"
 		>
 			<div className="px-3">
@@ -5306,8 +5341,16 @@ function GuardrailsSection({
 				<>
 					<FirewallCard caption={scopeCaption(scope, activeId)} ctx={ctx} />
 					<DlpCard ctx={ctx} />
-					<InspectorCard ctx={ctx} target={target} />
-					<EvaluatorsCard ctx={ctx} target={target} />
+					<InspectorCard
+						ctx={ctx}
+						pipelineStages={draft?.pipeline_stages}
+						target={target}
+					/>
+					<EvaluatorsCard
+						ctx={ctx}
+						pipelineStages={draft?.pipeline_stages}
+						target={target}
+					/>
 					<div className="flex items-center gap-3 px-1">
 						<Button
 							disabled={!reachable || saving || !dirty || !canConfigure}
@@ -6617,7 +6660,66 @@ export function GatewayDialog({
 				    data, so it lives here on the node/infra Gateway surface, next to
 				    model routing, rather than in the account SettingsDialog. The
 				    component is reused verbatim; only its host dialog moved. */}
-				{section === "providers" ? <LlmProvidersSettings /> : null}
+				{section === "providers" ? (
+					<ProviderControlCenter
+						credentials={
+							<>
+								{managed ? <ManagedKeysBanner /> : null}
+								{canConfigure || managed ? null : <PolicyReadOnlyBanner />}
+								<GatewayKeysCard reachable={reachable} target={target} />
+								<ByokCard
+									canConfigure={canConfigure}
+									managed={managed}
+									onRefresh={refreshWithConfig}
+									providers={configProviders}
+									target={target}
+								/>
+								<MediaKeyCard
+									canConfigure={canConfigure}
+									caption="Cloud image & video generation via Replicate."
+									getKey={getReplicateApiKey}
+									label="Replicate"
+									managed={managed}
+									placeholder="r8_…"
+									saveKey={setReplicateApiKey}
+									target={target}
+								/>
+								<MediaKeyCard
+									canConfigure={canConfigure}
+									caption="Cloud image, video and audio generation via fal.ai."
+									getKey={getFalApiKey}
+									label="Fal"
+									managed={managed}
+									placeholder="fal-…"
+									saveKey={setFalApiKey}
+									target={target}
+								/>
+							</>
+						}
+						integrations={<IntegrationsTab />}
+						routing={
+							<>
+								{canConfigure ? null : <PolicyReadOnlyBanner />}
+								<RoutingCard
+									canConfigure={canConfigure}
+									configuredProviders={health?.providers ?? []}
+									reachable={reachable}
+									target={target}
+								/>
+								<SmartRoutingCard
+									canConfigure={canConfigure}
+									reachable={reachable}
+									target={target}
+								/>
+								<FallbackRulesSection
+									canConfigure={canConfigure}
+									target={target}
+								/>
+								<AutoRetrySection canConfigure={canConfigure} target={target} />
+							</>
+						}
+					/>
+				) : null}
 				{section === "routing" ? (
 					<>
 						{canConfigure ? null : <PolicyReadOnlyBanner />}
@@ -6702,6 +6804,7 @@ export function GatewayDialog({
 					<>
 						<NetworkSettings />
 						<ManagedInferenceSettings />
+						<NodeRoutingSettings />
 					</>
 				) : null}
 				{section === "usage" ? (

@@ -561,7 +561,7 @@ export function StoreCardGrid({ children }: { children: ReactNode }) {
 /** Skeleton card grid for the loading state. */
 export function StoreLoadingGrid({ count = 4 }: { count?: number }) {
 	return (
-		<div className="grid flex-1 grid-cols-2 gap-3 overflow-auto p-4">
+		<div className="scroll-fade grid flex-1 grid-cols-2 gap-3 overflow-auto p-4">
 			{Array.from({ length: count }, (_, i) => i).map((i) => (
 				<div
 					className="space-y-3 rounded-xl border border-border bg-card p-4"

@@ -19,6 +19,7 @@ import { composeRules, parseRules } from "@ryuhq/protocol/agent-rules";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { AgentModelPickerField } from "@/components/agent-elements/input/agent-model-picker-field.tsx";
 import { AcpSessionControls } from "@/src/components/agents/AcpSessionControls.tsx";
 import { AgentCalendarView } from "@/src/components/agents/AgentCalendarView.tsx";
 import { AgentCapabilitiesPanel } from "@/src/components/agents/AgentCapabilitiesPanel.tsx";
@@ -32,6 +33,7 @@ import { ClaudeGatewayConfig } from "@/src/components/agents/ClaudeGatewayConfig
 import { CodexGatewayConfig } from "@/src/components/agents/CodexGatewayConfig.tsx";
 import { GatewayRoutingConfig } from "@/src/components/agents/GatewayRoutingConfig.tsx";
 import { OrchestrationPanel } from "@/src/components/agents/OrchestrationPanel.tsx";
+import { RulesAgentEditPanel } from "@/src/components/agents/RulesAgentEditPanel.tsx";
 import { RyuPiConfig } from "@/src/components/agents/RyuPiConfig.tsx";
 import { AdvancedInferenceSection } from "@/src/components/inference/AdvancedInferenceSection.tsx";
 import { ModelLaunchConfigSection } from "@/src/components/inference/ModelLaunchConfigSection.tsx";
@@ -56,11 +58,16 @@ import {
 } from "@/src/hooks/useComposioCatalog.ts";
 import { useFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { useIdentities } from "@/src/hooks/useIdentities.ts";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import {
 	glyphToPersonaFields,
 	personaToGlyphValue,
 } from "@/src/lib/agent-persona.ts";
+import {
+	legacyRulesToConfig,
+	saveAgentRulesConfig,
+} from "@/src/lib/api/agent-rules.ts";
 import {
 	type Agent,
 	type AgentSummary,
@@ -100,6 +107,7 @@ import {
 	buildAgentPublishBody,
 	type PublishListing,
 } from "@/src/lib/publish/packaging.ts";
+import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 // ── BYOA panel ────────────────────────────────────────────────────────────────
 
@@ -449,9 +457,18 @@ export default function AgentEditPage({
 	const { agents, activeEngine, loading, create, update } = useAgents();
 
 	const activeNode = useActiveNode();
+	const projectCwd = useWorkspaceStore((state) => state.folder);
+	const pluginContributions = usePluginContributions();
 	const target: ApiTarget = useMemo(
 		() => ({ url: activeNode.url, token: activeNode.token ?? null }),
 		[activeNode.url, activeNode.token]
+	);
+	const agentEditPanels = useMemo(
+		() =>
+			pluginContributions.agent_edit_panels.filter(
+				(panel) => panel.type === "rules"
+			),
+		[pluginContributions.agent_edit_panels]
 	);
 
 	const installedAgentEngineOptions = useMemo(() => {
@@ -597,7 +614,6 @@ export default function AgentEditPage({
 	const [composioToolkit, setComposioToolkit] = useState<string | null>(null);
 
 	// ── Coming-soon attribute slots (collapsed by default) ───────────────────────
-	const [moreSlotsOpen, setMoreSlotsOpen] = useState(false);
 
 	// Paywall gate: Prompt Studio and background agent schedules are Band-2 (pro)
 	// features — a one-time Lifetime license or a subscription unlocks them.
@@ -969,13 +985,16 @@ export default function AgentEditPage({
 		// Build persona tone value: use custom text when "custom" is selected.
 		const toneValue = tone === "custom" ? customTone.trim() || "neutral" : tone;
 
-		// Fold the structured rules list into the stored prompt.
-		const composedPrompt = composeRules(systemPrompt, rules);
-
 		const input = {
 			name: name.trim(),
 			description: description.trim() || null,
-			systemPrompt: composedPrompt.trim() ? composedPrompt.trim() : null,
+			// An enabled Rules contribution persists rules in its own Ryu preference.
+			// If the plugin is disabled/unavailable, retain the legacy prompt block so
+			// opening and saving an agent can never silently discard existing rules.
+			systemPrompt:
+				(agentEditPanels.length > 0
+					? systemPrompt.trim()
+					: composeRules(systemPrompt, rules).trim()) || null,
 			engine:
 				chatModel === ACP_CUSTOM_ENGINE
 					? `${ACP_EXEC_PREFIX}${acpCommand.trim()}`
@@ -1022,6 +1041,30 @@ export default function AgentEditPage({
 			} else {
 				const created = await create(input);
 				savedId = created.id;
+				setDraftId(savedId);
+				setExisting(created);
+			}
+
+			// A brand-new editor has no id while it is being filled, so its
+			// contribution panel cannot persist yet. Write the migrated/default
+			// config immediately after creation and keep the editor open if that
+			// preference write fails rather than silently dropping its rules.
+			if (!targetId && agentEditPanels.length > 0) {
+				const ruleWrites = await Promise.all(
+					agentEditPanels.map((panel) =>
+						saveAgentRulesConfig(
+							target,
+							`${panel.pref_key_prefix ?? "agent-rules:"}${encodeURIComponent(savedId)}`,
+							legacyRulesToConfig(rules)
+						)
+					)
+				);
+				if (ruleWrites.some((ok) => !ok)) {
+					setFormError(
+						"Agent created, but its rules could not be saved. Check the node and try again."
+					);
+					return;
+				}
 			}
 
 			// Scheduling an agent is modelled as a 1-node workflow (the standalone
@@ -1072,7 +1115,7 @@ export default function AgentEditPage({
 		const resolvedTone =
 			tone === "custom" ? customTone.trim() || "neutral" : tone;
 		return {
-			systemPrompt: composeRules(systemPrompt, rules).trim() || null,
+			systemPrompt: systemPrompt.trim() || null,
 			// The saved engine binding; the packager scrubs a custom `acp-exec:`
 			// command (a local binary path is never shipped).
 			engine:
@@ -1323,7 +1366,7 @@ export default function AgentEditPage({
 	const previewProps = {
 		builtIn: isBuiltIn,
 		displayName: personaDisplayName,
-		instructions: composeRules(systemPrompt, rules),
+		instructions: systemPrompt,
 		locked: isLocked && !isBuiltIn,
 		modelLabel,
 		name,
@@ -1340,7 +1383,7 @@ export default function AgentEditPage({
 						<Button
 							onClick={() => setPublishOpen(true)}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							<HugeiconsIcon className="size-4" icon={Rocket01Icon} />
 							Publish to marketplace
@@ -1414,6 +1457,20 @@ export default function AgentEditPage({
 					}
 					channelsPanel={<AgentChannelsSection agentId={effectiveAgentId} />}
 					chatModel={chatModel}
+					chatModelPicker={
+						<AgentModelPickerField
+							ariaLabel="Choose agent model provider"
+							disabled={
+								isLocked ||
+								(isBuiltIn && installedAgentEngineOptions.length === 0)
+							}
+							mode="model"
+							onChange={setChatModel}
+							placeholder="Select chat model"
+							target={target}
+							value={chatModel}
+						/>
+					}
 					chatSlotDisabled={
 						isLocked || (isBuiltIn && installedAgentEngineOptions.length === 0)
 					}
@@ -1503,7 +1560,6 @@ export default function AgentEditPage({
 					memoryReadLevels={memoryReadLevels}
 					memorySpaceIds={memorySpaceIds}
 					memoryWriteEnabled={memoryWriteEnabled}
-					moreSlotsOpen={moreSlotsOpen}
 					name={name}
 					onAcpCommandChange={setAcpCommand}
 					onAddMoreAgentProviders={openAgentsCatalog}
@@ -1542,7 +1598,6 @@ export default function AgentEditPage({
 					onToggleComposio={toggleComposio}
 					onToggleMemoryReadLevel={toggleMemoryReadLevel}
 					onToggleMemorySpace={toggleMemorySpace}
-					onToggleMoreSlots={() => setMoreSlotsOpen((o) => !o)}
 					onToggleSkill={toggleSkill}
 					onToggleTool={toggleTool}
 					onToneChange={(v) => setTone(v as ToneOption)}
@@ -1566,6 +1621,22 @@ export default function AgentEditPage({
 						)
 					}
 					rules={rules}
+					rulesPanel={
+						effectiveAgentId && agentEditPanels.length > 0
+							? agentEditPanels.map((panel) => (
+									<RulesAgentEditPanel
+										agentId={effectiveAgentId}
+										key={`${panel.plugin}:${panel.id}`}
+										legacyRules={rules}
+										locked={isLocked}
+										prefKeyPrefix={panel.pref_key_prefix}
+										projectCwd={projectCwd}
+										target={target}
+										title={panel.title}
+									/>
+								))
+							: null
+					}
 					saveDisabled={
 						saving ||
 						installedAgentEngineOptions.length === 0 ||

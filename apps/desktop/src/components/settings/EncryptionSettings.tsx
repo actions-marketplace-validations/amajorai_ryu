@@ -192,7 +192,7 @@ export function EncryptionSettings() {
 					<p className="text-muted-foreground text-sm">
 						We couldn't read this node's encryption state.
 					</p>
-					<Button onClick={() => refresh()} size="sm" variant="outline">
+					<Button onClick={() => refresh()} size="sm" variant="ghost">
 						Retry
 					</Button>
 				</SettingsCard>

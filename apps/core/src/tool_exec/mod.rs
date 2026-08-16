@@ -1162,37 +1162,31 @@ fn trusted_builtin_bin_path(bin_key: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Compute the built-in command-bin seed map by scanning ONLY the compiled-in
-/// manifests (`load_builtins()`, never `load()` which also reads untrusted
-/// `~/.ryu/plugins`). Every tool that resolves to a [`ToolBackend::Command`] has
-/// its bin KEY resolved to a trusted Core-side path. **Pure** (no global mutation):
-/// tests call this directly and assert the contents without poisoning the
-/// process-global [`BUILTIN_COMMAND_SEED`].
+/// Command-bin keys whose paths are trusted by Core independently of plugin
+/// enablement or manifest loading. These plugins are ordinary marketplace
+/// packages in production, so they are not necessarily present in
+/// `load_builtins()` even though their command keys remain Core-owned trust
+/// decisions.
+const TRUSTED_COMMAND_BIN_KEYS: &[&str] = &["spider", "rtk", "bws"];
+
+/// Compute the built-in command-bin seed map from Core's trusted command keys.
+/// This deliberately does not scan manifests: `load_builtins()` is a runtime
+/// system-manifest catalog, not the source of truth for command trust. **Pure**
+/// (no global mutation): tests call this directly and assert the contents
+/// without poisoning the process-global [`BUILTIN_COMMAND_SEED`].
 pub fn builtin_command_seed() -> BTreeMap<String, std::path::PathBuf> {
-    use crate::plugin_manifest::schema::ToolBackend;
     let mut map = BTreeMap::new();
-    for manifest in crate::plugin_manifest::PluginManifestLoader::load_builtins() {
-        for entry in &manifest.runnables {
-            if entry.kind != crate::runnable::RunnableKind::Tool {
-                continue;
-            }
-            let Some(cfg) = entry.config.as_ref().and_then(|v| {
-                serde_json::from_value::<crate::plugin_manifest::schema::ToolConfig>(v.clone()).ok()
-            }) else {
-                continue;
-            };
-            if let Ok(ToolBackend::Command { bin, .. }) = cfg.resolve_backend() {
-                if let Some(path) = trusted_builtin_bin_path(&bin) {
-                    map.insert(bin, path);
-                }
-            }
+    for &bin in TRUSTED_COMMAND_BIN_KEYS {
+        if let Some(path) = trusted_builtin_bin_path(bin) {
+            map.insert(bin.to_owned(), path);
         }
     }
     map
 }
 
-/// Seed [`BUILTIN_COMMAND_SEED`] once from the compiled-in manifests. Called from
-/// `main.rs` at startup so a granted spider/rtk call resolves out of the box.
+/// Seed [`BUILTIN_COMMAND_SEED`] once from Core's trusted command keys. Called
+/// from `main.rs` at startup so a granted spider/rtk call resolves out of the
+/// box even when their ordinary marketplace manifests are not compiled in.
 /// Idempotent; safe to call more than once (only the first wins).
 pub fn seed_builtin_command_allowlist() {
     let _ = BUILTIN_COMMAND_SEED.set(builtin_command_seed());
@@ -2462,9 +2456,9 @@ mod tests {
 
     #[test]
     fn builtin_command_seed_covers_only_trusted_builtin_bins() {
-        // Seeding scans ONLY `load_builtins()` (compiled-in), so the built-in
-        // command tools (spider, rtk, bws) are seeded and an untrusted/user manifest bin
-        // never could be. Pure — never touches the process-global OnceLock.
+        // The trusted command keys are seeded independently of the runtime
+        // manifest catalog, and an untrusted/user manifest bin never could be.
+        // Pure — never touches the process-global OnceLock.
         let _lock = crate::sidecar::gateway::lock_gateway_env();
         // Deterministic paths regardless of the dev box's PATH.
         std::env::set_var("RYU_SPIDER_BIN", "/opt/ryu/bin/spider");
@@ -2489,6 +2483,14 @@ mod tests {
         std::env::remove_var("RYU_SPIDER_BIN");
         std::env::remove_var("RYU_RTK_BIN");
         std::env::remove_var("RYU_BWS_BIN");
+    }
+
+    #[test]
+    fn trusted_command_keys_are_independent_of_builtin_manifests() {
+        assert_eq!(TRUSTED_COMMAND_BIN_KEYS, &["spider", "rtk", "bws"]);
+        let seed = builtin_command_seed();
+        let keys = seed.keys().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(keys, ["bws", "rtk", "spider"]);
     }
 
     #[test]

@@ -60,7 +60,7 @@ function Story() {
 					// the old arrangement is a picture of a layout that no longer ships.
 					actions={
 						<>
-							<Button size="sm" variant="outline">
+							<Button size="sm" variant="ghost">
 								Settings
 							</Button>
 							<span

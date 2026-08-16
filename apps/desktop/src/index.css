@@ -532,11 +532,17 @@ div[data-tauri-decorum-tb] .decorum-tb-btn {
 }
 @media (prefers-reduced-motion: reduce) {
 	.gooey-tap {
-		transition: none;
+		transition: opacity 0.15s ease;
 	}
 	.gooey-tap:hover,
 	.gooey-tap:active {
 		transform: none;
+	}
+	.gooey-tap:hover {
+		opacity: 0.8;
+	}
+	.gooey-tap:active {
+		opacity: 0.6;
 	}
 }
 

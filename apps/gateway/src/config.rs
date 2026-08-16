@@ -886,12 +886,10 @@ impl CreditsConfig {
         // 0` guard, and bills nothing. See
         // `an_async_video_job_bills_from_the_provider_payload_not_the_flat_rate`.
         //
-        // TTS and STT are gated here alongside tool calls because they are served
-        // synchronously and have no second cost source at all. Image and video
-        // are deliberately NOT gated: their real payer is the metered path, so
-        // an operator who zeroes them is choosing a fallback of 0 on a surface
-        // that usually prices itself — a defensible choice, unlike a zeroed
-        // surface that can only ever bill from the flat rate.
+        // Every media fallback is gated here alongside tool calls. Image and
+        // video usually have a provider timing value, but the fallback is still
+        // reachable for async jobs and providers that report no timing. A zero
+        // fallback would otherwise skip the debit under the `cost > 0` guard.
         if self.cost_per_tool_call_micro_usd == 0 {
             anyhow::bail!(
                 "credits are ENABLED but GATEWAY_CREDITS_COST_PER_TOOL_CALL_MICRO_USD is 0, \
@@ -916,6 +914,22 @@ Unset it to take the derived default, or set \
 GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give STT away on purpose."
             );
         }
+        if self.cost_per_image_micro_usd == 0 {
+            anyhow::bail!(
+                "credits are ENABLED but GATEWAY_CREDITS_COST_PER_IMAGE_MICRO_USD is 0, \
+so an image without provider compute timing bills the customer nothing while the provider still charges us. \
+Unset it to take the derived default, or set \
+GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give images away on purpose."
+            );
+        }
+        if self.cost_per_video_micro_usd == 0 {
+            anyhow::bail!(
+                "credits are ENABLED but GATEWAY_CREDITS_COST_PER_VIDEO_MICRO_USD is 0, \
+so an async video job without provider compute timing bills the customer nothing while the provider still charges us. \
+Unset it to take the derived default, or set \
+GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give videos away on purpose."
+            );
+        }
         Ok(())
     }
 
@@ -923,7 +937,6 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give STT away on purpose."
     pub fn tool_call_cost_micro_usd(&self, n: u64) -> u64 {
         self.cost_per_tool_call_micro_usd.saturating_mul(n)
     }
-
 
     /// The raw (pre-markup) flat cost in micro-USD for one successful media call
     /// of `modality`. Chat is never metered here (it uses real token/usage.cost);
@@ -952,15 +965,22 @@ GATEWAY_CREDITS_ALLOW_FREE_MODALITIES=1 to give STT away on purpose."
                 // Round UP: a partial second of GPU time is a second we are
                 // billed for, and rounding down would leak a sliver on every
                 // call.
-                let micro =
-                    (seconds * self.cost_per_gpu_second_micro_usd as f64).ceil();
+                let micro = (seconds * self.cost_per_gpu_second_micro_usd as f64).ceil();
                 return (micro.max(0.0) as u64, false);
             }
         }
-        (self.media_cost_micro_usd(modality), true)
+        // TTS and STT have no provider compute-time path, so their configured
+        // per-call rate is the actual price rather than an estimate. Image and
+        // video are the modalities where this flat amount is a fallback.
+        (
+            self.media_cost_micro_usd(modality),
+            matches!(modality, Modality::Image | Modality::Video),
+        )
     }
 
-    /// The flat configured rate for a modality — THE FALLBACK, never the price.
+    /// The flat configured rate for a modality. For image/video it is THE
+    /// FALLBACK, never the primary price; TTS/STT have no metered path, so this
+    /// configured per-call amount is their actual price.
     ///
     /// PRIVATE ON PURPOSE. Call {@link media_cost_from_response} instead, which
     /// prefers the provider's reported compute time and returns a flag saying
@@ -5016,9 +5036,7 @@ mod capacity_config_tests {
 
 #[cfg(test)]
 mod credits_config_tests {
-    use super::{
-        CreditsConfig, GpuKind, Modality, OsKind, WalletEmptyAction,
-    };
+    use super::{CreditsConfig, GpuKind, Modality, OsKind, WalletEmptyAction};
 
     #[test]
     fn debit_amount_passthrough_at_zero_bps() {
@@ -5195,18 +5213,29 @@ enabled = true
     }
 
     #[test]
-    fn zeroing_image_or_video_still_boots() {
-        // Deliberately NOT gated: their real payer is the metered path
-        // (`media_cost_from_response`), so choosing a 0 fallback on a surface
-        // that usually prices itself from the provider's reported compute time is
-        // a defensible deploy choice rather than a blank.
-        let c = CreditsConfig {
-            enabled: true,
-            cost_per_image_micro_usd: 0,
-            cost_per_video_micro_usd: 0,
-            ..Default::default()
-        };
-        assert!(c.validate_metered_rates().is_ok());
+    fn zeroing_any_media_fallback_fails_the_boot_gate() {
+        for (name, field) in [
+            ("image", Modality::Image),
+            ("video", Modality::Video),
+            ("tts", Modality::Tts),
+            ("stt", Modality::Stt),
+        ] {
+            let mut c = CreditsConfig {
+                enabled: true,
+                ..Default::default()
+            };
+            match field {
+                Modality::Image => c.cost_per_image_micro_usd = 0,
+                Modality::Video => c.cost_per_video_micro_usd = 0,
+                Modality::Tts => c.cost_per_tts_micro_usd = 0,
+                Modality::Stt => c.cost_per_stt_micro_usd = 0,
+                Modality::Chat => unreachable!("chat has no media fallback"),
+            }
+            assert!(
+                c.validate_metered_rates().is_err(),
+                "zero {name} fallback must fail the billing startup gate"
+            );
+        }
     }
 
     #[test]
@@ -5274,6 +5303,16 @@ enabled = true
     }
 
     #[test]
+    fn tts_and_stt_flat_rates_are_not_marked_as_estimated() {
+        let c = CreditsConfig::default();
+        for modality in [Modality::Tts, Modality::Stt] {
+            let (cost, estimated) = c.media_cost_from_response(&modality, &serde_json::json!({}));
+            assert!(cost > 0);
+            assert!(!estimated, "{modality:?} flat rate is its configured price");
+        }
+    }
+
+    #[test]
     fn an_async_video_job_bills_from_the_provider_payload_not_the_flat_rate() {
         // REGRESSION. The async video-job debit (submit + poll, in
         // `pipeline::mod`) called the flat `media_cost_micro_usd` directly and
@@ -5310,10 +5349,7 @@ enabled = true
     #[test]
     fn the_gpu_second_rate_defaults_to_replicates_published_l40s_price() {
         // $0.000975/sec. A real published figure, not an invented one.
-        assert_eq!(
-            CreditsConfig::default().cost_per_gpu_second_micro_usd,
-            975
-        );
+        assert_eq!(CreditsConfig::default().cost_per_gpu_second_micro_usd, 975);
     }
 
     #[test]
@@ -6082,8 +6118,14 @@ timeout_ms = 3000
         // Both halves, deliberately: `want` alone would still pass if the serde
         // attribute and `impl Default` were BOTH left at 0, and the literal alone
         // would not catch the two drifting apart.
-        assert_eq!(credits.cost_per_image_micro_usd, want.cost_per_image_micro_usd);
-        assert_eq!(credits.cost_per_video_micro_usd, want.cost_per_video_micro_usd);
+        assert_eq!(
+            credits.cost_per_image_micro_usd,
+            want.cost_per_image_micro_usd
+        );
+        assert_eq!(
+            credits.cost_per_video_micro_usd,
+            want.cost_per_video_micro_usd
+        );
         assert_eq!(credits.cost_per_tts_micro_usd, want.cost_per_tts_micro_usd);
         assert_eq!(credits.cost_per_stt_micro_usd, want.cost_per_stt_micro_usd);
 
@@ -6091,7 +6133,10 @@ timeout_ms = 3000
         // nominal job duration times Replicate's published L40S GPU-second
         // ($0.000975/sec) — so a future "default" of 1 micro-USD is caught too.
         assert_eq!(credits.cost_per_image_micro_usd, 1_950, "2s x $0.000975/s");
-        assert_eq!(credits.cost_per_video_micro_usd, 58_500, "60s x $0.000975/s");
+        assert_eq!(
+            credits.cost_per_video_micro_usd, 58_500,
+            "60s x $0.000975/s"
+        );
         assert_eq!(credits.cost_per_tts_micro_usd, 975, "1s x $0.000975/s");
         assert_eq!(credits.cost_per_stt_micro_usd, 975, "1s x $0.000975/s");
 
@@ -6131,10 +6176,22 @@ timeout_ms = 3000
         )
         .expect("parses")
         .credits;
-        assert_eq!(partial.cost_per_image_micro_usd, absent.cost_per_image_micro_usd);
-        assert_eq!(partial.cost_per_video_micro_usd, absent.cost_per_video_micro_usd);
-        assert_eq!(partial.cost_per_tts_micro_usd, absent.cost_per_tts_micro_usd);
-        assert_eq!(partial.cost_per_stt_micro_usd, absent.cost_per_stt_micro_usd);
+        assert_eq!(
+            partial.cost_per_image_micro_usd,
+            absent.cost_per_image_micro_usd
+        );
+        assert_eq!(
+            partial.cost_per_video_micro_usd,
+            absent.cost_per_video_micro_usd
+        );
+        assert_eq!(
+            partial.cost_per_tts_micro_usd,
+            absent.cost_per_tts_micro_usd
+        );
+        assert_eq!(
+            partial.cost_per_stt_micro_usd,
+            absent.cost_per_stt_micro_usd
+        );
     }
 
     /// A non-zero sandbox rate is what makes the wallet kill-switch reachable at

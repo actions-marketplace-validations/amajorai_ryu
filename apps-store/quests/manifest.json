@@ -2,6 +2,7 @@
   "id": "@ryu/quests",
   "name": "Quests",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Productivity",
   "description": "Quests: auto-detecting todos surfaced from your chats and activity, tracked as a lightweight quest board with progress and completion.",
   "tagline": "Your todos, found for you",

@@ -779,12 +779,12 @@ mod tests {
             ImportedMessage {
                 role: "assistant".into(),
                 content: "hi there".into(),
-            created_at: None,
+                created_at: None,
             },
             ImportedMessage {
                 role: "user".into(),
                 content: "  \n  real question\nmore".into(),
-            created_at: None,
+                created_at: None,
             },
         ];
         assert_eq!(first_line_title(&msgs), "real question");

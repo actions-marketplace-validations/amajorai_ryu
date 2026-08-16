@@ -42,7 +42,7 @@ function stub(bodyText: string, status = 200): Captured {
 		cap.url = url;
 		cap.init = init;
 		return Promise.resolve(new Response(bodyText, { status }));
-	}) as typeof fetch;
+	}) as unknown as typeof fetch;
 	return cap;
 }
 
@@ -61,7 +61,7 @@ function streamOnce(chunks: string[], init?: ResponseInit): void {
 				}),
 				init
 			)
-		)) as typeof fetch;
+		)) as unknown as typeof fetch;
 }
 
 async function collect(chunks: string[]): Promise<DownloadEvent[]> {
@@ -216,7 +216,9 @@ describe("streamDownloads — failure paths", () => {
 
 	test("throws when the response has no body", async () => {
 		globalThis.fetch = (() =>
-			Promise.resolve(new Response(null, { status: 200 }))) as typeof fetch;
+			Promise.resolve(
+				new Response(null, { status: 200 })
+			)) as unknown as typeof fetch;
 		await expect(
 			streamDownloads(target, () => {
 				// no-op

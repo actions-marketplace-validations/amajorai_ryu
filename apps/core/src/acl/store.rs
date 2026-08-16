@@ -178,7 +178,10 @@ pub fn acl_for(key: &ResourceKey) -> ResourceAcl {
         return ResourceAcl::new();
     };
     ResourceAcl {
-        overwrites: rows.iter().filter_map(StoredOverwrite::to_overwrite).collect(),
+        overwrites: rows
+            .iter()
+            .filter_map(StoredOverwrite::to_overwrite)
+            .collect(),
     }
 }
 
@@ -264,9 +267,8 @@ mod tests {
                 allow: vec!["a".to_owned()],
                 deny: vec!["d".to_owned()],
             };
-            let back = StoredOverwrite::from_overwrite(
-                &stored.to_overwrite().expect("known target type"),
-            );
+            let back =
+                StoredOverwrite::from_overwrite(&stored.to_overwrite().expect("known target type"));
             assert_eq!(back.target_type, ty);
             assert_eq!(back.target_id, id);
             assert_eq!(back.allow, vec!["a".to_owned()]);
@@ -300,7 +302,10 @@ mod tests {
     fn missing_resource_resolves_to_no_exceptions() {
         // The common path: almost no resource has overwrites, and one that does
         // not must fall through to the caller's base grant, not to a denial.
-        let acl = acl_for(&ResourceKey::new("workflow", "definitely-not-present-in-any-store"));
+        let acl = acl_for(&ResourceKey::new(
+            "workflow",
+            "definitely-not-present-in-any-store",
+        ));
         assert!(acl.overwrites.is_empty());
     }
 }

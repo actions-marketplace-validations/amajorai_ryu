@@ -70,6 +70,10 @@ test("web sources list the links a search returned, not just the query", async (
 	await expect(
 		page.getByText("oklch interpolation gamut clipping")
 	).toBeVisible();
+	// The pinned summary stops at five rows and provides the route to the complete
+	// workspace-tab inventory rather than becoming an unbounded sidebar.
+	await expect(page.getByText("+1 more items")).toBeVisible();
+	await expect(page.getByText("OKLCH browser support")).not.toBeVisible();
 });
 
 test("an MCP call arriving as a dynamic tool is attributed to its server", async ({

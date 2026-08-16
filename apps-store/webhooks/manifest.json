@@ -2,6 +2,7 @@
   "id": "@ryu/webhooks",
   "name": "Webhooks",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Automation",
   "description": "Inbound webhook endpoint registry: resolved public URLs, secret presence, last-delivery times, and the ingress backend status.",
   "tagline": "See every inbound webhook this node answers",

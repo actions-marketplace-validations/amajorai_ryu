@@ -381,7 +381,7 @@ function EmbeddingCard({ target }: { target: ApiTarget }) {
 					disabled={busy || pending === 0}
 					onClick={reindexNow}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Reindex stale ({pending})
 				</Button>

@@ -26,8 +26,7 @@ import { Input } from "@ryu/ui/components/input.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ComposerSettingsMenu } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
+import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	type ProviderEntry,
 	UniversalPickerBody,
@@ -294,12 +293,15 @@ export function AgentModelPickerField({
 						emit(providerId, first);
 					}
 				},
-				onConfigureAuto: NOOP,
 				onConfigureCredentials: NOOP,
 				onCreateAgent: undefined,
 				onInstallExternal: NOOP,
 				onSelectTeam: undefined,
 				onUpgrade: NOOP,
+				onSwitchProviderAccount: NOOP,
+				onRemoveProviderAccount: NOOP,
+				onSwitchAgentAccount: NOOP,
+				onRemoveAgentAccount: NOOP,
 			};
 		}
 
@@ -338,12 +340,15 @@ export function AgentModelPickerField({
 			onSelectProviderModel: NOOP,
 			onSelectProviderThinking: NOOP,
 			onUseProvider: NOOP,
-			onConfigureAuto: NOOP,
 			onConfigureCredentials: NOOP,
 			onCreateAgent: undefined,
 			onInstallExternal: NOOP,
 			onSelectTeam: undefined,
 			onUpgrade: NOOP,
+			onSwitchProviderAccount: NOOP,
+			onRemoveProviderAccount: NOOP,
+			onSwitchAgentAccount: NOOP,
+			onRemoveAgentAccount: NOOP,
 		};
 	}, [mode, catalogQuery.data, agents, value, onChange, onModelPick]);
 
@@ -352,9 +357,7 @@ export function AgentModelPickerField({
 		((mode === "agent" ? activeAgent?.name : null) ?? value) || placeholder;
 
 	return (
-		<ComposerSettingsMenu
-			align="end"
-			footer={(close) => <ManageModelsButton close={close} />}
+		<ProviderCommandDialog
 			renderBody={(close) => (
 				<>
 					<UniversalPickerBody close={close} data={data} />
@@ -374,8 +377,6 @@ export function AgentModelPickerField({
 					)}
 				</>
 			)}
-			sections={[]}
-			side="bottom"
 			trigger={
 				<button
 					aria-label={ariaLabel}

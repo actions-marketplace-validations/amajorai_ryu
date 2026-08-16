@@ -2,6 +2,7 @@
   "id": "@ryu/kotlin-lsp",
   "name": "Kotlin LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Kotlin language server for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install kotlin-lsp; the plugin ships config.",
   "tagline": "Kotlin code intelligence via the Kotlin LSP",

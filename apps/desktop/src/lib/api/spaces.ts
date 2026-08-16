@@ -565,11 +565,10 @@ export interface RetrievalModeChange {
 	 *  **That repair is API-only — this desktop cannot produce `changed: false`.**
 	 *  `handleRetrievalModeChange` in `src/pages/SpacesPage.tsx` returns early when
 	 *  `selected.retrievalMode === mode`, so every call the UI makes is a real
-	 *  switch. The guard is deliberate and stays: the rebuild is one uncancellable
-	 *  `spawn_blocking` transaction holding the single SQLite connection for 46–87 s
-	 *  on a 1,566-chunk Space, blocking *every* Space, and a picker whose current
-	 *  value re-fires that is a node-wide stall one stray click away. An operator
-	 *  repairs a graph by POSTing `/api/spaces/:id/retrieval-mode` directly. Read
+	 *  switch. The guard is deliberate and stays: a rebuild is an expensive
+	 *  background job, and a picker whose current value re-fires that is a second
+	 *  graph rebuild one stray click away. An operator repairs a graph by POSTing
+	 *  `/api/spaces/:id/retrieval-mode` directly. Read
 	 *  the fields below as documenting the endpoint, not a state this UI reaches. */
 	changed: boolean;
 	/** Chunks the rebuild walked. `0` when switching to vector, and also `0` for an
@@ -584,6 +583,14 @@ export interface RetrievalModeChange {
 	/** Core's own plain-language summary of what was and was not touched. */
 	note: string;
 	previous: RetrievalMode;
+}
+
+/** Live state reported while Core rebuilds a Space's retrieval graph. */
+export interface RetrievalModeProgress {
+	jobId: string;
+	processedChunks: number;
+	state: "running" | "cancelling" | "completed" | "cancelled" | "failed";
+	totalChunks: number;
 }
 
 /** `1 entity` / `2 entities`, without pulling in an i18n dependency. */
@@ -618,31 +625,111 @@ interface RetrievalModeChangeWire {
 	graph_edges?: number;
 	graph_nodes?: number;
 	graph_rebuilt?: boolean;
+	job_id?: string;
+	mode?: string;
 	note?: string;
+	previous?: string;
 	previous_retrieval_mode?: string;
 	retrieval_mode?: string;
+}
+
+interface RetrievalModeJobWire {
+	cancel?: string;
+	job_id: string;
+	requested_mode?: string;
+	space_id: string;
+	status?: string;
+}
+
+interface RetrievalModeCancelWire {
+	cancelled: boolean;
+	finalizing?: boolean;
+}
+
+interface RetrievalModeStatusWire {
+	change?: RetrievalModeChangeWire;
+	error?: string;
+	job_id: string;
+	processed_chunks?: number;
+	requested_mode?: string;
+	state: RetrievalModeProgress["state"];
+	total_chunks?: number;
+}
+
+export interface SetRetrievalModeOptions {
+	onProgress?: (progress: RetrievalModeProgress) => void;
+	signal?: AbortSignal;
+}
+
+function toRetrievalModeChange(
+	json: RetrievalModeChangeWire
+): RetrievalModeChange {
+	return {
+		mode: toRetrievalMode(json.retrieval_mode ?? json.mode),
+		previous: toRetrievalMode(json.previous_retrieval_mode ?? json.previous),
+		changed: json.changed ?? false,
+		graphRebuilt: json.graph_rebuilt ?? false,
+		chunksScanned: json.chunks_scanned ?? 0,
+		graphNodes: json.graph_nodes ?? 0,
+		graphEdges: json.graph_edges ?? 0,
+		note: json.note ?? "",
+	};
+}
+
+function toRetrievalModeProgress(
+	status: RetrievalModeStatusWire
+): RetrievalModeProgress {
+	return {
+		jobId: status.job_id,
+		state: status.state,
+		processedChunks: status.processed_chunks ?? 0,
+		totalChunks: status.total_chunks ?? 0,
+	};
+}
+
+function waitForRetrievalModePoll(signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let timer: ReturnType<typeof setTimeout>;
+		const abort = () => {
+			clearTimeout(timer);
+			cleanup();
+			reject(
+				new DOMException(
+					"The retrieval-mode rebuild was cancelled.",
+					"AbortError"
+				)
+			);
+		};
+		const cleanup = () => signal?.removeEventListener("abort", abort);
+		const complete = () => {
+			cleanup();
+			resolve();
+		};
+		if (signal?.aborted) {
+			abort();
+			return;
+		}
+		timer = setTimeout(complete, 250);
+		signal?.addEventListener("abort", abort, { once: true });
+	});
 }
 
 /**
  * Change an existing Space's retrieval mode.
  *
- * This is a real re-index of the entity graph, not a flag flip. Core runs it on a
- * blocking thread but the request does not return until it finishes, so from here
- * it is one long request — tens of seconds to minutes on a large Space (see
- * {@link RetrievalModeChange} for the measured numbers). Callers must keep the
- * control disabled until it resolves rather than letting a second click queue a
- * second full rebuild.
+ * This is a real re-index of the entity graph, not a flag flip. Core accepts it as
+ * a background job and returns HTTP 202; this client polls until the job commits or
+ * is cancelled. Callers should keep the control disabled while polling rather than
+ * letting a second click queue a second full rebuild.
  *
  * Two consequences worth stating because they are not the usual HTTP intuitions:
  *
- * - **Aborting does not cancel it.** Core's rebuild is one uncancellable
- *   `spawn_blocking` transaction; dropping the request (navigation, timeout,
- *   `AbortSignal`) frees this client but the node keeps working to completion.
- *   Re-issuing after a timeout therefore *queues a second rebuild behind the
- *   first*, it does not replace it.
- * - **It blocks every other Space, not just this one.** One SQLite connection
- *   serves all Spaces and the guard is held for the whole transaction, so searches
- *   and ingests elsewhere wait too.
+ * - **Aborting requests cancellation.** Once the job id is known, an aborted
+ *   `AbortSignal` posts to the cancel endpoint; Core rolls back the staged swap
+ *   and the previous mode remains active.
+ * - **Progress is authoritative.** The local mode is patched only after a
+ *   completed status includes the committed change; running and cancelled states
+ *   never make an optimistic mode update.
  *
  * The mode this writes governs every search of the Space — {@link searchSpace} and
  * the automatic recall an agent does on a chat turn, which delegates to the same
@@ -652,23 +739,88 @@ interface RetrievalModeChangeWire {
 export async function setSpaceRetrievalMode(
 	target: ApiTarget,
 	id: string,
-	mode: RetrievalMode
+	mode: RetrievalMode,
+	options: SetRetrievalModeOptions = {}
 ): Promise<RetrievalModeChange> {
 	const json = await request<RetrievalModeChangeWire>(
 		target,
 		`/api/spaces/${id}/retrieval-mode`,
-		{ method: "POST", body: { retrieval_mode: mode } }
+		{
+			method: "POST",
+			body: { retrieval_mode: mode },
+			// Core accepts this POST before it returns the job id. Do not let Stop
+			// interrupt that small handoff: an aborted fetch can otherwise leave an
+			// accepted rebuild running with no id for the cancellation path below.
+		}
 	);
-	return {
-		mode: toRetrievalMode(json.retrieval_mode),
-		previous: toRetrievalMode(json.previous_retrieval_mode),
-		changed: json.changed ?? false,
-		graphRebuilt: json.graph_rebuilt ?? false,
-		chunksScanned: json.chunks_scanned ?? 0,
-		graphNodes: json.graph_nodes ?? 0,
-		graphEdges: json.graph_edges ?? 0,
-		note: json.note ?? "",
+	// Keep accepting a completed response for older Core nodes, but the current
+	// contract is 202 + a job id. The local Space mode is updated only after the
+	// status endpoint reports `completed` and includes the committed change.
+	if (typeof json.job_id !== "string") {
+		return toRetrievalModeChange(json);
+	}
+	const job = json as RetrievalModeJobWire;
+	const statusPath = `/api/spaces/${id}/retrieval-mode/status?job_id=${encodeURIComponent(job.job_id)}`;
+	const cancelPath = `/api/spaces/${id}/retrieval-mode/cancel`;
+	const poll = async (signal?: AbortSignal): Promise<RetrievalModeChange> => {
+		for (;;) {
+			const status = await request<RetrievalModeStatusWire>(
+				target,
+				statusPath,
+				{
+					signal,
+				}
+			);
+			if (status.job_id !== job.job_id) {
+				await waitForRetrievalModePoll(signal);
+				continue;
+			}
+			options.onProgress?.(toRetrievalModeProgress(status));
+			if (status.state === "completed" && status.change) {
+				return toRetrievalModeChange(status.change);
+			}
+			if (status.state === "cancelled") {
+				throw new DOMException(
+					"The retrieval-mode rebuild was cancelled.",
+					"AbortError"
+				);
+			}
+			if (status.state === "failed") {
+				throw new Error(status.error ?? "The retrieval-mode rebuild failed.");
+			}
+			await waitForRetrievalModePoll(signal);
+		}
 	};
+	try {
+		return await poll(options.signal);
+	} catch (error) {
+		if (
+			error instanceof DOMException &&
+			error.name === "AbortError" &&
+			options.signal?.aborted
+		) {
+			const cancellation = await request<RetrievalModeCancelWire>(
+				target,
+				cancelPath,
+				{
+					method: "POST",
+					body: { job_id: job.job_id },
+				}
+			);
+			// An accepted cancellation is asynchronous too: Core may acknowledge the
+			// request before the worker reaches its terminal state. Keep observing the
+			// job so the UI does not report cancellation while the rebuild is still
+			// committing or rolling back.
+			if (
+				cancellation.cancelled === true ||
+				cancellation.cancelled === false ||
+				cancellation.finalizing === true
+			) {
+				return await poll();
+			}
+		}
+		throw error;
+	}
 }
 
 /** Delete a Space and everything in it. Returns whether a row was removed. */
@@ -1226,7 +1378,8 @@ export async function setEmbeddingModel(
 	target: ApiTarget,
 	modelId: string,
 	baseUrl?: string,
-	dims?: number
+	dims?: number,
+	provider?: string
 ): Promise<void> {
 	const body: Record<string, unknown> = { model_id: modelId };
 	if (baseUrl !== undefined) {
@@ -1234,6 +1387,9 @@ export async function setEmbeddingModel(
 	}
 	if (dims !== undefined) {
 		body.dims = dims;
+	}
+	if (provider !== undefined) {
+		body.provider = provider;
 	}
 	await request(target, "/api/embeddings/model", { method: "POST", body });
 }

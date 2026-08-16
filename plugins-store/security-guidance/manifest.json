@@ -2,6 +2,7 @@
   "id": "@ryu/security-guidance",
   "name": "Security Guidance",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Scans each answer for security vulnerabilities and has a second model review the code before you ship it. Off until you flip the Security review toggle in the composer, or run `/security` for a one-off review of the last answer; the reviewer model is configurable.",
   "tagline": "Catch vulnerabilities before you ship them",
   "keywords": ["security", "review", "code", "vulnerabilities"],
@@ -42,7 +43,8 @@
           {
             "type": "model_picker",
             "pref_key": "security-review-model",
-            "label": "Reviewer model"
+            "label": "Reviewer model",
+            "description": "Optional model used for security reviews. Leave empty to use the node's default."
           }
         ]
       }

@@ -206,7 +206,7 @@ export function StatsTab() {
 					<Button
 						onClick={() => unlocksQuery.refetch()}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Retry
 					</Button>
@@ -269,7 +269,7 @@ export function StatsTab() {
 						disabled={!userId}
 						onClick={handleShareWrapped}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						<HugeiconsIcon className="size-4" icon={ArrowUpRight01Icon} />
 						Share your Ryu Wrapped
@@ -286,11 +286,7 @@ export function StatsTab() {
 				</SettingsCard>
 				<SettingsCard>
 					<span className="font-medium text-sm">Last 30 days</span>
-					<ActivityArea
-						data={usageDays}
-						days={30}
-						formatCount={formatNumber}
-					/>
+					<ActivityArea data={usageDays} days={30} formatCount={formatNumber} />
 				</SettingsCard>
 			</SettingsSection>
 
@@ -322,7 +318,9 @@ export function StatsTab() {
 
 				<div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
 					<SettingsCard>
-						<span className="font-medium text-sm">Where your usage comes from</span>
+						<span className="font-medium text-sm">
+							Where your usage comes from
+						</span>
 						<TransportDonut
 							formatCount={formatNumber}
 							transport={
@@ -366,7 +364,9 @@ export function StatsTab() {
 						icon={<Gauge className="size-4" />}
 						sub="best effort"
 						title="Peak hour"
-						value={insights?.peakHourUtc ? `${insights.peakHourUtc}:00 UTC` : "—"}
+						value={
+							insights?.peakHourUtc ? `${insights.peakHourUtc}:00 UTC` : "—"
+						}
 					/>
 					<StatCard
 						icon={<Bot className="size-4" />}

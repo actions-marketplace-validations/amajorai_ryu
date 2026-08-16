@@ -1,7 +1,8 @@
 // apps/desktop/src/lib/api/import.ts
 //
 // Client for importing agent *setup* from a scanned local folder (instructions,
-// skills, MCP servers, plugins, Claude project memories) — the setup-side
+// skills, MCP servers, plugins, agents, slash commands, and Claude project
+// memories) — the setup-side
 // companion to `agent-threads.ts`. Scan a folder Core can read, preview what it
 // found, then import the selected items into Ryu's own stores.
 
@@ -12,7 +13,9 @@ export type ImportItemKind =
 	| "skill"
 	| "mcp_server"
 	| "plugin"
-	| "memory";
+	| "memory"
+	| "agent"
+	| "slash_command";
 
 export interface ScanItem {
 	/** Cheap same-name/same-id hint; the import step is authoritative. */
@@ -90,6 +93,10 @@ export function kindLabel(kind: ImportItemKind): string {
 			return "Plugins";
 		case "memory":
 			return "Memories";
+		case "agent":
+			return "Agents";
+		case "slash_command":
+			return "Slash commands";
 	}
 }
 

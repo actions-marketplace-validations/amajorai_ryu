@@ -114,7 +114,7 @@ export function SafeModeBanner() {
 					disabled={leaving}
 					onClick={handleLeave}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Leave
 				</Button>

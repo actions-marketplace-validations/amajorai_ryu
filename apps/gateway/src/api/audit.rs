@@ -382,12 +382,22 @@ pub async fn check_exec_budget(
             // (§4.3), consulted only when the request carries the widget
             // envelope. Keyed by instance_id so widgets stay isolated.
             if let Some(widget) = body.widget.as_ref() {
-                if !widget_call_allowed(&state.config.widget, &widget.instance_id) {
+                let allowed = if body.feature.as_deref() == Some("widget-followup") {
+                    widget_followup_allowed(&state.config.widget, &widget.instance_id)
+                } else {
+                    widget_call_allowed(&state.config.widget, &widget.instance_id)
+                };
+                if !allowed {
+                    let kind = if body.feature.as_deref() == Some("widget-followup") {
+                        "follow-up"
+                    } else {
+                        "call"
+                    };
                     return Ok(Json(ExecBudgetCheckResponse {
                         allowed: false,
                         reason: Some(format!(
-                            "Widget call rate limit exhausted: {} calls/min for instance {}.",
-                            state.config.widget.max_calls_per_min, widget.instance_id
+                            "Widget {kind} rate limit exhausted for instance {}.",
+                            widget.instance_id
                         )),
                         current_count,
                         max_count,
@@ -604,10 +614,17 @@ mod tests {
     // ── check_exec_budget ─────────────────────────────────────────────────────
 
     fn check_body(widget: Option<WidgetEnvelope>) -> ExecBudgetCheckBody {
+        check_body_with_feature(widget, None)
+    }
+
+    fn check_body_with_feature(
+        widget: Option<WidgetEnvelope>,
+        feature: Option<&str>,
+    ) -> ExecBudgetCheckBody {
         ExecBudgetCheckBody {
             backend: "wasmtime".to_string(),
             command: "echo".to_string(),
-            feature: None,
+            feature: feature.map(str::to_owned),
             widget,
         }
     }
@@ -679,6 +696,49 @@ mod tests {
         .unwrap();
         assert!(!second.allowed);
         assert!(second.reason.unwrap().contains("rate limit"));
+    }
+
+    #[tokio::test]
+    async fn check_exec_budget_denies_a_widget_followup_over_its_per_instance_rate() {
+        let audit = AuditLogger::new(&AuditConfig {
+            enabled: false,
+            db_path: String::new(),
+        })
+        .unwrap();
+        let mut config = GatewayConfig {
+            auth: AuthConfig {
+                require_auth: true,
+                master_key: Some("sk-master".to_string()),
+                api_keys: vec![],
+            },
+            ..GatewayConfig::default()
+        };
+        config.widget.enabled = true;
+        config.widget.max_followups_per_min = 1;
+        let state = Arc::new(AppState::new_for_test(
+            config,
+            audit,
+            EvalsRunner::new(EvalsConfig::default()),
+        ));
+
+        let envelope = || {
+            Some(WidgetEnvelope {
+                instance_id: "widget-followup-rate-instance".to_string(),
+                origin_server: "com.acme.app".to_string(),
+            })
+        };
+        let body = || check_body_with_feature(envelope(), Some("widget-followup"));
+        let Json(first) =
+            check_exec_budget(State(Arc::clone(&state)), bearer("sk-master"), Json(body()))
+                .await
+                .unwrap();
+        assert!(first.allowed);
+
+        let Json(second) = check_exec_budget(State(state), bearer("sk-master"), Json(body()))
+            .await
+            .unwrap();
+        assert!(!second.allowed);
+        assert!(second.reason.unwrap().contains("follow-up rate limit"));
     }
 
     // ── query_audit ───────────────────────────────────────────────────────────

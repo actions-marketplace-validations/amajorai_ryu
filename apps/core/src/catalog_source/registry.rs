@@ -110,13 +110,13 @@ fn source_from_spec(spec: CustomSourceSpec) -> Source {
                 // not a Claude plugin marketplace. Both forms are just "a URL" in
                 // a custom source spec, so this is where they are told apart —
                 // mirroring the `.json` model-index rule in the Model arm above.
-                Some(url) if WellKnownSource::is_well_known_url(&url) => Source::WellKnown(
-                    WellKnownSource::new(
+                Some(url) if WellKnownSource::is_well_known_url(&url) => {
+                    Source::WellKnown(WellKnownSource::new(
                         spec.id,
                         spec.display_name,
                         WellKnownSource::base_from_url(&url),
-                    ),
-                ),
+                    ))
+                }
                 Some(repo_url) => Source::Marketplace(
                     MarketplaceSource::new(
                         spec.id,
@@ -213,10 +213,9 @@ fn source_from_spec(spec: CustomSourceSpec) -> Source {
                 display_name: spec.display_name,
                 kind: CatalogKind::Agent,
             })
-        }
-        // No catch-all arm on purpose: every kind is matched explicitly, so the
-        // compiler flags the NEXT one added instead of silently degrading it to a
-        // stub the way a trailing `other =>` did.
+        } // No catch-all arm on purpose: every kind is matched explicitly, so the
+          // compiler flags the NEXT one added instead of silently degrading it to a
+          // stub the way a trailing `other =>` did.
     }
 }
 
@@ -481,7 +480,11 @@ fn builtin_sources() -> HashMap<CatalogKind, Vec<Source>> {
     // registries. ClawHub is last on purpose: it is the largest and the least
     // vouched-for, so it should never be what a user lands on by default.
     let mut skill_sources = vec![Source::SkillsSh(SkillsShSource::builtin())];
-    skill_sources.extend(skill_registries::github_taps().into_iter().map(Source::GithubTap));
+    skill_sources.extend(
+        skill_registries::github_taps()
+            .into_iter()
+            .map(Source::GithubTap),
+    );
     skill_sources.push(Source::BrowseSh(BrowseShSource::builtin()));
     skill_sources.push(Source::LobeHub(LobeHubSource::builtin()));
     skill_sources.push(Source::ClawHub(ClawHubSource::builtin()));

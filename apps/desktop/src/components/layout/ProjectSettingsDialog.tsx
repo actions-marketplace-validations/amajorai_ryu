@@ -2,7 +2,14 @@
 // existing AGENTS.md / agents.md / CLAUDE.md from the folder; first save creates
 // AGENTS.md when none exists. Uses the same Plate MarkdownEditor as Spaces pages.
 
-import { Button } from "@ryu/ui/components/button";
+import {
+	Add01Icon,
+	Cancel01Icon,
+	Delete02Icon,
+	PlayIcon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button.tsx";
 import {
 	Dialog,
 	DialogContent,
@@ -10,20 +17,43 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "@ryu/ui/components/dialog";
-import { Input } from "@ryu/ui/components/input";
-import { Label } from "@ryu/ui/components/label";
-import { toast } from "@ryu/ui/components/sileo";
-import { Spinner } from "@ryu/ui/components/spinner";
+} from "@ryu/ui/components/dialog.tsx";
+import { Input } from "@ryu/ui/components/input.tsx";
+import { Label } from "@ryu/ui/components/label.tsx";
+import { toast } from "@ryu/ui/components/sileo.tsx";
+import { Spinner } from "@ryu/ui/components/spinner.tsx";
+import { Textarea } from "@ryu/ui/components/textarea.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { useEffect, useRef, useState } from "react";
 import { MarkdownEditor } from "@/src/components/editor/MarkdownEditor.tsx";
+import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
+import { request } from "@/src/lib/api/client.ts";
 import {
 	basename,
 	joinPath,
 	resolveProjectAgentsFile,
 	writeProjectFile,
 } from "@/src/lib/files.ts";
-import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
+import {
+	emptyEnvironmentScripts,
+	type ProjectEnvironment,
+	type ProjectEnvironmentScripts,
+	useWorkspaceStore,
+} from "@/src/store/useWorkspaceStore.ts";
+
+const SCRIPT_PLATFORMS = ["default", "macos", "linux", "windows"] as const;
+type ScriptPlatform = (typeof SCRIPT_PLATFORMS)[number];
+
+const newId = (): string => crypto.randomUUID();
+
+const newEnvironment = (name = "Local"): ProjectEnvironment => ({
+	id: newId(),
+	name,
+	setup: emptyEnvironmentScripts(),
+	cleanup: emptyEnvironmentScripts(),
+	variables: [],
+	actions: [],
+});
 
 /** Controlled dialog to edit a project's label and on-disk AGENTS.md. */
 export function ProjectSettingsDialog({
@@ -35,8 +65,18 @@ export function ProjectSettingsDialog({
 	open: boolean;
 	path: string;
 }) {
+	const node = useActiveNode();
 	const projectNames = useWorkspaceStore((s) => s.projectNames);
 	const setProjectName = useWorkspaceStore((s) => s.setProjectName);
+	const storedEnvironments = useWorkspaceStore(
+		(s) => s.projectEnvironments[path]
+	);
+	const storedActiveEnvironment = useWorkspaceStore(
+		(s) => s.activeProjectEnvironments[path]
+	);
+	const setProjectEnvironments = useWorkspaceStore(
+		(s) => s.setProjectEnvironments
+	);
 	const folderLeaf = basename(path);
 	const storedName = projectNames[path];
 
@@ -48,6 +88,19 @@ export function ProjectSettingsDialog({
 	const [loadError, setLoadError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const markdownRef = useRef("");
+	const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
+	const [activeEnvironmentId, setActiveEnvironmentId] = useState<string | null>(
+		null
+	);
+	const [editingEnvironmentId, setEditingEnvironmentId] = useState<
+		string | null
+	>(null);
+	const [mappingOrganizationId, setMappingOrganizationId] = useState("");
+	const [mappingProjectId, setMappingProjectId] = useState("");
+	const [loadedMapping, setLoadedMapping] = useState<{
+		organizationId: string;
+		projectId: string;
+	} | null>(null);
 
 	// Reset + load when the dialog opens for a path.
 	useEffect(() => {
@@ -63,6 +116,33 @@ export function ProjectSettingsDialog({
 		setFilePath(null);
 		setExisted(false);
 		markdownRef.current = "";
+		const nextEnvironments = structuredClone(storedEnvironments ?? []);
+		setEnvironments(nextEnvironments);
+		const nextActive =
+			storedActiveEnvironment ?? nextEnvironments[0]?.id ?? null;
+		setActiveEnvironmentId(nextActive);
+		setEditingEnvironmentId(nextActive);
+		request<{
+			mappings: Array<{
+				organizationId: string;
+				projectId: string;
+				root: string;
+			}>;
+		}>(
+			{ url: node.url, token: node.token ?? null },
+			"/api/org-project-mappings"
+		)
+			.then(({ mappings }) => {
+				const mapping = mappings.find((item) => item.root === path) ?? null;
+				setLoadedMapping(mapping);
+				setMappingOrganizationId(mapping?.organizationId ?? "");
+				setMappingProjectId(mapping?.projectId ?? "");
+			})
+			.catch(() => {
+				setLoadedMapping(null);
+				setMappingOrganizationId("");
+				setMappingProjectId("");
+			});
 
 		let cancelled = false;
 		resolveProjectAgentsFile(path)
@@ -90,7 +170,14 @@ export function ProjectSettingsDialog({
 		return () => {
 			cancelled = true;
 		};
-	}, [open, path]);
+	}, [
+		node.token,
+		node.url,
+		open,
+		path,
+		storedActiveEnvironment,
+		storedEnvironments,
+	]);
 
 	const handleSave = async () => {
 		if (saving || markdown === null) {
@@ -101,12 +188,62 @@ export function ProjectSettingsDialog({
 			toast.error("Name can't be empty");
 			return;
 		}
+		if (environments.some((environment) => !environment.name.trim())) {
+			toast.error("Environment names can't be empty");
+			return;
+		}
+		if (
+			Boolean(mappingOrganizationId.trim()) !== Boolean(mappingProjectId.trim())
+		) {
+			toast.error(
+				"Organization ID and project ID are both required for a mapping"
+			);
+			return;
+		}
+		for (const environment of environments) {
+			const variableKeys = environment.variables
+				.map((variable) => variable.key.trim())
+				.filter(Boolean);
+			if (variableKeys.some((key) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key))) {
+				toast.error(`Invalid variable name in ${environment.name}`);
+				return;
+			}
+			if (new Set(variableKeys).size !== variableKeys.length) {
+				toast.error(`Duplicate variable name in ${environment.name}`);
+				return;
+			}
+			if (environment.actions.some((action) => !action.name.trim())) {
+				toast.error(`Action names can't be empty in ${environment.name}`);
+				return;
+			}
+		}
 		const targetPath = filePath ?? joinPath(path, fileName || "AGENTS.md");
 		setSaving(true);
 		try {
 			await writeProjectFile(targetPath, markdownRef.current);
+			const apiTarget = { url: node.url, token: node.token ?? null };
+			if (mappingOrganizationId.trim() && mappingProjectId.trim()) {
+				await request(apiTarget, "/api/org-project-mappings", {
+					body: {
+						organizationId: mappingOrganizationId.trim(),
+						projectId: mappingProjectId.trim(),
+						root: path,
+					},
+					method: "PUT",
+				});
+			} else if (loadedMapping) {
+				const query = new URLSearchParams({
+					organizationId: loadedMapping.organizationId,
+					projectId: loadedMapping.projectId,
+					root: path,
+				});
+				await request(apiTarget, `/api/org-project-mappings?${query}`, {
+					method: "DELETE",
+				});
+			}
 			// Empty / basename-equal clears the override so the leaf stays the source of truth.
 			setProjectName(path, trimmedName === folderLeaf ? "" : trimmedName);
+			setProjectEnvironments(path, environments, activeEnvironmentId);
 			onOpenChange(false);
 			toast.success(
 				existed ? `Saved ${fileName}` : `Created ${basename(targetPath)}`,
@@ -129,7 +266,7 @@ export function ProjectSettingsDialog({
 
 	return (
 		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent className="flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+			<DialogContent className="flex max-h-[90vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
 				<DialogHeader className="shrink-0 space-y-1.5 border-b px-6 py-4">
 					<DialogTitle>Edit project</DialogTitle>
 					<DialogDescription>
@@ -142,7 +279,7 @@ export function ProjectSettingsDialog({
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-4">
+				<div className="scroll-fade flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-4">
 					<div className="flex flex-col gap-1.5">
 						<Label htmlFor="project-settings-name">Name</Label>
 						<Input
@@ -208,6 +345,137 @@ export function ProjectSettingsDialog({
 							) at the project root.
 						</p>
 					</div>
+
+					<section className="flex flex-col gap-3 border-t pt-4">
+						<div>
+							<h3 className="font-medium text-sm">Managed project mapping</h3>
+							<p className="text-muted-foreground text-xs">
+								Map this local folder to a control-plane project. The folder
+								path stays on this node.
+							</p>
+						</div>
+						<div className="grid gap-3 sm:grid-cols-2">
+							<div className="space-y-1.5">
+								<Label htmlFor="project-mapping-organization">
+									Organization ID
+								</Label>
+								<Input
+									id="project-mapping-organization"
+									onChange={(event) =>
+										setMappingOrganizationId(event.target.value)
+									}
+									placeholder="Organization ID"
+									value={mappingOrganizationId}
+								/>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="project-mapping-project">Project ID</Label>
+								<Input
+									id="project-mapping-project"
+									onChange={(event) => setMappingProjectId(event.target.value)}
+									placeholder="Project ID"
+									value={mappingProjectId}
+								/>
+							</div>
+						</div>
+					</section>
+
+					<section className="flex flex-col gap-3 border-t pt-4">
+						<div className="flex items-start justify-between gap-4">
+							<div>
+								<h3 className="font-medium text-sm">Local environments</h3>
+								<p className="text-muted-foreground text-xs">
+									Named setups for worktrees, agent processes, and project
+									actions.
+								</p>
+							</div>
+							<Button
+								onClick={() => {
+									const environment = newEnvironment(
+										`Local ${environments.length + 1}`
+									);
+									setEnvironments((current) => [...current, environment]);
+									setEditingEnvironmentId(environment.id);
+									setActiveEnvironmentId(
+										(current) => current ?? environment.id
+									);
+								}}
+								size="sm"
+								type="button"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								Add environment
+							</Button>
+						</div>
+
+						{environments.length === 0 ? (
+							<button
+								className="rounded-lg border border-dashed px-4 py-8 text-muted-foreground text-sm transition-colors hover:bg-muted/40"
+								onClick={() => {
+									const environment = newEnvironment();
+									setEnvironments([environment]);
+									setEditingEnvironmentId(environment.id);
+									setActiveEnvironmentId(environment.id);
+								}}
+								type="button"
+							>
+								Add a local environment setup
+							</button>
+						) : (
+							<>
+								<div className="flex flex-wrap gap-1">
+									{environments.map((environment) => (
+										<button
+											className={cn(
+												"rounded-md px-3 py-1.5 text-xs transition-colors",
+												editingEnvironmentId === environment.id
+													? "bg-foreground text-background"
+													: "bg-muted text-muted-foreground hover:text-foreground"
+											)}
+											key={environment.id}
+											onClick={() => setEditingEnvironmentId(environment.id)}
+											type="button"
+										>
+											{environment.name}
+											{activeEnvironmentId === environment.id
+												? " · Active"
+												: ""}
+										</button>
+									))}
+								</div>
+								{environments.map((environment) =>
+									environment.id === editingEnvironmentId ? (
+										<EnvironmentEditor
+											environment={environment}
+											isActive={activeEnvironmentId === environment.id}
+											key={environment.id}
+											onChange={(next) =>
+												setEnvironments((current) =>
+													current.map((item) =>
+														item.id === next.id ? next : item
+													)
+												)
+											}
+											onDelete={() => {
+												const remaining = environments.filter(
+													(item) => item.id !== environment.id
+												);
+												setEnvironments(remaining);
+												setEditingEnvironmentId(remaining[0]?.id ?? null);
+												if (activeEnvironmentId === environment.id) {
+													setActiveEnvironmentId(remaining[0]?.id ?? null);
+												}
+											}}
+											onMakeActive={() =>
+												setActiveEnvironmentId(environment.id)
+											}
+										/>
+									) : null
+								)}
+							</>
+						)}
+					</section>
 				</div>
 
 				<DialogFooter className="shrink-0 border-t px-6 py-4">
@@ -231,5 +499,298 @@ export function ProjectSettingsDialog({
 				</DialogFooter>
 			</DialogContent>
 		</Dialog>
+	);
+}
+
+function EnvironmentEditor({
+	environment,
+	isActive,
+	onChange,
+	onDelete,
+	onMakeActive,
+}: {
+	environment: ProjectEnvironment;
+	isActive: boolean;
+	onChange: (environment: ProjectEnvironment) => void;
+	onDelete: () => void;
+	onMakeActive: () => void;
+}) {
+	return (
+		<div className="flex flex-col gap-4 rounded-lg border bg-muted/15 p-4">
+			<div className="flex items-end gap-2">
+				<div className="min-w-0 flex-1 space-y-1.5">
+					<Label htmlFor={`environment-${environment.id}-name`}>Name</Label>
+					<Input
+						id={`environment-${environment.id}-name`}
+						onChange={(event) =>
+							onChange({ ...environment, name: event.target.value })
+						}
+						placeholder="Local"
+						value={environment.name}
+					/>
+				</div>
+				<Button
+					disabled={isActive}
+					onClick={onMakeActive}
+					type="button"
+					variant="ghost"
+				>
+					{isActive ? "Active" : "Make active"}
+				</Button>
+				<Button
+					aria-label={`Delete ${environment.name}`}
+					onClick={onDelete}
+					size="icon"
+					type="button"
+					variant="ghost"
+				>
+					<HugeiconsIcon className="size-4" icon={Delete02Icon} />
+				</Button>
+			</div>
+
+			<ScriptEditor
+				description="Runs once at the project root after Ryu creates a worktree."
+				label="Setup script"
+				onChange={(setup) => onChange({ ...environment, setup })}
+				placeholder={"bun install --frozen-lockfile\ncargo fetch"}
+				scripts={environment.setup}
+			/>
+			<ScriptEditor
+				description="Runs from the worktree before Ryu removes it."
+				label="Cleanup script"
+				onChange={(cleanup) => onChange({ ...environment, cleanup })}
+				placeholder="docker compose down --remove-orphans"
+				scripts={environment.cleanup}
+			/>
+
+			<div className="space-y-2">
+				<div className="flex items-center justify-between">
+					<div>
+						<Label>Variables</Label>
+						<p className="text-muted-foreground text-xs">
+							Inherited by setup, cleanup, actions, and the coding agent. Do not
+							store secrets here.
+						</p>
+					</div>
+					<Button
+						onClick={() =>
+							onChange({
+								...environment,
+								variables: [
+									...environment.variables,
+									{ id: newId(), key: "", value: "" },
+								],
+							})
+						}
+						size="sm"
+						type="button"
+						variant="ghost"
+					>
+						<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						Add variable
+					</Button>
+				</div>
+				{environment.variables.map((variable) => (
+					<div className="flex gap-2" key={variable.id}>
+						<Input
+							aria-label="Variable name"
+							className="font-mono"
+							onChange={(event) =>
+								onChange({
+									...environment,
+									variables: environment.variables.map((item) =>
+										item.id === variable.id
+											? { ...item, key: event.target.value }
+											: item
+									),
+								})
+							}
+							placeholder="DATABASE_URL"
+							value={variable.key}
+						/>
+						<Input
+							aria-label="Variable value"
+							className="font-mono"
+							onChange={(event) =>
+								onChange({
+									...environment,
+									variables: environment.variables.map((item) =>
+										item.id === variable.id
+											? { ...item, value: event.target.value }
+											: item
+									),
+								})
+							}
+							placeholder="value"
+							value={variable.value}
+						/>
+						<Button
+							aria-label={`Remove ${variable.key || "variable"}`}
+							onClick={() =>
+								onChange({
+									...environment,
+									variables: environment.variables.filter(
+										(item) => item.id !== variable.id
+									),
+								})
+							}
+							size="icon"
+							type="button"
+							variant="ghost"
+						>
+							<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
+						</Button>
+					</div>
+				))}
+			</div>
+
+			<div className="space-y-2 border-t pt-4">
+				<div className="flex items-center justify-between">
+					<div>
+						<Label>Actions</Label>
+						<p className="text-muted-foreground text-xs">
+							Commands shown beside the active environment in the workspace bar.
+						</p>
+					</div>
+					<Button
+						onClick={() =>
+							onChange({
+								...environment,
+								actions: [
+									...environment.actions,
+									{
+										id: newId(),
+										name: "Run",
+										scripts: emptyEnvironmentScripts(),
+									},
+								],
+							})
+						}
+						size="sm"
+						type="button"
+						variant="ghost"
+					>
+						<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						Add action
+					</Button>
+				</div>
+				{environment.actions.map((action) => (
+					<div className="rounded-md border bg-background p-3" key={action.id}>
+						<div className="mb-3 flex gap-2">
+							<HugeiconsIcon
+								className="mt-2.5 size-4 text-muted-foreground"
+								icon={PlayIcon}
+							/>
+							<Input
+								aria-label="Action name"
+								onChange={(event) =>
+									onChange({
+										...environment,
+										actions: environment.actions.map((item) =>
+											item.id === action.id
+												? { ...item, name: event.target.value }
+												: item
+										),
+									})
+								}
+								placeholder="Dev stack"
+								value={action.name}
+							/>
+							<Button
+								aria-label={`Remove ${action.name}`}
+								onClick={() =>
+									onChange({
+										...environment,
+										actions: environment.actions.filter(
+											(item) => item.id !== action.id
+										),
+									})
+								}
+								size="icon"
+								type="button"
+								variant="ghost"
+							>
+								<HugeiconsIcon className="size-4" icon={Cancel01Icon} />
+							</Button>
+						</div>
+						<ScriptEditor
+							compact
+							label="Command"
+							onChange={(scripts) =>
+								onChange({
+									...environment,
+									actions: environment.actions.map((item) =>
+										item.id === action.id ? { ...item, scripts } : item
+									),
+								})
+							}
+							placeholder="bun run dev"
+							scripts={action.scripts}
+						/>
+					</div>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function ScriptEditor({
+	compact = false,
+	description,
+	label,
+	onChange,
+	placeholder,
+	scripts,
+}: {
+	compact?: boolean;
+	description?: string;
+	label: string;
+	onChange: (scripts: ProjectEnvironmentScripts) => void;
+	placeholder: string;
+	scripts: ProjectEnvironmentScripts;
+}) {
+	const [platform, setPlatform] = useState<ScriptPlatform>("default");
+	return (
+		<div className="space-y-1.5">
+			<div>
+				<Label>{label}</Label>
+				{description ? (
+					<p className="text-muted-foreground text-xs">{description}</p>
+				) : null}
+			</div>
+			<div className="flex gap-1">
+				{SCRIPT_PLATFORMS.map((item) => (
+					<button
+						className={cn(
+							"rounded-md px-2 py-1 text-xs capitalize",
+							platform === item
+								? "bg-muted font-medium text-foreground"
+								: "text-muted-foreground hover:text-foreground"
+						)}
+						key={item}
+						onClick={() => setPlatform(item)}
+						type="button"
+					>
+						{item === "default" ? "Default" : item}
+					</button>
+				))}
+			</div>
+			<Textarea
+				className={cn(
+					"resize-y font-mono text-xs",
+					compact ? "min-h-20" : "min-h-28"
+				)}
+				onChange={(event) =>
+					onChange({ ...scripts, [platform]: event.target.value })
+				}
+				placeholder={
+					platform === "default"
+						? placeholder
+						: `Overrides Default on ${platform}`
+				}
+				spellCheck={false}
+				value={scripts[platform]}
+			/>
+		</div>
 	);
 }

@@ -23,6 +23,7 @@ import {
 //    the JSON — their whole job is to be an INDEPENDENT copy. ──────────────────
 
 const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
+	"app.request": "app.http",
 	"core.listAgents": "core.listAgents",
 	"ui.registerRoute": "ui.render",
 	"tool.call": "tool.call",
@@ -222,6 +223,7 @@ const OLD_METHOD_CAPABILITY: Record<string, Capability> = {
 };
 
 const OLD_GRANT_CAPABILITY: Record<string, Capability> = {
+	"app:http": "app.http",
 	"core:list_agents": "core.listAgents",
 	"ui:render": "ui.render",
 	"tool:call": "tool.call",

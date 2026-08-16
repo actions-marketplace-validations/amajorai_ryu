@@ -8,7 +8,7 @@
 //   • Artifacts — files the agent created this run (worktree diff, kind="added").
 //   • Context   — the selected project folder + branch (workspace + git status).
 //   • Changes   — the aggregate worktree diff with Apply / Open PR (DiffReviewPane).
-//   • Sources   — connectors the run actually used, derived from its tool calls
+//   • Sources   — chat attachments and connectors the run actually used
 //                 (web search, GitHub, Gmail, MCP servers, local files).
 //   • Side chats— persisted `/btw` asides for this conversation (see Phase 2).
 //
@@ -41,6 +41,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import type { IconSvgElement } from "@hugeicons/react";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { TextShimmer } from "@ryu/blocks/desktop/agent-elements/text-shimmer";
 import { extractCitations } from "@ryu/blocks/desktop/agent-elements/utils/citations.ts";
 import { cn } from "@ryu/ui/lib/utils";
 import type { UIMessage } from "ai";
@@ -83,7 +84,14 @@ import { compactAge } from "@/src/lib/time.ts";
 // ── Message-stream shapes (loose, mirroring the AI SDK parts we read) ──────────
 
 interface StreamPart {
+	/** File-part fields used by user attachments. */
+	contentType?: string;
+	fileName?: string;
+	filename?: string;
 	input?: unknown;
+	mediaType?: string;
+	mimeType?: string;
+	name?: string;
 	output?: unknown;
 	/** Present on tool parts. Nested (subagent) tools carry `<parentTaskId>:<id>`. */
 	state?: string;
@@ -91,9 +99,11 @@ interface StreamPart {
 	/** Present on `dynamic-tool` parts, where the name isn't in `type`. */
 	toolName?: string;
 	type?: string;
+	url?: string;
 }
 
 interface StreamMessage {
+	experimental_attachments?: unknown[];
 	parts?: StreamPart[];
 	role?: string;
 }
@@ -112,6 +122,8 @@ export interface CoworkContextPanelProps {
 	 * (pickers + git + commit & push) here so the whole panel is one accordion.
 	 */
 	leadingItems?: BouncyAccordionItem[];
+	/** Cap each list-like section when this panel is used as a compact summary. */
+	maxItemsPerSection?: number;
 	/** The conversation's message stream (AI SDK UIMessages). */
 	messages: StreamMessage[];
 	/**
@@ -121,17 +133,23 @@ export interface CoworkContextPanelProps {
 	onOpenArtifact?: (artifact: Artifact) => void;
 	/** Reopen a persisted side chat (the host shows it in the btw overlay). */
 	onOpenSideChat?: (entry: BtwEntry) => void;
+	/** Open the complete Sources list in its own workspace tab. */
+	onOpenSources?: () => void;
 	/**
 	 * Open a spawned subagent's transcript in the right panel. The host reads the
 	 * subagent id and re-derives the live transcript from the message stream.
 	 */
 	onOpenSubagent?: (subagent: SubagentSummary) => void;
+	/** Open the complete Subagents list in its own workspace tab. */
+	onOpenSubagents?: () => void;
 	/** The active conversation id (== worktree run id). Null on a fresh chat. */
 	runId: string | null;
 	/** Bumped by the host after a new `/btw` so the side-chats list refetches. */
 	sideChatsRefreshKey?: number;
 	/** Node target for the worktree-diff / git-status fetches. */
 	target: ApiTarget;
+	/** Connected rail styling used by the floating pinned summary. */
+	variant?: "cards" | "summary";
 }
 
 // ── Derivations from the message stream ────────────────────────────────────────
@@ -191,6 +209,15 @@ export interface DerivedSource {
 const MAX_SOURCE_ITEMS = 40;
 const MAX_ITEM_CHARS = 160;
 const FIRST_LINE_RE = /\r?\n[\s\S]*$/;
+const CHAT_ATTACHMENTS_SOURCE = {
+	id: "attachments",
+	label: "Chat attachments",
+	icon: File01Icon,
+} as const;
+
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 // Tool-name sets, not part types: a tool arrives either as `tool-<Name>` or as a
 // `dynamic-tool` carrying `toolName`, and ACP bridges use their own names for
@@ -232,6 +259,40 @@ function clampItem(text: string): string {
 	return oneLine.length > MAX_ITEM_CHARS
 		? `${oneLine.slice(0, MAX_ITEM_CHARS - 1).trimEnd()}…`
 		: oneLine;
+}
+
+/** A file the user supplied with a chat turn, read from the same wire shapes the transcript renders. */
+function attachmentItem(
+	value: unknown,
+	id: string,
+	fallbackNumber: number,
+	legacy = false
+): SourceItem | null {
+	if (typeof value !== "object" || value === null) {
+		return null;
+	}
+	const part = value as Record<string, unknown>;
+	if (!legacy && part.type !== "file") {
+		return null;
+	}
+	const mediaType =
+		nonEmptyString(part.mediaType) ?? nonEmptyString(part.mimeType);
+	const filename =
+		nonEmptyString(part.filename) ??
+		nonEmptyString(part.name) ??
+		nonEmptyString(part.fileName);
+	const contentType = nonEmptyString(part.contentType);
+	const resolvedMediaType = mediaType ?? contentType;
+	if (!(resolvedMediaType || filename || nonEmptyString(part.url))) {
+		return null;
+	}
+	const isImage = resolvedMediaType?.startsWith("image/") ?? false;
+	return {
+		id,
+		label: filename ?? `${isImage ? "Image" : "Attachment"} ${fallbackNumber}`,
+		detail: resolvedMediaType,
+		icon: isImage ? Image02Icon : File01Icon,
+	};
 }
 
 /**
@@ -362,35 +423,68 @@ function pushItem(source: DerivedSource, item: SourceItem | null) {
 	}
 }
 
+function sourceFrom(
+	byId: Map<string, DerivedSource>,
+	meta: Omit<DerivedSource, "items">
+): DerivedSource {
+	const existing = byId.get(meta.id);
+	if (existing) {
+		return existing;
+	}
+	const source = { ...meta, items: [] };
+	byId.set(source.id, source);
+	return source;
+}
+
 /**
  * Distinct sources used across the whole conversation, first-seen order, each
- * carrying the files / links / commands it was used on. Web results come from
- * `extractCitations` (the same derivation the transcript's citation chips use),
- * so a search's result links show up, not just the query that found them.
+ * carrying the attachments / files / links / commands it was used on. User
+ * attachments come from the same message parts the transcript renders. Web
+ * results come from `extractCitations` (the same derivation the transcript's
+ * citation chips use), so a search's result links show up, not just the query
+ * that found them.
  */
 export function extractSources(messages: StreamMessage[]): DerivedSource[] {
 	const byId = new Map<string, DerivedSource>();
 	const allParts: StreamPart[] = [];
-	for (const message of messages) {
-		if (!message.parts) {
-			continue;
-		}
-		for (const part of message.parts) {
+	for (const [messageIndex, message] of messages.entries()) {
+		for (const [partIndex, part] of (message.parts ?? []).entries()) {
 			allParts.push(part);
+			if (message.role === "user") {
+				const item = attachmentItem(
+					part,
+					`attachment:${messageIndex}:${partIndex}`,
+					partIndex + 1
+				);
+				if (item) {
+					pushItem(sourceFrom(byId, CHAT_ATTACHMENTS_SOURCE), item);
+				}
+			}
 			if (!isToolPart(part)) {
 				continue;
 			}
 			const tool = toolNameOf(part);
 			const meta = sourceForTool(tool);
-			if (!meta) {
-				continue;
+			if (meta) {
+				pushItem(sourceFrom(byId, meta), itemForTool(tool, part));
 			}
-			let source = byId.get(meta.id);
-			if (!source) {
-				source = { ...meta, items: [] };
-				byId.set(meta.id, source);
+		}
+		if (message.role === "user" && message.experimental_attachments) {
+			for (const [
+				attachmentIndex,
+				attachment,
+			] of message.experimental_attachments.entries()) {
+				const item = attachmentItem(
+					attachment,
+					`legacy-attachment:${messageIndex}:${attachmentIndex}`,
+					attachmentIndex + 1,
+					true
+				);
+				if (!item) {
+					continue;
+				}
+				pushItem(sourceFrom(byId, CHAT_ATTACHMENTS_SOURCE), item);
 			}
-			pushItem(source, itemForTool(tool, part));
 		}
 	}
 
@@ -430,6 +524,8 @@ export interface SubagentSummary {
 	 * panel row updates live instead of only at the end.
 	 */
 	activity: string;
+	/** Lines added/removed by this subagent's nested write tools. */
+	changes: { deletions: number; insertions: number };
 	/**
 	 * The spawn ended in `output-error`. Distinct from a merely empty result: an
 	 * errored Task usually carries no extractable output text either, so without
@@ -575,6 +671,49 @@ function latestActivity(nested: StreamPart[]): string {
 	return `${name}${detailStr}`;
 }
 
+function lineCount(value: unknown): number {
+	return typeof value === "string" && value.length > 0
+		? value.split("\n").length
+		: 0;
+}
+
+/** Best-effort per-agent diff stats from the same tool payloads used for activity. */
+function nestedChanges(nested: StreamPart[]): {
+	deletions: number;
+	insertions: number;
+} {
+	let insertions = 0;
+	let deletions = 0;
+	for (const part of nested) {
+		const input = (part.input ?? {}) as Record<string, unknown>;
+		const output = (part.output ?? {}) as Record<string, unknown>;
+		const diffStats =
+			typeof output.diffStats === "string" ? output.diffStats : "";
+		const added = /\+(\d+)/.exec(diffStats)?.[1];
+		const removed = /-(\d+)/.exec(diffStats)?.[1];
+		if (added || removed) {
+			insertions += Number(added ?? 0);
+			deletions += Number(removed ?? 0);
+			continue;
+		}
+		const patch = typeof input.patch === "string" ? input.patch : "";
+		if (patch) {
+			for (const line of patch.split("\n")) {
+				if (line.startsWith("+") && !line.startsWith("+++")) {
+					insertions += 1;
+				}
+				if (line.startsWith("-") && !line.startsWith("---")) {
+					deletions += 1;
+				}
+			}
+			continue;
+		}
+		insertions += lineCount(input.new_string ?? input.new_str ?? input.content);
+		deletions += lineCount(input.old_string ?? input.old_str);
+	}
+	return { insertions, deletions };
+}
+
 /** Reconstruct one subagent's summary + read-only transcript from its parts. */
 function toSubagentSummary(
 	task: StreamPart,
@@ -608,6 +747,7 @@ function toSubagentSummary(
 	] as unknown as UIMessage[];
 
 	return {
+		changes: nestedChanges(nested),
 		id,
 		name: subagentName(id),
 		label: input?.subagent_type || "",
@@ -647,13 +787,19 @@ export function extractSubagents(messages: StreamMessage[]): SubagentSummary[] {
 function SubagentsList({
 	subagents,
 	onOpen,
+	limit,
+	onShowAll,
 }: {
+	limit?: number;
 	onOpen?: (subagent: SubagentSummary) => void;
+	onShowAll?: () => void;
 	subagents: SubagentSummary[];
 }) {
+	const shown = limit === undefined ? subagents : subagents.slice(0, limit);
+	const overflow = subagents.length - shown.length;
 	return (
 		<ul className="flex flex-col gap-0.5">
-			{subagents.map((sub) => {
+			{shown.map((sub) => {
 				// While running, the second line shows the live current tool step
 				// (recomputed each stream tick); once done it falls back to the task
 				// description so the row stays informative.
@@ -679,12 +825,34 @@ function SubagentsList({
 										</span>
 									)}
 								</span>
-								{secondary && (
+								{secondary && sub.status === "running" ? (
+									<TextShimmer
+										as="span"
+										className="truncate text-muted-foreground"
+										duration={2.4}
+									>
+										{secondary}
+									</TextShimmer>
+								) : secondary ? (
 									<span className="truncate text-muted-foreground">
 										{secondary}
 									</span>
-								)}
+								) : null}
 							</span>
+							{(sub.changes.insertions > 0 || sub.changes.deletions > 0) && (
+								<span className="flex shrink-0 items-center gap-1 font-medium text-[11px] tabular-nums">
+									{sub.changes.insertions > 0 && (
+										<span className="text-emerald-600 dark:text-emerald-400/90">
+											+{sub.changes.insertions}
+										</span>
+									)}
+									{sub.changes.deletions > 0 && (
+										<span className="text-red-600/90 dark:text-red-400/90">
+											-{sub.changes.deletions}
+										</span>
+									)}
+								</span>
+							)}
 							{sub.status === "running" && (
 								<span
 									className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary"
@@ -695,7 +863,54 @@ function SubagentsList({
 					</li>
 				);
 			})}
+			{overflow > 0 && (
+				<OverflowRow count={overflow} label="subagents" onShowAll={onShowAll} />
+			)}
 		</ul>
+	);
+}
+
+/** Inline activity summary for the chat transcript. These intentionally read as
+ * ghost buttons: useful while a run is busy, quiet enough not to become another
+ * message bubble, and wired to the same transcript opener as the context rail. */
+export function SubagentActivityChips({
+	onOpen,
+	subagents,
+}: {
+	onOpen?: (subagent: SubagentSummary) => void;
+	subagents: SubagentSummary[];
+}) {
+	if (subagents.length === 0) {
+		return null;
+	}
+
+	return (
+		<div className="scrollbar-none flex min-w-0 items-center gap-1.5 overflow-x-auto px-4 py-2">
+			{subagents.map((subagent) => (
+				<button
+					aria-label={`Open ${subagent.name}'s subagent thread`}
+					className="group flex shrink-0 items-center gap-1.5 rounded-full border border-border/60 bg-transparent px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:border-border hover:bg-muted/50 hover:text-foreground"
+					key={subagent.id}
+					onClick={() => onOpen?.(subagent)}
+					type="button"
+				>
+					<SubagentAvatar
+						className="size-4 opacity-75 transition-opacity group-hover:opacity-100"
+						seed={subagent.id}
+					/>
+					<span>{subagent.name}</span>
+					{subagent.status === "running" && (
+						<span
+							aria-hidden
+							className="size-1.5 animate-pulse rounded-full bg-primary"
+						/>
+					)}
+				</button>
+			))}
+			<span className="truncate pl-1 text-muted-foreground/70 text-xs">
+				{`${subagents.length} subagent${subagents.length === 1 ? "" : "s"} working`}
+			</span>
+		</div>
 	);
 }
 
@@ -728,13 +943,17 @@ const ARTIFACT_KIND_LABEL: Record<ArtifactKind, string> = {
 function RenderedArtifactsList({
 	artifacts,
 	onOpen,
+	limit,
 }: {
 	artifacts: Artifact[];
+	limit?: number;
 	onOpen?: (artifact: Artifact) => void;
 }) {
+	const shown = limit === undefined ? artifacts : artifacts.slice(0, limit);
+	const overflow = artifacts.length - shown.length;
 	return (
 		<ul className="flex flex-col gap-0.5">
-			{artifacts.map((artifact) => (
+			{shown.map((artifact) => (
 				<li key={artifact.id}>
 					<button
 						className={PANEL_ROW}
@@ -756,6 +975,7 @@ function RenderedArtifactsList({
 					</button>
 				</li>
 			))}
+			{overflow > 0 && <OverflowRow count={overflow} label="artifacts" />}
 		</ul>
 	);
 }
@@ -803,6 +1023,35 @@ function EmptyHint({ children }: { children: ReactNode }) {
 	return <p className="py-1 text-muted-foreground text-xs">{children}</p>;
 }
 
+function OverflowRow({
+	count,
+	label,
+	onShowAll,
+}: {
+	count: number;
+	label: string;
+	onShowAll?: () => void;
+}) {
+	const copy = `+${count} more ${label}`;
+	if (!onShowAll) {
+		return (
+			<li className="px-1.5 py-1 text-muted-foreground text-xs">{copy}</li>
+		);
+	}
+	return (
+		<li>
+			<button
+				className={cn(PANEL_ROW, "text-muted-foreground")}
+				onClick={onShowAll}
+				type="button"
+			>
+				<span>{copy}</span>
+				<span className="ml-auto text-[10px]">View all</span>
+			</button>
+		</li>
+	);
+}
+
 // ── Progress checklist ─────────────────────────────────────────────────────────
 
 function TodoStatusDot({
@@ -839,17 +1088,21 @@ function TodoStatusDot({
 function ProgressSection({
 	todos,
 	chatStatus,
+	limit,
 }: {
 	chatStatus?: string;
+	limit?: number;
 	todos: CoworkPlanTodo[];
 }) {
 	const isStreaming = chatStatus === "streaming" || chatStatus === "submitted";
 	if (todos.length === 0) {
 		return <EmptyHint>Steps will show as the task unfolds.</EmptyHint>;
 	}
+	const shown = limit === undefined ? todos : todos.slice(0, limit);
+	const overflow = todos.length - shown.length;
 	return (
 		<ul className="flex flex-col gap-2">
-			{todos.map((todo, idx) => (
+			{shown.map((todo, idx) => (
 				<li
 					className="flex items-start gap-2"
 					key={`${idx}-${todo.content.slice(0, 24)}`}
@@ -872,6 +1125,7 @@ function ProgressSection({
 					</span>
 				</li>
 			))}
+			{overflow > 0 && <OverflowRow count={overflow} label="steps" />}
 		</ul>
 	);
 }
@@ -945,10 +1199,18 @@ function SourceItemRow({ item }: { item: SourceItem }) {
 	);
 }
 
-function SourceGroup({ source }: { source: DerivedSource }) {
+function SourceGroup({
+	source,
+	itemLimit,
+	onShowAll,
+}: {
+	itemLimit?: number;
+	onShowAll?: () => void;
+	source: DerivedSource;
+}) {
 	const [open, setOpen] = useState(false);
 	const contentId = useId();
-	const shown = source.items.slice(0, MAX_SOURCE_ITEMS);
+	const shown = source.items.slice(0, itemLimit ?? MAX_SOURCE_ITEMS);
 	const overflow = source.items.length - shown.length;
 
 	if (source.items.length === 0) {
@@ -1001,9 +1263,7 @@ function SourceGroup({ source }: { source: DerivedSource }) {
 						<SourceItemRow item={item} key={item.id} />
 					))}
 					{overflow > 0 && (
-						<li className="px-1.5 py-1 text-muted-foreground text-xs">
-							+{overflow} more
-						</li>
+						<OverflowRow count={overflow} label="items" onShowAll={onShowAll} />
 					)}
 				</ul>
 			)}
@@ -1011,13 +1271,137 @@ function SourceGroup({ source }: { source: DerivedSource }) {
 	);
 }
 
-function SourcesList({ sources }: { sources: DerivedSource[] }) {
+function SourcesList({
+	sources,
+	limit,
+	onShowAll,
+}: {
+	limit?: number;
+	onShowAll?: () => void;
+	sources: DerivedSource[];
+}) {
+	const shown = limit === undefined ? sources : sources.slice(0, limit);
+	const overflow = sources.length - shown.length;
 	return (
 		<ul className="flex flex-col gap-0.5">
-			{sources.map((source) => (
-				<SourceGroup key={source.id} source={source} />
+			{shown.map((source) => (
+				<SourceGroup
+					itemLimit={limit}
+					key={source.id}
+					onShowAll={onShowAll}
+					source={source}
+				/>
 			))}
+			{overflow > 0 && (
+				<OverflowRow count={overflow} label="sources" onShowAll={onShowAll} />
+			)}
 		</ul>
+	);
+}
+
+function WorkspaceListHeading({
+	count,
+	icon,
+	title,
+}: {
+	count: number;
+	icon: IconSvgElement;
+	title: string;
+}) {
+	return (
+		<div className="flex items-center gap-2 px-1 text-muted-foreground text-xs">
+			<HugeiconsIcon aria-hidden className="size-4" icon={icon} />
+			<span>{title}</span>
+			<span>· {count}</span>
+		</div>
+	);
+}
+
+/** Complete Codex-style run roster shown in a dedicated workspace tab. */
+export function SubagentsWorkspacePanel({
+	messages,
+	onOpenSubagent,
+}: Pick<CoworkContextPanelProps, "messages" | "onOpenSubagent">) {
+	const subagents = useMemo(() => extractSubagents(messages), [messages]);
+	const active = subagents.filter((subagent) => subagent.status === "running");
+	const done = subagents.filter((subagent) => subagent.status === "done");
+
+	if (subagents.length === 0) {
+		return (
+			<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
+				Subagents will appear here when this chat delegates work.
+			</div>
+		);
+	}
+
+	return (
+		<div className="h-full overflow-y-auto px-4 py-5">
+			<div className="flex flex-col gap-7">
+				{active.length > 0 && (
+					<section className="flex flex-col gap-2">
+						<WorkspaceListHeading
+							count={active.length}
+							icon={Robot01Icon}
+							title="Active"
+						/>
+						<SubagentsList onOpen={onOpenSubagent} subagents={active} />
+					</section>
+				)}
+				{done.length > 0 && (
+					<section className="flex flex-col gap-2">
+						<WorkspaceListHeading
+							count={done.length}
+							icon={CheckmarkCircle02Icon}
+							title="Done"
+						/>
+						<SubagentsList onOpen={onOpenSubagent} subagents={done} />
+					</section>
+				)}
+			</div>
+		</div>
+	);
+}
+
+/** Complete source inventory; unlike the pinned summary, no rows are capped. */
+export function SourcesWorkspacePanel({
+	messages,
+}: Pick<CoworkContextPanelProps, "messages">) {
+	const sources = useMemo(() => extractSources(messages), [messages]);
+	if (sources.length === 0) {
+		return (
+			<div className="flex h-full items-center justify-center p-4 text-center text-muted-foreground text-xs">
+				Sources will appear here as this chat reads files, links and connectors.
+			</div>
+		);
+	}
+
+	return (
+		<div className="h-full overflow-y-auto px-4 py-5">
+			<div className="flex flex-col">
+				{sources.map((source, index) => (
+					<section
+						className={cn(
+							"flex flex-col gap-2 py-4 first:pt-0 last:pb-0",
+							index > 0 && "border-border/60 border-t"
+						)}
+						key={source.id}
+					>
+						<WorkspaceListHeading
+							count={source.items.length}
+							icon={source.icon}
+							title={source.label}
+						/>
+						{source.items.length > 0 && (
+							<ul className="flex flex-col gap-0.5">
+								{source.items.map((item) => (
+									<SourceItemRow item={item} key={item.id} />
+								))}
+							</ul>
+						)}
+					</section>
+				))}
+			</div>
+		</div>
 	);
 }
 
@@ -1027,14 +1411,18 @@ function SideChatsList({
 	entries,
 	onOpen,
 	onDelete,
+	limit,
 }: {
 	entries: BtwEntry[];
+	limit?: number;
 	onDelete: (id: string) => void;
 	onOpen?: (entry: BtwEntry) => void;
 }) {
+	const shown = limit === undefined ? entries : entries.slice(0, limit);
+	const overflow = entries.length - shown.length;
 	return (
 		<ul className="flex flex-col gap-0.5">
-			{entries.map((entry) => (
+			{shown.map((entry) => (
 				<li className="group/side flex items-center gap-1" key={entry.id}>
 					<button
 						className={cn(PANEL_ROW, "w-auto flex-1")}
@@ -1064,6 +1452,7 @@ function SideChatsList({
 					</button>
 				</li>
 			))}
+			{overflow > 0 && <OverflowRow count={overflow} label="side chats" />}
 		</ul>
 	);
 }
@@ -1078,8 +1467,12 @@ export function CoworkContextPanel({
 	onOpenArtifact,
 	onOpenSideChat,
 	onOpenSubagent,
+	onOpenSources,
+	onOpenSubagents,
 	sideChatsRefreshKey,
 	leadingItems,
+	maxItemsPerSection,
+	variant = "cards",
 }: CoworkContextPanelProps) {
 	const todos = useMemo(() => extractLatestTodos(messages), [messages]);
 	const sources = useMemo(() => extractSources(messages), [messages]);
@@ -1152,7 +1545,13 @@ export function CoworkContextPanel({
 			id: "progress",
 			icon: <SectionIcon icon={Target02Icon} />,
 			title: <SectionTitle count={todos.length} title="Progress" />,
-			description: <ProgressSection chatStatus={chatStatus} todos={todos} />,
+			description: (
+				<ProgressSection
+					chatStatus={chatStatus}
+					limit={maxItemsPerSection}
+					todos={todos}
+				/>
+			),
 		});
 	}
 
@@ -1163,9 +1562,18 @@ export function CoworkContextPanel({
 			title: <SectionTitle count={createdFiles.length} title="Artifacts" />,
 			description: (
 				<div className="flex flex-col">
-					{createdFiles.map((file) => (
+					{createdFiles.slice(0, maxItemsPerSection).map((file) => (
 						<FileRow file={file} key={file.path} />
 					))}
+					{maxItemsPerSection !== undefined &&
+						createdFiles.length > maxItemsPerSection && (
+							<ul>
+								<OverflowRow
+									count={createdFiles.length - maxItemsPerSection}
+									label="files"
+								/>
+							</ul>
+						)}
 				</div>
 			),
 		});
@@ -1188,7 +1596,11 @@ export function CoworkContextPanel({
 				<SectionTitle count={artifacts.length} title="Rendered artifacts" />
 			),
 			description: (
-				<RenderedArtifactsList artifacts={artifacts} onOpen={onOpenArtifact} />
+				<RenderedArtifactsList
+					artifacts={artifacts}
+					limit={maxItemsPerSection}
+					onOpen={onOpenArtifact}
+				/>
 			),
 		});
 	}
@@ -1198,7 +1610,13 @@ export function CoworkContextPanel({
 			id: "sources",
 			icon: <SectionIcon icon={Globe02Icon} />,
 			title: <SectionTitle count={sources.length} title="Sources" />,
-			description: <SourcesList sources={sources} />,
+			description: (
+				<SourcesList
+					limit={maxItemsPerSection}
+					onShowAll={onOpenSources}
+					sources={sources}
+				/>
+			),
 		});
 	}
 
@@ -1208,7 +1626,12 @@ export function CoworkContextPanel({
 			icon: <SectionIcon icon={Robot01Icon} />,
 			title: <SectionTitle count={subagents.length} title="Subagents" />,
 			description: (
-				<SubagentsList onOpen={onOpenSubagent} subagents={subagents} />
+				<SubagentsList
+					limit={maxItemsPerSection}
+					onOpen={onOpenSubagent}
+					onShowAll={onOpenSubagents}
+					subagents={subagents}
+				/>
 			),
 		});
 	}
@@ -1221,6 +1644,7 @@ export function CoworkContextPanel({
 			description: (
 				<SideChatsList
 					entries={sideChats}
+					limit={maxItemsPerSection}
 					onDelete={handleDeleteSideChat}
 					onOpen={onOpenSideChat}
 				/>
@@ -1233,16 +1657,33 @@ export function CoworkContextPanel({
 	}
 
 	return (
-		<div className="h-full overflow-y-auto p-2">
+		<div
+			className={cn(
+				"h-full overflow-y-auto",
+				variant === "cards" ? "p-2" : "p-0"
+			)}
+		>
 			<BouncyAccordion
 				// No `description` size override: every section body now declares its
 				// own scale (the subsection rows are `text-xs`, DiffReviewPane and the
 				// progress/file lists `text-sm`), so a panel-wide `text-sm` here would
 				// only fight them.
-				classNames={{
-					item: "border border-border/60",
-					title: "truncate",
-				}}
+				classNames={
+					variant === "summary"
+						? {
+								root: "rounded-3xl border border-border/70 bg-card/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl [&>div]:!mt-0 [&>div+div]:border-border/60 [&>div+div]:border-t",
+								item: "!rounded-none !bg-transparent",
+								trigger: "min-h-11 px-1.5 py-2 hover:bg-muted/35 rounded-lg",
+								icon: "h-6 w-6",
+								title: "truncate",
+								content: "px-0",
+								description: "pb-1",
+							}
+						: {
+								item: "border border-border/60",
+								title: "truncate",
+							}
+				}
 				defaultValue={items[0]?.id ?? null}
 				items={items}
 			/>

@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -36,6 +37,28 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::win_process::NoWindow;
+
+/// Sanitized HTTP failure from a remote MCP endpoint. Authentication callers can
+/// downcast this to inspect the status and `WWW-Authenticate` challenge without
+/// exposing response headers or bearer values in a string error.
+#[derive(Debug)]
+pub struct McpHttpFailure {
+    pub status: reqwest::StatusCode,
+    pub www_authenticate: Option<String>,
+    pub body_snippet: String,
+}
+
+impl std::fmt::Display for McpHttpFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "remote MCP endpoint returned HTTP {}: {}",
+            self.status, self.body_snippet
+        )
+    }
+}
+
+impl std::error::Error for McpHttpFailure {}
 
 /// The MCP protocol version this client offers during a **stdio** `initialize`.
 ///
@@ -62,6 +85,19 @@ const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// reject a request without it. That is what
 /// [`HttpTransport::protocol_version`] carries.
 const MCP_HTTP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_HTTP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
+
+#[derive(Clone, Copy)]
+enum HttpProtocolMode {
+    Modern,
+    Legacy,
+}
+
+fn http_protocol_modes() -> &'static tokio::sync::RwLock<BTreeMap<String, HttpProtocolMode>> {
+    static MODES: OnceLock<tokio::sync::RwLock<BTreeMap<String, HttpProtocolMode>>> =
+        OnceLock::new();
+    MODES.get_or_init(|| tokio::sync::RwLock::new(BTreeMap::new()))
+}
 
 /// How long to wait for any single JSON-RPC response before giving up. MCP
 /// servers spawned via `npx` can be slow to start, so this is generous.
@@ -305,6 +341,9 @@ struct HttpTransport {
     /// completes — the `initialize` POST itself carries no such header, because
     /// nothing has been negotiated yet.
     protocol_version: Option<String>,
+    /// Current stateless HTTP protocol: no initialize/session, with per-request
+    /// method/name headers and client metadata.
+    modern: bool,
     pending: VecDeque<String>,
 }
 
@@ -405,6 +444,19 @@ impl HttpTransport {
             "application/json, text/event-stream".to_owned(),
         ));
         headers.push(("Content-Type".to_owned(), "application/json".to_owned()));
+        if self.modern {
+            let frame: Value = serde_json::from_str(line).context("parsing outbound MCP frame")?;
+            if let Some(method) = frame.get("method").and_then(Value::as_str) {
+                headers.push(("Mcp-Method".to_owned(), method.to_owned()));
+            }
+            let name = frame
+                .pointer("/params/name")
+                .or_else(|| frame.pointer("/params/uri"))
+                .and_then(Value::as_str);
+            if let Some(name) = name {
+                headers.push(("Mcp-Name".to_owned(), name.to_owned()));
+            }
+        }
         if let Some(session) = &self.session_id {
             headers.push(("Mcp-Session-Id".to_owned(), session.clone()));
         }
@@ -420,12 +472,14 @@ impl HttpTransport {
         )
         .await?;
 
-        if let Some(session) = resp_headers
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-        {
-            self.session_id = Some(session);
+        if !self.modern {
+            if let Some(session) = resp_headers
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+            {
+                self.session_id = Some(session);
+            }
         }
 
         if status.is_redirection() {
@@ -456,11 +510,29 @@ impl HttpTransport {
             // Body snippet, truncated: a remote's error page is untrusted text
             // and this string reaches logs and the model. The URL is redacted for
             // the complementary reason — it is OUR secret, not the remote's text.
-            let snippet: String = body.chars().take(300).collect();
-            return Err(anyhow!(
-                "MCP endpoint {} returned HTTP {status}: {snippet}",
-                crate::server::redact_url_for_display(&self.url)
-            ));
+            let mut snippet: String = body.chars().take(300).collect();
+            for (name, value) in &self.headers {
+                if name.eq_ignore_ascii_case("authorization") {
+                    snippet = snippet.replace(value, "<redacted>");
+                    if let Some((_, token)) = value.split_once(' ') {
+                        snippet = snippet.replace(token, "<redacted>");
+                    }
+                }
+            }
+            return Err(anyhow!(McpHttpFailure {
+                status,
+                www_authenticate: resp_headers
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned),
+                body_snippet: snippet,
+            }))
+            .with_context(|| {
+                format!(
+                    "MCP endpoint {} authentication/HTTP failure",
+                    crate::server::redact_url_for_display(&self.url)
+                )
+            });
         }
 
         let content_type = resp_headers
@@ -492,6 +564,14 @@ struct McpConnection {
 impl McpConnection {
     /// Open the transport and complete the MCP `initialize` handshake.
     async fn connect(target: &McpTarget) -> Result<Self> {
+        let cached_http_mode = match target {
+            McpTarget::Http(endpoint) => http_protocol_modes()
+                .read()
+                .await
+                .get(&endpoint.url)
+                .copied(),
+            McpTarget::Stdio(_) => None,
+        };
         let transport = match target {
             McpTarget::Stdio(cmd) => Transport::Stdio(Self::spawn_stdio(cmd).await?),
             McpTarget::Http(ep) => Transport::Http(HttpTransport {
@@ -499,6 +579,7 @@ impl McpConnection {
                 headers: ep.headers.clone(),
                 session_id: None,
                 protocol_version: None,
+                modern: !matches!(cached_http_mode, Some(HttpProtocolMode::Legacy)),
                 pending: VecDeque::new(),
             }),
         };
@@ -509,7 +590,62 @@ impl McpConnection {
             label: target.describe(),
         };
 
-        // `initialize` request → `initialized` notification, per the MCP spec.
+        // Current HTTP is stateless: `server/discover` carries client metadata on
+        // the request and no initialize/session follows. A method-not-found (or a
+        // transport-level 404) proves the endpoint is legacy, in which case we
+        // reconnect through the 2025 initialize/session path below.
+        if matches!(cached_http_mode, Some(HttpProtocolMode::Modern)) {
+            if let Transport::Http(http) = &mut conn.transport {
+                http.protocol_version = Some(MCP_HTTP_STATELESS_PROTOCOL_VERSION.to_owned());
+            }
+            return Ok(conn);
+        }
+        if matches!(target, McpTarget::Http(_)) && cached_http_mode.is_none() {
+            if let Transport::Http(http) = &mut conn.transport {
+                http.protocol_version = Some(MCP_HTTP_STATELESS_PROTOCOL_VERSION.to_owned());
+            }
+            match conn
+                .request(
+                    "server/discover",
+                    json!({
+                        "_meta": modern_client_meta(),
+                    }),
+                )
+                .await
+            {
+                Ok(_) => {
+                    let McpTarget::Http(endpoint) = target else {
+                        unreachable!("guarded by the HTTP match")
+                    };
+                    http_protocol_modes()
+                        .write()
+                        .await
+                        .insert(endpoint.url.clone(), HttpProtocolMode::Modern);
+                    return Ok(conn);
+                }
+                Err(error) if error_proves_legacy(&error) => {
+                    let McpTarget::Http(endpoint) = target else {
+                        unreachable!("guarded by the HTTP match")
+                    };
+                    conn.transport = Transport::Http(HttpTransport {
+                        url: endpoint.url.clone(),
+                        headers: endpoint.headers.clone(),
+                        session_id: None,
+                        protocol_version: None,
+                        modern: false,
+                        pending: VecDeque::new(),
+                    });
+                    conn.next_id = 1;
+                    http_protocol_modes()
+                        .write()
+                        .await
+                        .insert(endpoint.url.clone(), HttpProtocolMode::Legacy);
+                }
+                Err(error) => return Err(error).context("MCP server/discover"),
+            }
+        }
+
+        // Legacy `initialize` request → `initialized` notification.
         let offered = match target {
             McpTarget::Stdio(_) => MCP_PROTOCOL_VERSION,
             McpTarget::Http(_) => MCP_HTTP_PROTOCOL_VERSION,
@@ -607,6 +743,11 @@ impl McpConnection {
         let id = self.next_id;
         self.next_id += 1;
 
+        let params = if matches!(&self.transport, Transport::Http(http) if http.modern) {
+            with_modern_client_meta(params)
+        } else {
+            params
+        };
         let frame = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -655,6 +796,41 @@ impl McpConnection {
     async fn shutdown(self) {
         self.transport.shutdown().await;
     }
+}
+
+fn modern_client_meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": MCP_HTTP_STATELESS_PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "ryu-core",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+fn with_modern_client_meta(mut params: Value) -> Value {
+    if !params.is_object() {
+        params = json!({ "value": params });
+    }
+    params["_meta"] = modern_client_meta();
+    params
+}
+
+fn error_proves_legacy(error: &anyhow::Error) -> bool {
+    if error.to_string().contains("-32601") {
+        return true;
+    }
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<McpHttpFailure>()
+            .is_some_and(|failure| {
+                matches!(
+                    failure.status,
+                    reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                )
+            })
+    })
 }
 
 /// List the tools an MCP server advertises (`tools/list`).
@@ -830,6 +1006,25 @@ impl McpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modern_requests_use_the_namespaced_stateless_meta_envelope() {
+        let params = with_modern_client_meta(json!({ "name": "send_email" }));
+        let meta = params.get("_meta").expect("modern request metadata");
+        assert_eq!(
+            meta.get("io.modelcontextprotocol/protocolVersion"),
+            Some(&json!("2026-07-28"))
+        );
+        assert_eq!(
+            meta.pointer("/io.modelcontextprotocol~1clientInfo/name"),
+            Some(&json!("ryu-core"))
+        );
+        assert_eq!(
+            meta.get("io.modelcontextprotocol/clientCapabilities"),
+            Some(&json!({}))
+        );
+        assert!(meta.get("clientInfo").is_none());
+    }
 
     /// The SSRF screen the HTTP transport runs before it POSTs anything.
     ///

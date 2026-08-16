@@ -39,9 +39,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::plugin_manifest::{
-    CompatibilityVerdict, EnginesReq, PluginManifest, Requires, Surface,
-};
+use crate::plugin_manifest::{CompatibilityVerdict, EnginesReq, PluginManifest, Requires, Surface};
 use crate::plugins::graph::{resolve_enable_order, DependencyError};
 
 /// Hard cap on how many plugins one catalog install may pull in (target +

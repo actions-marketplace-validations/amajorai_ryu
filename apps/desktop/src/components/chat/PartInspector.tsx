@@ -217,7 +217,7 @@ export function PartInspector({ part }: { part: InspectedPart }) {
 				<CopyJsonButton value={safeStringify(part)} />
 			</div>
 
-			<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
+			<div className="scroll-fade flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
 				<div className="flex flex-wrap items-center gap-1.5">
 					<MetaChip label="type" value={facts.type} />
 					{facts.state && <MetaChip label="state" value={facts.state} />}

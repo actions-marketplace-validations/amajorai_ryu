@@ -165,7 +165,7 @@ pub fn response_to_gemini(response: &Value, requested_model: &str) -> Value {
 }
 
 /// Map an OpenAI finish reason to Gemini's `FINISH_REASON` vocabulary.
-fn finish_reason_to_gemini(reason: Option<&str>) -> &'static str {
+pub(crate) fn finish_reason_to_gemini(reason: Option<&str>) -> &'static str {
     match reason {
         Some("tool_calls") => "STOP", // tools are a normal completion to Gemini
         Some("length") => "MAX_TOKENS",
@@ -177,7 +177,7 @@ fn finish_reason_to_gemini(reason: Option<&str>) -> &'static str {
 
 /// Decode an OpenAI `function.arguments` JSON-encoded string to the object
 /// Gemini wants for `functionCall.args`. Unparseable → `{}`.
-fn parse_json_arguments(arguments: &Value) -> Value {
+pub(crate) fn parse_json_arguments(arguments: &Value) -> Value {
     match arguments {
         Value::String(s) if !s.trim().is_empty() => {
             serde_json::from_str(s).unwrap_or_else(|_| json!({}))
@@ -270,7 +270,10 @@ mod tests {
         });
         let out = response_to_gemini(&oai, "gemini-2.0-flash");
         assert_eq!(out["candidates"][0]["content"]["role"], "model");
-        assert_eq!(out["candidates"][0]["content"]["parts"][0]["text"], "The answer is 42.");
+        assert_eq!(
+            out["candidates"][0]["content"]["parts"][0]["text"],
+            "The answer is 42."
+        );
         assert_eq!(out["candidates"][0]["finishReason"], "STOP");
         assert_eq!(out["usageMetadata"]["promptTokenCount"], 10);
         assert_eq!(out["usageMetadata"]["candidatesTokenCount"], 5);
@@ -293,7 +296,13 @@ mod tests {
             "usage": { "prompt_tokens": 1, "completion_tokens": 1 },
         });
         let out = response_to_gemini(&oai, "gemini-2.0-flash");
-        assert_eq!(out["candidates"][0]["content"]["parts"][0]["functionCall"]["name"], "add");
-        assert_eq!(out["candidates"][0]["content"]["parts"][0]["functionCall"]["args"]["a"], 1);
+        assert_eq!(
+            out["candidates"][0]["content"]["parts"][0]["functionCall"]["name"],
+            "add"
+        );
+        assert_eq!(
+            out["candidates"][0]["content"]["parts"][0]["functionCall"]["args"]["a"],
+            1
+        );
     }
 }

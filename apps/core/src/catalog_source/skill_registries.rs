@@ -312,7 +312,11 @@ impl GithubTapSource {
     /// inside GitHub's 60 req/hour unauthenticated budget. A `truncated` response
     /// (very large repos) is used as-is rather than paged: the alternative is
     /// dozens of calls, and every skills repo we tap is far below the limit.
-    async fn skill_paths(&self, client: &reqwest::Client) -> Result<Vec<String>> {
+    ///
+    /// `pub(crate)`: skill **packs** (`skills_catalog::packs`) reuse exactly this
+    /// tree walk to enumerate a repo's member skills — a pack is a repo whose
+    /// `SKILL.md` dirs are its members, the same layout this tap indexes.
+    pub(crate) async fn skill_paths(&self, client: &reqwest::Client) -> Result<Vec<String>> {
         let cache = skills_catalog::github_cache_path(&format!("tap-{}", self.repo));
         if let Some(cached) = skills_catalog::read_fresh_cache::<Vec<String>>(&cache) {
             return Ok(cached);
@@ -715,7 +719,11 @@ impl BrowseShSource {
         format!("{}/api/skills/{}", self.api_base(), id)
     }
 
-    async fn markdown(&self, client: &reqwest::Client, id: &str) -> Result<(BrowseShDetail, String)> {
+    async fn markdown(
+        &self,
+        client: &reqwest::Client,
+        id: &str,
+    ) -> Result<(BrowseShDetail, String)> {
         let detail: BrowseShDetail =
             fetch_json(client, &self.detail_url(id), "browse.sh skill detail").await?;
         let markdown = match detail.skill_md.clone().filter(|s| !s.trim().is_empty()) {
@@ -1190,7 +1198,10 @@ impl CatalogSource for LobeHubSource {
                     .unwrap_or_else(|| humanize(&agent.identifier));
                 card(
                     format!("lobehub/{}", agent.identifier),
-                    agent.author.clone().unwrap_or_else(|| "lobehub".to_string()),
+                    agent
+                        .author
+                        .clone()
+                        .unwrap_or_else(|| "lobehub".to_string()),
                     agent.identifier.clone(),
                     name,
                     agent.meta.description.clone(),
@@ -1323,10 +1334,7 @@ mod tests {
     #[test]
     fn split_front_matter_strips_quotes_from_description() {
         let md = "---\ndescription: \"Quoted text\"\n---\nBody";
-        assert_eq!(
-            split_front_matter(md).0.as_deref(),
-            Some("Quoted text")
-        );
+        assert_eq!(split_front_matter(md).0.as_deref(), Some("Quoted text"));
     }
 
     #[test]
@@ -1348,7 +1356,9 @@ mod tests {
             "https://github.com/owner/repo"
         ));
         assert_eq!(
-            WellKnownSource::base_from_url("https://mintlify.com/docs/.well-known/skills/index.json"),
+            WellKnownSource::base_from_url(
+                "https://mintlify.com/docs/.well-known/skills/index.json"
+            ),
             "https://mintlify.com/docs"
         );
         assert_eq!(
@@ -1500,7 +1510,10 @@ mod tests {
     async fn live_browse_sh_lists_and_serves_markdown() {
         let source = BrowseShSource::builtin();
         let client = client();
-        let value = source.search(&client, &query("", 25)).await.expect("search");
+        let value = source
+            .search(&client, &query("", 25))
+            .await
+            .expect("search");
         let cards = assert_cards(&value, "browse.sh");
 
         let id = cards[0]["id"].as_str().expect("id").to_string();
@@ -1520,7 +1533,10 @@ mod tests {
     async fn live_clawhub_lists_and_detail_carries_the_skill_md() {
         let source = ClawHubSource::builtin();
         let client = client();
-        let value = source.search(&client, &query("", 25)).await.expect("search");
+        let value = source
+            .search(&client, &query("", 25))
+            .await
+            .expect("search");
         let cards = assert_cards(&value, "clawhub");
         for card in &cards {
             assert_eq!(
@@ -1545,7 +1561,10 @@ mod tests {
     async fn live_lobehub_index_and_agent_convert_to_a_skill() {
         let source = LobeHubSource::builtin();
         let client = client();
-        let value = source.search(&client, &query("", 25)).await.expect("search");
+        let value = source
+            .search(&client, &query("", 25))
+            .await
+            .expect("search");
         let cards = assert_cards(&value, "lobehub");
 
         let id = cards[0]["id"].as_str().expect("id").to_string();
@@ -1565,7 +1584,10 @@ mod tests {
         // Mintlify publishes the discovery protocol at its docs base.
         let source = WellKnownSource::new("wk-mintlify", "Mintlify", "https://mintlify.com/docs");
         let client = client();
-        let value = source.search(&client, &query("", 25)).await.expect("search");
+        let value = source
+            .search(&client, &query("", 25))
+            .await
+            .expect("search");
         assert_cards(&value, "well-known");
     }
 

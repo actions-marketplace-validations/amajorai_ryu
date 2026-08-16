@@ -165,9 +165,7 @@ fn generate_user_code() -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
     let mut rng = rand::thread_rng();
-    let pick = |rng: &mut rand::rngs::ThreadRng| {
-        ALPHABET[rng.gen_range(0..ALPHABET.len())] as char
-    };
+    let pick = |rng: &mut rand::rngs::ThreadRng| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char;
     let mut rng_ref = rng;
     let left: String = (0..3).map(|_| pick(&mut rng_ref)).collect();
     let right: String = (0..3).map(|_| pick(&mut rng_ref)).collect();

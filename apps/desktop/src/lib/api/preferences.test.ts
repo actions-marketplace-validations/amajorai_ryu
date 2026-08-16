@@ -76,7 +76,10 @@ import {
 	formatContextBudget,
 	MAX_ISLAND_EDGE_OFFSET,
 	MIN_ISLAND_EDGE_OFFSET,
+	NODE_ROUTING_PREF_KEY,
 	parseContextBudget,
+	parseNodeRoutingPreferences,
+	serializeNodeRoutingPreferences,
 	TOOL_RANKER_PREF_KEY,
 } from "./preferences.ts";
 
@@ -195,6 +198,7 @@ function rustAnchor(
 }
 
 const SERVER_RS = "apps/core/src/server/mod.rs";
+const GATEWAY_RS = "apps/core/src/sidecar/gateway.rs";
 const CONTEXT_WINDOW_RS = "apps/core/src/sidecar/adapters/context_window.rs";
 // The ranker pref belongs to the extracted tool-registry crate, not to Core —
 // Core's MCP catalog and the skills tool both re-export it from there.
@@ -204,6 +208,7 @@ const TOOL_REGISTRY_RS = "crates/core/tool-registry/src/lib.rs";
 const AGENT_ROUTING_RS = "apps/core/src/agent_routing/mod.rs";
 
 const serverRs = rustSource(SERVER_RS);
+const gatewayRs = rustSource(GATEWAY_RS);
 const contextWindowRs = rustSource(CONTEXT_WINDOW_RS);
 const toolRegistryRs = rustSource(TOOL_REGISTRY_RS);
 const agentRoutingRs = rustSource(AGENT_ROUTING_RS);
@@ -243,6 +248,12 @@ function rustFnBody(source: string, name: string): string {
 }
 
 describe("preference keys mirror Core", () => {
+	it("uses Core's atomic managed-routing preference key", () => {
+		expect(NODE_ROUTING_PREF_KEY).toBe(
+			rustStrConst(gatewayRs, GATEWAY_RS, "NODE_ROUTING_PREF_KEY")
+		);
+	});
+
 	it("uses Core's auto-recall top-k key and default", () => {
 		expect(AUTO_RECALL_TOP_K_PREF_KEY).toBe(
 			rustStrConst(serverRs, SERVER_RS, "AUTO_RECALL_TOP_K_PREF")
@@ -349,6 +360,46 @@ describe("preference keys mirror Core", () => {
 			)
 		).toBe(ANCHOR_PRESENT);
 		expect(coerceToolRanker("semantic")).toBe("semantic");
+	});
+});
+
+describe("managed node-routing preferences", () => {
+	it("round-trips fallback order and additive firewall patterns", () => {
+		const prefs = parseNodeRoutingPreferences(
+			serializeNodeRoutingPreferences({
+				fallback: [" anthropic ", "openrouter"],
+				firewall: {
+					custom_patterns: [
+						{ kind: "secret", name: "internal_id", regex: "id_[0-9]+" },
+					],
+				},
+			})
+		);
+		expect(prefs).toEqual({
+			fallback: ["anthropic", "openrouter"],
+			firewall: {
+				custom_patterns: [
+					{ kind: "secret", name: "internal_id", regex: "id_[0-9]+" },
+				],
+			},
+		});
+	});
+
+	it("treats malformed or unsafe pattern entries as empty preferences", () => {
+		expect(
+			parseNodeRoutingPreferences(
+				JSON.stringify({
+					fallback: ["anthropic", 42, ""],
+					firewall: {
+						custom_patterns: [{ kind: "not-a-kind", name: "x", regex: ".*" }],
+					},
+				})
+			)
+		).toEqual({ fallback: ["anthropic"], firewall: null });
+		expect(parseNodeRoutingPreferences("not-json")).toEqual({
+			fallback: [],
+			firewall: null,
+		});
 	});
 });
 

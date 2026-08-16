@@ -155,7 +155,7 @@ export function ShadowSettings() {
 						placeholder="e.g. VSCode, Terminal, Chrome"
 						value={allowlistRaw}
 					/>
-					<Button onClick={commitAllowlist} variant="outline">
+					<Button onClick={commitAllowlist} variant="ghost">
 						Apply
 					</Button>
 				</SettingsCard>

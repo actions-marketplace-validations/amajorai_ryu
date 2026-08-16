@@ -27,7 +27,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::ServerState;
@@ -63,6 +63,23 @@ pub struct WidgetInstance {
     pub may_send_follow_up: bool,
 }
 
+/// Server-only provenance recovered from a single-use follow-up ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWidgetProvenance {
+    pub source: &'static str,
+    pub widget_instance_id: String,
+    pub origin_server: String,
+    pub conversation_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct WidgetFollowUpTicket {
+    token: String,
+    prompt: String,
+    provenance: VerifiedWidgetProvenance,
+    created_at: Instant,
+}
+
 impl WidgetInstance {
     fn is_live(&self) -> bool {
         self.created_at.elapsed() < WIDGET_TTL
@@ -73,6 +90,7 @@ impl WidgetInstance {
 /// resolved by the governed routes.
 pub struct WidgetInstanceStore {
     inner: Mutex<HashMap<String, WidgetInstance>>,
+    follow_up_tickets: Mutex<HashMap<String, WidgetFollowUpTicket>>,
     max_concurrent: usize,
 }
 
@@ -80,6 +98,7 @@ impl WidgetInstanceStore {
     fn new(max_concurrent: usize) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            follow_up_tickets: Mutex::new(HashMap::new()),
             max_concurrent,
         }
     }
@@ -138,6 +157,82 @@ impl WidgetInstanceStore {
             }
         }
     }
+
+    fn issue_follow_up_ticket(&self, record: &WidgetInstance, prompt: &str) -> Option<String> {
+        let token = format!("wft_{}", uuid::Uuid::new_v4().simple());
+        let ticket = WidgetFollowUpTicket {
+            token: token.clone(),
+            prompt: prompt.to_owned(),
+            provenance: VerifiedWidgetProvenance {
+                source: "widget",
+                widget_instance_id: record.instance_id.clone(),
+                origin_server: record.origin_server.clone(),
+                conversation_id: record.conversation_id.clone(),
+            },
+            created_at: Instant::now(),
+        };
+        let mut tickets = self.follow_up_tickets.lock().ok()?;
+        tickets.retain(|_, ticket| ticket.created_at.elapsed() < WIDGET_TTL);
+        tickets.insert(token.clone(), ticket);
+        Some(token)
+    }
+
+    /// Consume a ticket only after every binding check matches. A mismatch does
+    /// not burn the ticket, so a delayed desktop request can still be retried on
+    /// the original conversation; a successful use is strictly one-shot.
+    pub fn validate_follow_up_ticket(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        prompt: &str,
+    ) -> Result<VerifiedWidgetProvenance, &'static str> {
+        let tickets = self
+            .follow_up_tickets
+            .lock()
+            .map_err(|_| "widget follow-up ticket store unavailable")?;
+        let Some(ticket) = tickets.get(token) else {
+            return Err("unknown, expired, or already-used widget follow-up ticket");
+        };
+        if ticket.created_at.elapsed() >= WIDGET_TTL {
+            return Err("unknown, expired, or already-used widget follow-up ticket");
+        }
+        if ticket.token != token
+            || ticket.provenance.conversation_id != conversation_id
+            || ticket.prompt != prompt
+        {
+            return Err("widget follow-up ticket does not match this chat turn");
+        }
+        Ok(ticket.provenance.clone())
+    }
+
+    pub fn consume_follow_up_ticket(
+        &self,
+        token: &str,
+        conversation_id: &str,
+        prompt: &str,
+    ) -> Result<VerifiedWidgetProvenance, &'static str> {
+        let mut tickets = self
+            .follow_up_tickets
+            .lock()
+            .map_err(|_| "widget follow-up ticket store unavailable")?;
+        let Some(ticket) = tickets.get(token) else {
+            return Err("unknown, expired, or already-used widget follow-up ticket");
+        };
+        if ticket.created_at.elapsed() >= WIDGET_TTL {
+            tickets.remove(token);
+            return Err("unknown, expired, or already-used widget follow-up ticket");
+        }
+        if ticket.token != token
+            || ticket.provenance.conversation_id != conversation_id
+            || ticket.prompt != prompt
+        {
+            return Err("widget follow-up ticket does not match this chat turn");
+        }
+        let ticket = tickets
+            .remove(token)
+            .expect("ticket remains present while the store lock is held");
+        Ok(ticket.provenance)
+    }
 }
 
 fn gen_instance_id() -> String {
@@ -152,6 +247,22 @@ static STORE: OnceLock<WidgetInstanceStore> = OnceLock::new();
 /// The process-global widget instance store.
 pub fn store() -> &'static WidgetInstanceStore {
     STORE.get_or_init(|| WidgetInstanceStore::new(DEFAULT_MAX_CONCURRENT))
+}
+
+pub fn consume_follow_up_ticket(
+    token: &str,
+    conversation_id: &str,
+    prompt: &str,
+) -> Result<VerifiedWidgetProvenance, &'static str> {
+    store().consume_follow_up_ticket(token, conversation_id, prompt)
+}
+
+pub fn validate_follow_up_ticket(
+    token: &str,
+    conversation_id: &str,
+    prompt: &str,
+) -> Result<VerifiedWidgetProvenance, &'static str> {
+    store().validate_follow_up_ticket(token, conversation_id, prompt)
 }
 
 /// Mint a widget instance from the emit path (the MCP bridge). Returns the
@@ -186,8 +297,30 @@ pub struct WidgetCallBody {
     args: Value,
 }
 
-/// Error reply codes (D6): `denied | not_found | over_budget | server_error |
-/// invalid_args`.
+/// Stable widget route error codes (D6). Keep this closed: clients branch on
+/// these values, while the message remains human-readable and non-contractual.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WidgetErrorCode {
+    Denied,
+    NotFound,
+    OverBudget,
+    ServerError,
+    InvalidArgs,
+}
+
+impl WidgetErrorCode {
+    fn from_wire(code: &str) -> Self {
+        match code {
+            "denied" => Self::Denied,
+            "not_found" => Self::NotFound,
+            "over_budget" => Self::OverBudget,
+            "invalid_args" => Self::InvalidArgs,
+            _ => Self::ServerError,
+        }
+    }
+}
+
 fn err_reply(
     status: StatusCode,
     code: &str,
@@ -195,7 +328,11 @@ fn err_reply(
 ) -> axum::response::Response {
     (
         status,
-        Json(json!({ "ok": false, "error": message.into(), "code": code })),
+        Json(json!({
+            "ok": false,
+            "error": message.into(),
+            "code": WidgetErrorCode::from_wire(code),
+        })),
     )
         .into_response()
 }
@@ -491,6 +628,39 @@ pub async fn widget_follow_up(
         );
     }
 
+    // The Gateway owns the per-instance follow-up bucket. Check it before the
+    // prompt scan and fail closed on a denied or unavailable governance call so
+    // this route cannot bypass the configured limit.
+    if let crate::sidecar::gateway::ExecBudgetOutcome::Deny(reason) =
+        crate::sidecar::gateway::check_widget_followup(&record.instance_id, &record.origin_server)
+            .await
+    {
+        let code = if reason.to_ascii_lowercase().contains("rate limit")
+            || reason.to_ascii_lowercase().contains("budget")
+        {
+            "over_budget"
+        } else {
+            "server_error"
+        };
+        let status = if code == "over_budget" {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        // A denied follow-up must remain visible in the Gateway audit trail,
+        // including rate-limit, budget, and fail-closed Gateway errors.
+        crate::sidecar::gateway::report_exec_audit(
+            "widget-followup",
+            "follow_up",
+            0,
+            1,
+            Some(record.conversation_id.clone()),
+            Some(reason.clone()),
+        )
+        .await;
+        return err_reply(status, code, reason);
+    }
+
     // Firewall / PII-DLP on the prompt before it can enter model context.
     let scan = crate::sidecar::gateway::check_exec_scan(
         "widget-followup",
@@ -524,8 +694,17 @@ pub async fn widget_follow_up(
     )
     .await;
 
+    let Some(ticket) = store().issue_follow_up_ticket(&record, &body.prompt) else {
+        return err_reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "could not issue widget follow-up ticket",
+        );
+    };
+
     Json(json!({
         "ok": true,
+        "ticket": ticket,
         "injected": {
             "role": "user",
             "source": "widget",
@@ -540,6 +719,34 @@ pub async fn widget_follow_up(
 }
 
 // ── POST /api/widgets/state ──────────────────────────────────────────────────
+
+/// Maximum serialized size retained for a client-supplied widget state.
+const WIDGET_STATE_MAX_BYTES: usize = 64 * 1024;
+/// Maximum number of nested JSON containers retained for a widget state.
+const WIDGET_STATE_MAX_DEPTH: usize = 32;
+
+fn validate_widget_state(state: &Value) -> Result<(), &'static str> {
+    let serialized = serde_json::to_vec(state).map_err(|_| "widget state is not valid JSON")?;
+    if serialized.len() > WIDGET_STATE_MAX_BYTES {
+        return Err("widget state exceeds the maximum serialized size");
+    }
+
+    let mut pending = vec![(state, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > WIDGET_STATE_MAX_DEPTH {
+            return Err("widget state exceeds the maximum nesting depth");
+        }
+        match value {
+            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
+            Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, depth + 1)))
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 pub struct WidgetStateBody {
@@ -568,6 +775,9 @@ pub async fn widget_state(
             "not_found",
             "unknown or expired widget instance",
         );
+    }
+    if let Err(message) = validate_widget_state(&body.state) {
+        return err_reply(StatusCode::BAD_REQUEST, "invalid_args", message);
     }
     store().set_state(&body.instance_id, body.state);
     Json(json!({ "ok": true })).into_response()
@@ -1082,8 +1292,9 @@ pub async fn mcp_resources_read(
 mod asset_proxy_tests {
     use super::{
         content_type_is_allowed, host_is_blocked, normalize_allow_host, parse_resource_domains,
+        validate_widget_state, WIDGET_STATE_MAX_BYTES, WIDGET_STATE_MAX_DEPTH,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn normalize_accepts_public_hosts_rejects_wildcards_and_bare_labels() {
@@ -1168,7 +1379,8 @@ mod asset_proxy_tests {
     }
 
     use super::{
-        allow_gateway_fallback, err_reply, ip_is_blocked, WidgetInstance, WidgetInstanceStore,
+        allow_gateway_fallback, err_reply, ip_is_blocked, VerifiedWidgetProvenance,
+        WidgetErrorCode, WidgetInstance, WidgetInstanceStore,
     };
     use axum::http::StatusCode;
     use std::net::IpAddr;
@@ -1244,6 +1456,36 @@ mod asset_proxy_tests {
         // No-op for an unknown id — must not create a resolvable instance.
         store.set_state("wgt_ghost", json!({ "x": 1 }));
         assert!(store.get("wgt_ghost").is_none());
+    }
+
+    #[test]
+    fn widget_state_accepts_size_and_depth_boundaries() {
+        let state = Value::String("x".repeat(WIDGET_STATE_MAX_BYTES - 2));
+        assert!(validate_widget_state(&state).is_ok());
+
+        let mut nested = json!(null);
+        for _ in 0..WIDGET_STATE_MAX_DEPTH {
+            nested = json!([nested]);
+        }
+        assert!(validate_widget_state(&nested).is_ok());
+    }
+
+    #[test]
+    fn widget_state_rejects_oversized_or_deep_state_with_stable_messages() {
+        let oversized = Value::String("x".repeat(WIDGET_STATE_MAX_BYTES - 1));
+        assert_eq!(
+            validate_widget_state(&oversized),
+            Err("widget state exceeds the maximum serialized size")
+        );
+
+        let mut too_deep = json!(null);
+        for _ in 0..=WIDGET_STATE_MAX_DEPTH {
+            too_deep = json!([too_deep]);
+        }
+        assert_eq!(
+            validate_widget_state(&too_deep),
+            Err("widget state exceeds the maximum nesting depth")
+        );
     }
 
     /// The D6 error envelope is `{ ok:false, error, code }` at the given status — the
@@ -1367,5 +1609,73 @@ mod asset_proxy_tests {
             "a widget that was never granted `ui:send_message` must not become \
              permitted by passing through the store"
         );
+    }
+
+    #[test]
+    fn follow_up_ticket_is_bound_to_prompt_and_conversation_and_is_one_shot() {
+        let store = WidgetInstanceStore::new(4);
+        let record = mint(&store, true);
+        let ticket = store
+            .issue_follow_up_ticket(&record, "Use the selected row")
+            .expect("ticket is minted");
+
+        assert_eq!(
+            store.consume_follow_up_ticket(&ticket, "other-conversation", "Use the selected row"),
+            Err("widget follow-up ticket does not match this chat turn")
+        );
+        assert_eq!(
+            store.consume_follow_up_ticket(&ticket, "conv1", "Use another prompt"),
+            Err("widget follow-up ticket does not match this chat turn")
+        );
+
+        let provenance = store
+            .consume_follow_up_ticket(&ticket, "conv1", "Use the selected row")
+            .expect("matching ticket is accepted");
+        assert_eq!(provenance.source, "widget");
+        assert_eq!(provenance.widget_instance_id, record.instance_id);
+        assert_eq!(provenance.origin_server, "srv");
+
+        assert_eq!(
+            store.consume_follow_up_ticket(&ticket, "conv1", "Use the selected row"),
+            Err("unknown, expired, or already-used widget follow-up ticket")
+        );
+    }
+
+    #[test]
+    fn follow_up_ticket_peek_survives_rejected_pre_stream_request() {
+        let store = WidgetInstanceStore::new(4);
+        let record = mint(&store, true);
+        let ticket = store
+            .issue_follow_up_ticket(&record, "Use the selected row")
+            .expect("ticket is minted");
+
+        assert_eq!(
+            store.validate_follow_up_ticket(&ticket, "conv1", "Use the selected row"),
+            Ok(VerifiedWidgetProvenance {
+                source: "widget",
+                widget_instance_id: record.instance_id.clone(),
+                origin_server: "srv".to_owned(),
+                conversation_id: "conv1".to_owned(),
+            })
+        );
+        assert!(store
+            .validate_follow_up_ticket(&ticket, "other-conversation", "Use the selected row")
+            .is_err());
+
+        store
+            .consume_follow_up_ticket(&ticket, "conv1", "Use the selected row")
+            .expect("a ticket remains usable after pre-stream rejection");
+    }
+
+    #[test]
+    fn widget_error_codes_are_closed_and_wire_stable() {
+        assert_eq!(
+            serde_json::to_value(WidgetErrorCode::OverBudget).unwrap(),
+            serde_json::json!("over_budget")
+        );
+        assert!(matches!(
+            WidgetErrorCode::from_wire("unexpected"),
+            WidgetErrorCode::ServerError
+        ));
     }
 }

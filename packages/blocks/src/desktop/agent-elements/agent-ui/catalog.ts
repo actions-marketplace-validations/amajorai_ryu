@@ -23,6 +23,7 @@ const JUSTIFY = z.enum(["start", "center", "end", "between", "around"]);
 const SelectOption = z.object({
 	label: z.string().describe("Visible option text"),
 	value: z.string().describe("Value written to state when chosen"),
+	description: z.string().optional().describe("Optional supporting text"),
 });
 
 export const agentUiCatalog = defineCatalog(schema, {
@@ -253,8 +254,66 @@ export const agentUiCatalog = defineCatalog(schema, {
 			description:
 				"A dropdown select. Provide `options` as { label, value }[] and two-way bind `value` to state.",
 		},
+		OptionList: {
+			props: z.object({
+				label: z.string().optional(),
+				value: z
+					.string()
+					.optional()
+					.describe("Bind to state with { $bindState: 'path' }"),
+				options: z
+					.array(SelectOption)
+					.min(1)
+					.max(20)
+					.describe("Options shown as an accessible single-choice list"),
+			}),
+			description:
+				"An accessible single-choice list. Two-way bind `value` to state and use for a small set of explicit choices.",
+		},
+		Slider: {
+			props: z.object({
+				label: z.string().optional(),
+				value: z
+					.number()
+					.optional()
+					.describe("Bind to state with { $bindState: 'path' }"),
+				min: z.number().optional(),
+				max: z.number().optional(),
+				step: z.number().positive().optional(),
+			}),
+			description:
+				"A bounded numeric slider. Two-way bind `value` to state; defaults to 0-100 with step 1.",
+		},
+		ApprovalCard: {
+			props: z.object({
+				title: z.string(),
+				description: z.string().optional(),
+				approveLabel: z.string().optional(),
+				rejectLabel: z.string().optional(),
+			}),
+			description:
+				"A compact approval decision card. Wire `approve` and `reject` events to actions in the element's `on` field.",
+		},
+		LinkPreview: {
+			props: z.object({
+				title: z.string(),
+				href: z.string().describe("Destination URL"),
+				description: z.string().optional(),
+				imageSrc: z.string().optional().describe("Optional preview image URL"),
+			}),
+			description:
+				"A safe link preview card. HTTP(S) and mailto URLs are allowed; unsafe schemes render inertly.",
+		},
 	},
-	actions: {},
+	actions: {
+		submit: {
+			params: z.object({
+				value: z.unknown().describe("The user's selected or entered value"),
+			}),
+			description:
+				"Submit a user's answer or selection to the host. Use the current form value or selected option as value.",
+		},
+	},
 });
 
 export type AgentUiCatalog = typeof agentUiCatalog;

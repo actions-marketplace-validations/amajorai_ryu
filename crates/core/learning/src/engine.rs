@@ -58,9 +58,9 @@ impl LearningCtx {
 /// judge can route off-device). Gates sweep/score/cycle + the scheduled retrain.
 pub const LEARNING_ENABLED_PREF: &str = "learning.enabled";
 /// Opt-in for the **local skills** loop — distilling reusable skills from
-/// conversations and proposing them in the approval inbox. Default ON. Entirely
-/// on-device and inbox-gated (no conversation text ever leaves the machine), so it
-/// is the safe "grows with you" default, kept separate from the training opt-in.
+/// conversations and proposing them in the approval inbox. Default OFF. Even
+/// local synthesis turns conversation content into a durable artifact, so it
+/// requires explicit consent.
 pub const LEARNING_SKILLS_ENABLED_PREF: &str = "learning.skills-enabled";
 /// Unix-seconds watermark for the autonomous skills pass: only conversations
 /// updated after this are considered, so a chat is never re-distilled until it
@@ -167,15 +167,15 @@ pub async fn resolve_enabled(host: &dyn LearningHost) -> bool {
         .unwrap_or(false)
 }
 
-/// Local skills-loop opt-in. Default ON — on-device, inbox-gated, no data egress,
-/// so it's safe to run without the explicit consent the training path requires.
+/// Local skills-loop opt-in. Default OFF — skill synthesis still turns
+/// conversation content into a durable artifact.
 pub async fn resolve_skills_enabled(host: &dyn LearningHost) -> bool {
     if let Some(v) = pref(host, LEARNING_SKILLS_ENABLED_PREF).await {
         return truthy(&v);
     }
     std::env::var("RYU_LEARNING_SKILLS_ENABLED")
         .map(|v| truthy(&v))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Whether a synthesized skill needs inbox approval before it goes live. Default
@@ -767,7 +767,7 @@ pub async fn synthesize_skill(
     force: bool,
     requested_by: Option<&str>,
 ) -> Result<SynthOutcome> {
-    // Gated by the *skills* opt-in (default ON, on-device), not the training
+    // Gated by the *skills* opt-in (default OFF), not the training
     // opt-in — distilling a local skill never sends conversation text off-device.
     if !(force || resolve_skills_enabled(ctx.host()).await) {
         return Ok(SynthOutcome {
@@ -927,11 +927,11 @@ async fn write_skill(slug: &str, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Autonomous local skills pass (the default "grows with you" loop). For each
+/// Autonomous local skills pass (the opt-in "grows with you" loop). For each
 /// conversation updated since the last watermark, distill a skill and propose it
 /// in the approval inbox (deduped by slug so a chat never spams). Bounded to `max`
 /// conversations per call so it can never flood the local model or the inbox.
-/// On-device only; gated by the skills opt-in (default ON) and completely
+/// On-device only; gated by the skills opt-in (default OFF) and completely
 /// independent of the training path. Returns the number of skills proposed.
 pub async fn run_skills_pass(ctx: &LearningCtx, max: usize) -> Result<usize> {
     if !resolve_skills_enabled(ctx.host()).await {
@@ -1123,6 +1123,46 @@ pub async fn run_cycle(ctx: &LearningCtx, execute: bool) -> Result<CyclePlan> {
         error,
         note,
     })
+}
+
+/// Merge a completed learning adapter and return the registered model stem.
+/// Serving-model switching stays an explicit Core-owned transaction.
+pub async fn merge_cycle_output(ctx: &LearningCtx, mut body: Value) -> Result<Value> {
+    let has_adapter = body
+        .get("adapter_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+        || body
+            .get("adapter_path")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+    if !has_adapter {
+        anyhow::bail!("need `adapter_name` or `adapter_path`");
+    }
+
+    if body.get("output_name").is_none() {
+        body["output_name"] = json!("learning-merged");
+    }
+
+    let merged = ctx
+        .host()
+        .merge_finetune(body)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let model_id = merged
+        .get("stem")
+        .or_else(|| merged.get("model_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("merge response did not include a model stem"))?;
+
+    Ok(json!({
+        "merged": true,
+        "model_id": model_id,
+        "serving": false,
+        "merge": merged,
+        "activate_with": "/api/models/active"
+    }))
 }
 
 struct Dispatched {
@@ -1436,13 +1476,13 @@ mod flow_tests {
     // ---- two-flag consent gating ------------------------------------------
 
     #[tokio::test]
-    async fn training_opt_in_defaults_off_skills_opt_in_defaults_on() {
-        // The load-bearing default posture: training OFF (PRM can route
-        // off-device), skills ON (on-device + inbox-gated). Both prefs unset, so
-        // this exercises the default branch (env is unset under a clean test run).
+    async fn training_and_skills_opt_in_default_off() {
+        // Both learning paths process conversation content, so both are OFF
+        // until explicitly enabled. Both prefs unset exercises the default
+        // branch (env is unset under a clean test run).
         let host = MockHost::new();
         assert!(!resolve_enabled(&host).await);
-        assert!(resolve_skills_enabled(&host).await);
+        assert!(!resolve_skills_enabled(&host).await);
     }
 
     #[tokio::test]
@@ -1887,6 +1927,7 @@ mod flow_tests {
     #[tokio::test]
     async fn skills_pass_proposes_fresh_convos_and_advances_watermark() {
         let mut host = MockHost::new()
+            .with_pref(LEARNING_SKILLS_ENABLED_PREF, "true")
             .with_conversation("c1", 100, 2)
             .with_messages("c1", &[("user", "q"), ("assistant", "a")])
             .with_conversation("c2", 200, 2)
@@ -1901,6 +1942,42 @@ mod flow_tests {
         assert_eq!(wm.as_deref(), Some("200"));
         // A second pass sees nothing newer than the watermark.
         assert_eq!(run_skills_pass(&c, 5).await.unwrap(), 0);
+    }
+
+    // ---- merge handoff ---------------------------------------------------
+
+    #[tokio::test]
+    async fn merge_handoff_requires_an_adapter() {
+        let c = ctx(MockHost::new(), store("merge-missing"));
+        let err = merge_cycle_output(&c, json!({})).await.unwrap_err();
+        assert!(format!("{err:#}").contains("adapter_name"));
+    }
+
+    #[tokio::test]
+    async fn merge_handoff_returns_registered_model_stem_without_switching_it() {
+        let mut host = MockHost::new();
+        host.merged = Some(json!({
+            "stem": "learning-merged-1",
+            "gguf_path": "/models/learning-merged-1.gguf"
+        }));
+        let c = ctx(host, store("merge-ok"));
+        let out = merge_cycle_output(&c, json!({ "adapter_name": "adapter-1" }))
+            .await
+            .unwrap();
+        assert_eq!(out["model_id"], "learning-merged-1");
+        assert_eq!(out["serving"], false);
+        assert_eq!(out["activate_with"], "/api/models/active");
+    }
+
+    #[tokio::test]
+    async fn merge_handoff_rejects_unusable_merge_response() {
+        let mut host = MockHost::new();
+        host.merged = Some(json!({ "gguf_path": "/models/unknown.gguf" }));
+        let c = ctx(host, store("merge-no-stem"));
+        let err = merge_cycle_output(&c, json!({ "adapter_path": "/tmp/a" }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("model stem"));
     }
 
     // ---- run_cycle + dispatch --------------------------------------------

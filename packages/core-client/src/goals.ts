@@ -16,8 +16,8 @@ export interface GoalState {
 	last_reason?: string;
 	/** Unix milliseconds when the goal was set (drives the elapsed timer). */
 	started_at?: number;
-	/** "active" | "achieved" | absent (no goal). */
-	status?: "active" | "achieved";
+	/** "active" | "paused" | "achieved" | absent (no goal). */
+	status?: "active" | "paused" | "achieved";
 	/** Number of turns the judge has evaluated. */
 	turns: number;
 }
@@ -70,6 +70,30 @@ export async function clearGoal(
 	await request(target, `/api/conversations/${conversationId}/goal`, {
 		method: "DELETE",
 	});
+}
+
+/** Persistently pause the goal loop without creating a chat turn. */
+export function pauseGoal(
+	target: ApiTarget,
+	conversationId: string
+): Promise<GoalState> {
+	return request<GoalState>(
+		target,
+		`/api/conversations/${conversationId}/goal/pause`,
+		{ method: "POST" }
+	);
+}
+
+/** Persistently resume the goal loop without creating a chat turn. */
+export function resumeGoal(
+	target: ApiTarget,
+	conversationId: string
+): Promise<GoalState> {
+	return request<GoalState>(
+		target,
+		`/api/conversations/${conversationId}/goal/resume`,
+		{ method: "POST" }
+	);
 }
 
 /** Run one judge evaluation against the conversation transcript so far. */

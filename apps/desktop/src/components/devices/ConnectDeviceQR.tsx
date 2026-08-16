@@ -1,7 +1,7 @@
+import { ExpandableQRCode } from "@ryu/ui/components/qr-code.tsx";
 import { buildRyuDeepLink } from "@ryuhq/protocol/deep-link";
-import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { useEffect, useState } from "react";
-import QRCode from "react-qr-code";
+import { invokeWhenReady } from "@/src/lib/tauri-ready.ts";
 import { useNodeStore } from "@/src/store/useNodeStore.ts";
 
 const LOOPBACK_HOST =
@@ -83,11 +83,7 @@ function ConnectDeviceQR() {
 					http://192.168.1.50:7980.
 				</p>
 			)}
-			{link && (
-				<div className="rounded-lg bg-white p-3">
-					<QRCode size={180} value={link} />
-				</div>
-			)}
+			{link && <ExpandableQRCode size={180} value={link} />}
 		</div>
 	);
 }

@@ -4,7 +4,8 @@
 // companion to `ImportThreadsDialog` (which imports conversations). Point at a
 // folder (a project directory, or an agent config root like ~/.claude,
 // ~/.cursor, ~/.codex), scan it, pick what to bring over (instructions, skills,
-// MCP servers, plugins, Claude project memories), and import the selection into
+// MCP servers, plugins, agents, slash commands, and Claude project memories),
+// and import the selection into
 // Ryu's own stores.
 //
 // Read-only + additive against the source: imports never modify the folder they
@@ -221,8 +222,8 @@ export function ImportSetupDialog({
 					<DialogTitle>Import agent setup</DialogTitle>
 					<DialogDescription>
 						Scan a folder and bring its agent setup into Ryu — instructions,
-						skills, MCP servers, plugins, and Claude project memories. Your
-						files are never modified.
+						skills, MCP servers, plugins, agents, slash commands, and Claude
+						project memories. Your files are never modified.
 					</DialogDescription>
 				</DialogHeader>
 
@@ -240,7 +241,7 @@ export function ImportSetupDialog({
 										key={path}
 										onClick={() => scanFolder(path).catch(() => undefined)}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										{AGENT_CONFIG_ROOTS[idx]?.label}
 									</Button>

@@ -146,6 +146,7 @@ interface CoreMessage {
 	/** Set by Core's boot reconciliation on an assistant turn the node died in
 	 * the middle of — its text/parts are whatever had been flushed. */
 	interrupted?: boolean;
+	origin_server?: string | null;
 	parent_message_id?: string;
 	/**
 	 * Structured render parts (AI SDK reduced UIMessage `parts` array) captured
@@ -159,6 +160,8 @@ interface CoreMessage {
 	sibling_ids?: string[];
 	/** Version-tree fields from Core's active-path read. */
 	sibling_index?: number;
+	source?: string | null;
+	widget_instance_id?: string | null;
 }
 
 function authHeaders(token: string | null): Record<string, string> {
@@ -428,6 +431,9 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 						id: m.id,
 						role: m.role === "assistant" ? "assistant" : "user",
 						content: m.content,
+						originServer:
+							typeof m.origin_server === "string" ? m.origin_server : undefined,
+						source: m.source ?? undefined,
 						// Carry through the structured parts when Core has them, so the
 						// chat page can rehydrate tool rows + cowork context instead of
 						// only flat text (see ChatPage's hydration).
@@ -441,6 +447,10 @@ export function ChatHistoryProvider({ children }: { children: ReactNode }) {
 						siblingIds: m.sibling_ids,
 						parentMessageId: m.parent_message_id,
 						timestamp: m.created_at,
+						widgetInstanceId:
+							typeof m.widget_instance_id === "string"
+								? m.widget_instance_id
+								: undefined,
 					})),
 				};
 			} catch {

@@ -264,6 +264,40 @@ pub async fn install_app(store: &PluginStore, manifest: &PluginManifest) -> Resu
     install_app_with_provenance(store, manifest, provenance.as_ref()).await
 }
 
+/// Capture the manifest binding for provenance observed through a trusted
+/// install path, and register official packages for manifest reloads.
+pub(crate) fn capture_provenance(
+    manifest: &PluginManifest,
+    provenance: &crate::plugins::isolation::PluginProvenance,
+) -> crate::plugins::isolation::PluginProvenance {
+    let mut captured = provenance.clone();
+    if captured.signature_verified {
+        captured.manifest_sha256 = Some(crate::plugins::isolation::manifest_sha256(manifest));
+    }
+    crate::plugins::builtins::record_verified_official_package(manifest, &captured);
+    captured
+}
+
+/// Backfill the manifest binding for a legacy official install only after the
+/// catalog has re-verified the same manifest bytes. A provenance row without a
+/// digest is intentionally insufficient on its own: the writable package on
+/// disk may have been replaced since the row was written.
+pub(crate) fn reverified_provenance(
+    manifest: &PluginManifest,
+    catalog_manifest: &PluginManifest,
+    provenance: &crate::plugins::isolation::PluginProvenance,
+) -> Option<crate::plugins::isolation::PluginProvenance> {
+    if provenance.source_id.as_deref()
+        != Some(crate::plugins::isolation::OFFICIAL_MARKETPLACE_SOURCE_ID)
+        || !provenance.signature_verified
+        || crate::plugins::isolation::manifest_sha256(manifest)
+            != crate::plugins::isolation::manifest_sha256(catalog_manifest)
+    {
+        return None;
+    }
+    Some(capture_provenance(catalog_manifest, provenance))
+}
+
 /// Install `manifest`, recording where it came from.
 ///
 /// The provenance is the input to [`crate::plugins::isolation`]'s trust
@@ -275,6 +309,7 @@ pub async fn install_app_with_provenance(
     manifest: &PluginManifest,
     provenance: Option<&crate::plugins::isolation::PluginProvenance>,
 ) -> Result<PluginRecord> {
+    let provenance = provenance.map(|p| capture_provenance(manifest, p));
     // The ACL vocabulary is assembled from installed manifests and cached, so a
     // change to the installed set must drop it — otherwise an app's newly
     // declared permission levels stay unknown until restart and every grant
@@ -291,7 +326,7 @@ pub async fn install_app_with_provenance(
     })?;
 
     let record = store
-        .insert_with_provenance(&manifest.id, &manifest.version, provenance)
+        .insert_with_provenance(&manifest.id, &manifest.version, provenance.as_ref())
         .await
         .map_err(|e| anyhow::anyhow!("install failed: {e}"))?;
 
@@ -376,10 +411,7 @@ pub async fn enable_app(
     // them even while Safe Mode is masking them off for the runtime. Resolving a
     // dependency graph against the mask would read every dep as disabled and
     // cascade-enable the world.
-    let records = store
-        .list_all_records()
-        .await
-        .map_err(EnableError::Other)?;
+    let records = store.list_all_records().await.map_err(EnableError::Other)?;
 
     // The graph resolves over the INSTALLED manifests (see `graph`'s module
     // contract): a declared dependency that is not installed must surface as
@@ -1364,6 +1396,76 @@ mod tests {
         assert_eq!(rec.id, "com.test.app");
         assert_eq!(rec.version, "1.0.0");
         assert!(!rec.enabled);
+    }
+
+    #[tokio::test]
+    async fn adopted_official_provenance_survives_reload_as_core() {
+        use crate::plugin_manifest::PluginTier;
+        use crate::plugins::builtins::tier_for_manifest;
+        use crate::plugins::isolation::{
+            manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
+        };
+
+        let s = store();
+        let manifest = make_manifest("@ryu/social", "1.0.0", vec![]);
+        s.insert(&manifest.id, &manifest.version).await.unwrap();
+
+        let provenance = capture_provenance(
+            &manifest,
+            &PluginProvenance {
+                source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+                signature_verified: true,
+                ..PluginProvenance::default()
+            },
+        );
+        let record = s
+            .set_provenance(&manifest.id, Some(&provenance))
+            .await
+            .unwrap()
+            .unwrap();
+        let digest = manifest_sha256(&manifest);
+
+        assert_eq!(
+            record
+                .provenance
+                .as_ref()
+                .and_then(|p| p.manifest_sha256.as_deref()),
+            Some(digest.as_str())
+        );
+        assert_eq!(tier_for_manifest(&manifest), PluginTier::Core);
+    }
+
+    #[test]
+    fn legacy_official_provenance_is_backfilled_only_for_matching_verified_bytes() {
+        use crate::plugins::isolation::{
+            manifest_sha256, PluginProvenance, OFFICIAL_MARKETPLACE_SOURCE_ID,
+        };
+
+        let manifest = make_manifest("@ryu/social", "1.0.0", vec![]);
+        let legacy = PluginProvenance {
+            source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+            signature_verified: true,
+            ..PluginProvenance::default()
+        };
+        let backfilled = reverified_provenance(&manifest, &manifest, &legacy)
+            .expect("matching signed official manifest should be backfilled");
+        assert_eq!(backfilled.manifest_sha256, Some(manifest_sha256(&manifest)));
+
+        let mut spoofed = manifest.clone();
+        spoofed.name = "Spoofed Social".to_owned();
+        assert!(
+            reverified_provenance(&spoofed, &manifest, &legacy).is_none(),
+            "changed on-disk bytes must not inherit official provenance"
+        );
+
+        let unsigned = PluginProvenance {
+            signature_verified: false,
+            ..legacy
+        };
+        assert!(
+            reverified_provenance(&manifest, &manifest, &unsigned).is_none(),
+            "unsigned legacy records must remain Community"
+        );
     }
 
     #[tokio::test]

@@ -157,20 +157,30 @@ export function SessionsPopover({
 								{costSummary.callCount} call
 								{costSummary.callCount === 1 ? "" : "s"}
 							</span>
-							<span
-								className="font-heading"
-								title="Estimated cost across this conversation's model calls"
-							>
-								{costSummary.costMicroUsd == null
-									? "—"
-									: formatCost(costSummary.costMicroUsd)}
-							</span>
-							<span
-								className="text-muted-foreground"
-								title="Total model-call latency"
-							>
-								{formatLatency(costSummary.totalLatencyMs)}
-							</span>
+							<Tooltip>
+								<TooltipTrigger
+									render={
+										<span className="font-heading">
+											{costSummary.costMicroUsd == null
+												? "—"
+												: formatCost(costSummary.costMicroUsd)}
+										</span>
+									}
+								/>
+								<TooltipContent>
+									Estimated cost across this conversation's model calls
+								</TooltipContent>
+							</Tooltip>
+							<Tooltip>
+								<TooltipTrigger
+									render={
+										<span className="text-muted-foreground">
+											{formatLatency(costSummary.totalLatencyMs)}
+										</span>
+									}
+								/>
+								<TooltipContent>Total model-call latency</TooltipContent>
+							</Tooltip>
 						</div>
 					) : null}
 				</div>
@@ -185,7 +195,7 @@ export function SessionsPopover({
 						No sessions yet.
 					</p>
 				) : (
-					<ul className="max-h-64 overflow-y-auto py-1">
+					<ul className="scroll-fade max-h-64 overflow-y-auto py-1">
 						{sessions.map((s) => (
 							<li
 								className="flex items-center gap-2 px-3 py-1.5 text-xs"

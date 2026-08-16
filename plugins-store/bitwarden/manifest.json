@@ -2,6 +2,7 @@
   "id": "@ryu/bitwarden",
   "name": "Bitwarden Secrets Manager",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Pull API keys from Bitwarden Secrets Manager on demand instead of storing them in plaintext — one machine-account bootstrap token (BWS_ACCESS_TOKEN) replaces N provider keys, and rotating a credential is one change in the Bitwarden web app. Declarative `command` tools that shell out to the locally-installed `bws` CLI (BYO binary, no API key in the manifest).",
   "tagline": "Pull credentials from Bitwarden, not plaintext",
   "keywords": ["secrets", "bitwarden", "credentials", "security", "env"],

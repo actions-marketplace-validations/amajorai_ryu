@@ -148,7 +148,7 @@ export function SupportAccessBanner() {
 				disabled={ending}
 				onClick={handleEnd}
 				size="sm"
-				variant="outline"
+				variant="ghost"
 			>
 				End now
 			</Button>

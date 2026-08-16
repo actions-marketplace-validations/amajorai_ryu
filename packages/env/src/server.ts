@@ -34,6 +34,10 @@ export const env = createEnv({
 		// Local development escape hatch for running without
 		// RYU_DB_MASTER_KEY. Never set this in production.
 		RYU_DB_ALLOW_PLAINTEXT_SECRETS: z.string().optional(),
+		// PKCS#8 DER Ed25519 private key, base64 encoded. Signs canonical fleet
+		// desired-state snapshots; fleet enrollment/reconciliation is unavailable
+		// when it is absent rather than falling back to an ephemeral trust root.
+		RYU_FLEET_SIGNING_PRIVATE_KEY: z.string().optional(),
 		// Email (useSend — self-hosted Resend-compatible API)
 		USESEND_API_KEY: z.string().optional(),
 		// Base URL of the useSend instance (e.g. https://send.amajor.ai). When

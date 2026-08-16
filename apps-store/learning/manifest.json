@@ -2,6 +2,7 @@
   "id": "@ryu/learning",
   "name": "Learning",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Knowledge & Memory",
   "description": "Learning loop: turn chats and runs into reusable skills, gated by the approval Inbox, with an experience log of what was learned.",
   "tagline": "Turn your chats into reusable skills",

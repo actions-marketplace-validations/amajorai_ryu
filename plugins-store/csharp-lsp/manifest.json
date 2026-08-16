@@ -2,6 +2,7 @@
   "id": "@ryu/csharp-lsp",
   "name": "C# LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "C# language server (csharp-ls) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install csharp-ls; the plugin ships config.",
   "tagline": "C# code intelligence via csharp-ls",

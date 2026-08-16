@@ -51,7 +51,7 @@ function streamOnce(chunks: string[], init?: ResponseInit): Captured {
 				init
 			)
 		);
-	}) as typeof fetch;
+	}) as unknown as typeof fetch;
 	return cap;
 }
 
@@ -134,7 +134,9 @@ describe("streamDelegation — failure paths", () => {
 
 	test("throws when the response has no body", async () => {
 		globalThis.fetch = (() =>
-			Promise.resolve(new Response(null, { status: 200 }))) as typeof fetch;
+			Promise.resolve(
+				new Response(null, { status: 200 })
+			)) as unknown as typeof fetch;
 		await expect(
 			streamDelegation(target, { delegates: [] }, () => {
 				// no-op

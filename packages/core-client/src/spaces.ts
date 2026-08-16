@@ -376,7 +376,8 @@ export async function setEmbeddingModel(
 	target: ApiTarget,
 	modelId: string,
 	baseUrl?: string,
-	dims?: number
+	dims?: number,
+	provider?: string
 ): Promise<void> {
 	const body: Record<string, unknown> = { model_id: modelId };
 	if (baseUrl !== undefined) {
@@ -384,6 +385,9 @@ export async function setEmbeddingModel(
 	}
 	if (dims !== undefined) {
 		body.dims = dims;
+	}
+	if (provider !== undefined) {
+		body.provider = provider;
 	}
 	await request(target, "/api/embeddings/model", { method: "POST", body });
 }

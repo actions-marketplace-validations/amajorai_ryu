@@ -1055,7 +1055,7 @@ function SeasonalEffectsSettings() {
 									previewTarget && previewSeasonalTheme(previewTarget)
 								}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								{previewing ? "Previewing…" : "Preview"}
 							</Button>
@@ -1103,6 +1103,10 @@ export function AppearanceTab() {
 			APPEARANCE_KEYS.sidebarOverflowPopover,
 			APPEARANCE_DEFAULTS.sidebarOverflowPopover
 		);
+	const [nodeSelectorDetail, setNodeSelectorDetail] = usePersistedToggle(
+		APPEARANCE_KEYS.nodeSelectorDetail,
+		APPEARANCE_DEFAULTS.nodeSelectorDetail
+	);
 	const usageBarPrefs = useUsageBarPrefs();
 	const [groupToolUses, setGroupToolUses] = usePersistedToggle(
 		APPEARANCE_KEYS.groupToolUses,
@@ -2010,6 +2014,17 @@ export function AppearanceTab() {
 					<SettingsItem
 						actions={
 							<Switch
+								checked={nodeSelectorDetail}
+								id="node-selector-detail-toggle"
+								onCheckedChange={setNodeSelectorDetail}
+							/>
+						}
+						description="Show live hardware, usage, versions, and service captions in the node command dialog. Turn it off for a faster compact picker; nested engine controls stay available either way."
+						title="Detailed node picker"
+					/>
+					<SettingsItem
+						actions={
+							<Switch
 								checked={sidebarOverflowPopover}
 								id="sidebar-overflow-popover-toggle"
 								onCheckedChange={setSidebarOverflowPopover}
@@ -2078,7 +2093,7 @@ export function AppearanceTab() {
 										onCheckedChange={setGroupToolUses}
 									/>
 								}
-								description="Collapse consecutive tool calls (Tasks, Agents) into a single grouped row with a summary. Turn off to show every tool call individually."
+								description="Collapse consecutive tool calls into one activity row with a summary. Rich and interactive results stay separate. Turn off to show every call individually."
 								title="Group tool uses"
 							/>
 							<SettingsItem

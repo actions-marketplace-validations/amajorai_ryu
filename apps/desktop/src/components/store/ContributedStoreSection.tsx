@@ -46,11 +46,12 @@ import {
 } from "@ryu/app-host/views";
 import { InstallProgressButton } from "@ryu/blocks/desktop/install-button";
 import StoreCatalogCard from "@ryu/marketplace/catalog/chrome/store-catalog-card";
-import { storeItemContextMenu } from "@ryu/marketplace/catalog/chrome/store-item-action";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "@ryu/marketplace/catalog/chrome/store-catalog-layout";
-import StoreItemAction from "@ryu/marketplace/catalog/chrome/store-item-action";
+import StoreItemAction, {
+	storeItemContextMenu,
+} from "@ryu/marketplace/catalog/chrome/store-item-action";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -150,7 +151,7 @@ function AppOffState({
 					{tab.app_installed ? "Enable" : "Add"}
 				</InstallProgressButton>
 				{openSettings ? (
-					<Button onClick={openSettings} size="sm" variant="outline">
+					<Button onClick={openSettings} size="sm" variant="ghost">
 						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
 						Settings
 					</Button>
@@ -238,7 +239,7 @@ function DetailPanel({
 								/>
 							}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							<HugeiconsIcon className="size-4" icon={Link01Icon} />
 							Source
@@ -419,7 +420,7 @@ function CardAction({
 	}
 	if (label && label !== "Add" && label !== "Install") {
 		return (
-			<Button disabled={busy} onClick={onInstall} size="sm" variant="outline">
+			<Button disabled={busy} onClick={onInstall} size="sm" variant="ghost">
 				{label}
 			</Button>
 		);

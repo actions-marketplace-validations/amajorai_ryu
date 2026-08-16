@@ -340,7 +340,7 @@ function AcpAuthSection({ agentId }: { agentId: string }) {
 						disabled={loggingOut || pendingMethodId !== null}
 						onClick={handleLogout}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						{loggingOut ? "Logging out…" : "Log out"}
 					</Button>
@@ -427,7 +427,7 @@ function AcpSessionsSection({ agentId }: { agentId: string }) {
 									disabled={busy}
 									onClick={() => handleDelete(session.sessionId)}
 									size="sm"
-									variant="outline"
+									variant="ghost"
 								>
 									{busy ? "Deleting…" : "Delete"}
 								</Button>

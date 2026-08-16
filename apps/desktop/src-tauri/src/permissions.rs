@@ -19,37 +19,37 @@ use ghost_permissions::Capability;
 /// Whether Accessibility is currently granted. Never prompts.
 #[tauri::command]
 pub fn check_accessibility_permission() -> bool {
-	ghost_permissions::granted(Capability::Accessibility)
+    ghost_permissions::granted(Capability::Accessibility)
 }
 
 /// Surface the Accessibility prompt and register the app in System Settings.
 #[tauri::command]
 pub fn request_accessibility_permission() -> bool {
-	ghost_permissions::request(Capability::Accessibility)
+    ghost_permissions::request(Capability::Accessibility)
 }
 
 /// Whether Screen Recording is currently granted. Never prompts.
 #[tauri::command]
 pub fn check_screen_recording_permission() -> bool {
-	ghost_permissions::granted(Capability::ScreenRecording)
+    ghost_permissions::granted(Capability::ScreenRecording)
 }
 
 /// Surface the Screen Recording prompt and register the app in System Settings.
 #[tauri::command]
 pub fn request_screen_recording_permission() -> bool {
-	ghost_permissions::request(Capability::ScreenRecording)
+    ghost_permissions::request(Capability::ScreenRecording)
 }
 
 /// Whether Input Monitoring is currently granted. Never prompts.
 #[tauri::command]
 pub fn check_input_monitoring_permission() -> bool {
-	ghost_permissions::granted(Capability::InputMonitoring)
+    ghost_permissions::granted(Capability::InputMonitoring)
 }
 
 /// Surface the Input Monitoring prompt and register the app in System Settings.
 #[tauri::command]
 pub fn request_input_monitoring_permission() -> bool {
-	ghost_permissions::request(Capability::InputMonitoring)
+    ghost_permissions::request(Capability::InputMonitoring)
 }
 
 /// Whether the current OS gates these capabilities behind a user-grantable
@@ -57,5 +57,5 @@ pub fn request_input_monitoring_permission() -> bool {
 /// show "no setup needed" instead of Grant buttons.
 #[tauri::command]
 pub fn automation_permissions_required() -> bool {
-	ghost_permissions::required(Capability::ScreenRecording)
+    ghost_permissions::required(Capability::ScreenRecording)
 }

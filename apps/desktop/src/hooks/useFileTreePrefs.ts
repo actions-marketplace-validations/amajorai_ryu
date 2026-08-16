@@ -47,7 +47,7 @@ export interface FileTreePrefs {
 
 export const DEFAULT_FILE_TREE_PREFS: FileTreePrefs = {
 	density: "default",
-	iconSet: "standard",
+	iconSet: "complete",
 	coloredIcons: true,
 	stickyFolders: true,
 	showSearch: false,

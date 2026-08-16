@@ -353,10 +353,29 @@ impl CollabStore {
              );
              CREATE TABLE IF NOT EXISTS doc_seed_claims (
                  doc_id     TEXT PRIMARY KEY,
-                 claimed_at INTEGER NOT NULL
+                 claimed_at INTEGER NOT NULL,
+                 claimed_by TEXT NOT NULL DEFAULT ''
              );",
         )
         .context("initializing collab schema")?;
+
+        // Upgrade stores created before claims were owner-scoped. Unowned rows
+        // are legacy leftovers from a process that could not safely release a
+        // claim after a pre-seed disconnect, so they are safe to discard here.
+        let has_claimed_by = conn
+            .prepare("PRAGMA table_info(doc_seed_claims)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|column| column.ok())
+            .any(|column| column == "claimed_by");
+        if !has_claimed_by {
+            conn.execute_batch(
+                "ALTER TABLE doc_seed_claims
+                 ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''",
+            )
+            .context("adding seed claim owner")?;
+        }
+        conn.execute("DELETE FROM doc_seed_claims WHERE claimed_by = ''", [])
+            .context("discarding legacy unowned seed claims")?;
         Ok(())
     }
 
@@ -504,13 +523,13 @@ impl CollabStore {
     ///
     /// "Won the claim" is necessary but the caller still gates on emptiness +
     /// write-access before honoring it (see Core's `server::realtime_ws`).
-    fn claim_seed(&self, doc_id: &str) -> Result<bool> {
+    fn claim_seed(&self, doc_id: &str, owner_id: &str) -> Result<bool> {
         let conn = self.lock();
         let inserted = conn
             .execute(
-                "INSERT INTO doc_seed_claims (doc_id, claimed_at) VALUES (?1, ?2)
+                "INSERT INTO doc_seed_claims (doc_id, claimed_at, claimed_by) VALUES (?1, ?2, ?3)
                  ON CONFLICT(doc_id) DO NOTHING",
-                params![doc_id, now_millis()],
+                params![doc_id, now_millis(), owner_id],
             )
             .context("claiming seed")?;
         Ok(inserted == 1)
@@ -520,11 +539,11 @@ impl CollabStore {
     /// on last-leave when the doc is STILL empty (the winner left before its seed
     /// update landed), so a crashed-before-seed claim does not permanently lock the
     /// room out of seeding. Idempotent (a missing row is a no-op).
-    fn release_seed_claim(&self, doc_id: &str) -> Result<()> {
+    fn release_seed_claim(&self, doc_id: &str, owner_id: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "DELETE FROM doc_seed_claims WHERE doc_id = ?1",
-            params![doc_id],
+            "DELETE FROM doc_seed_claims WHERE doc_id = ?1 AND claimed_by = ?2",
+            params![doc_id, owner_id],
         )
         .context("releasing seed claim")?;
         Ok(())
@@ -813,16 +832,44 @@ impl DocRegistry {
         Ok(txn.state_vector().is_empty())
     }
 
-    /// Atomically claim the one-shot right to seed `doc_id` (see
-    /// [`CollabStore::claim_seed`]). Exactly one caller wins per doc; race-proof.
-    pub fn claim_seed(&self, doc_id: &str) -> Result<bool> {
-        self.store.claim_seed(doc_id)
+    /// Atomically claim the one-shot right to seed an empty `doc_id` (see
+    /// [`CollabStore::claim_seed`]). The document lock is held across the
+    /// emptiness check and SQL insert, so an update cannot land between the
+    /// check and claim. Exactly one caller wins per doc; race-proof.
+    pub fn claim_seed(&self, doc_id: &str, owner_id: &str) -> Result<bool> {
+        let entry = self.entry(doc_id)?;
+        let doc = entry.doc.lock().unwrap_or_else(|e| e.into_inner());
+        if !doc.transact().state_vector().is_empty() {
+            return Ok(false);
+        }
+        self.store.claim_seed(doc_id, owner_id)
     }
 
     /// Release a seed claim so a future session may re-claim an unseeded empty doc
     /// (see [`CollabStore::release_seed_claim`]).
-    pub fn release_seed_claim(&self, doc_id: &str) -> Result<()> {
-        self.store.release_seed_claim(doc_id)
+    pub fn release_seed_claim(&self, doc_id: &str, owner_id: &str) -> Result<()> {
+        self.store.release_seed_claim(doc_id, owner_id)
+    }
+
+    /// Release an owner’s seed claim only while the authoritative document is still
+    /// empty. The document mutex is held across the emptiness check and SQL delete,
+    /// so a concurrent update cannot make an owner’s stale disconnect release a
+    /// claim after the first seed has landed. Returns whether the owner's claim was
+    /// actually deleted.
+    pub fn release_seed_claim_if_empty(&self, doc_id: &str, owner_id: &str) -> Result<bool> {
+        let entry = self.entry(doc_id)?;
+        let doc = entry.doc.lock().unwrap_or_else(|e| e.into_inner());
+        if !doc.transact().state_vector().is_empty() {
+            return Ok(false);
+        }
+        let conn = self.store.lock();
+        let deleted = conn
+            .execute(
+                "DELETE FROM doc_seed_claims WHERE doc_id = ?1 AND claimed_by = ?2",
+                params![doc_id, owner_id],
+            )
+            .context("releasing seed claim")?;
+        Ok(deleted == 1)
     }
 }
 
@@ -1204,11 +1251,20 @@ mod tests {
         // The seed claim is one-shot per doc: the first caller wins, every later
         // caller for the same doc loses. A different doc is independent.
         let store = CollabStore::open_in_memory().unwrap();
-        assert!(store.claim_seed("doc").unwrap(), "first caller wins");
-        assert!(!store.claim_seed("doc").unwrap(), "second caller loses");
-        assert!(!store.claim_seed("doc").unwrap(), "third caller loses");
         assert!(
-            store.claim_seed("other-doc").unwrap(),
+            store.claim_seed("doc", "alice").unwrap(),
+            "first caller wins"
+        );
+        assert!(
+            !store.claim_seed("doc", "bob").unwrap(),
+            "second caller loses"
+        );
+        assert!(
+            !store.claim_seed("doc", "carol").unwrap(),
+            "third caller loses"
+        );
+        assert!(
+            store.claim_seed("other-doc", "alice").unwrap(),
             "a different doc is an independent claim"
         );
     }
@@ -1222,13 +1278,15 @@ mod tests {
         const RACERS: usize = 8;
         let barrier = Arc::new(std::sync::Barrier::new(RACERS));
         let mut handles = Vec::with_capacity(RACERS);
-        for _ in 0..RACERS {
+        for racer in 0..RACERS {
             let store = Arc::clone(&store);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
                 // Release all threads at once so the claims genuinely contend.
                 barrier.wait();
-                store.claim_seed("race-doc").unwrap()
+                store
+                    .claim_seed("race-doc", &format!("member-{racer}"))
+                    .unwrap()
             }));
         }
         let wins = handles
@@ -1244,15 +1302,41 @@ mod tests {
         // A winner that left before seeding (doc still empty) releases its claim so
         // a future session can re-claim and seed. Release is idempotent.
         let store = CollabStore::open_in_memory().unwrap();
-        assert!(store.claim_seed("doc").unwrap());
-        assert!(!store.claim_seed("doc").unwrap());
-        store.release_seed_claim("doc").unwrap();
+        assert!(store.claim_seed("doc", "alice").unwrap());
+        assert!(!store.claim_seed("doc", "bob").unwrap());
+        store.release_seed_claim("doc", "bob").unwrap();
+        assert!(!store.claim_seed("doc", "bob").unwrap());
+        store.release_seed_claim("doc", "alice").unwrap();
         assert!(
-            store.claim_seed("doc").unwrap(),
+            store.claim_seed("doc", "bob").unwrap(),
             "after release the next caller may re-claim"
         );
         // Releasing a non-existent claim is a no-op.
-        store.release_seed_claim("never-claimed").unwrap();
+        store.release_seed_claim("never-claimed", "nobody").unwrap();
+    }
+
+    #[test]
+    fn owner_scoped_empty_release_cannot_remove_another_claim() {
+        let reg = registry();
+        assert!(reg.claim_seed("doc", "alice").unwrap());
+        assert!(
+            !reg.release_seed_claim_if_empty("doc", "bob").unwrap(),
+            "a stale disconnect cannot release another owner's claim"
+        );
+        assert!(!reg.claim_seed("doc", "bob").unwrap());
+        assert!(reg.release_seed_claim_if_empty("doc", "alice").unwrap());
+        assert!(reg.claim_seed("doc", "bob").unwrap());
+    }
+
+    #[test]
+    fn seed_claim_rechecks_empty_under_the_document_lock() {
+        let reg = registry();
+        let update = make_text_update("body", 0, "seeded", &StateVector::default());
+        reg.apply_remote_update("doc", &update).unwrap();
+        assert!(
+            !reg.claim_seed("doc", "alice").unwrap(),
+            "a document with applied state cannot acquire a seed claim"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
   "id": "@ryu/serper",
   "name": "Serper",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Google's own search results as JSON via the Serper API (https://serper.dev), plus single-page scraping, exposed as two declarative HTTP tools. Provides the swappable `web.search` and `web.extract` layers, so selecting it in the layer picker re-points the stable `web__search` / `web__extract` tools at Serper without changing what agents call. Serper is a paid, credit-metered API with a free allowance; requires a BYOK Serper API key.",
   "icon": "google",
   "iconDither": { "from": 257, "to": "transparent", "direction": "down" },

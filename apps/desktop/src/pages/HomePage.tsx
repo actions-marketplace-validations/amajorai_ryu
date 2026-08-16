@@ -863,7 +863,7 @@ export default function HomePage() {
 				<EmptyDescription>{error}</EmptyDescription>
 			</EmptyHeader>
 			<EmptyContent>
-				<Button onClick={handleRetry} size="sm" variant="outline">
+				<Button onClick={handleRetry} size="sm" variant="ghost">
 					Try again
 				</Button>
 			</EmptyContent>
@@ -906,11 +906,7 @@ export default function HomePage() {
 						<Button onClick={handleGenerateWithAi} size="sm">
 							<SparklesIcon className="size-4" /> Generate a dashboard for me
 						</Button>
-						<Button
-							onClick={() => setAddOpen(true)}
-							size="sm"
-							variant="outline"
-						>
+						<Button onClick={() => setAddOpen(true)} size="sm" variant="ghost">
 							<PlusIcon className="size-4" /> Add a widget
 						</Button>
 					</div>
@@ -943,7 +939,7 @@ export default function HomePage() {
 			);
 		}
 		return (
-			<div className="h-full overflow-auto p-3">
+			<div className="scroll-fade h-full overflow-auto p-3">
 				<DashboardGrid
 					live={live}
 					onLayoutPersist={handleLayoutPersist}

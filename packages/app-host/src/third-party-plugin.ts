@@ -387,6 +387,16 @@ export function thirdPartyPluginSrcdoc(
           recordStatus: function () { return call("ghost.recordStatus", []); },
           recordStop: function () { return call("ghost.recordStop", []); }
         },
+        // Generic own-sidecar HTTP (grant app:http). The host derives the target
+        // from this companion's owning plugin id; the frame supplies no host/id.
+        app: {
+          request: function (a) { return call("app.request", [a || {}]); }
+        },
+        // Host-vetted browser navigation. ui.openExternal accepts only http(s)
+        // and is a local host capability, so the sandbox never opens URLs itself.
+        ui: {
+          openExternal: function (a) { return call("ui.openExternal", [a || {}]); }
+        },
         // Outpost (needs grant social:crud). ONE generic forwarder plus two navigation
         // verbs — see the sibling bridge below for why the app's 33 sidecar routes do
         // not each get a verb here. Kept in step with that builder deliberately: the two
@@ -979,6 +989,15 @@ function htmlCompanionHeadFragment(
         open: function (a) { return call("meetings.open", [a || {}]); },
         openNotes: function (a) { return call("meetings.openNotes", [a || {}]); },
         openList: function () { return call("meetings.openList", []); }
+      },
+      // Generic own-sidecar HTTP (grant app:http). Kept in step with the Path A
+      // bridge above; Core's ext-proxy applies the manifest route allowlist.
+      app: {
+        request: function (a) { return call("app.request", [a || {}]); }
+      },
+      // Host-vetted browser navigation. Kept in step with the Path A bridge.
+      ui: {
+        openExternal: function (a) { return call("ui.openExternal", [a || {}]); }
       },
       // Outpost (needs grant social:crud). The @ryu/social companion renders the
       // compose, calendar, queue and inbox surface. ONE generic request forwarder

@@ -2,6 +2,7 @@
   "id": "@ryu/desktop",
   "name": "Virtual Desktop",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "An interactive virtual desktop for any Ryu node — cloud-managed, self-hosted, or local. The sidecar brings up a full headless Linux desktop (Xvfb + window manager + apps) with a VNC server on loopback, exposes it through Core's generic WebSocket ext-proxy, and the desktop Virtual Desktop panel streams it live with mouse/keyboard input. Ghost can drive the same display, so agents see and control exactly what you watch.",
   "keywords": ["desktop", "vnc", "stream", "remote", "computer-use"],
   "icon": "monitor-02",

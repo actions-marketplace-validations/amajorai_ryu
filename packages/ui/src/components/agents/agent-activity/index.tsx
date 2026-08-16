@@ -6,7 +6,7 @@ import { AgentDisclosure } from "@ryu/ui/components/agents/agent-disclosure";
 import { ThinkingShimmer } from "@ryu/ui/components/agents/loading-states/thinking-shimmer";
 import { EASE_OUT, SPRING_LAYOUT, SPRING_SWAP } from "@ryu/ui/lib/ease";
 import { cn } from "@ryu/ui/lib/utils";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Globe2, ListChecks, Wrench } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
 	type ReactNode,
@@ -95,6 +95,16 @@ function getActiveLabel(type: AgentActivityContentType) {
 		return "Working through it…";
 	}
 	return "Thinking…";
+}
+
+function ActivityIcon({ type }: { type: AgentActivityContentType }) {
+	if (type === "search") {
+		return <Globe2 className="size-4" />;
+	}
+	if (type === "tool") {
+		return <Wrench className="size-4" />;
+	}
+	return <ListChecks className="size-4" />;
 }
 
 function getSummary(
@@ -217,10 +227,11 @@ export function AgentActivity({
 		>
 			{working ? (
 				<div
-					className="flex h-7 min-w-0 items-center text-muted-foreground"
+					className="flex h-7 min-w-0 items-center gap-2 text-muted-foreground"
 					id={triggerId}
 					role="status"
 				>
+					<ActivityIcon type={contentType} />
 					<ThinkingShimmer>{liveLabel}</ThinkingShimmer>
 				</div>
 			) : (
@@ -232,6 +243,7 @@ export function AgentActivity({
 					onClick={toggle}
 					type="button"
 				>
+					<ActivityIcon type={contentType} />
 					<span className="truncate">{completedSummary}</span>
 					<motion.span
 						animate={{ rotate: expanded ? 180 : 0 }}
@@ -255,7 +267,7 @@ export function AgentActivity({
 					className={cn(
 						"scrollbar-hide pr-1",
 						capped && expanded && !working
-							? "overflow-y-auto"
+							? "scroll-fade overflow-y-auto"
 							: "overflow-y-hidden"
 					)}
 					ref={viewportRef}

@@ -2,6 +2,7 @@
   "id": "@ryu/pi-monitor",
   "name": "Monitor",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Adds the monitor tool to the managed Pi agent, so it can watch a command or WebSocket in the background and react when events arrive.",
   "tagline": "Watch a command or stream and react when it changes",

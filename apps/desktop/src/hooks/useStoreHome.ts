@@ -123,7 +123,7 @@ export interface UseStoreHomeResult {
 /** Marketplace kind → the Store realm/section that browses it. Marketplace
  *  "plugin" cards route to the Plugins section (third-party marketplace items
  *  are overwhelmingly non-companion plugins). */
-const KIND_TO_REALM: Record<MarketplaceKind, StoreSearchRealm> = {
+const KIND_TO_REALM: Partial<Record<MarketplaceKind, StoreSearchRealm>> = {
 	plugin: "plugins",
 	skill: "skills",
 	model: "models",
@@ -196,10 +196,10 @@ export function useStoreHome(): UseStoreHomeResult {
 
 	const featured = useMemo<HomeFeaturedItem[]>(
 		() =>
-			(featuredQuery.data ?? []).map((card) => ({
-				card,
-				realm: KIND_TO_REALM[card.kind],
-			})),
+			(featuredQuery.data ?? []).flatMap((card) => {
+				const realm = KIND_TO_REALM[card.kind];
+				return realm ? [{ card, realm }] : [];
+			}),
 		[featuredQuery.data]
 	);
 

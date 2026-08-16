@@ -2,8 +2,8 @@
 //
 // Renders a minimal, Apple-style "employee card" for an agent — the face that
 // gets composited onto the Lanyard badge (see AgentLanyardCard). We draw to an
-// offscreen canvas and return data URLs rather than mounting DOM: deterministic,
-// dependency-free at runtime, and safe to feed straight into the WebGL texture
+// offscreen canvas and return data URLs rather than mounting DOM: deterministic
+// and safe to feed straight into the WebGL texture
 // (same-origin canvas, never tainted).
 //
 // Design: a clean white ID card — the Ryu logo mark up top, a small tracked
@@ -11,7 +11,7 @@
 // accent hue is derived from the agent so each card is subtly its own, but the
 // card stays quiet and monochrome everywhere else.
 
-import qr from "qr.js";
+import { createQRCodeGeometry } from "@ryu/ui/lib/qr-code.ts";
 
 export interface AgentBadgeInput {
 	/** Built-in agents get a "CORE STAFF" title instead of "AGENT". */
@@ -39,6 +39,7 @@ export interface AgentBadgeImages {
 const CARD_W = 600;
 const CARD_H = 844;
 const MARGIN = 56;
+const QR_QUIET_ZONE = 12;
 
 // Apple-ish neutral palette.
 const INK = "#1d1d1f";
@@ -274,22 +275,67 @@ function drawQr(
 	size: number,
 	color: string
 ): void {
-	const model = qr(text);
-	const cells = model.modules;
-	const count = cells.length;
-	if (count === 0) {
+	const codeSize = size - QR_QUIET_ZONE * 2;
+	const codeX = x + QR_QUIET_ZONE;
+	const codeY = y + QR_QUIET_ZONE;
+	const geometry = createQRCodeGeometry(text, codeSize);
+	if (!geometry) {
 		return;
 	}
-	const cell = size / count;
+
+	const {
+		circleRadius,
+		circles,
+		finderPositions,
+		finderSize,
+		innerBlackSize,
+		innerPadding,
+		innerWhiteSize,
+		moduleSize,
+	} = geometry;
+
+	ctx.fillStyle = CARD_TOP;
+	ctx.beginPath();
+	ctx.roundRect(x, y, size, size, 12);
+	ctx.fill();
+
+	for (const [row, column] of finderPositions) {
+		const finderX = codeX + column * moduleSize;
+		const finderY = codeY + row * moduleSize;
+
+		ctx.fillStyle = color;
+		ctx.beginPath();
+		ctx.roundRect(finderX, finderY, finderSize, finderSize, 12);
+		ctx.fill();
+
+		ctx.fillStyle = CARD_TOP;
+		ctx.beginPath();
+		ctx.roundRect(
+			finderX + innerPadding,
+			finderY + innerPadding,
+			innerWhiteSize,
+			innerWhiteSize,
+			8
+		);
+		ctx.fill();
+
+		ctx.fillStyle = color;
+		ctx.beginPath();
+		ctx.roundRect(
+			finderX + innerPadding * 2,
+			finderY + innerPadding * 2,
+			innerBlackSize,
+			innerBlackSize,
+			3
+		);
+		ctx.fill();
+	}
+
 	ctx.fillStyle = color;
-	for (let r = 0; r < count; r++) {
-		const row = cells[r] ?? [];
-		for (let c = 0; c < count; c++) {
-			if (row[c]) {
-				// +0.6 overdraw removes hairline seams between modules.
-				ctx.fillRect(x + c * cell, y + r * cell, cell + 0.6, cell + 0.6);
-			}
-		}
+	for (const { cx, cy } of circles) {
+		ctx.beginPath();
+		ctx.arc(codeX + cx, codeY + cy, circleRadius, 0, Math.PI * 2);
+		ctx.fill();
 	}
 }
 

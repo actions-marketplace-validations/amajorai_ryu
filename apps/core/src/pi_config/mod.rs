@@ -1615,7 +1615,13 @@ pub(crate) fn sync_plaintext_into_vault() {
             Some("oauth") => "Login",
             _ => "API key",
         };
-        if let Err(e) = vault.upsert(&scope, &new_account_id(), base, credential_kind(&entry), Some(credential)) {
+        if let Err(e) = vault.upsert(
+            &scope,
+            &new_account_id(),
+            base,
+            credential_kind(&entry),
+            Some(credential),
+        ) {
             tracing::warn!(scope, error = %e, "could not import legacy credential into the account vault");
         }
     }
@@ -1623,7 +1629,11 @@ pub(crate) fn sync_plaintext_into_vault() {
     let models = read_models();
     if let Some(providers) = models["providers"].as_object() {
         for (id, provider) in providers {
-            let Some(key) = provider.get("apiKey").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+            let Some(key) = provider
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
                 continue;
             };
             let scope = accounts::provider_scope(id);
@@ -1729,7 +1739,10 @@ pub(crate) fn materialize_active_accounts() {
         }
     }
     if auth_dirty {
-        if let Err(e) = write_secret_file(&auth_path(), &serde_json::to_string_pretty(&auth).unwrap_or_default()) {
+        if let Err(e) = write_secret_file(
+            &auth_path(),
+            &serde_json::to_string_pretty(&auth).unwrap_or_default(),
+        ) {
             tracing::warn!(error = %e, "materialize: could not write auth.json");
         }
     }
@@ -1888,7 +1901,8 @@ fn persist_oauth_refresh(
     drop(obj);
     let refreshed_entry = entry.clone();
     let kind = credential_kind(&refreshed_entry);
-    let body = serde_json::to_string_pretty(&auth).context("serialize auth.json")?;    write_secret_file(&auth_path(), &body)?;
+    let body = serde_json::to_string_pretty(&auth).context("serialize auth.json")?;
+    write_secret_file(&auth_path(), &body)?;
     // Keep the vault's active copy fresh so switching away and back does not
     // resurrect an expired token.
     if let Some(vault) = accounts::global() {
@@ -2452,7 +2466,8 @@ fn provider_configured(meta: &ProviderMeta) -> bool {
     // the sealed vault holds an account.
     if meta.auth_kind == "subscription" {
         return !meta.auth_key.is_empty()
-            && (auth_has_any(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key)));
+            && (auth_has_any(meta.auth_key)
+                || vault_has_any(&accounts::provider_scope(meta.auth_key)));
     }
     if !meta.auth_key.is_empty()
         && (auth_has_key(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key)))
@@ -2487,7 +2502,8 @@ pub fn subscription_login_present(provider_id: &str) -> Option<bool> {
     }
     Some(
         !meta.auth_key.is_empty()
-            && (auth_has_any(meta.auth_key) || vault_has_any(&accounts::provider_scope(meta.auth_key))),
+            && (auth_has_any(meta.auth_key)
+                || vault_has_any(&accounts::provider_scope(meta.auth_key))),
     )
 }
 
@@ -2497,14 +2513,14 @@ pub fn subscription_login_present(provider_id: &str) -> Option<bool> {
 /// `models.json` id for a custom provider. `None` for managed/gateway rows that
 /// hold no credential.
 pub fn provider_account_scope(provider_id: &str) -> Option<String> {
-    let meta = provider_meta(provider_id)?;
     if is_managed_or_gateway(provider_id) {
         return None;
     }
-    let key = if meta.auth_key.is_empty() {
-        provider_id.to_owned()
-    } else {
-        meta.auth_key.to_owned()
+    // Custom providers have no `ProviderMeta` row (they live in models.json),
+    // so the scope keys off the provider id itself for those.
+    let key = match provider_meta(provider_id) {
+        Some(meta) if !meta.auth_key.is_empty() => meta.auth_key.to_owned(),
+        _ => provider_id.to_owned(),
     };
     Some(accounts::provider_scope(&key))
 }
@@ -2672,7 +2688,11 @@ pub fn record_acp_account(spawn_cmd: &str, provider_id: Option<&str>) {
 /// account carries a `provider` tag naming the provider scope to switch; for any
 /// other agent switching means re-running the agent's own login (the route's
 /// job), so this only acknowledges.
-pub fn switch_acp_account(spawn_cmd: &str, account_id: &str, provider: Option<&str>) -> Result<bool> {
+pub fn switch_acp_account(
+    spawn_cmd: &str,
+    account_id: &str,
+    provider: Option<&str>,
+) -> Result<bool> {
     let Some(vault) = accounts::global() else {
         return Ok(false);
     };
@@ -4364,7 +4384,10 @@ mod tests {
                 crate::sidecar::gateway::set_managed_fleet_pref(None, None);
                 let patch = gateway_openai_patch_for(Some("openrouter/auto"), true);
                 let base = patch.get("baseUrl").and_then(Value::as_str).unwrap();
-                assert!(base.contains("127.0.0.1"), "expected local fallback, got {base}");
+                assert!(
+                    base.contains("127.0.0.1"),
+                    "expected local fallback, got {base}"
+                );
             }
         });
     }
@@ -4868,7 +4891,10 @@ mod tests {
             // Always Gateway-routed: a pool row's egress must stay metered, or the
             // spend never reaches the pool it was supposed to draw from.
             assert_eq!(view.routing, "gateway");
-            assert_eq!(view.model.as_deref(), Some("@cf/meta/llama-3.1-8b-instruct"));
+            assert_eq!(
+                view.model.as_deref(),
+                Some("@cf/meta/llama-3.1-8b-instruct")
+            );
             assert_ne!(view.model.as_deref(), Some(MANAGED_DEFAULT_MODEL));
             let settings = read_settings();
             assert_eq!(settings.default_provider.as_deref(), Some("openai"));

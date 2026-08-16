@@ -14,7 +14,8 @@ import { AnimatePresence, motion } from "motion/react";
 import type { Route } from "next";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import type { RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import { productCategories, productsByCategory } from "./data/products.tsx";
 import {
 	DOCS_URL,
@@ -88,6 +89,13 @@ const SHEET_FOOTERS = {
 type SheetKey = keyof typeof SHEET_TITLES;
 type TabKey = "home" | SheetKey | "download";
 
+const FOCUSABLE_SELECTOR =
+	'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function focusableElements(root: HTMLElement): HTMLElement[] {
+	return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+}
+
 interface MobileNavProps {
 	className?: string;
 }
@@ -133,6 +141,7 @@ function SheetLink({
 			<a
 				className={className}
 				href={href}
+				onClick={onClose}
 				rel="noopener noreferrer"
 				target="_blank"
 			>
@@ -147,7 +156,15 @@ function SheetLink({
 	);
 }
 
-function Sheet({ kind, onClose }: { kind: SheetKey; onClose: () => void }) {
+function Sheet({
+	dialogRef,
+	kind,
+	onClose,
+}: {
+	dialogRef: RefObject<HTMLDivElement | null>;
+	kind: SheetKey;
+	onClose: () => void;
+}) {
 	const groups =
 		kind === "products"
 			? PRODUCT_SHEET
@@ -156,9 +173,19 @@ function Sheet({ kind, onClose }: { kind: SheetKey; onClose: () => void }) {
 				: RESOURCE_SHEET;
 	const footer = SHEET_FOOTERS[kind];
 	return (
-		<div className="border-border/60 border-b bg-background px-4 pt-3 pb-2 shadow-2xl">
+		<div
+			aria-labelledby={`${kind}-mobile-nav-title`}
+			aria-modal="true"
+			className="border-border/60 border-b bg-background px-4 pt-3 pb-2 shadow-2xl"
+			id="mobile-nav-sheet"
+			ref={dialogRef}
+			role="dialog"
+			tabIndex={-1}
+		>
 			<div className="mb-2 flex items-center justify-between">
-				<p className="font-semibold text-lg">{SHEET_TITLES[kind]}</p>
+				<p className="font-semibold text-lg" id={`${kind}-mobile-nav-title`}>
+					{SHEET_TITLES[kind]}
+				</p>
 				<button
 					aria-label={`Close ${SHEET_TITLES[kind]} menu`}
 					className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -204,11 +231,69 @@ function Sheet({ kind, onClose }: { kind: SheetKey; onClose: () => void }) {
 export function MobileNav({ className }: MobileNavProps) {
 	const pathname = usePathname();
 	const [open, setOpen] = useState<SheetKey | null>(null);
+	const dialogRef = useRef<HTMLDivElement>(null);
+	const triggerRef = useRef<HTMLButtonElement>(null);
+	const wasOpen = useRef(false);
 
 	// A navigation closes any open sheet — the destination is already chosen.
 	useEffect(() => {
 		setOpen(null);
 	}, [pathname]);
+
+	// Move focus into the sheet when it opens, and back to the button that opened
+	// it when it closes. This keeps keyboard users in the same navigation context
+	// instead of leaving focus behind the scrim.
+	useEffect(() => {
+		if (open) {
+			wasOpen.current = true;
+			const first = dialogRef.current
+				? focusableElements(dialogRef.current)[0]
+				: undefined;
+			first?.focus();
+			return;
+		}
+		if (wasOpen.current) {
+			wasOpen.current = false;
+			triggerRef.current?.focus();
+		}
+	}, [open]);
+
+	// Treat the bottom sheet as a modal while open: Escape closes it and Tab
+	// cycles only through controls in the current sheet.
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+		const handleKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				setOpen(null);
+				return;
+			}
+			if (event.key !== "Tab" || !dialogRef.current) {
+				return;
+			}
+			const focusable = focusableElements(dialogRef.current);
+			if (focusable.length === 0) {
+				event.preventDefault();
+				return;
+			}
+			const first = focusable[0];
+			const last = focusable.at(-1);
+			if (event.shiftKey && document.activeElement === first) {
+				event.preventDefault();
+				last?.focus();
+			} else if (!event.shiftKey && document.activeElement === last) {
+				event.preventDefault();
+				first?.focus();
+			} else if (!dialogRef.current.contains(document.activeElement)) {
+				event.preventDefault();
+				first?.focus();
+			}
+		};
+		document.addEventListener("keydown", handleKeyDown);
+		return () => document.removeEventListener("keydown", handleKeyDown);
+	}, [open]);
 
 	const toggle = (key: SheetKey) =>
 		setOpen((current) => (current === key ? null : key));
@@ -245,7 +330,11 @@ export function MobileNav({ className }: MobileNavProps) {
 						key="sheet"
 						transition={{ duration: 0.2, ease: "easeOut" }}
 					>
-						<Sheet kind={open} onClose={() => setOpen(null)} />
+						<Sheet
+							dialogRef={dialogRef}
+							kind={open}
+							onClose={() => setOpen(null)}
+						/>
 					</motion.div>
 				) : null}
 			</AnimatePresence>
@@ -257,7 +346,10 @@ export function MobileNav({ className }: MobileNavProps) {
 					position="bottom"
 					useThemeBackground
 				/>
-				<nav className="relative z-40 grid h-full grid-cols-5 items-center">
+				<nav
+					aria-label="Mobile navigation"
+					className="relative z-40 grid h-full grid-cols-5 items-center"
+				>
 					<Link className={tabClass(isTabActive("home", pathname))} href="/">
 						<Home className="size-5" />
 						<span className="text-xs">Home</span>
@@ -273,10 +365,14 @@ export function MobileNav({ className }: MobileNavProps) {
 						const isOpen = open === key;
 						return (
 							<button
+								aria-controls="mobile-nav-sheet"
 								aria-expanded={isOpen}
 								className={tabClass(isOpen || isTabActive(key, pathname))}
 								key={key}
-								onClick={() => toggle(key)}
+								onClick={(event) => {
+									triggerRef.current = event.currentTarget;
+									toggle(key);
+								}}
 								type="button"
 							>
 								<Icon className="size-5" />

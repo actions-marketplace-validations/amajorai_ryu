@@ -426,7 +426,8 @@ impl RyuMcpHandler {
     /// unchanged.
     async fn build_tool_list(&self) -> Vec<Tool> {
         let registry_tools = self.mcp.tools_for_agent(self.allowlist.as_deref()).await;
-        let registry_tools = crate::sidecar::mcp::filter_capability_tools(registry_tools, self.caps);
+        let registry_tools =
+            crate::sidecar::mcp::filter_capability_tools(registry_tools, self.caps);
         let mut tools: Vec<Tool> = registry_tools
             .iter()
             .map(|t| {
@@ -834,7 +835,9 @@ impl rmcp::ServerHandler for RyuMcpHandler {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: RequestContext<rmcp::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.build_tool_list().await))
+        Ok(ListToolsResult::with_all_items(
+            self.build_tool_list().await,
+        ))
     }
 
     async fn call_tool(
@@ -1533,6 +1536,9 @@ mod tests {
                     transport: None,
                     url: None,
                     headers: BTreeMap::new(),
+                    auth: None,
+                    owner_plugin_id: None,
+                    owner_server_name: None,
                     args: vec![],
                     env: BTreeMap::new(),
                     description: Some("mock".to_owned()),
@@ -1985,8 +1991,14 @@ mod tests {
         let init = serve(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }))
             .await
             .expect("answered");
-        assert_eq!(init["result"]["protocolVersion"], json!(MCP_PROTOCOL_VERSION));
-        assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], json!(false));
+        assert_eq!(
+            init["result"]["protocolVersion"],
+            json!(MCP_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            init["result"]["capabilities"]["tools"]["listChanged"],
+            json!(false)
+        );
 
         // A NOTIFICATION (no `id` key at all) is answered with nothing — replying
         // to one is itself a protocol violation, and `notifications/initialized` is
@@ -1996,11 +2008,15 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(serve(json!({ "jsonrpc": "2.0", "method": "ping" })).await.is_none());
-        // But `"id": null` is a request, not a notification, and gets an answer.
-        assert!(serve(json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }))
+        assert!(serve(json!({ "jsonrpc": "2.0", "method": "ping" }))
             .await
-            .is_some());
+            .is_none());
+        // But `"id": null` is a request, not a notification, and gets an answer.
+        assert!(
+            serve(json!({ "jsonrpc": "2.0", "id": null, "method": "ping" }))
+                .await
+                .is_some()
+        );
 
         // Unknown method → a JSON-RPC error, with the id echoed back.
         let unknown = serve(json!({ "jsonrpc": "2.0", "id": "x", "method": "resources/list" }))
@@ -2033,7 +2049,9 @@ mod tests {
         let result = http_call(&mcp, "nope__does_not_exist", json!({})).await;
         assert_eq!(result["isError"], json!(true), "{result}");
         assert!(
-            result["content"][0]["text"].as_str().is_some_and(|t| !t.is_empty()),
+            result["content"][0]["text"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
             "the refusal carries a message the model can act on: {result}"
         );
     }

@@ -37,24 +37,24 @@ const RELEASE_BASE: &str = "https://github.com/amajorai/ryu/releases/latest/down
 /// the Tauri updater) while a sidecar from the old version lingered in
 /// `~/.ryu/bin/`, and must be re-fetched.
 fn app_version(app: &AppHandle) -> String {
-	app.package_info().version.to_string()
+    app.package_info().version.to_string()
 }
 
 /// Path to the version marker written next to an installed binary:
 /// `~/.ryu/bin/<bin_name>.version`. Records which app version installed it so a
 /// later launch can detect and replace a stale binary.
 fn version_marker_path(bin_name: &str) -> Option<PathBuf> {
-	install_path(bin_name).map(|p| p.with_extension("version"))
+    install_path(bin_name).map(|p| p.with_extension("version"))
 }
 
 /// Whether the managed `~/.ryu/bin/<bin>` was installed by the currently-running
 /// app version. A missing marker (legacy binary predating this scheme) counts as
 /// a mismatch, so it is re-downloaded once and gains a marker.
 fn installed_version_matches(bin_name: &str, expected: &str) -> bool {
-	version_marker_path(bin_name)
-		.and_then(|p| std::fs::read_to_string(p).ok())
-		.map(|v| v.trim() == expected)
-		.unwrap_or(false)
+    version_marker_path(bin_name)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|v| v.trim() == expected)
+        .unwrap_or(false)
 }
 
 /// Whether the managed `~/.ryu/bin/<bin>` exists but was installed by a *different*
@@ -63,24 +63,24 @@ fn installed_version_matches(bin_name: &str, expected: &str) -> bool {
 /// in `~/.ryu/bin/` at all returns `false` here (that's an "install", not an
 /// "upgrade" — handled by [`is_installed`] / the `None` path in `lib.rs`).
 fn is_managed_stale(spec: &SidecarBinary, expected: &str) -> bool {
-	if std::env::var(spec.env_var)
-		.ok()
-		.map(PathBuf::from)
-		.is_some_and(|p| p.exists())
-	{
-		return false;
-	}
-	match install_path(spec.bin_name) {
-		Some(p) if p.exists() => !installed_version_matches(spec.bin_name, expected),
-		_ => false,
-	}
+    if std::env::var(spec.env_var)
+        .ok()
+        .map(PathBuf::from)
+        .is_some_and(|p| p.exists())
+    {
+        return false;
+    }
+    match install_path(spec.bin_name) {
+        Some(p) if p.exists() => !installed_version_matches(spec.bin_name, expected),
+        _ => false,
+    }
 }
 
 /// Whether a stale managed `ryu-core` is sitting in `~/.ryu/bin/` (installed by an
 /// older app version). Called from `lib.rs`'s core-start path to trigger a
 /// re-download after the app self-updates. Kept public since `CORE` is private.
 pub fn is_managed_core_stale(app: &AppHandle) -> bool {
-	is_managed_stale(&CORE, &app_version(app))
+    is_managed_stale(&CORE, &app_version(app))
 }
 
 /// A binary this module can install: the release-asset base name (before the
@@ -89,28 +89,28 @@ pub fn is_managed_core_stale(app: &AppHandle) -> bool {
 /// resolvers so [`is_installed`] agrees with what Core will actually spawn).
 #[derive(Clone, Copy)]
 struct SidecarBinary {
-	/// Release-asset base, e.g. `"ryu-gateway"`. The platform suffix + any `.exe`
-	/// is appended by [`platform_asset`].
-	asset_base: &'static str,
-	/// File name written under `~/.ryu/bin/`, e.g. `"ryu-gateway"` (`.exe` on
-	/// Windows added by [`install_path`]). This is the bare command name Core
-	/// resolves on PATH.
-	bin_name: &'static str,
-	/// Env var Core reads to override the binary path (e.g. `RYU_GATEWAY_BIN`);
-	/// `RYU_CORE_BIN` for core. If set to an existing file, the binary counts as
-	/// installed and we skip the download.
-	env_var: &'static str,
+    /// Release-asset base, e.g. `"ryu-gateway"`. The platform suffix + any `.exe`
+    /// is appended by [`platform_asset`].
+    asset_base: &'static str,
+    /// File name written under `~/.ryu/bin/`, e.g. `"ryu-gateway"` (`.exe` on
+    /// Windows added by [`install_path`]). This is the bare command name Core
+    /// resolves on PATH.
+    bin_name: &'static str,
+    /// Env var Core reads to override the binary path (e.g. `RYU_GATEWAY_BIN`);
+    /// `RYU_CORE_BIN` for core. If set to an existing file, the binary counts as
+    /// installed and we skip the download.
+    env_var: &'static str,
 }
 
 const CORE: SidecarBinary = SidecarBinary {
-	asset_base: "ryu-core",
-	bin_name: "ryu-core",
-	env_var: "RYU_CORE_BIN",
+    asset_base: "ryu-core",
+    bin_name: "ryu-core",
+    env_var: "RYU_CORE_BIN",
 };
 const GATEWAY: SidecarBinary = SidecarBinary {
-	asset_base: "ryu-gateway",
-	bin_name: "ryu-gateway",
-	env_var: "RYU_GATEWAY_BIN",
+    asset_base: "ryu-gateway",
+    bin_name: "ryu-gateway",
+    env_var: "RYU_GATEWAY_BIN",
 };
 // NOTE: the per-app opt-in sidecar consts (MAIL/TEAMS/RESEARCH/… ) and the
 // `OPTIONAL_SIDECARS` boot-prefetch that used to live here have been REMOVED. The
@@ -128,12 +128,12 @@ const GATEWAY: SidecarBinary = SidecarBinary {
 /// unsupported platform. Matches the published release assets: `linux-x86_64`,
 /// `macos-aarch64`, `windows-x86_64`.
 fn platform_slug() -> Option<&'static str> {
-	match (std::env::consts::OS, std::env::consts::ARCH) {
-		("linux", "x86_64") => Some("linux-x86_64"),
-		("macos", "aarch64") => Some("macos-aarch64"),
-		("windows", "x86_64") => Some("windows-x86_64"),
-		_ => None,
-	}
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("linux-x86_64"),
+        ("macos", "aarch64") => Some("macos-aarch64"),
+        ("windows", "x86_64") => Some("windows-x86_64"),
+        _ => None,
+    }
 }
 
 /// The release asset name for `base` on the running platform, or `None` if no
@@ -141,9 +141,9 @@ fn platform_slug() -> Option<&'static str> {
 /// (or `ryu-gateway-windows-x86_64.exe` on Windows). The `.exe` matches how the
 /// release publishes Windows executables (see the core asset naming).
 fn platform_asset(base: &str) -> Option<String> {
-	let slug = platform_slug()?;
-	let ext = if cfg!(windows) { ".exe" } else { "" };
-	Some(format!("{base}-{slug}{ext}"))
+    let slug = platform_slug()?;
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    Some(format!("{base}-{slug}{ext}"))
 }
 
 /// Destination for an installed binary: `~/.ryu{profile}/bin/<bin_name>[.exe]`. This
@@ -151,12 +151,12 @@ fn platform_asset(base: &str) -> Option<String> {
 /// here is picked up on the next spawn. Profile-aware so a dev app installs its OWN
 /// binaries under `~/.ryu-dev/bin` instead of overwriting the release app's `~/.ryu/bin`.
 fn install_path(bin_name: &str) -> Option<PathBuf> {
-	let file = if cfg!(windows) {
-		format!("{bin_name}.exe")
-	} else {
-		bin_name.to_string()
-	};
-	Some(crate::profile::ryu_home_dir().join("bin").join(file))
+    let file = if cfg!(windows) {
+        format!("{bin_name}.exe")
+    } else {
+        bin_name.to_string()
+    };
+    Some(crate::profile::ryu_home_dir().join("bin").join(file))
 }
 
 /// Whether `spec` already resolves to a real file — mirroring how Core resolves it
@@ -164,32 +164,31 @@ fn install_path(bin_name: &str) -> Option<PathBuf> {
 /// download on every launch. `~/.ryu/bin` is on the PATH Core builds, so the
 /// `~/.ryu/bin` and PATH checks usually coincide; both are kept for env-less setups.
 fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
-	// 1. Explicit env override pointing at an existing file — user-managed, so we
-	//    respect it regardless of version.
-	if std::env::var(spec.env_var)
-		.ok()
-		.map(PathBuf::from)
-		.is_some_and(|p| p.exists())
-	{
-		return true;
-	}
-	// 2. Our install target under ~/.ryu/bin. Only "installed" when its version
-	//    marker matches the running app: a binary left over from an older app
-	//    version is treated as absent so it is re-downloaded (and NOT rescued by
-	//    the PATH check below, since ~/.ryu/bin is on PATH — this branch returns).
-	if let Some(p) = install_path(spec.bin_name) {
-		if p.exists() {
-			return installed_version_matches(spec.bin_name, expected_version);
-		}
-	}
-	// 3. Anywhere else on PATH — an external install we don't manage; respect it.
-	//    EXCEPT another profile's install: `~/.ryu/bin` and `~/.ryu-dev/bin` are both
-	//    on PATH, so counting the release binary as "installed" here is what leaves a
-	//    dev profile with no `ryu-core` of its own (and silently running the release
-	//    one against `~/.ryu-dev`). Treat it as absent so it gets downloaded — this
-	//    must stay in lockstep with the same rejection in `resolve_core_binary`.
-	which::which(spec.bin_name)
-		.is_ok_and(|hit| !crate::profile::is_foreign_profile_bin(&hit))
+    // 1. Explicit env override pointing at an existing file — user-managed, so we
+    //    respect it regardless of version.
+    if std::env::var(spec.env_var)
+        .ok()
+        .map(PathBuf::from)
+        .is_some_and(|p| p.exists())
+    {
+        return true;
+    }
+    // 2. Our install target under ~/.ryu/bin. Only "installed" when its version
+    //    marker matches the running app: a binary left over from an older app
+    //    version is treated as absent so it is re-downloaded (and NOT rescued by
+    //    the PATH check below, since ~/.ryu/bin is on PATH — this branch returns).
+    if let Some(p) = install_path(spec.bin_name) {
+        if p.exists() {
+            return installed_version_matches(spec.bin_name, expected_version);
+        }
+    }
+    // 3. Anywhere else on PATH — an external install we don't manage; respect it.
+    //    EXCEPT another profile's install: `~/.ryu/bin` and `~/.ryu-dev/bin` are both
+    //    on PATH, so counting the release binary as "installed" here is what leaves a
+    //    dev profile with no `ryu-core` of its own (and silently running the release
+    //    one against `~/.ryu-dev`). Treat it as absent so it gets downloaded — this
+    //    must stay in lockstep with the same rejection in `resolve_core_binary`.
+    which::which(spec.bin_name).is_ok_and(|hit| !crate::profile::is_foreign_profile_bin(&hit))
 }
 
 /// Download `asset` from the release hub into `~/.ryu/bin/<dest_file>` and return
@@ -211,135 +210,135 @@ fn is_installed(spec: &SidecarBinary, expected_version: &str) -> bool {
 /// gateway/optional-app installers all funnel through it, parameterised by
 /// (`asset`, `dest_file`, `event`).
 async fn download_release_binary(
-	app: &AppHandle,
-	asset: &str,
-	dest: PathBuf,
-	event: &str,
+    app: &AppHandle,
+    asset: &str,
+    dest: PathBuf,
+    event: &str,
 ) -> Result<PathBuf, String> {
-	use std::io::Write as _;
+    use std::io::Write as _;
 
-	let url = format!("{RELEASE_BASE}/{asset}");
+    let url = format!("{RELEASE_BASE}/{asset}");
 
-	let _ = app.emit(
-		event,
-		serde_json::json!({ "phase": "downloading", "asset": asset, "received": 0 }),
-	);
+    let _ = app.emit(
+        event,
+        serde_json::json!({ "phase": "downloading", "asset": asset, "received": 0 }),
+    );
 
-	let client = reqwest::Client::builder()
-		// Bounds the connect + response-headers phase only, NOT the body stream:
-		// a 119 MB asset on a slow link legitimately outruns any whole-request
-		// budget, while an unreachable host still fails in seconds.
-		.connect_timeout(std::time::Duration::from_secs(30))
-		.read_timeout(std::time::Duration::from_secs(120))
-		.build()
-		.map_err(|e| e.to_string())?;
-	let resp = client
-		.get(&url)
-		.send()
-		.await
-		.map_err(|e| format!("download {url}: {e}"))?;
-	if !resp.status().is_success() {
-		let err = format!("download {url}: HTTP {}", resp.status());
-		let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
-		return Err(err);
-	}
+    let client = reqwest::Client::builder()
+        // Bounds the connect + response-headers phase only, NOT the body stream:
+        // a 119 MB asset on a slow link legitimately outruns any whole-request
+        // budget, while an unreachable host still fails in seconds.
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("download {url}: {e}"))?;
+    if !resp.status().is_success() {
+        let err = format!("download {url}: HTTP {}", resp.status());
+        let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
+        return Err(err);
+    }
 
-	if let Some(parent) = dest.parent() {
-		std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-	}
-	// Write to a temp path then rename, so an interrupted download never leaves a
-	// truncated binary that looks installed.
-	let tmp = dest.with_extension("download");
-	let total = resp.content_length();
-	let mut received: u64 = 0;
-	// Emit at most one event per 1 MB so a fast download doesn't flood the webview
-	// with thousands of IPC messages.
-	const PROGRESS_STEP: u64 = 1024 * 1024;
-	let mut next_emit = PROGRESS_STEP;
-	let mut resp = resp;
-	{
-		let mut file =
-			std::fs::File::create(&tmp).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-		loop {
-			let chunk = match resp.chunk().await {
-				Ok(Some(c)) => c,
-				Ok(None) => break,
-				Err(e) => {
-					let err = format!("download {url}: {e}");
-					let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
-					let _ = std::fs::remove_file(&tmp);
-					return Err(err);
-				}
-			};
-			file.write_all(&chunk)
-				.map_err(|e| format!("write {}: {e}", tmp.display()))?;
-			received += chunk.len() as u64;
-			if received >= next_emit {
-				next_emit = received + PROGRESS_STEP;
-				let _ = app.emit(
-					event,
-					serde_json::json!({
-						"phase": "downloading",
-						"asset": asset,
-						"received": received,
-						"total": total,
-					}),
-				);
-			}
-		}
-		file.flush()
-			.map_err(|e| format!("write {}: {e}", tmp.display()))?;
-	}
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    // Write to a temp path then rename, so an interrupted download never leaves a
+    // truncated binary that looks installed.
+    let tmp = dest.with_extension("download");
+    let total = resp.content_length();
+    let mut received: u64 = 0;
+    // Emit at most one event per 1 MB so a fast download doesn't flood the webview
+    // with thousands of IPC messages.
+    const PROGRESS_STEP: u64 = 1024 * 1024;
+    let mut next_emit = PROGRESS_STEP;
+    let mut resp = resp;
+    {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        loop {
+            let chunk = match resp.chunk().await {
+                Ok(Some(c)) => c,
+                Ok(None) => break,
+                Err(e) => {
+                    let err = format!("download {url}: {e}");
+                    let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(err);
+                }
+            };
+            file.write_all(&chunk)
+                .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+            received += chunk.len() as u64;
+            if received >= next_emit {
+                next_emit = received + PROGRESS_STEP;
+                let _ = app.emit(
+                    event,
+                    serde_json::json!({
+                        "phase": "downloading",
+                        "asset": asset,
+                        "received": received,
+                        "total": total,
+                    }),
+                );
+            }
+        }
+        file.flush()
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    }
 
-	let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
+    let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
 
-	#[cfg(unix)]
-	{
-		use std::os::unix::fs::PermissionsExt;
-		std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-			.map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
-	}
-	std::fs::rename(&tmp, &dest).map_err(|e| format!("install {}: {e}", dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| format!("install {}: {e}", dest.display()))?;
 
-	let _ = app.emit(
-		event,
-		serde_json::json!({ "phase": "done", "path": dest.to_string_lossy() }),
-	);
-	Ok(dest)
+    let _ = app.emit(
+        event,
+        serde_json::json!({ "phase": "done", "path": dest.to_string_lossy() }),
+    );
+    Ok(dest)
 }
 
 /// Resolve `(asset, dest)` for `spec`, then download it. Shared by every named
 /// installer below; returns a clear error on an unsupported platform or missing
 /// home dir so callers can decide whether the miss is fatal.
 async fn install_sidecar(
-	app: &AppHandle,
-	spec: &SidecarBinary,
-	event: &str,
+    app: &AppHandle,
+    spec: &SidecarBinary,
+    event: &str,
 ) -> Result<PathBuf, String> {
-	let asset = platform_asset(spec.asset_base).ok_or_else(|| {
-		format!(
-			"no prebuilt {} for {}-{}",
-			spec.asset_base,
-			std::env::consts::OS,
-			std::env::consts::ARCH
-		)
-	})?;
-	let dest = install_path(spec.bin_name).ok_or("could not resolve home directory")?;
-	let path = download_release_binary(app, &asset, dest, event).await?;
-	// Stamp the version so a future launch can tell whether this binary is stale
-	// after the app self-updates. Best-effort: a missing marker just forces one
-	// redundant re-download next time, never a broken install.
-	if let Some(marker) = version_marker_path(spec.bin_name) {
-		let _ = std::fs::write(marker, app_version(app));
-	}
-	Ok(path)
+    let asset = platform_asset(spec.asset_base).ok_or_else(|| {
+        format!(
+            "no prebuilt {} for {}-{}",
+            spec.asset_base,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let dest = install_path(spec.bin_name).ok_or("could not resolve home directory")?;
+    let path = download_release_binary(app, &asset, dest, event).await?;
+    // Stamp the version so a future launch can tell whether this binary is stale
+    // after the app self-updates. Best-effort: a missing marker just forces one
+    // redundant re-download next time, never a broken install.
+    if let Some(marker) = version_marker_path(spec.bin_name) {
+        let _ = std::fs::write(marker, app_version(app));
+    }
+    Ok(path)
 }
 
 /// Download the platform `ryu-core` binary into `~/.ryu/bin/` and return its path.
 /// Emits `core-install-progress` events. (Signature preserved — called from
 /// `lib.rs` first-launch orchestration and `ensure_core_installed`.)
 pub async fn download_core_binary(app: &AppHandle) -> Result<PathBuf, String> {
-	install_sidecar(app, &CORE, "core-install-progress").await
+    install_sidecar(app, &CORE, "core-install-progress").await
 }
 
 /// Download the platform `ryu-gateway` binary into `~/.ryu/bin/` and return its
@@ -349,7 +348,7 @@ pub async fn download_core_binary(app: &AppHandle) -> Result<PathBuf, String> {
 /// (warn, still let the app open) and — critically — awaits this *before* starting
 /// Core so the gateway is on disk when Core's spawn resolves it on PATH.
 pub async fn download_gateway_binary(app: &AppHandle) -> Result<PathBuf, String> {
-	install_sidecar(app, &GATEWAY, "gateway-install-progress").await
+    install_sidecar(app, &GATEWAY, "gateway-install-progress").await
 }
 
 /// Ensure `ryu-gateway` is installed, downloading it if absent. Skips the download
@@ -357,10 +356,11 @@ pub async fn download_gateway_binary(app: &AppHandle) -> Result<PathBuf, String>
 /// starting Core (Core spawns the gateway at boot) and logs a loud warning on
 /// failure, but the app still opens (degraded chat beats no app).
 pub async fn ensure_gateway_installed(app: &AppHandle) -> Result<PathBuf, String> {
-	if is_installed(&GATEWAY, &app_version(app)) {
-		return install_path(GATEWAY.bin_name).ok_or("could not resolve home directory".to_string());
-	}
-	download_gateway_binary(app).await
+    if is_installed(&GATEWAY, &app_version(app)) {
+        return install_path(GATEWAY.bin_name)
+            .ok_or("could not resolve home directory".to_string());
+    }
+    download_gateway_binary(app).await
 }
 
 // The opt-in app-sidecar prefetch (`progress_event`, `ensure_optional_installed`,
@@ -397,19 +397,19 @@ pub async fn ensure_gateway_installed(app: &AppHandle) -> Result<PathBuf, String
 /// self-extracts on launch, no installer step); Linux the AppImage; macOS the `.zip`
 /// carrying `Ryu Island.app` (electron-updater needs the zip, not just the dmg).
 fn island_asset() -> Option<&'static str> {
-	match (std::env::consts::OS, std::env::consts::ARCH) {
-		("windows", "x86_64") => Some("ryu-island-win-x64-portable.exe"),
-		("linux", "x86_64") => Some("ryu-island-linux-x86_64.AppImage"),
-		("macos", "aarch64") => Some("ryu-island-mac-arm64.zip"),
-		_ => None,
-	}
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Some("ryu-island-win-x64-portable.exe"),
+        ("linux", "x86_64") => Some("ryu-island-linux-x86_64.AppImage"),
+        ("macos", "aarch64") => Some("ryu-island-mac-arm64.zip"),
+        _ => None,
+    }
 }
 
 /// The dedicated install directory for Island: `~/.ryu/island/`. Separate from the
 /// `~/.ryu/bin/` sidecars because the Electron bundle is more than one file (a whole
 /// `.app` tree on macOS) and should not clutter the flat command-binary dir.
 fn island_dir() -> Option<PathBuf> {
-	Some(crate::profile::ryu_home_dir().join("island"))
+    Some(crate::profile::ryu_home_dir().join("island"))
 }
 
 /// The installed Island launch target under `~/.ryu/island/`:
@@ -417,41 +417,41 @@ fn island_dir() -> Option<PathBuf> {
 ///   - Linux:   `ryu-island.AppImage`
 ///   - macOS:   `Ryu Island.app` (a bundle *directory*, launched via `open`)
 fn island_install_path() -> Option<PathBuf> {
-	let dir = island_dir()?;
-	let file = if cfg!(target_os = "windows") {
-		"ryu-island.exe"
-	} else if cfg!(target_os = "macos") {
-		"Ryu Island.app"
-	} else {
-		"ryu-island.AppImage"
-	};
-	Some(dir.join(file))
+    let dir = island_dir()?;
+    let file = if cfg!(target_os = "windows") {
+        "ryu-island.exe"
+    } else if cfg!(target_os = "macos") {
+        "Ryu Island.app"
+    } else {
+        "ryu-island.AppImage"
+    };
+    Some(dir.join(file))
 }
 
 /// Version marker for the installed Island bundle: `~/.ryu/island/.version`. Mirrors
 /// the sidecar markers — records which app version installed it so a later launch can
 /// re-download after the app self-updates and leaves a stale bundle behind.
 fn island_version_marker() -> Option<PathBuf> {
-	island_dir().map(|d| d.join(".version"))
+    island_dir().map(|d| d.join(".version"))
 }
 
 /// Whether the installed Island bundle was placed by the currently-running app
 /// version. A missing/mismatched marker counts as stale (re-download once).
 fn island_version_matches(expected: &str) -> bool {
-	island_version_marker()
-		.and_then(|p| std::fs::read_to_string(p).ok())
-		.map(|v| v.trim() == expected)
-		.unwrap_or(false)
+    island_version_marker()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|v| v.trim() == expected)
+        .unwrap_or(false)
 }
 
 /// Whether Island is installed AND matches the running app version. A bundle left by
 /// an older app version is treated as absent so [`ensure_island_installed`] re-fetches
 /// it. Unlike the sidecars there is no env override — Island has no `RYU_*_BIN` hook.
 fn is_island_installed(expected: &str) -> bool {
-	match island_install_path() {
-		Some(p) if p.exists() => island_version_matches(expected),
-		_ => false,
-	}
+    match island_install_path() {
+        Some(p) if p.exists() => island_version_matches(expected),
+        _ => false,
+    }
 }
 
 /// Download the macOS Island `.zip` into `~/.ryu/island/`, extract it, and return the
@@ -461,60 +461,60 @@ fn is_island_installed(expected: &str) -> bool {
 /// artifacts never take this path.
 #[cfg(target_os = "macos")]
 async fn install_island_macos(
-	app: &AppHandle,
-	asset: &str,
-	dir: &std::path::Path,
-	event: &str,
+    app: &AppHandle,
+    asset: &str,
+    dir: &std::path::Path,
+    event: &str,
 ) -> Result<PathBuf, String> {
-	// Download the archive itself (NOT the final launch target) via the shared
-	// helper: its temp-then-rename keeps a partial download from ever looking
-	// complete, and the `0o755` it stamps on the `.zip` is harmless.
-	let zip = dir.join("ryu-island.zip");
-	download_release_binary(app, asset, zip.clone(), event).await?;
+    // Download the archive itself (NOT the final launch target) via the shared
+    // helper: its temp-then-rename keeps a partial download from ever looking
+    // complete, and the `0o755` it stamps on the `.zip` is harmless.
+    let zip = dir.join("ryu-island.zip");
+    download_release_binary(app, asset, zip.clone(), event).await?;
 
-	let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
-	let extracted_ok = std::process::Command::new("ditto")
-		.arg("-x")
-		.arg("-k")
-		.arg(&zip)
-		.arg(dir)
-		.status()
-		.map(|s| s.success())
-		.unwrap_or(false)
-		|| std::process::Command::new("unzip")
-			.arg("-o")
-			.arg(&zip)
-			.arg("-d")
-			.arg(dir)
-			.status()
-			.map(|s| s.success())
-			.unwrap_or(false);
-	if !extracted_ok {
-		let err = "failed to extract Ryu Island .zip".to_string();
-		let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
-		return Err(err);
-	}
-	// The archive is only a staging artifact; drop it once extracted.
-	let _ = std::fs::remove_file(&zip);
+    let _ = app.emit(event, serde_json::json!({ "phase": "installing" }));
+    let extracted_ok = std::process::Command::new("ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(&zip)
+        .arg(dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        || std::process::Command::new("unzip")
+            .arg("-o")
+            .arg(&zip)
+            .arg("-d")
+            .arg(dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if !extracted_ok {
+        let err = "failed to extract Ryu Island .zip".to_string();
+        let _ = app.emit(event, serde_json::json!({ "phase": "error", "error": err }));
+        return Err(err);
+    }
+    // The archive is only a staging artifact; drop it once extracted.
+    let _ = std::fs::remove_file(&zip);
 
-	// Locate the extracted `.app`: prefer the canonical `Ryu Island.app`, else the
-	// first `*.app` in the dir (in case the archive's top-level name ever drifts).
-	let bundle = island_install_path()
-		.filter(|p| p.exists())
-		.or_else(|| {
-			std::fs::read_dir(dir).ok().and_then(|entries| {
-				entries
-					.filter_map(|e| e.ok())
-					.map(|e| e.path())
-					.find(|p| p.extension().and_then(|x| x.to_str()) == Some("app"))
-			})
-		})
-		.ok_or("no .app found in extracted Ryu Island archive")?;
-	let _ = app.emit(
-		event,
-		serde_json::json!({ "phase": "done", "path": bundle.to_string_lossy() }),
-	);
-	Ok(bundle)
+    // Locate the extracted `.app`: prefer the canonical `Ryu Island.app`, else the
+    // first `*.app` in the dir (in case the archive's top-level name ever drifts).
+    let bundle = island_install_path()
+        .filter(|p| p.exists())
+        .or_else(|| {
+            std::fs::read_dir(dir).ok().and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .find(|p| p.extension().and_then(|x| x.to_str()) == Some("app"))
+            })
+        })
+        .ok_or("no .app found in extracted Ryu Island archive")?;
+    let _ = app.emit(
+        event,
+        serde_json::json!({ "phase": "done", "path": bundle.to_string_lossy() }),
+    );
+    Ok(bundle)
 }
 
 /// Ensure the Island companion is installed under `~/.ryu/island/`, downloading (and,
@@ -523,41 +523,41 @@ async fn install_island_macos(
 /// vocabulary as the sidecars). Errors on an unsupported platform or a failed
 /// download/extract so the caller can decide the miss is non-fatal.
 pub async fn ensure_island_installed(app: &AppHandle) -> Result<PathBuf, String> {
-	let expected = app_version(app);
-	if is_island_installed(&expected) {
-		return island_install_path().ok_or("could not resolve home directory".to_string());
-	}
+    let expected = app_version(app);
+    if is_island_installed(&expected) {
+        return island_install_path().ok_or("could not resolve home directory".to_string());
+    }
 
-	let asset = island_asset().ok_or_else(|| {
-		format!(
-			"no prebuilt Ryu Island for {}-{}",
-			std::env::consts::OS,
-			std::env::consts::ARCH
-		)
-	})?;
-	let dir = island_dir().ok_or("could not resolve home directory")?;
-	std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let asset = island_asset().ok_or_else(|| {
+        format!(
+            "no prebuilt Ryu Island for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let dir = island_dir().ok_or("could not resolve home directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-	let event = "island-install-progress";
-	// macOS ships a `.zip` (extract + locate the `.app`); Windows/Linux are single-file
-	// spawnables that download straight to the launch target (`download_release_binary`
-	// chmod +x's the AppImage on unix), exactly like `ryu-core`. cfg on the `let`
-	// statement (not on a tail block expr, which is unstable) so only the platform's
-	// branch compiles.
-	#[cfg(target_os = "macos")]
-	let installed = install_island_macos(app, asset, &dir, event).await?;
-	#[cfg(not(target_os = "macos"))]
-	let installed = {
-		let dest = island_install_path().ok_or("could not resolve home directory")?;
-		download_release_binary(app, asset, dest, event).await?
-	};
+    let event = "island-install-progress";
+    // macOS ships a `.zip` (extract + locate the `.app`); Windows/Linux are single-file
+    // spawnables that download straight to the launch target (`download_release_binary`
+    // chmod +x's the AppImage on unix), exactly like `ryu-core`. cfg on the `let`
+    // statement (not on a tail block expr, which is unstable) so only the platform's
+    // branch compiles.
+    #[cfg(target_os = "macos")]
+    let installed = install_island_macos(app, asset, &dir, event).await?;
+    #[cfg(not(target_os = "macos"))]
+    let installed = {
+        let dest = island_install_path().ok_or("could not resolve home directory")?;
+        download_release_binary(app, asset, dest, event).await?
+    };
 
-	// Stamp the version so a later launch can detect a stale bundle after the app
-	// self-updates. Best-effort, like the sidecar markers.
-	if let Some(marker) = island_version_marker() {
-		let _ = std::fs::write(marker, &expected);
-	}
-	Ok(installed)
+    // Stamp the version so a later launch can detect a stale bundle after the app
+    // self-updates. Best-effort, like the sidecar markers.
+    if let Some(marker) = island_version_marker() {
+        let _ = std::fs::write(marker, &expected);
+    }
+    Ok(installed)
 }
 
 /// Launch the installed Island companion DETACHED, so it runs as an independent
@@ -566,29 +566,29 @@ pub async fn ensure_island_installed(app: &AppHandle) -> Result<PathBuf, String>
 /// this while an island is already running self-exits — safe to call unconditionally
 /// on startup.
 pub fn launch_island() -> Result<(), String> {
-	let target = island_install_path().ok_or("could not resolve home directory")?;
-	if !target.exists() {
-		return Err(format!("Ryu Island not installed at {}", target.display()));
-	}
+    let target = island_install_path().ok_or("could not resolve home directory")?;
+    if !target.exists() {
+        return Err(format!("Ryu Island not installed at {}", target.display()));
+    }
 
-	#[cfg(target_os = "macos")]
-	{
-		// `open` launches the `.app` bundle detached and returns immediately.
-		std::process::Command::new("open")
-			.arg(&target)
-			.spawn()
-			.map_err(|e| format!("launch Ryu Island: {e}"))?;
-	}
-	#[cfg(not(target_os = "macos"))]
-	{
-		use crate::win_process::NoWindow;
-		// Windows portable `.exe` self-extracts on launch; the Linux AppImage runs
-		// directly. Spawn and drop the child handle — it runs detached. `no_window()`
-		// suppresses a stray console window on Windows (no-op elsewhere).
-		std::process::Command::new(&target)
-			.no_window()
-			.spawn()
-			.map_err(|e| format!("launch Ryu Island: {e}"))?;
-	}
-	Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        // `open` launches the `.app` bundle detached and returns immediately.
+        std::process::Command::new("open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("launch Ryu Island: {e}"))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use crate::win_process::NoWindow;
+        // Windows portable `.exe` self-extracts on launch; the Linux AppImage runs
+        // directly. Spawn and drop the child handle — it runs detached. `no_window()`
+        // suppresses a stray console window on Windows (no-op elsewhere).
+        std::process::Command::new(&target)
+            .no_window()
+            .spawn()
+            .map_err(|e| format!("launch Ryu Island: {e}"))?;
+    }
+    Ok(())
 }

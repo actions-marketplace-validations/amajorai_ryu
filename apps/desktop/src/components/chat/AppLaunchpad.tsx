@@ -169,7 +169,7 @@ export function AppLaunchpadGrid({
 			    whole page, exactly as Launchpad does. The scrollbar is hidden because
 			    the dots below already say where you are. */}
 			<div
-				className="flex snap-x snap-mandatory overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+				className="scroll-fade-x flex snap-x snap-mandatory overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 				data-testid="launchpad-scroller"
 				onScroll={handleScroll}
 				ref={scrollerRef}

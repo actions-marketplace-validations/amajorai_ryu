@@ -111,6 +111,11 @@ export function useGitStatus(
 		// Re-read the moment the user comes back — that is when an out-of-app git
 		// command has just happened. The app-wide default is `false`.
 		refetchOnWindowFocus: true,
+		// A thread may mount after another thread (or an external terminal) changed
+		// this worktree. Do not make the new thread wait for the shared poll timer;
+		// it should verify the branch immediately while still sharing the result
+		// with every other mounted thread.
+		refetchOnMount: "always",
 		// The point of this hook is freshness, so opt out of the app-wide
 		// 5-minute staleTime that suits slow-moving catalog data.
 		staleTime: 0,

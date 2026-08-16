@@ -2,6 +2,7 @@
   "id": "@ryu/advisor",
   "name": "Advisor",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Research",
   "description": "Consult a stronger reviewer model for a second opinion — as an auto-review turn hook (toggle / `/advisor`) and as the model-callable `advisor__consult` tool, a declarative HTTP tool routed through Core's `/api/advisor/consult` bridge.",
   "tagline": "A stronger second model reviews your answers",
@@ -76,7 +77,8 @@
           {
             "type": "model_picker",
             "pref_key": "advisor-model",
-            "label": "Advisor model"
+            "label": "Advisor model",
+            "description": "Optional model used to give planning advice. Leave empty to use the node's default."
           }
         ]
       }

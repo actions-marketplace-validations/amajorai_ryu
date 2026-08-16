@@ -39,9 +39,31 @@ function control(
 
 describe("validation", () => {
 	test("accepts every documented type", () => {
-		for (const type of ["toggle", "select", "chip", "action"]) {
-			expect(isKnownComposerControl(control({ type }))).toBe(true);
-		}
+		expect(isKnownComposerControl(control({ type: "toggle" }))).toBe(true);
+		expect(isKnownComposerControl(control({ type: "select" }))).toBe(true);
+		expect(
+			isKnownComposerControl(
+				control({ type: "chip", source: { http: { path: "/api/clips" } } })
+			)
+		).toBe(true);
+		expect(
+			isKnownComposerControl(
+				control({ type: "action", capability: "clips.capture" })
+			)
+		).toBe(true);
+	});
+
+	test("rejects action and chip controls without their required dispatch seam", () => {
+		expect(isKnownComposerControl(control({ type: "action" }))).toBe(false);
+		expect(isKnownComposerControl(control({ type: "chip" }))).toBe(false);
+		expect(
+			isKnownComposerControl(
+				control({
+					type: "chip",
+					source: { http: { path: "https://example.com" } },
+				})
+			)
+		).toBe(false);
 	});
 
 	test("skips a control type this build does not render", () => {
@@ -114,8 +136,18 @@ describe("partitionComposerControls", () => {
 			control({ id: "t", type: "toggle" }),
 			control({ id: "s", type: "select", flag: "mode" }),
 			control({ id: "sb", type: "select", flag: "mode2", placement: "bar" }),
-			control({ id: "c", type: "chip", flag: "clip" }),
-			control({ id: "a", type: "action", flag: "shot" }),
+			control({
+				id: "c",
+				type: "chip",
+				flag: "clip",
+				source: { http: { path: "/api/clips" } },
+			}),
+			control({
+				id: "a",
+				type: "action",
+				flag: "shot",
+				capability: "clips.capture",
+			}),
 		]);
 		expect(toggles.map((c) => c.id)).toEqual(["t"]);
 		expect(selects.map((c) => c.id)).toEqual(["s"]);

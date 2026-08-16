@@ -2,6 +2,7 @@
   "id": "@ryu/spider",
   "name": "Spider",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "High-performance web crawling and content extraction via the Spider CLI (https://spider.cloud), exposed as a declarative `command` tool that shells out to the locally-installed `spider` binary. No API key.",
   "iconUrl": "https://avatars.githubusercontent.com/u/112983871?v=4",
   "iconDither": { "from": 233, "to": "transparent", "direction": "down" },

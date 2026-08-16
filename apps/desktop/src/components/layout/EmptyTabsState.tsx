@@ -773,7 +773,7 @@ export function EmptyTabsState() {
 	};
 
 	return (
-		<div className="h-full w-full overflow-y-auto">
+		<div className="scroll-fade h-full w-full overflow-y-auto">
 			{/* The no-tabs launchpad is vertically centered while still scrolling from
 			    the top when the content is taller than the viewport. */}
 			<div className="flex min-h-full flex-col justify-center">

@@ -15,9 +15,9 @@
 // nonce is safe to put in a QR code the user may hold up to a phone camera.
 
 import { Button } from "@ryu/ui/components/button";
+import { ExpandableQRCode } from "@ryu/ui/components/qr-code";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import QRCode from "react-qr-code";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	beginManagedBotPairing,
@@ -347,9 +347,7 @@ export function TelegramManagedBotPanel({
 					bot you own, and Ryu never sees your Telegram login or @BotFather.
 				</p>
 				<div className="flex flex-col items-center gap-3">
-					<div className="rounded-lg bg-white p-3">
-						<QRCode size={QR_SIZE} value={pairing.deep_link} />
-					</div>
+					<ExpandableQRCode size={QR_SIZE} value={pairing.deep_link} />
 					<a
 						className="break-all text-center text-sm underline hover:text-foreground"
 						href={pairing.deep_link}
@@ -412,7 +410,7 @@ export function TelegramManagedBotPanel({
 					>
 						Connect @{created.botUsername}
 					</Button>
-					<Button onClick={refuse} size="sm" variant="outline">
+					<Button onClick={refuse} size="sm" variant="ghost">
 						Not mine — discard
 					</Button>
 				</div>
@@ -442,7 +440,7 @@ export function TelegramManagedBotPanel({
 						start().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Start over
 				</Button>
@@ -459,7 +457,7 @@ export function TelegramManagedBotPanel({
 						start().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Try again
 				</Button>
@@ -479,7 +477,7 @@ export function TelegramManagedBotPanel({
 					start().catch(() => undefined);
 				}}
 				size="sm"
-				variant="outline"
+				variant="ghost"
 			>
 				{phase === "starting" ? <Spinner className="size-4" /> : null}
 				Create a bot for me

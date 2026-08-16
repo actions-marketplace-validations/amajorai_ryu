@@ -77,7 +77,7 @@ export default function ReviewPage() {
 			</header>
 
 			<div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,26rem)]">
-				<div className="min-w-0 overflow-y-auto p-4">
+				<div className="scroll-fade min-w-0 overflow-y-auto p-4">
 					{query.isLoading && (
 						<div className="flex items-center gap-2 text-muted-foreground text-sm">
 							<Spinner className="size-4" /> Loading your week…

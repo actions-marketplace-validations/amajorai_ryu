@@ -1,13 +1,8 @@
 ﻿import { Button } from "@ryu/ui/components/button";
 import { cn } from "@ryu/ui/lib/utils";
-import {
-	IconFileCode as FileCode,
-	IconFileTypeJs as FileJson,
-	IconFileText as FileText,
-	IconPhoto as ImageIcon,
-	IconX as X,
-} from "@tabler/icons-react";
+import { IconX as X } from "@tabler/icons-react";
 import { useRef, useState } from "react";
+import { FileTypeIcon } from "../file-type-icon.tsx";
 import { ImageLightbox } from "../image-lightbox.tsx";
 
 export interface FileAttachmentProps {
@@ -36,59 +31,6 @@ function formatFileSize(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type FileIconName = "image" | "code" | "data" | "text";
-
-function getFileIconName(filename: string, isImage?: boolean): FileIconName {
-	if (isImage) {
-		return "image";
-	}
-
-	const ext = filename.split(".").pop()?.toLowerCase();
-
-	if (
-		[
-			"js",
-			"ts",
-			"jsx",
-			"tsx",
-			"py",
-			"rb",
-			"go",
-			"rs",
-			"java",
-			"kt",
-			"swift",
-			"c",
-			"cpp",
-			"h",
-			"hpp",
-			"cs",
-			"php",
-		].includes(ext || "")
-	) {
-		return "code";
-	}
-
-	if (["json", "yaml", "yml", "xml"].includes(ext || "")) {
-		return "data";
-	}
-
-	return "text";
-}
-
-function renderFileIcon(iconName: FileIconName) {
-	switch (iconName) {
-		case "image":
-			return <ImageIcon className="size-4 text-muted-foreground" />;
-		case "code":
-			return <FileCode className="size-4 text-muted-foreground" />;
-		case "data":
-			return <FileJson className="size-4 text-muted-foreground" />;
-		default:
-			return <FileText className="size-4 text-muted-foreground" />;
-	}
-}
-
 export function FileAttachment({
 	id,
 	filename,
@@ -103,7 +45,6 @@ export function FileAttachment({
 	const [isHovered, setIsHovered] = useState(false);
 	const [isLightboxOpen, setIsLightboxOpen] = useState(false);
 	const lightboxOriginRef = useRef<HTMLElement | null>(null);
-	const iconName = getFileIconName(filename, isImage);
 	const isImageOnly = display === "image-only" && isImage && !!url;
 	const canPreview = Boolean(enableImagePreview && isImage && url);
 
@@ -157,7 +98,7 @@ export function FileAttachment({
 						</div>
 					) : (
 						<div className="flex w-8 shrink-0 items-center justify-center self-stretch rounded-sm bg-muted">
-							{renderFileIcon(iconName)}
+							<FileTypeIcon className="size-4" path={filename} />
 						</div>
 					)}
 

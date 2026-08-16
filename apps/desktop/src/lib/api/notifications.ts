@@ -19,12 +19,17 @@ import { type ApiTarget, apiUrl, makeHeaders, request } from "./client.ts";
 export interface AppNotification {
 	ack_required: boolean;
 	acked: boolean;
+	/** When the user archived this row; null = live in the inbox. */
+	archived_at?: string | null;
 	body?: string | null;
 	created_at: string;
 	id: string;
 	level: string;
 	node_id?: string | null;
 	read_at?: string | null;
+	/** The app/plugin that raised this notification (empty for legacy Core rows),
+	 *  resolved to a name/icon by the surface. */
+	source_app_id?: string | null;
 	title: string;
 	user_id: string;
 	workflow_run_id?: string | null;
@@ -35,22 +40,28 @@ export interface UserNotificationEvent {
 	body?: string | null;
 	level: string;
 	notification_id?: string | null;
+	source_app_id?: string | null;
 	target_user_id?: string | null;
 	title: string;
 }
 
 const DEFAULT_LIMIT = 50;
 
-/** List the signed-in user's inbox notifications (newest first). */
+/** List the signed-in user's inbox notifications (newest first).
+ *  `archived`: `false` (default) = live inbox, `true` = archived rows only. */
 export async function listNotifications(
 	target: ApiTarget,
 	userId: string,
-	limit = DEFAULT_LIMIT
+	limit = DEFAULT_LIMIT,
+	archived?: boolean
 ): Promise<AppNotification[]> {
 	const params = new URLSearchParams({
 		user_id: userId,
 		limit: String(limit),
 	});
+	if (archived !== undefined) {
+		params.set("archived", String(archived));
+	}
 	const json = await request<{ notifications?: AppNotification[] }>(
 		target,
 		`/api/notifications?${params.toString()}`
@@ -64,6 +75,24 @@ export async function markNotificationRead(
 	id: string
 ): Promise<void> {
 	await request(target, `/api/notifications/${id}/read`, { method: "POST" });
+}
+
+/** Archive a notification (also marks it read). Idempotent server-side. */
+export async function archiveNotification(
+	target: ApiTarget,
+	id: string
+): Promise<void> {
+	await request(target, `/api/notifications/${id}/archive`, { method: "POST" });
+}
+
+/** Restore an archived notification to the live inbox. Idempotent server-side. */
+export async function unarchiveNotification(
+	target: ApiTarget,
+	id: string
+): Promise<void> {
+	await request(target, `/api/notifications/${id}/unarchive`, {
+		method: "POST",
+	});
 }
 
 /**

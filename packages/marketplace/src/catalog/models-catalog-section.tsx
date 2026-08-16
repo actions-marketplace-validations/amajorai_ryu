@@ -446,6 +446,7 @@ export default function ModelsCatalogSection({
 					setInstalledOnly={setInstalledOnly}
 					setShowTags={setShowTags}
 					setSort={setSort}
+					showInstalledOnly={host.install !== null}
 					showTags={showTags}
 					sort={sort}
 					sources={sources}
@@ -573,7 +574,30 @@ function TagFilterDropdown({
 /** Bottom-nav filter panel: category + sort + friendly/installed switches + chips.
  *  The search box itself lives directly in the bar (see the section's
  *  useStoreToolbar call); this is the "Filters" region that morphs above it. */
-function ModelsFilterPanel({
+export interface ModelsFilterPanelProps {
+	activeSource: string;
+	activeTokens: Set<string>;
+	category: ModelCategory;
+	chips: ActiveChip[];
+	format: ModelFormat;
+	friendly: boolean;
+	installedOnly: boolean;
+	selectingSource: boolean;
+	selectSource: (id: string) => void;
+	setCategory: (c: ModelCategory) => void;
+	setFormat: (f: ModelFormat) => void;
+	setFriendly: (v: boolean) => void;
+	setInstalledOnly: (v: boolean) => void;
+	setShowTags: (v: boolean) => void;
+	setSort: (s: ModelSort) => void;
+	showInstalledOnly: boolean;
+	showTags: boolean;
+	sort: ModelSort;
+	sources: ModelCatalogSource[];
+	toggleToken: (id: string) => void;
+}
+
+export function ModelsFilterPanel({
 	category,
 	setCategory,
 	sort,
@@ -584,6 +608,7 @@ function ModelsFilterPanel({
 	setFriendly,
 	installedOnly,
 	setInstalledOnly,
+	showInstalledOnly,
 	chips,
 	sources,
 	activeSource,
@@ -593,27 +618,7 @@ function ModelsFilterPanel({
 	toggleToken,
 	showTags,
 	setShowTags,
-}: {
-	category: ModelCategory;
-	setCategory: (c: ModelCategory) => void;
-	sort: ModelSort;
-	setSort: (s: ModelSort) => void;
-	format: ModelFormat;
-	setFormat: (f: ModelFormat) => void;
-	friendly: boolean;
-	setFriendly: (v: boolean) => void;
-	installedOnly: boolean;
-	setInstalledOnly: (v: boolean) => void;
-	chips: ActiveChip[];
-	sources: ModelCatalogSource[];
-	activeSource: string;
-	selectSource: (id: string) => void;
-	selectingSource: boolean;
-	activeTokens: Set<string>;
-	toggleToken: (id: string) => void;
-	showTags: boolean;
-	setShowTags: (v: boolean) => void;
-}) {
+}: ModelsFilterPanelProps) {
 	// Only worth a picker when there's a real choice. The {value,label} items
 	// prop is required so Base UI's SelectValue renders the friendly name.
 	const sourceItems = sources.map((s) => ({
@@ -730,17 +735,19 @@ function ModelsFilterPanel({
 							Show tags
 						</label>
 					</div>
-					<div className="flex items-center gap-2">
-						<Switch
-							aria-label="Show only installed models"
-							checked={installedOnly}
-							id="installed-only"
-							onCheckedChange={setInstalledOnly}
-						/>
-						<label className="cursor-pointer" htmlFor="installed-only">
-							Added only
-						</label>
-					</div>
+					{showInstalledOnly ? (
+						<div className="flex items-center gap-2">
+							<Switch
+								aria-label="Show only installed models"
+								checked={installedOnly}
+								id="installed-only"
+								onCheckedChange={setInstalledOnly}
+							/>
+							<label className="cursor-pointer" htmlFor="installed-only">
+								Added only
+							</label>
+						</div>
+					) : null}
 				</div>
 			</div>
 			<FilterChipBar chips={chips} />
@@ -1261,7 +1268,7 @@ function LlmfitEstimateBlock({ repo }: { repo: string }) {
 					disabled={busy !== "idle"}
 					onClick={onRun}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{busy === "loading" ? <Spinner className="size-4" /> : null}
 					{busy === "loading"
@@ -1535,7 +1542,7 @@ function ModelDetailPanel({
 					<Button
 						onClick={() => host.navigate?.("/plugin/@ryu/finetune")}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Fine-tune
 					</Button>

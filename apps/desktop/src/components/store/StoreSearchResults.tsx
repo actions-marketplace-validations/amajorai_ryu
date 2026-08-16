@@ -58,7 +58,7 @@ export default function StoreSearchResults({
 		);
 	}
 	return (
-		<div className="flex h-full flex-col gap-8 overflow-auto p-4">
+		<div className="scroll-fade flex h-full flex-col gap-8 overflow-auto p-4">
 			{groups.map((group) => (
 				<ResultSection group={group} key={group.realm} onOpen={onOpenRealm} />
 			))}

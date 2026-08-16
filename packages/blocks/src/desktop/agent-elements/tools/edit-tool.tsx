@@ -1,12 +1,13 @@
 ﻿import { FileDiff } from "@ryu/ui/components/agents/file-diff";
+import { Pencil } from "lucide-react";
 import { memo, useMemo } from "react";
 import { useToolComplete } from "../hooks/use-tool-complete.ts";
 import type { StepState, TimelineStep } from "../types/timeline.ts";
+import { diffLines } from "../utils/diff-lines.ts";
 import {
 	mapToolInvocationToStep,
 	mapToolStateToStepState,
 } from "../utils/tool-adapters.ts";
-import { diffLines } from "../utils/diff-lines.ts";
 import {
 	type ToolApproval,
 	ToolApprovalFooter,
@@ -25,7 +26,9 @@ export interface EditToolDiffCardProps {
 export { diffLines };
 
 /** Derive the language hint for the diff from the file extension. */
-function languageForFile(fileName: string): "typescript" | "json" | "bash" | "diff" | "tsx" | "text" {
+function languageForFile(
+	fileName: string
+): "typescript" | "json" | "bash" | "diff" | "tsx" | "text" {
 	const ext = fileName.split(".").pop()?.toLowerCase();
 	if (ext === "ts" || ext === "tsx" || ext === "js" || ext === "jsx") {
 		return "tsx";
@@ -110,6 +113,7 @@ export function EditToolDiffCard({
 					collapseOnComplete={isCollapsible && !isPending}
 					defaultOpen={!isCollapsible || isPending}
 					file={hasFileName ? fileName : "file"}
+					icon={<Pencil aria-hidden className="size-4" />}
 					language={languageForFile(fileName ?? "file")}
 					lines={diff.lines}
 					maxHeight={360}

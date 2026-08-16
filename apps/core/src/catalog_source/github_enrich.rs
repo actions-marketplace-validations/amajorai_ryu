@@ -115,6 +115,26 @@ struct GithubReleaseItem {
 struct GithubReleaseAsset {
     #[serde(default)]
     download_count: u64,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Release metadata is downloaded too, but it is not an installable artifact.
+/// Counting signatures, checksums, manifests and prose inflates popularity once
+/// per platform without representing a real app/plugin download.
+fn is_downloadable_release_asset(asset: &GithubReleaseAsset) -> bool {
+    let Some(name) = asset.name.as_deref() else {
+        return false;
+    };
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    ![
+        ".asc", ".json", ".md", ".sha1", ".sha256", ".sha512", ".sig", ".txt", ".yaml", ".yml",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
 }
 
 /// A git tag, the fallback when a repo publishes no GitHub Releases. Many plugin
@@ -379,7 +399,12 @@ fn release_to_value(release: &GithubReleaseItem) -> Option<Value> {
         .or(release.name.as_deref())
         .map(str::trim)
         .filter(|v| !v.is_empty())?;
-    let downloads: u64 = release.assets.iter().map(|a| a.download_count).sum();
+    let downloads: u64 = release
+        .assets
+        .iter()
+        .filter(|asset| is_downloadable_release_asset(asset))
+        .map(|asset| asset.download_count)
+        .sum();
     Some(serde_json::json!({
         "version": version,
         "name": release.name.as_deref().map(str::trim).filter(|n| !n.is_empty()),
@@ -542,8 +567,14 @@ mod tests {
             tag_name: Some("v1.2.0".to_string()),
             name: Some("1.2.0".to_string()),
             assets: vec![
-                GithubReleaseAsset { download_count: 7 },
-                GithubReleaseAsset { download_count: 5 },
+                GithubReleaseAsset {
+                    download_count: 7,
+                    name: Some("app-macos.dmg".to_string()),
+                },
+                GithubReleaseAsset {
+                    download_count: 5,
+                    name: Some("app-windows.exe".to_string()),
+                },
             ],
             ..Default::default()
         };

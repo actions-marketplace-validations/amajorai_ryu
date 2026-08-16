@@ -41,9 +41,9 @@ pub fn has_pending_legacy_canvases() -> bool {
     let Ok(entries) = std::fs::read_dir(canvases_dir()) else {
         return false; // no legacy store — nothing to import.
     };
-    entries.flatten().any(|entry| {
-        entry.path().extension().and_then(|e| e.to_str()) == Some("json")
-    })
+    entries
+        .flatten()
+        .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("json"))
 }
 
 /// Import every legacy canvas file into `space_id` as a `@ryu/canvas` document.

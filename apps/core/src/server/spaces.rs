@@ -28,13 +28,83 @@
 //! crate can't own), by *constructor injection* like `ryu-storage`.
 
 use anyhow::Result;
+use ryu_rag::Embedder;
 
 pub use ryu_spaces::*;
 
 use crate::identity_verify::ResourceTenancy;
 use crate::server::conversations::Tenancy;
-use crate::server::preferences::PreferencesStore;
-use ryu_rag::Embedder;
+
+/// Resolve a per-Spaces embedding preference through Core's single RAG resolver.
+pub fn embedder_for_pref(pref: &EmbeddingModelPref) -> Embedder {
+    if pref.provider.as_deref() == Some("gateway") {
+        return crate::rag_host::gateway_embedder(
+            &pref.model_id,
+            pref.dims
+                .unwrap_or_else(|| crate::rag_host::retrieval_registry().embedder.dims),
+        );
+    }
+    crate::rag_host::embedder_from_config(
+        pref.base_url.as_deref().unwrap_or_default(),
+        &pref.model_id,
+        pref.dims
+            .unwrap_or_else(|| crate::rag_host::retrieval_registry().embedder.dims),
+    )
+}
+
+/// Apply the persisted Spaces embedding preference at boot, including reindexing
+/// when its model or dimensionality differs from the store's current embedder.
+pub async fn apply_saved_embedding_pref(
+    store: &SpaceStore,
+    preferences: &crate::server::preferences::PreferencesStore,
+) {
+    let Ok(Some(raw)) = preferences.get(EMBEDDING_MODEL_PREF_KEY).await else {
+        return;
+    };
+    let Ok(pref) = serde_json::from_str::<EmbeddingModelPref>(&raw) else {
+        tracing::warn!("ignoring invalid saved embedding model preference");
+        return;
+    };
+    store.apply_embedder_change(embedder_for_pref(&pref)).await;
+}
+
+/// Apply the persisted embedding provider to every vector-bearing Core index.
+/// Spaces uses its transactional swap; retrieval and encrypted-message search
+/// install the same provider before their guarded stale-row passes. This is the
+/// boot counterpart of `POST /api/embeddings/model`.
+pub async fn apply_saved_embedding_pref_all(
+    spaces: &SpaceStore,
+    retrieval: &ryu_rag::RetrievalStore,
+    conversations: &crate::server::conversations::ConversationStore,
+    preferences: &crate::server::preferences::PreferencesStore,
+) {
+    let Ok(Some(raw)) = preferences.get(EMBEDDING_MODEL_PREF_KEY).await else {
+        return;
+    };
+    let Ok(pref) = serde_json::from_str::<EmbeddingModelPref>(&raw) else {
+        tracing::warn!("ignoring invalid saved embedding model preference");
+        return;
+    };
+    let embedder = embedder_for_pref(&pref);
+    spaces.apply_embedder_change(embedder.clone()).await;
+    retrieval.set_embedder(embedder.clone());
+    let search_embedder = std::sync::Arc::new(
+        crate::search_host::CoreSearchEmbedder::from_embedder(embedder),
+    );
+    if let Err(error) = conversations.set_message_embedder(search_embedder).await {
+        tracing::warn!("could not apply saved message embedding provider: {error:#}");
+    }
+    let retrieval = retrieval.clone();
+    let conversations = conversations.clone();
+    tokio::spawn(async move {
+        if let Err(error) = retrieval.reindex_stale_embeddings().await {
+            tracing::warn!("saved retrieval embedding reindex failed: {error:#}");
+        }
+        if let Err(error) = conversations.reindex_message_embeddings().await {
+            tracing::warn!("saved message embedding reindex failed: {error:#}");
+        }
+    });
+}
 
 /// Lower a Core [`Tenancy`] into the crate's plain [`DocOwner`] at the boundary.
 /// Lossless: `Tenancy::Unattributed` → `(None, None)`, `Tenancy::Owned` → the same
@@ -114,32 +184,6 @@ pub fn open_default() -> Result<SpaceStore> {
         crate::paths::ryu_dir().join("blobs"),
         backfill_owner(),
     )
-}
-
-/// Build a concrete embedder from a saved [`EmbeddingModelPref`] (the per-space
-/// embedder gotcha — a Space picks its own model). A non-empty `base_url` yields a
-/// Remote (OpenAI-compatible) embedder; otherwise the offline Local hashing
-/// embedder. Funnelled through the single RAG resolver so a per-space embedder
-/// still follows an embed-provider swap; dims fall back to the registry default
-/// only when the pref omits them.
-pub fn embedder_for_pref(pref: &EmbeddingModelPref) -> Embedder {
-    let dims = pref.dims.unwrap_or(crate::registry::DEFAULT_EMBED_DIMS);
-    let base_url = pref.base_url.as_deref().unwrap_or("");
-    crate::rag_host::embedder_from_config(base_url, &pref.model_id, dims)
-}
-
-/// On startup, apply the user's saved default embedding model (if any). Reads the
-/// pref Core-side, resolves it into an embedder through the single RAG resolver,
-/// then hands it to the store which detects a change and kicks a background
-/// re-index if needed.
-pub async fn apply_saved_embedding_pref(store: &SpaceStore, prefs: &PreferencesStore) {
-    let Ok(Some(raw)) = prefs.get(EMBEDDING_MODEL_PREF_KEY).await else {
-        return;
-    };
-    let Ok(pref) = serde_json::from_str::<EmbeddingModelPref>(&raw) else {
-        return;
-    };
-    store.apply_embedder_change(embedder_for_pref(&pref)).await;
 }
 
 /// Read a document's access metadata and map it into the shared

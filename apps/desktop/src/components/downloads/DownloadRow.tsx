@@ -20,6 +20,7 @@ import {
 	PauseIcon,
 	PlayIcon,
 } from "@hugeicons/core-free-icons";
+import { useEffect, useState } from "react";
 import {
 	TrayAction,
 	TrayIconAction,
@@ -121,6 +122,15 @@ export function DownloadRow({
 	const done = task.state === "completed";
 	const failed = task.state === "failed";
 	const terminal = done || failed || task.state === "cancelled";
+	const [holdFull, setHoldFull] = useState(false);
+	useEffect(() => {
+		if (!done) {
+			return;
+		}
+		setHoldFull(true);
+		const timer = setTimeout(() => setHoldFull(false), 430);
+		return () => clearTimeout(timer);
+	}, [done]);
 
 	let tone: "default" | "danger" | "success" = "default";
 	if (failed) {
@@ -191,7 +201,7 @@ export function DownloadRow({
 			icon={done ? CheckmarkCircle02Icon : kindIcon(task.kind)}
 			meta={meta}
 			metaTone={failed ? "danger" : "default"}
-			progress={terminal ? undefined : percent}
+			progress={terminal ? (holdFull ? 100 : undefined) : percent}
 			// Native title attribute rather than a Tooltip: the row already carries
 			// tooltipped controls, and nesting another trigger around the truncated
 			// label made the whole row a tooltip target.

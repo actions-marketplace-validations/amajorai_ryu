@@ -89,13 +89,16 @@ export async function listAgentThreads(
 
 export interface ImportedThreadResult {
 	/** True when this thread was already imported before — the id points at the
-	 * existing conversation rather than a freshly created one. */
+	 * existing conversation, updated with any new native messages, rather than a
+	 * freshly created one. */
 	alreadyImported: boolean;
 	conversationId: string;
 	/** Workspace folder the thread ran in, if the transcript recorded one. Used
 	 * to register the folder as a project so the chat appears grouped. */
 	cwd?: string;
 	messageCount: number;
+	/** Messages appended to the Ryu conversation by this import. */
+	messagesAdded: number;
 	title: string;
 	truncated: boolean;
 }
@@ -128,6 +131,7 @@ export async function importAgentThread(
 		conversation_id: string;
 		cwd?: string;
 		message_count?: number;
+		messages_added?: number;
 		truncated?: boolean;
 		title?: string;
 	};
@@ -136,6 +140,7 @@ export async function importAgentThread(
 		conversationId: body.conversation_id,
 		cwd: body.cwd,
 		messageCount: body.message_count ?? 0,
+		messagesAdded: body.messages_added ?? body.message_count ?? 0,
 		truncated: body.truncated ?? false,
 		title: body.title ?? "Imported thread",
 	};

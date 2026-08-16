@@ -174,7 +174,7 @@ export function AttachVideoControl({
 						onClick={handleChooseFile}
 						size="sm"
 						type="button"
-						variant="outline"
+						variant="ghost"
 					>
 						<IconFolder className="size-4" />
 						Choose file

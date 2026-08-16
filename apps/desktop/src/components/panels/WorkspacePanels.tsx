@@ -27,6 +27,10 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PatchDiff } from "@pierre/diffs/react";
+import type {
+	ContextMenuItem as FileTreeContextMenuItem,
+	ContextMenuOpenContext as FileTreeContextMenuOpenContext,
+} from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import {
 	ContextMenu,
@@ -45,6 +49,7 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
+import { toast } from "@ryu/ui/components/sileo";
 import {
 	Tooltip,
 	TooltipContent,
@@ -82,6 +87,8 @@ import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkCont
 import {
 	CoworkContextPanel,
 	extractSubagents,
+	SourcesWorkspacePanel,
+	SubagentsWorkspacePanel,
 } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CrmPanel } from "@/src/components/panels/crm/CrmPanel.tsx";
 import { DesktopStreamPanel } from "@/src/components/panels/DesktopStreamPanel.tsx";
@@ -144,9 +151,11 @@ import {
 } from "@/src/lib/api/mission-control.ts";
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
+import { CONTRIBUTED_LINK_OPENED_EVENT } from "@/src/lib/contributed-link-handler.ts";
 import { pageRoute, SIDE_PANEL_PAGES } from "@/src/lib/page-routes.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
+import { useDockPanelRequestStore } from "@/src/store/useDockPanelRequestStore.ts";
 import {
 	type ProjectDockTab,
 	useProjectDockStore,
@@ -355,6 +364,45 @@ const EDITOR_DEFS: EditorDef[] = [
 	},
 ];
 
+const SHELL_EDITOR_IDS = new Set(["terminal", "gitbash", "powershell", "cmd"]);
+
+function useAvailableEditorIds(): Set<string> {
+	const [availableEditorIds, setAvailableEditorIds] = useState<Set<string>>(
+		() => new Set(["explorer"])
+	);
+
+	useEffect(() => {
+		let cancelled = false;
+		invoke<Array<{ available: boolean; id: string }>>(
+			"get_editor_availability",
+			{
+				editors: EDITOR_DEFS.map((def) => def.id),
+			}
+		)
+			.then((items) => {
+				if (cancelled) {
+					return;
+				}
+				const next = new Set(
+					items.filter((item) => item.available).map((item) => item.id)
+				);
+				next.add("explorer");
+				setAvailableEditorIds(next);
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setAvailableEditorIds(new Set(["explorer"]));
+				}
+			});
+
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	return availableEditorIds;
+}
+
 const WINDOWS_TERMINAL_PATH =
 	"M8.165 6V3h7.665v3H8.165zm-.5-3H1c-.55 0-1 .45-1 1v2h7.665V3zM23 3h-6.67v3H24V4c0-.55-.45-1-1-1zM0 6.5h24V20c0 .55-.45 1-1 1H1c-.55 0-1-.45-1-1V6.5zM11.5 18c0 .3.2.5.5.5h8c.3 0 .5-.2.5-.5v-1.5c0-.3-.2-.5-.5-.5h-8c-.3 0-.5.2-.5.5V18zm-5.2-4.55l-3.1 3.1c-.25.25-.25.6 0 .8l.9.9c.25.25.6.25.8 0l4.4-4.4a.52.52 0 0 0 0-.8l-4.4-4.4c-.2-.2-.6-.2-.8 0l-.9.9c-.25.2-.25.55 0 .8l3.1 3.1z";
 const CMD_PATH =
@@ -454,9 +502,7 @@ function EditorIcon({ def }: { def: EditorDef }) {
 
 function EditorButtonGroup({ folder }: { folder?: string | null }) {
 	const [activeId, setActiveId] = useState("explorer");
-	const [availableEditorIds, setAvailableEditorIds] = useState<Set<string>>(
-		() => new Set(["explorer"])
-	);
+	const availableEditorIds = useAvailableEditorIds();
 	const editorDefs = useMemo(
 		() => EDITOR_DEFS.filter((def) => availableEditorIds.has(def.id)),
 		[availableEditorIds]
@@ -468,31 +514,10 @@ function EditorButtonGroup({ folder }: { folder?: string | null }) {
 		EDITOR_DEFS[0];
 
 	useEffect(() => {
-		let cancelled = false;
-		invoke<Array<{ available: boolean; id: string }>>(
-			"get_editor_availability",
-			{
-				editors: EDITOR_DEFS.map((def) => def.id),
-			}
-		)
-			.then((items) => {
-				if (cancelled) {
-					return;
-				}
-				const next = new Set(
-					items.filter((item) => item.available).map((item) => item.id)
-				);
-				next.add("explorer");
-				setAvailableEditorIds(next);
-				setActiveId((current) => (next.has(current) ? current : "explorer"));
-			})
-			.catch((e) => {
-				console.error("get_editor_availability:", e);
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, []);
+		setActiveId((current) =>
+			availableEditorIds.has(current) ? current : "explorer"
+		);
+	}, [availableEditorIds]);
 
 	const run = async (id: string) => {
 		setActiveId(id);
@@ -612,6 +637,8 @@ const RIGHT_TAB_TYPES: TabTypeDef[] = [
 	// RELOADED chat has no ring even when Core still holds a breakdown. Menu-only
 	// reachability is what keeps the panel usable in that (common) case.
 	{ kind: "context", label: "Context", icon: PieChartIcon },
+	{ kind: "sources", label: "Sources", icon: Globe02Icon },
+	{ kind: "subagents", label: "Subagents", icon: Robot01Icon },
 	// What this chat DID, grouped per turn with the agent's own rationale. Menu-
 	// only: unlike the panels below it is not raised by a click anywhere in the
 	// chat, so the "+" menu is its single entry point.
@@ -641,6 +668,8 @@ const BUILTIN_TAB_ICONS: Record<BuiltinTabKind, typeof ComputerTerminal01Icon> =
 		codereview: FileCodeIcon,
 		files: FolderOpenIcon,
 		cowork: DashboardSquare01Icon,
+		sources: Globe02Icon,
+		subagents: Robot01Icon,
 		subagent: Robot01Icon,
 		artifact: BrowserIcon,
 		inspector: SourceCodeIcon,
@@ -1179,6 +1208,14 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 	const prefs = useFileTreePrefs();
 	const options = useMemo(() => fileTreePrefsToOptions(prefs), [prefs]);
 	const themeStyles = useFileTreeThemeStyles(prefs);
+	const availableEditorIds = useAvailableEditorIds();
+	const availableEditors = useMemo(
+		() =>
+			EDITOR_DEFS.filter(
+				(def) => def.id !== "explorer" && availableEditorIds.has(def.id)
+			),
+		[availableEditorIds]
+	);
 
 	if (!folder) {
 		return (
@@ -1265,6 +1302,8 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 			    keying on it would throw away expansion/scroll state on every switch. */}
 			<div className="min-h-0 flex-1 overflow-hidden p-1">
 				<FileTreeView
+					availableEditors={availableEditors}
+					folder={folder}
 					key={JSON.stringify(options)}
 					options={options}
 					paths={paths}
@@ -1281,19 +1320,113 @@ function FileTreePanel({ folder }: { folder?: string | null }) {
 // resolves after mount so the model is built with `[]`. The parent remounts this
 // (via `key`) when display prefs change, since those are constructor-time.
 function FileTreeView({
+	availableEditors,
+	folder,
 	paths,
 	options,
 	style,
 }: {
+	availableEditors: readonly EditorDef[];
+	folder: string;
 	options: ReturnType<typeof fileTreePrefsToOptions>;
 	paths: readonly string[];
 	style?: CSSProperties;
 }) {
-	const { model } = useFileTree(options);
+	const { model } = useFileTree({ ...options, paths });
 	useEffect(() => {
 		model.resetPaths(paths);
 	}, [paths, model]);
-	return <FileTree className="h-full w-full" model={model} style={style} />;
+	return (
+		<FileTree
+			className="h-full w-full"
+			model={model}
+			renderContextMenu={(item, context) => (
+				<FileTreeContextActions
+					availableEditors={availableEditors}
+					context={context}
+					folder={folder}
+					item={item}
+				/>
+			)}
+			style={style}
+		/>
+	);
+}
+
+function FileTreeContextActions({
+	availableEditors,
+	context,
+	folder,
+	item,
+}: {
+	availableEditors: readonly EditorDef[];
+	context: FileTreeContextMenuOpenContext;
+	folder: string;
+	item: FileTreeContextMenuItem;
+}) {
+	const run = async (command: string, editor?: string) => {
+		context.close({ restoreFocus: false });
+		try {
+			await invoke(command, {
+				editor: editor ?? null,
+				path: item.path,
+				root: folder,
+			});
+		} catch (error) {
+			toast.error("Couldn't open that workspace item", {
+				description: error instanceof Error ? error.message : String(error),
+			});
+		}
+	};
+
+	return (
+		<div
+			aria-label={`Actions for ${item.name}`}
+			className="min-w-52 rounded-2xl border border-border/60 bg-popover/95 p-1 text-popover-foreground shadow-lg backdrop-blur-xl"
+			data-file-tree-context-menu-root="true"
+			role="menu"
+		>
+			<button
+				className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
+				onClick={() => run("open_workspace_item")}
+				role="menuitem"
+				type="button"
+			>
+				<HugeiconsIcon className="size-4" icon={File01Icon} />
+				Open
+			</button>
+			<button
+				className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
+				onClick={() => run("reveal_workspace_item")}
+				role="menuitem"
+				type="button"
+			>
+				<HugeiconsIcon className="size-4" icon={FolderOpenIcon} />
+				Reveal in {fileManagerName}
+			</button>
+			{availableEditors.length > 0 ? (
+				<div className="my-1 h-px bg-border/60" role="separator" />
+			) : null}
+			{availableEditors.map((editor) => {
+				const opensContainingFolder =
+					item.kind === "file" && SHELL_EDITOR_IDS.has(editor.id);
+				return (
+					<button
+						className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
+						key={editor.id}
+						onClick={() => run("open_workspace_item", editor.id)}
+						role="menuitem"
+						type="button"
+					>
+						<EditorIcon def={editor} />
+						{opensContainingFolder
+							? `Open containing folder in ${editor.shortLabel}`
+							: editor.label}
+					</button>
+				);
+			})}
+		</div>
+	);
 }
 
 // ── Code review panel (@pierre/diffs) ────────────────────────────────────────
@@ -1800,6 +1933,18 @@ function BrowserSidecarPanel() {
 
 	useEffect(() => {
 		refresh().catch(() => undefined);
+	}, [refresh]);
+
+	useEffect(() => {
+		const onLinkOpened = (event: Event) => {
+			const plugin = (event as CustomEvent<{ plugin?: string }>).detail?.plugin;
+			if (plugin === BROWSER_PLUGIN_ID) {
+				refresh().catch(() => undefined);
+			}
+		};
+		window.addEventListener(CONTRIBUTED_LINK_OPENED_EVENT, onLinkOpened);
+		return () =>
+			window.removeEventListener(CONTRIBUTED_LINK_OPENED_EVENT, onLinkOpened);
 	}, [refresh]);
 
 	const openTab = useCallback(
@@ -2849,6 +2994,23 @@ function TabContent({
 	if (tab.kind === "context") {
 		return <ContextPanel view={contextView} />;
 	}
+	if (tab.kind === "sources") {
+		return cowork ? (
+			<SourcesWorkspacePanel messages={cowork.messages} />
+		) : (
+			<DockPanelPlaceholder text="Open a chat to see its sources here." />
+		);
+	}
+	if (tab.kind === "subagents") {
+		return cowork ? (
+			<SubagentsWorkspacePanel
+				messages={cowork.messages}
+				onOpenSubagent={cowork.onOpenSubagent}
+			/>
+		) : (
+			<DockPanelPlaceholder text="Open a chat to see its subagents here." />
+		);
+	}
 	if (tab.kind === "inspector") {
 		if (inspectorView == null) {
 			return (
@@ -3118,6 +3280,11 @@ export interface WorkspacePanelsProps {
 	artifactRequest?: { artifact: Artifact; nonce: number } | null;
 	bottomOpen: boolean;
 	children: ReactNode;
+	/** Open a complete run collection from its capped pinned-summary section. */
+	collectionRequest?: {
+		kind: "sources" | "subagents";
+		nonce: number;
+	} | null;
 	/**
 	 * A request to open the context-window breakdown in the right panel. Carries
 	 * only a `nonce` — the DATA is `contextView`, passed live, so the panel keeps
@@ -3198,6 +3365,7 @@ function WorkspacePanelsImpl({
 	inspectorRequest,
 	contextRequest,
 	contextView,
+	collectionRequest,
 	renderPinnedSummary,
 }: WorkspacePanelsProps) {
 	// Chat-local tabs (cowork / subagent / artifact / inspector, and shareable
@@ -3438,6 +3606,18 @@ function WorkspacePanelsImpl({
 		openRightTabRef.current("context", "Context");
 	}, [contextRequest]);
 
+	// A capped pinned-summary section raises its complete collection in a reusable
+	// workspace tab. The panel reads `cowork.messages` live, so the list continues
+	// to update after it opens.
+	useEffect(() => {
+		if (!collectionRequest) {
+			return;
+		}
+		const label =
+			collectionRequest.kind === "sources" ? "Sources" : "Subagents";
+		openRightTabRef.current(collectionRequest.kind, label);
+	}, [collectionRequest]);
+
 	// Same flow for a PAGE raised in the right dock — but sourced from a store
 	// rather than a prop, because its callers are all over the shell (a command, a
 	// tab menu, an agent-facing seam) and none of them own this component.
@@ -3448,6 +3628,8 @@ function WorkspacePanelsImpl({
 	// so a background tab brought forward later doesn't replay a stale one.
 	const pendingRoute = useSidePanelRouteStore((s) => s.pending);
 	const clearPendingRoute = useSidePanelRouteStore((s) => s.clear);
+	const pendingDockPanel = useDockPanelRequestStore((s) => s.pending);
+	const clearPendingDockPanel = useDockPanelRequestStore((s) => s.clear);
 	const isFocusedWindowTab = useIsActiveTab();
 	useEffect(() => {
 		if (!(pendingRoute && isFocusedWindowTab)) {
@@ -3472,6 +3654,34 @@ function WorkspacePanelsImpl({
 		pendingRoute,
 		isFocusedWindowTab,
 		clearPendingRoute,
+		visibleRightProject,
+		rightOpen,
+		onRightOpenChange,
+	]);
+
+	useEffect(() => {
+		if (!(pendingDockPanel && isFocusedWindowTab)) {
+			return;
+		}
+		clearPendingDockPanel();
+		const pinnedSame = visibleRightProject.find(
+			(tab) => tab.kind === pendingDockPanel.kind
+		);
+		if (pinnedSame) {
+			setRightActiveUid(pinnedSame.uid);
+		} else {
+			openRightTabRef.current(
+				pendingDockPanel.kind as TabKind,
+				pendingDockPanel.label
+			);
+		}
+		if (!rightOpen) {
+			onRightOpenChange(true);
+		}
+	}, [
+		pendingDockPanel,
+		isFocusedWindowTab,
+		clearPendingDockPanel,
 		visibleRightProject,
 		rightOpen,
 		onRightOpenChange,

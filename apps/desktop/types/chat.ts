@@ -17,6 +17,7 @@ export interface Message {
 	 * "cut off" marker rather than passing a truncated reply off as a whole one.
 	 */
 	interrupted?: boolean;
+	originServer?: string;
 	/** The message this one replied to (its parent in the version tree). */
 	parentMessageId?: string;
 	/**
@@ -40,7 +41,9 @@ export interface Message {
 	 * Both come from Core's active-path read; absent/1 for never-branched turns.
 	 */
 	siblingIndex?: number;
+	source?: string;
 	timestamp: number;
+	widgetInstanceId?: string;
 }
 
 export interface Conversation {

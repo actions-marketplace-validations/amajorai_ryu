@@ -31,6 +31,8 @@ import { Button } from "@ryu/ui/components/button";
 import { Kbd } from "@ryu/ui/components/kbd";
 import { toast } from "@ryu/ui/components/sileo";
 import { useCallback, useEffect, useState } from "react";
+import { useApps } from "@/src/hooks/useApps.ts";
+import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	DEFAULT_DICTATION_PREFS,
@@ -38,9 +40,11 @@ import {
 	// DEFAULT_ISLAND_COMMAND_SHORTCUT,
 	// DEFAULT_VOICE_PREFS,
 	getDictationPrefs,
+	getPreference,
 	// getIslandCommandShortcut,
 	// getVoiceInputPrefs,
 	setDictationPrefs,
+	setPreference,
 	// setIslandCommandShortcut,
 	// setVoiceInputPrefs,
 } from "@/src/lib/api/preferences.ts";
@@ -54,6 +58,24 @@ import {
 
 function activeTarget() {
 	return toTarget(useNodeStore.getState().getActiveNode());
+}
+
+const PLUGIN_SHORTCUTS_KEY = "keybindings";
+
+function readShortcutOverrides(
+	raw: string | null
+): Record<string, string | null> {
+	if (!raw) {
+		return {};
+	}
+	try {
+		const value: unknown = JSON.parse(raw);
+		return value && typeof value === "object" && !Array.isArray(value)
+			? (value as Record<string, string | null>)
+			: {};
+	} catch {
+		return {};
+	}
 }
 
 /** Render a chord as keycaps, or a muted "Unbound" when null. */
@@ -255,6 +277,43 @@ export function KeyboardShortcutsTab() {
 	} = useHotkeysAdmin();
 
 	const inAppGroups = groupByCategory(registry.filter((a) => !a.global));
+	const { apps } = useApps();
+	const { companions } = usePluginContributions();
+	const [pluginOverrides, setPluginOverrides] = useState<
+		Record<string, string | null>
+	>({});
+
+	useEffect(() => {
+		getPreference(activeTarget(), PLUGIN_SHORTCUTS_KEY).then((raw) =>
+			setPluginOverrides(readShortcutOverrides(raw))
+		);
+	}, []);
+
+	const shortcutApps = apps
+		.map((app) => {
+			const companion = companions.find((entry) => entry.pluginId === app.id);
+			const declared = companion?.shortcut ?? app.companion?.shortcut ?? null;
+			return declared ? { app, companion, declared } : null;
+		})
+		.filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+		.sort((a, b) => a.app.name.localeCompare(b.app.name));
+
+	const savePluginShortcut = async (appId: string, chord: Chord | null) => {
+		const actionId = `plugin:${appId}`;
+		const next = {
+			...pluginOverrides,
+			[actionId]: chord ? toElectronAccelerator(chord) : null,
+		};
+		setPluginOverrides(next);
+		const ok = await setPreference(
+			activeTarget(),
+			PLUGIN_SHORTCUTS_KEY,
+			JSON.stringify(next)
+		);
+		if (!ok) {
+			toast.error({ title: "Couldn't update plugin shortcut" });
+		}
+	};
 
 	// Look up the labels of the OTHER actions a chord collides with, for a row.
 	const conflictLabelsFor = (action: HotkeyAction): string[] => {
@@ -383,6 +442,69 @@ export function KeyboardShortcutsTab() {
 						}}
 					/>
 				</SettingsGroup>
+			</SettingsSection>
+
+			<SettingsSection
+				caption="Shortcuts contributed by enabled plugins and apps. Changes apply to the Island global shortcut bridge."
+				title="Plugins and apps"
+			>
+				{shortcutApps.length === 0 ? (
+					<p className="px-3 text-muted-foreground text-sm">
+						No enabled plugins or apps currently declare a shortcut.
+					</p>
+				) : (
+					shortcutApps.map(({ app, companion, declared }) => {
+						const actionId = `plugin:${app.id}`;
+						const configured = Object.hasOwn(pluginOverrides, actionId)
+							? pluginOverrides[actionId]
+							: declared;
+						return (
+							<SettingsSection key={app.id} title={app.name}>
+								<SettingsGroup>
+									<SettingsItem
+										actions={
+											<div className="flex items-center gap-1.5">
+												<ChordRecorder
+													onChange={(chord) =>
+														savePluginShortcut(app.id, chord)
+													}
+													value={
+														configured ? chordFromElectron(configured) : null
+													}
+												/>
+												<Button
+													disabled={!Object.hasOwn(pluginOverrides, actionId)}
+													onClick={() => {
+														const next = { ...pluginOverrides };
+														delete next[actionId];
+														setPluginOverrides(next);
+														setPreference(
+															activeTarget(),
+															PLUGIN_SHORTCUTS_KEY,
+															JSON.stringify(next)
+														);
+													}}
+													size="sm"
+													variant="ghost"
+												>
+													Reset
+												</Button>
+											</div>
+										}
+										title={
+											<span className="flex flex-col gap-0.5">
+												<span>{companion?.label ?? app.name}</span>
+												<span className="text-muted-foreground text-xs">
+													{app.id}
+												</span>
+											</span>
+										}
+									/>
+								</SettingsGroup>
+							</SettingsSection>
+						);
+					})
+				)}
 			</SettingsSection>
 
 			{/* The one "shortcut" that is not an accelerator: a bare-modifier double

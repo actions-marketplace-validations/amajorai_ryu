@@ -8,14 +8,17 @@
 // model output omits; `<Renderer>` is lenient and treats missing fields as defaults.
 
 import {
+	ActionProvider,
 	type ComponentRenderProps,
 	JSONUIProvider,
 	Renderer,
 	type Spec,
+	StateProvider,
 } from "@json-render/react";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { Component, type ReactNode } from "react";
+import { Component, type ReactNode, useCallback, useState } from "react";
 import { registry } from "./registry.tsx";
+import { AgentUiSubmissionStateProvider } from "./submission-context.tsx";
 
 // A spec is renderable when it is an object naming a root element key and an
 // elements map. Prop-level mistakes are tolerated by the renderer, not rejected here.
@@ -43,10 +46,28 @@ function UnknownComponent({ element }: ComponentRenderProps) {
 
 interface AgentUIProps {
 	className?: string;
+	/** Receives values from the spec's `submit` action. */
+	onSubmit?: (value: unknown) => void | Promise<void>;
 	/** The json-render spec emitted by the agent (tool input). */
 	spec: unknown;
 	/** Optional heading shown above the rendered UI. */
 	title?: string;
+}
+
+interface AgentUiActionParams {
+	value?: unknown;
+}
+
+export function createAgentUiActionHandlers(
+	onSubmit?: (value: unknown) => void | Promise<void>
+): { submit: (params: AgentUiActionParams) => Promise<void> } {
+	return {
+		submit: async (params) => {
+			if (onSubmit && "value" in params) {
+				await onSubmit(params.value);
+			}
+		},
+	};
 }
 
 interface RawSpecFallbackProps {
@@ -101,7 +122,32 @@ class RenderErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 	}
 }
 
-export function AgentUI({ spec, title, className }: AgentUIProps) {
+export function AgentUI({ spec, title, className, onSubmit }: AgentUIProps) {
+	const submit = onSubmit;
+	const [pending, setPending] = useState(false);
+	const [submitted, setSubmitted] = useState(false);
+	const [submitError, setSubmitError] = useState<string | null>(null);
+	const handleSubmit = useCallback(
+		async (value: unknown) => {
+			if (!submit || pending || submitted) {
+				return;
+			}
+			setPending(true);
+			setSubmitError(null);
+			try {
+				await submit(value);
+				setSubmitted(true);
+			} catch (error) {
+				setSubmitError(
+					error instanceof Error ? error.message : "Submission failed"
+				);
+				throw error;
+			} finally {
+				setPending(false);
+			}
+		},
+		[pending, submit, submitted]
+	);
 	if (!isRenderableSpec(spec)) {
 		return (
 			<RawSpecFallback
@@ -121,14 +167,43 @@ export function AgentUI({ spec, title, className }: AgentUIProps) {
 					<RawSpecFallback reason="This UI failed to render." spec={spec} />
 				}
 			>
-				<JSONUIProvider registry={registry}>
-					<Renderer
-						fallback={UnknownComponent}
-						registry={registry}
-						spec={spec}
-					/>
-				</JSONUIProvider>
+				<AgentUiSubmissionStateProvider state={{ pending, submitted }}>
+					<StateProvider>
+						<ActionProvider
+							handlers={createAgentUiActionHandlers(handleSubmit)}
+						>
+							<JSONUIProvider registry={registry}>
+								<Renderer
+									fallback={UnknownComponent}
+									registry={registry}
+									spec={spec}
+								/>
+							</JSONUIProvider>
+						</ActionProvider>
+					</StateProvider>
+				</AgentUiSubmissionStateProvider>
 			</RenderErrorBoundary>
+			{submitError ? (
+				<p aria-live="polite" className="text-destructive text-xs" role="alert">
+					{submitError}
+				</p>
+			) : pending ? (
+				<p
+					aria-live="polite"
+					className="text-muted-foreground text-xs"
+					role="status"
+				>
+					Submitting…
+				</p>
+			) : submitted ? (
+				<p
+					aria-live="polite"
+					className="text-muted-foreground text-xs"
+					role="status"
+				>
+					Submitted
+				</p>
+			) : null}
 		</div>
 	);
 }

@@ -2,6 +2,7 @@
   "id": "@ryu/clangd-lsp",
   "name": "Clangd (C/C++)",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "C/C++ language server (clangd) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install clangd; the plugin ships config.",
   "tagline": "C/C++ code intelligence via clangd",

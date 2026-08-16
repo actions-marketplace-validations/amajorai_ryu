@@ -432,7 +432,7 @@ export class CrashBoundary extends Component<
 							<Button onClick={this.handleRetry} size="sm">
 								Try again
 							</Button>
-							<Button onClick={this.handleReload} size="sm" variant="outline">
+							<Button onClick={this.handleReload} size="sm" variant="ghost">
 								Reload
 							</Button>
 							{import.meta.env.DEV || isDeveloperMode() ? (

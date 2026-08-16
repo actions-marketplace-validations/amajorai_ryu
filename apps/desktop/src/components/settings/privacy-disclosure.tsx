@@ -37,7 +37,7 @@ export const DISCLOSURE_ACK_KEY = "ryu:privacy-disclosure-ack";
 // in the first-run disclosure and reused by PrivacySettings, so both surfaces
 // point at the same place. Opened in the browser (via openExternal) as a real,
 // followable link rather than a dead file path.
-export const PRIVACY_DOCS_PATH = "/docs/desktop/transparency";
+export const PRIVACY_DOCS_PATH = "/docs/surfaces/desktop/transparency";
 
 /** True once the user has acknowledged the first-run privacy disclosure. */
 export function isPrivacyDisclosureAcknowledged(): boolean {

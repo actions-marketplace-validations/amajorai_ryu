@@ -42,8 +42,7 @@ import {
 import { cn } from "@ryu/ui/lib/utils.ts";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ComposerSettingsMenu } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
+import { ProviderCommandDialog } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	type ProviderEntry,
 	UniversalPickerBody,
@@ -355,12 +354,17 @@ export function AgentSelectionField({
 					pickModel(providerId, first);
 				}
 			},
-			onConfigureAuto: NOOP,
 			onConfigureCredentials: NOOP,
 			onCreateAgent: undefined,
 			onInstallExternal: NOOP,
 			onSelectTeam: undefined,
 			onUpgrade: NOOP,
+			// A settings field only records ids — account switching/removal is a
+			// live-composer concern, so these are inert here.
+			onSwitchProviderAccount: NOOP,
+			onRemoveProviderAccount: NOOP,
+			onSwitchAgentAccount: NOOP,
+			onRemoveAgentAccount: NOOP,
 		};
 		// `onChange`/`value` drive every handler above; agents + catalog drive the rows.
 	}, [catalogQuery.data, agents, value, onChange]);
@@ -395,9 +399,7 @@ export function AgentSelectionField({
 
 	return (
 		<div className={cn("space-y-3", className)}>
-			<ComposerSettingsMenu
-				align="end"
-				footer={(close) => <ManageModelsButton close={close} />}
+			<ProviderCommandDialog
 				renderBody={(close) => (
 					<>
 						<UniversalPickerBody close={close} data={data} />
@@ -419,8 +421,6 @@ export function AgentSelectionField({
 						)}
 					</>
 				)}
-				sections={[]}
-				side="bottom"
 				trigger={
 					<button
 						aria-label={ariaLabel}

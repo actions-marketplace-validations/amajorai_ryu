@@ -6,7 +6,9 @@ import {
 	Loading01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { IconSwap } from "@ryu/ui/components/icon-swap.tsx";
 import { NumberPopIn } from "@ryu/ui/components/number-pop-in";
+import { SuccessCheck } from "@ryu/ui/components/success-check.tsx";
 import { useEffect, useRef, useState } from "react";
 import {
 	fetchCatalog,
@@ -162,17 +164,22 @@ export function InstallingStep({
 
 	return (
 		<div className="flex flex-col gap-5">
-			<div>
-				<h2 className="mb-1 font-semibold text-xl">Setting up Ryu</h2>
-				<p className="text-muted-foreground text-sm">
-					{doneCount < total ? (
-						<>
-							<NumberPopIn value={doneCount} /> of {total} ready
-						</>
-					) : (
-						"Everything is ready"
-					)}
-				</p>
+			<div className="flex items-center gap-3">
+				{doneCount >= total ? (
+					<SuccessCheck className="size-8 shrink-0 text-success" />
+				) : null}
+				<div>
+					<h2 className="mb-1 font-semibold text-xl">Setting up Ryu</h2>
+					<p className="text-muted-foreground text-sm">
+						{doneCount < total ? (
+							<>
+								<NumberPopIn value={doneCount} /> of {total} ready
+							</>
+						) : (
+							"Everything is ready"
+						)}
+					</p>
+				</div>
 			</div>
 
 			<div className="space-y-1">
@@ -185,16 +192,21 @@ export function InstallingStep({
 							{item.status === "waiting" && (
 								<div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/30" />
 							)}
-							{item.status === "installing" && (
-								<HugeiconsIcon
-									className="h-4 w-4 animate-spin text-primary"
-									icon={Loading01Icon}
-								/>
-							)}
-							{item.status === "done" && (
-								<HugeiconsIcon
-									className="h-4 w-4 text-success"
-									icon={CheckmarkCircle01Icon}
+							{(item.status === "installing" || item.status === "done") && (
+								<IconSwap
+									a={
+										<HugeiconsIcon
+											className="h-4 w-4 animate-spin text-primary"
+											icon={Loading01Icon}
+										/>
+									}
+									b={
+										<HugeiconsIcon
+											className="h-4 w-4 text-success"
+											icon={CheckmarkCircle01Icon}
+										/>
+									}
+									state={item.status === "done" ? "b" : "a"}
 								/>
 							)}
 							{item.status === "failed" && (

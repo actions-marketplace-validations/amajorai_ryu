@@ -753,7 +753,8 @@ mod tests {
             "a serverless spec must still fail without an override"
         );
 
-        let api = spec_to_api_with_base(&spec, DEFAULT_OP_CAP, Some("http://127.0.0.1:8011")).unwrap();
+        let api =
+            spec_to_api_with_base(&spec, DEFAULT_OP_CAP, Some("http://127.0.0.1:8011")).unwrap();
         assert_eq!(api.base_url, "http://127.0.0.1:8011");
         // Pins the `host_of` assumption: the override must be an ABSOLUTE URL, or
         // domain derivation (and with it the egress grant) has nothing to parse.
@@ -766,7 +767,10 @@ mod tests {
     fn spec_to_api_still_reads_servers_when_no_override() {
         let api = spec_to_api_with_base(&petstore(), DEFAULT_OP_CAP, None).unwrap();
         assert_eq!(api.domain, "api.petstore.example");
-        assert!(api.tools.iter().all(|t| t.url.starts_with("https://api.petstore.example/v1")));
+        assert!(api
+            .tools
+            .iter()
+            .all(|t| t.url.starts_with("https://api.petstore.example/v1")));
     }
 
     #[test]
@@ -812,13 +816,17 @@ mod tests {
             "a $ref body must contribute its properties, got {props:#}"
         );
         assert_eq!(
-            tool.input_schema.pointer("/required/0").and_then(Value::as_str),
+            tool.input_schema
+                .pointer("/required/0")
+                .and_then(Value::as_str),
             Some("title")
         );
         // A property that is itself a `$ref` resolves one level, so the model sees a
         // real schema instead of an opaque pointer.
         assert_eq!(
-            props.pointer("/owner/properties/email/type").and_then(Value::as_str),
+            props
+                .pointer("/owner/properties/email/type")
+                .and_then(Value::as_str),
             Some("string")
         );
     }
@@ -882,7 +890,10 @@ mod tests {
         });
 
         let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
-        assert!(api.tools[0].input_schema.pointer("/properties/sku").is_some());
+        assert!(api.tools[0]
+            .input_schema
+            .pointer("/properties/sku")
+            .is_some());
     }
 
     #[test]
@@ -1009,10 +1020,7 @@ mod tests {
         });
 
         let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
-        assert!(api.tools[0]
-            .input_schema
-            .pointer("/properties/n")
-            .is_some());
+        assert!(api.tools[0].input_schema.pointer("/properties/n").is_some());
     }
 
     #[test]
@@ -1043,7 +1051,10 @@ mod tests {
 
         let api = spec_to_api(&spec, DEFAULT_OP_CAP).unwrap();
         assert_eq!(
-            api.tools[0].input_schema.pointer("/properties/page/type").and_then(Value::as_str),
+            api.tools[0]
+                .input_schema
+                .pointer("/properties/page/type")
+                .and_then(Value::as_str),
             Some("integer")
         );
     }

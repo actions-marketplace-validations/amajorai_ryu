@@ -186,7 +186,7 @@ pub fn resolve_pi_extensions(
             continue;
         };
         let grants = enabled.get(&manifest.id).map(Vec::as_slice).unwrap_or(&[]);
-        let tier = crate::plugins::builtins::tier_for(&manifest.id);
+        let tier = crate::plugins::builtins::tier_for_manifest(manifest);
         if !may_ship_pi_extensions(tier, grants) {
             for ext in &contributes.pi_extensions {
                 resolution.skipped.push(PiExtensionSkip {

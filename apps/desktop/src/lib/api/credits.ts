@@ -322,6 +322,15 @@ export interface WalletUpdate {
 	updatedAt: string;
 }
 
+/** A claimed low-balance transition from the cloud credit-alert stream. */
+export interface CreditAlertEvent {
+	balanceMicroUsd: number;
+	createdAt: string;
+	level: "warning";
+	thresholdMicroUsd: number;
+	title: string;
+}
+
 /**
  * Open the org wallet's live-balance stream and async-iterate its frames. Sends
  * the session bearer token in the `Authorization` header (fetch + ReadableStream
@@ -348,6 +357,16 @@ export async function* openWalletStream(
 		}
 		throw e;
 	}
+}
+
+/** Open the edge-triggered cloud low-balance notification stream. */
+export async function* openCreditAlertStream(
+	signal: AbortSignal
+): AsyncGenerator<SseMessage<CreditAlertEvent>> {
+	yield* openSse<CreditAlertEvent>(`${BASE}/alert/stream`, {
+		token: authToken(),
+		signal,
+	});
 }
 
 export interface TopupInput {

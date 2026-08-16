@@ -1294,7 +1294,10 @@ mod tests {
         );
         // An unparseable expiry also falls back to the ceiling rather than
         // rejecting the pairing.
-        assert_eq!(effective_expiry_ms("not a date", now), now + PAIRING_MAX_TTL_MS);
+        assert_eq!(
+            effective_expiry_ms("not a date", now),
+            now + PAIRING_MAX_TTL_MS
+        );
         // A short manager expiry is honoured verbatim.
         let soon = chrono::DateTime::from_timestamp_millis(now + 60_000)
             .expect("timestamp")
@@ -1468,7 +1471,10 @@ mod tests {
         let secret = store.take_for_cancel(nonce).expect("claim secret");
         assert_eq!(secret.expose(), "s3cr3t-claim-secret-0123456789ab");
         assert!(store.take_confirmed(nonce).is_none());
-        assert!(matches!(store.begin_poll(nonce, now), PollDecision::Unknown));
+        assert!(matches!(
+            store.begin_poll(nonce, now),
+            PollDecision::Unknown
+        ));
         // Nothing left to cancel twice.
         assert!(store.take_for_cancel(nonce).is_none());
     }

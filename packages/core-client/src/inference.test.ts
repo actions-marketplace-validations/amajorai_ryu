@@ -29,7 +29,7 @@ function stub(bodyText: string, status = 200): Captured {
 		cap.url = url;
 		cap.init = init;
 		return Promise.resolve(new Response(bodyText, { status }));
-	}) as typeof fetch;
+	}) as unknown as typeof fetch;
 	return cap;
 }
 
@@ -59,7 +59,7 @@ describe("getModelLaunchConfig", () => {
 
 	test("fails open to {} when fetch itself rejects", async () => {
 		globalThis.fetch = (() =>
-			Promise.reject(new Error("network down"))) as typeof fetch;
+			Promise.reject(new Error("network down"))) as unknown as typeof fetch;
 		expect(await getModelLaunchConfig(target, "m1")).toEqual({});
 	});
 

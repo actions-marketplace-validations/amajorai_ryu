@@ -42,7 +42,12 @@ import { useAgentsCatalog } from "@/src/hooks/useAgentsCatalog.ts";
 import { useCreditGrants } from "@/src/hooks/useCreditGrants.ts";
 import { usePiConfig } from "@/src/hooks/usePiConfig.ts";
 import { engineForAgent } from "@/src/lib/agent-logos.tsx";
-import type { AgentSummary } from "@/src/lib/api/agents.ts";
+import {
+	type AgentSummary,
+	removeAgentAccount,
+	switchAgentAccount,
+} from "@/src/lib/api/agents.ts";
+import { toTarget } from "@/src/lib/api/client.ts";
 import {
 	getActiveModel,
 	listInstalledModels,
@@ -50,10 +55,12 @@ import {
 } from "@/src/lib/api/models.ts";
 import {
 	filterEnabledModels,
+	type PiCatalog,
 	type PiProvider,
+	removeProviderAccount,
+	switchProviderAccount,
 } from "@/src/lib/api/pi-config.ts";
 import type { Team } from "@/src/lib/api/teams.ts";
-import { useAgentAutoDialog } from "@/src/store/useAgentAutoDialog.ts";
 import { useGatewayDialog } from "@/src/store/useGatewayDialog.ts";
 
 /** The flagship agent id (mirrors Core `DEFAULT_AGENT_ID`). */
@@ -162,7 +169,10 @@ export interface UseUniversalPickerParams {
 
 export interface UseUniversalPickerResult {
 	/** Body renderer for `ComposerSettingsMenu`'s `renderBody` prop. */
-	renderBody: (close: () => void) => ReactNode;
+	renderBody: (
+		close: () => void,
+		mode?: "agents" | "models" | "all"
+	) => ReactNode;
 }
 
 export function useUniversalPicker(
@@ -183,7 +193,6 @@ export function useUniversalPicker(
 	const { config, catalog, save } = usePiConfig();
 	const catalogAgents = useAgentsCatalog();
 	const openGateway = useGatewayDialog((s) => s.openGateway);
-	const openAgentAutoConfig = useAgentAutoDialog((s) => s.openAgentAutoConfig);
 	const { verdict, requestUpgrade } = useEntitlementContext();
 	// True only with an active PAID managed plan. The managed provider is always
 	// `configured` server-side (wallet-gated at the Gateway), so the composer upsell
@@ -349,8 +358,20 @@ export function useUniversalPicker(
 		[node.url, node.token, queryClient, saveProvider]
 	);
 
+	// Account switch/remove routes return the refreshed catalog; fold it straight
+	// into the cache so `configured`/`accounts` flip without a round trip.
+	const applyCatalog = useCallback(
+		(catalog: PiCatalog) => {
+			queryClient.setQueryData(["pi-config-catalog", node.url], catalog);
+		},
+		[queryClient, node.url]
+	);
+
 	const renderBody = useCallback(
-		(close: () => void): ReactNode => {
+		(
+			close: () => void,
+			mode: "agents" | "models" | "all" = "all"
+		): ReactNode => {
 			const ryuAgent =
 				agents.find((a) => a.id === RYU_AGENT_ID) ??
 				agents.find((a) => a.recommended) ??
@@ -378,6 +399,9 @@ export function useUniversalPicker(
 					authKind: p.authKind,
 					managed: Boolean(p.managed),
 					supportsDiscovery: p.supportsDiscovery !== false,
+					// Every account the provider holds in the sealed vault (labels
+					// only). Renders the submenu's switchable Account section.
+					accounts: p.accounts ?? [],
 					// Only the default managed row borrows OpenRouter's catalog (it has no
 					// model list of its own and routes there). A pool row enumerates under
 					// its OWN id or not at all — inheriting OpenRouter's list would have it
@@ -487,7 +511,6 @@ export function useUniversalPicker(
 						// Install errors surface via the catalog hook's error state.
 					});
 				},
-				onConfigureAuto: () => openAgentAutoConfig(),
 				onConfigureCredentials: () => openGateway("providers"),
 				onUpgrade: () => requestUpgrade(),
 				// The Local row is not a Pi provider (see `LOCAL_PROVIDER_ID`): every
@@ -523,9 +546,75 @@ export function useUniversalPicker(
 					}
 					saveProvider(providerId, model, level);
 				},
+				// ── Account switching (multi-account, sealed vault) ──
+				//
+				// Switch/remove fold the refreshed catalog straight into the cache
+				// (the route returns it) so the picker's `configured`/`accounts`
+				// state flips without a second round trip. Agent accounts live in a
+				// separate query keyed by agent id, so those get invalidated instead.
+				onSwitchProviderAccount: (providerId, accountId) => {
+					switchProviderAccount(toTarget(node), providerId, accountId)
+						.then(applyCatalog)
+						.catch((error: unknown) => {
+							sileo.error({
+								title:
+									error instanceof Error
+										? error.message
+										: "Could not switch account",
+							});
+						});
+				},
+				onRemoveProviderAccount: (providerId, accountId) => {
+					removeProviderAccount(toTarget(node), providerId, accountId)
+						.then(applyCatalog)
+						.catch((error: unknown) => {
+							sileo.error({
+								title:
+									error instanceof Error
+										? error.message
+										: "Could not remove account",
+							});
+						});
+				},
+				onSwitchAgentAccount: (agentId, accountId, provider) => {
+					switchAgentAccount(toTarget(node), agentId, { accountId, provider })
+						.then(() => {
+							queryClient
+								.invalidateQueries({
+									queryKey: ["agent-accounts", node.url, agentId],
+								})
+								.catch(() => undefined);
+						})
+						.catch((error: unknown) => {
+							sileo.error({
+								title:
+									error instanceof Error
+										? error.message
+										: "Could not switch account",
+							});
+						});
+				},
+				onRemoveAgentAccount: (agentId, accountId) => {
+					removeAgentAccount(toTarget(node), agentId, accountId)
+						.then(() => {
+							queryClient
+								.invalidateQueries({
+									queryKey: ["agent-accounts", node.url, agentId],
+								})
+								.catch(() => undefined);
+						})
+						.catch((error: unknown) => {
+							sileo.error({
+								title:
+									error instanceof Error
+										? error.message
+										: "Could not remove account",
+							});
+						});
+				},
 			};
 
-			return createElement(UniversalPickerBody, { data, close });
+			return createElement(UniversalPickerBody, { data, close, mode });
 		},
 		[
 			agents,
@@ -550,9 +639,9 @@ export function useUniversalPicker(
 			onSelectTeam,
 			onCreateAgent,
 			openGateway,
-			openAgentAutoConfig,
 			requestUpgrade,
 			saveProvider,
+			applyCatalog,
 		]
 	);
 

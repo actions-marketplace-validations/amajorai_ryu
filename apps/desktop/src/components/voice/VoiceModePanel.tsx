@@ -127,7 +127,7 @@ export function VoiceModePanel({ voice }: VoiceModePanelProps) {
 
 				{/* Transcript: chat-style log */}
 				<div
-					className="min-h-24 flex-1 space-y-3 overflow-y-auto px-4 py-4"
+					className="scroll-fade min-h-24 flex-1 space-y-3 overflow-y-auto px-4 py-4"
 					ref={scrollRef}
 				>
 					{hasTurns ? (

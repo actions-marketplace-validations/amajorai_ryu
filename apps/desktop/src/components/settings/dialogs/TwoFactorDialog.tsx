@@ -15,12 +15,12 @@ import { IconSwap } from "@ryu/ui/components/icon-swap";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { OTPInput, type OTPStatus } from "@ryu/ui/components/motion/otp-input";
+import { ExpandableQRCode } from "@ryu/ui/components/qr-code";
 import { Separator } from "@ryu/ui/components/separator";
 import { TextSwap } from "@ryu/ui/components/text-swap";
 import { SPRING_PANEL } from "@ryu/ui/lib/ease.ts";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useState } from "react";
-import QRCode from "react-qr-code";
 import { sileo } from "sileo";
 import { authClient } from "@/lib/auth-client.ts";
 
@@ -66,6 +66,7 @@ export function TwoFactorDialog({
 	const [saveReminder, setSaveReminder] = useState(false);
 	const [isBusy, setIsBusy] = useState(false);
 	const [copiedAll, setCopiedAll] = useState(false);
+	const [showManualSetup, setShowManualSetup] = useState(false);
 
 	const handleOpenChange = (next: boolean) => {
 		setOpen(next);
@@ -79,6 +80,7 @@ export function TwoFactorDialog({
 			setConfirmCode("");
 			setConfirmStatus("idle");
 			setSaveReminder(false);
+			setShowManualSetup(false);
 		}
 	};
 
@@ -297,35 +299,62 @@ export function TwoFactorDialog({
 									</DialogHeader>
 									<div className="flex flex-col items-center gap-4 py-2">
 										{totpUri && (
-											<div className="rounded-lg border bg-white p-4">
-												<QRCode size={180} value={totpUri} />
-											</div>
+											<ExpandableQRCode
+												containerClassName="border p-4"
+												size={180}
+												value={totpUri}
+											/>
 										)}
 										<div className="w-full">
-											<p className="mb-1 text-muted-foreground text-xs">
-												Or enter the key manually:
-											</p>
-											<div className="flex items-center gap-2">
-												<Input
-													className="bg-muted font-mono text-xs"
-													readOnly
-													value={totpUri.match(TOTP_SECRET_RE)?.[1] ?? ""}
-												/>
-												<Button
-													aria-label="Copy secret key"
-													className="shrink-0"
-													onClick={() => {
-														const secret =
-															totpUri.match(TOTP_SECRET_RE)?.[1] ?? "";
-														navigator.clipboard.writeText(secret);
-														sileo.success({ title: "Copied" });
-													}}
-													size="icon"
-													variant="ghost"
-												>
-													<HugeiconsIcon className="size-4" icon={Copy01Icon} />
-												</Button>
-											</div>
+											<Button
+												className="h-auto px-0 text-sm"
+												onClick={() => setShowManualSetup((shown) => !shown)}
+												variant="link"
+											>
+												{showManualSetup
+													? "Hide manual setup"
+													: "Can’t scan? Enter setup key manually"}
+											</Button>
+											{showManualSetup && (
+												<div className="space-y-3 rounded-md border bg-muted/40 p-3">
+													<p className="text-muted-foreground text-xs">
+														In your authenticator app, choose{" "}
+														<strong>Enter setup key</strong> and paste this key.
+													</p>
+													<div className="flex items-center gap-2">
+														<Input
+															aria-label="Authenticator setup key"
+															className="bg-background font-mono text-xs"
+															readOnly
+															value={totpUri.match(TOTP_SECRET_RE)?.[1] ?? ""}
+														/>
+														<Button
+															aria-label="Copy authenticator setup key"
+															onClick={() => {
+																navigator.clipboard.writeText(
+																	totpUri.match(TOTP_SECRET_RE)?.[1] ?? ""
+																);
+																sileo.success({ title: "Setup key copied" });
+															}}
+															size="icon"
+															variant="ghost"
+														>
+															<HugeiconsIcon
+																className="size-4"
+																icon={Copy01Icon}
+															/>
+														</Button>
+													</div>
+													<details className="text-xs">
+														<summary className="cursor-pointer text-muted-foreground">
+															Show setup URL
+														</summary>
+														<code className="mt-2 block break-all rounded bg-background p-2">
+															{totpUri}
+														</code>
+													</details>
+												</div>
+											)}
 										</div>
 									</div>
 									<DialogFooter>

@@ -87,7 +87,7 @@ export function NodeUnreachableBanner() {
 					disabled={retrying}
 					onClick={handleRetry}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{retrying ? "Checking…" : "Retry"}
 				</Button>

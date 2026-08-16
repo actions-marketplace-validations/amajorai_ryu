@@ -2,6 +2,7 @@
   "id": "@ryu/swift-lsp",
   "name": "Swift LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Swift language server (SourceKit-LSP) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install sourcekit-lsp; the plugin ships config.",
   "tagline": "Swift code intelligence via SourceKit-LSP",

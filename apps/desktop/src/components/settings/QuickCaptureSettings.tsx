@@ -233,7 +233,7 @@ function PermissionRow({
 				granted ? (
 					<span className="text-muted-foreground text-xs">Granted</span>
 				) : (
-					<Button onClick={onFix} size="sm" variant="outline">
+					<Button onClick={onFix} size="sm" variant="ghost">
 						Grant
 					</Button>
 				)

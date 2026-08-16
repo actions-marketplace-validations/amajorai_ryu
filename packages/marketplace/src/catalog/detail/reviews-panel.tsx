@@ -202,7 +202,7 @@ export default function ReviewsPanel({
 					disabled={state.loadingMore}
 					onClick={() => load(state.nextCursor)}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{state.loadingMore ? <Spinner className="size-4" /> : null}
 					Load more reviews
@@ -243,7 +243,7 @@ function RatingSummary({
 				)}
 			</div>
 			{onWrite && !writingOpen ? (
-				<Button onClick={onWrite} size="sm" variant="outline">
+				<Button onClick={onWrite} size="sm" variant="ghost">
 					Write a review
 				</Button>
 			) : null}

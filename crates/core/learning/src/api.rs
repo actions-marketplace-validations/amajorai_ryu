@@ -33,6 +33,7 @@ pub fn routes(ctx: LearningCtx) -> Router<()> {
         .route("/api/learn/score", post(score))
         .route("/api/learn/synthesize", post(synthesize))
         .route("/api/learn/cycle", post(cycle))
+        .route("/api/learn/merge", post(merge))
         .route("/api/learn/exclude", post(exclude))
         .route("/api/experience/list", get(list))
         .with_state(ctx)
@@ -160,6 +161,24 @@ pub async fn cycle(State(ctx): State<LearningCtx>, Json(body): Json<Value>) -> R
     }
 }
 
+/// `POST /api/learn/merge` — merge a completed learning adapter into a
+/// registered model artifact. Body: `{ "adapter_name": "..." }` (or
+/// `adapter_path`). Serving activation remains an explicit Core model switch.
+#[utoipa::path(
+    post,
+    path = "/api/learn/merge",
+    tag = "Learning",
+    summary = "merge a completed learning adapter into a registered model",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn merge(State(ctx): State<LearningCtx>, Json(body): Json<Value>) -> Response {
+    match engine::merge_cycle_output(&ctx, body).await {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 /// `POST /api/learn/exclude` — per-conversation opt-out. Body:
 /// `{ "conversation_id": "...", "excluded": true }`. Sets the pref AND flips any
 /// already-buffered rows so an excluded chat is dropped from training retroactively.
@@ -258,7 +277,7 @@ mod tests {
         let (status, v) = body(resp).await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(v["enabled"], false); // training default OFF
-        assert_eq!(v["skills_enabled"], true); // skills default ON
+        assert_eq!(v["skills_enabled"], false); // skills default OFF
     }
 
     #[tokio::test]

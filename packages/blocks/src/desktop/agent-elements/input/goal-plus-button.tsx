@@ -20,29 +20,12 @@ import {
 } from "@ryu/ui/components/popover";
 import { Switch } from "@ryu/ui/components/switch";
 import { cn } from "@ryu/ui/lib/utils";
-import type { ReactNode } from "react";
 import { memo, useState } from "react";
-
-const PLUS_MENU_ITEM =
-	"h-8 w-full items-center justify-start gap-2 rounded-md px-2 text-left font-medium text-sm";
-
-const PLUS_MENU_SECTION_LABEL =
-	"px-2 pt-2 pb-1 text-muted-foreground text-xs leading-none";
-
-function PlusMenuSection({
-	children,
-	title,
-}: {
-	children: ReactNode;
-	title: string;
-}) {
-	return (
-		<div className="space-y-0.5">
-			<div className={PLUS_MENU_SECTION_LABEL}>{title}</div>
-			{children}
-		</div>
-	);
-}
+import {
+	ComposerMenu,
+	type ComposerMenuGroup,
+	type ComposerMenuItem,
+} from "./composer-menu.tsx";
 
 export interface GoalControls {
 	/** Whether a goal is currently active on this conversation. */
@@ -112,6 +95,10 @@ export interface MediaGenControls {
 }
 
 export interface GoalPlusButtonProps {
+	/** Apps, plugins, and context references shown in the shared searchable list. */
+	directoryGroups?: ComposerMenuGroup[];
+	/** Text typed into the composer while the + menu is open. */
+	directoryQuery?: string;
 	disabled?: boolean;
 	/**
 	 * Double-check affordances. When provided, the dropdown gains a "Double-check"
@@ -131,6 +118,8 @@ export interface GoalPlusButtonProps {
 	imageGen?: MediaGenControls;
 	/** "Add photos & files" action. Omitted item when undefined. */
 	onAttach?: () => void;
+	onDirectorySelect?: (item: ComposerMenuItem) => void;
+	onMenuOpenChange?: (open: boolean) => void;
 	/**
 	 * Toggles contributed by enabled plugins (`composer_controls`). Each renders as
 	 * a toggle row in the Assist section, mirroring the built-in double-check row.
@@ -158,8 +147,28 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	videoGen,
 	pluginControls,
 	disabled,
+	directoryGroups = [],
+	directoryQuery = "",
+	onDirectorySelect,
+	onMenuOpenChange,
 }: GoalPlusButtonProps) {
 	const [open, setOpen] = useState(false);
+	const handleOpenChange = (next: boolean) => {
+		setOpen(next);
+		onMenuOpenChange?.(next);
+	};
+	const handlePopoverOpenChange = (
+		next: boolean,
+		details: { reason?: string }
+	) => {
+		// The shared + directory deliberately returns focus to the textarea so the
+		// user can search it by typing. Base UI reports that hand-off as focus-out;
+		// keep the controlled popup open for that one close reason.
+		if (!next && details.reason === "focus-out") {
+			return;
+		}
+		handleOpenChange(next);
+	};
 
 	const showVerdict = Boolean(
 		doubleCheck?.enabled && doubleCheck.result && !doubleCheck.checking
@@ -167,10 +176,143 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 	const verdictOk = doubleCheck?.result?.ok ?? false;
 	const VerdictIcon = verdictOk ? Tick02Icon : InformationCircleIcon;
 	const verdictTone = verdictOk ? "text-emerald-500" : "text-amber-500";
+	const menuGroups: ComposerMenuGroup[] = [];
+	if (onAttach) {
+		menuGroups.push({
+			id: "add",
+			label: "Add",
+			items: [
+				{
+					id: "action:attach",
+					label: "Files and images",
+					description: "Attach context from this device",
+					icon: <HugeiconsIcon className="size-4" icon={Image01Icon} />,
+				},
+			],
+		});
+	}
+	const createItems: ComposerMenuItem[] = [];
+	if (imageGen) {
+		createItems.push({
+			id: "action:image",
+			label: "Generate image",
+			icon: <HugeiconsIcon className="size-4" icon={AiImageIcon} />,
+			disabled: imageGen.disabled || imageGen.generating,
+			badge: imageGen.generating ? "Working…" : undefined,
+		});
+	}
+	if (videoGen) {
+		createItems.push({
+			id: "action:video",
+			label: "Generate video",
+			icon: <HugeiconsIcon className="size-4" icon={Video01Icon} />,
+			disabled: videoGen.disabled || videoGen.generating,
+			badge: videoGen.generating ? "Working…" : undefined,
+		});
+	}
+	if (createItems.length > 0) {
+		menuGroups.push({ id: "create", label: "Create", items: createItems });
+	}
+	const assistItems: ComposerMenuItem[] = [];
+	if (goal) {
+		assistItems.push({
+			id: "action:goal",
+			label: "Pursue goal",
+			icon: <HugeiconsIcon className="size-4" icon={Target01Icon} />,
+			trailing: (
+				<Switch
+					aria-label="Pursue goal"
+					checked={goal.active}
+					className="pointer-events-none"
+					tabIndex={-1}
+				/>
+			),
+		});
+	}
+	if (doubleCheck) {
+		assistItems.push({
+			id: "action:double-check",
+			label: "Double-check",
+			description: "Have a second model review each answer",
+			icon: <HugeiconsIcon className="size-4" icon={Tick02Icon} />,
+			badge:
+				doubleCheck.enabled && doubleCheck.checking ? "Checking…" : undefined,
+			trailing: (
+				<Switch
+					aria-label="Double-check"
+					checked={doubleCheck.enabled}
+					className="pointer-events-none"
+					tabIndex={-1}
+				/>
+			),
+		});
+	}
+	for (const control of pluginControls ?? []) {
+		assistItems.push({
+			id: `control:${control.id}`,
+			label: control.label,
+			description: control.description,
+			icon: <HugeiconsIcon className="size-4" icon={Tick02Icon} />,
+			trailing: (
+				<Switch
+					aria-label={control.label}
+					checked={control.enabled}
+					className="pointer-events-none"
+					tabIndex={-1}
+				/>
+			),
+		});
+	}
+	if (ghost) {
+		assistItems.push({
+			id: "action:ghost",
+			label: "Temporary chat",
+			description: "This thread is not saved to Ryu history",
+			icon: <HugeiconsIcon className="size-4" icon={GhostIcon} />,
+			trailing: (
+				<Switch
+					aria-label="Temporary chat"
+					checked={ghost.active}
+					className="pointer-events-none"
+					tabIndex={-1}
+				/>
+			),
+		});
+	}
+	if (assistItems.length > 0) {
+		menuGroups.push({ id: "assist", label: "Assist", items: assistItems });
+	}
+	menuGroups.push(...directoryGroups);
+
+	const handleMenuSelect = (item: ComposerMenuItem) => {
+		if (item.id === "action:attach") {
+			onAttach?.();
+		} else if (item.id === "action:image") {
+			imageGen?.onGenerate();
+		} else if (item.id === "action:video") {
+			videoGen?.onGenerate();
+		} else if (item.id === "action:goal") {
+			goal?.onPursueToggle();
+		} else if (item.id === "action:double-check") {
+			doubleCheck?.onToggle(!doubleCheck.enabled);
+		} else if (item.id === "action:ghost") {
+			ghost?.onToggle();
+		} else if (item.id.startsWith("control:")) {
+			const control = pluginControls?.find(
+				(candidate) => `control:${candidate.id}` === item.id
+			);
+			if (control) {
+				control.onToggle(control.flag, !control.enabled);
+			}
+		} else {
+			onDirectorySelect?.(item);
+		}
+		handleOpenChange(false);
+	};
 
 	return (
 		<div className="flex items-center gap-1">
-			<Popover onOpenChange={setOpen} open={open}>
+			<Popover onOpenChange={handlePopoverOpenChange} open={open}>
 				<PopoverTrigger
 					render={
 						<Button
@@ -187,176 +329,17 @@ export const GoalPlusButton = memo(function GoalPlusButton({
 				</PopoverTrigger>
 				<PopoverContent
 					align="start"
-					className="max-h-[320px] w-[min(calc(100vw_-_24px),704px)] gap-1 overflow-y-auto rounded-2xl border-border/70 bg-popover/95 p-1.5 shadow-xl"
+					className="w-[min(calc(100vw_-_32px),704px)] gap-0 rounded-2xl border-border/70 bg-popover/95 p-1.5 shadow-xl"
 					side="top"
-					sideOffset={6}
+					sideOffset={8}
 				>
-					{onAttach && (
-						<PlusMenuSection title="Add">
-							<Button
-								className={PLUS_MENU_ITEM}
-								onClick={() => {
-									onAttach();
-									setOpen(false);
-								}}
-								type="button"
-								variant="ghost"
-							>
-								<HugeiconsIcon
-									className="size-4 shrink-0 text-muted-foreground"
-									icon={Image01Icon}
-								/>
-								<span className="flex-1">Files and images</span>
-							</Button>
-						</PlusMenuSection>
-					)}
-					{(imageGen || videoGen) && (
-						<PlusMenuSection title="Create">
-							{imageGen && (
-								<Button
-									className={PLUS_MENU_ITEM}
-									disabled={imageGen.disabled || imageGen.generating}
-									onClick={() => {
-										imageGen.onGenerate();
-										setOpen(false);
-									}}
-									type="button"
-									variant="ghost"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={AiImageIcon}
-									/>
-									<span className="flex-1">Generate image</span>
-									{imageGen.generating && (
-										<span className="text-muted-foreground text-xs">
-											working...
-										</span>
-									)}
-								</Button>
-							)}
-							{videoGen && (
-								<Button
-									className={PLUS_MENU_ITEM}
-									disabled={videoGen.disabled || videoGen.generating}
-									onClick={() => {
-										videoGen.onGenerate();
-										setOpen(false);
-									}}
-									type="button"
-									variant="ghost"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={Video01Icon}
-									/>
-									<span className="flex-1">Generate video</span>
-									{videoGen.generating && (
-										<span className="text-muted-foreground text-xs">
-											working...
-										</span>
-									)}
-								</Button>
-							)}
-						</PlusMenuSection>
-					)}
-					{(goal || doubleCheck || pluginControls?.length) && (
-						<PlusMenuSection title="Assist">
-							{goal && (
-								<button
-									className={cn(PLUS_MENU_ITEM, "flex hover:bg-accent")}
-									onClick={() => {
-										goal.onPursueToggle();
-										setOpen(false);
-									}}
-									type="button"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={Target01Icon}
-									/>
-									<span className="flex-1">Pursue goal</span>
-									<Switch
-										aria-label="Pursue goal"
-										checked={goal.active}
-										className="pointer-events-none"
-										tabIndex={-1}
-									/>
-								</button>
-							)}
-							{doubleCheck && (
-								<button
-									className={cn(PLUS_MENU_ITEM, "flex hover:bg-accent")}
-									onClick={() => doubleCheck.onToggle(!doubleCheck.enabled)}
-									title="Double-check: have a second model review each answer"
-									type="button"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={Tick02Icon}
-									/>
-									<span className="flex-1">Double-check</span>
-									{doubleCheck.enabled && doubleCheck.checking && (
-										<span className="text-muted-foreground text-xs">
-											checking...
-										</span>
-									)}
-									<Switch
-										aria-label="Double-check"
-										checked={doubleCheck.enabled}
-										className="pointer-events-none"
-										tabIndex={-1}
-									/>
-								</button>
-							)}
-							{pluginControls?.map((control) => (
-								<button
-									className={cn(PLUS_MENU_ITEM, "flex hover:bg-accent")}
-									key={control.id}
-									onClick={() =>
-										control.onToggle(control.flag, !control.enabled)
-									}
-									title={control.description ?? control.label}
-									type="button"
-								>
-									<HugeiconsIcon
-										className="size-4 shrink-0 text-muted-foreground"
-										icon={Tick02Icon}
-									/>
-									<span className="flex-1">{control.label}</span>
-									<Switch
-										aria-label={control.label}
-										checked={control.enabled}
-										className="pointer-events-none"
-										tabIndex={-1}
-									/>
-								</button>
-							))}
-						</PlusMenuSection>
-					)}
-					{ghost && (
-						<button
-							className={cn(PLUS_MENU_ITEM, "flex hover:bg-accent")}
-							onClick={() => {
-								ghost.onToggle();
-								setOpen(false);
-							}}
-							title="Temporary chat — this thread isn't saved to Ryu history"
-							type="button"
-						>
-							<HugeiconsIcon
-								className="size-4 shrink-0 text-muted-foreground"
-								icon={GhostIcon}
-							/>
-							<span className="flex-1">Temporary chat</span>
-							<Switch
-								aria-label="Temporary chat"
-								checked={ghost.active}
-								className="pointer-events-none"
-								tabIndex={-1}
-							/>
-						</button>
-					)}
+					<ComposerMenu
+						embedded
+						groups={menuGroups}
+						onDismiss={() => handleOpenChange(false)}
+						onSelect={handleMenuSelect}
+						query={directoryQuery}
+					/>
 				</PopoverContent>
 			</Popover>
 

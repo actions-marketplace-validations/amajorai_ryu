@@ -18,10 +18,20 @@ pub struct WorktreeGuard {
     repo_root: PathBuf,
     /// The commit SHA from which this worktree was forked (the base for diff).
     pub base_hash: String,
+    /// Environment variables inherited by setup/cleanup and the ACP child.
+    pub environment: Vec<(String, String)>,
+    cleanup_script: Option<String>,
 }
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
+        if let Some(script) = self.cleanup_script.as_deref() {
+            if let Err(error) =
+                run_environment_script(script, &self.path, &self.repo_root, &self.environment)
+            {
+                tracing::warn!(error = %error, path = %self.path.display(), "worktree cleanup script failed");
+            }
+        }
         remove_worktree_sync(&self.repo_root, &self.path, &self.branch);
     }
 }
@@ -141,7 +151,33 @@ pub fn create_worktree_in(
         branch,
         repo_root: repo_path.to_owned(),
         base_hash,
+        environment: Vec::new(),
+        cleanup_script: None,
     })
+}
+
+impl WorktreeGuard {
+    /// Configure and bootstrap this worktree. The cleanup hook is armed before
+    /// setup runs, so a partially completed setup still gets its matching cleanup.
+    pub fn configure_environment(
+        &mut self,
+        setup_script: Option<&str>,
+        cleanup_script: Option<&str>,
+        environment: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        self.environment = environment;
+        self.cleanup_script = cleanup_script
+            .map(str::trim)
+            .filter(|script| !script.is_empty())
+            .map(str::to_owned);
+        if let Some(script) = setup_script
+            .map(str::trim)
+            .filter(|script| !script.is_empty())
+        {
+            run_environment_script(script, &self.path, &self.repo_root, &self.environment)?;
+        }
+        Ok(())
+    }
 }
 
 /// Remove a worktree directory and its branch; called from `Drop`.
@@ -193,6 +229,51 @@ fn remove_worktree_sync(repo_root: &Path, worktree_path: &Path, branch: &str) {
         }
         Err(e) => tracing::warn!("git branch -D exec error: {e}"),
     }
+}
+
+fn run_environment_script(
+    script: &str,
+    worktree_path: &Path,
+    repo_root: &Path,
+    environment: &[(String, String)],
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+        command
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut command = Command::new("sh");
+        command.args(["-lc", script]);
+        command
+    };
+
+    command
+        .current_dir(worktree_path)
+        .env("RYU_PROJECT_PATH", repo_root)
+        .env("RYU_WORKTREE_PATH", worktree_path)
+        .envs(environment.iter().cloned())
+        .no_window();
+    let output = command
+        .output()
+        .map_err(|error| anyhow::anyhow!("environment script spawn failed: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    Err(anyhow::anyhow!(
+        "environment script exited with {}{}",
+        output.status,
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    ))
 }
 
 /// Detect whether `path` is inside a git repository. Used to gate worktree
@@ -974,5 +1055,48 @@ mod tests {
             branches_str.trim().is_empty(),
             "run branch should be deleted after drop"
         );
+    }
+
+    #[test]
+    fn project_environment_runs_setup_and_cleanup_with_variables() {
+        let tmp = TempDir::new().expect("tempdir");
+        let repo = tmp.path();
+        init_git_repo(repo);
+
+        let mut guard = create_worktree(repo).expect("create_worktree");
+        let worktree_path = guard.path.clone();
+
+        #[cfg(target_os = "windows")]
+        let setup = "Set-Content -Path setup-marker.txt -Value $env:RYU_TEST_VALUE";
+        #[cfg(not(target_os = "windows"))]
+        let setup = "printf '%s' \"$RYU_TEST_VALUE\" > setup-marker.txt";
+        #[cfg(target_os = "windows")]
+        let cleanup =
+            "Set-Content -Path (Join-Path $env:RYU_PROJECT_PATH cleanup-marker.txt) -Value cleaned";
+        #[cfg(not(target_os = "windows"))]
+        let cleanup = "printf cleaned > \"$RYU_PROJECT_PATH/cleanup-marker.txt\"";
+
+        guard
+            .configure_environment(
+                Some(setup),
+                Some(cleanup),
+                vec![("RYU_TEST_VALUE".to_owned(), "ready".to_owned())],
+            )
+            .expect("configure environment");
+        assert_eq!(
+            std::fs::read_to_string(worktree_path.join("setup-marker.txt"))
+                .expect("setup marker")
+                .trim(),
+            "ready"
+        );
+
+        drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("cleanup-marker.txt"))
+                .expect("cleanup marker")
+                .trim(),
+            "cleaned"
+        );
+        assert!(!worktree_path.exists(), "worktree is removed after cleanup");
     }
 }

@@ -5,7 +5,7 @@
 // /health and /metrics and returns a combined snapshot, or a clear down state
 // (`reachable: false`) when the gateway is unreachable while Core is still up.
 
-import { apiUrl, type ApiTarget, request, requestHeaders } from "./client.ts";
+import { type ApiTarget, apiUrl, request, requestHeaders } from "./client.ts";
 import { restartGateway } from "./system.ts";
 
 /** Gateway `/health` payload (status, version, providers, auth flag). */
@@ -1429,6 +1429,8 @@ export interface GatewayConfig {
 	 * `firewall_agent_overlays`.
 	 */
 	firewall_org_overlays: Record<string, GatewayFirewallOverlay>;
+	/** Resolved pipeline stages currently running in the gateway process. */
+	pipeline_stages?: string[];
 	providers: GatewayProvidersConfig;
 	routing: GatewayRoutingConfig;
 }

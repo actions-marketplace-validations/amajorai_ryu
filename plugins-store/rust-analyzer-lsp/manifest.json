@@ -2,6 +2,7 @@
   "id": "@ryu/rust-analyzer-lsp",
   "name": "Rust LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Rust language server (rust-analyzer) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install rust-analyzer; the plugin ships config.",
   "tagline": "Rust code intelligence via rust-analyzer",

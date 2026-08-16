@@ -12,7 +12,7 @@
 //! and the Learning-App enable gate on the whole surface (`learning_routes`).
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     response::{IntoResponse, Response},
     Json,
 };
@@ -165,6 +165,24 @@ pub async fn cycle(State(state): State<ServerState>, Json(body): Json<Value>) ->
     }
 }
 
+/// `POST /api/learn/merge` — merge a completed learning adapter into a
+/// registered model artifact. Serving activation remains an explicit Core model
+/// switch. Body: `{ "adapter_name": "..." }` (or `adapter_path`).
+#[utoipa::path(
+    post,
+    path = "/api/learn/merge",
+    tag = "Learning",
+    summary = "merge a completed learning adapter into a registered model",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn merge(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
+    match ryu_learning::merge_cycle_output(&learning_ctx(&state), body).await {
+        Ok(outcome) => Json(outcome).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 /// `POST /api/learn/exclude` — per-conversation opt-out. Body:
 /// `{ "conversation_id": "...", "excluded": true }`. Sets the pref AND flips any
 /// already-buffered rows so an excluded chat is dropped from training retroactively.
@@ -176,7 +194,11 @@ pub async fn cycle(State(state): State<ServerState>, Json(body): Json<Value>) ->
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn exclude(State(state): State<ServerState>, Json(body): Json<Value>) -> Response {
+pub async fn exclude(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Json(body): Json<Value>,
+) -> Response {
     let Some(cid) = body.get("conversation_id").and_then(Value::as_str) else {
         return bad_request("missing `conversation_id`");
     };
@@ -184,6 +206,9 @@ pub async fn exclude(State(state): State<ServerState>, Json(body): Json<Value>) 
         .get("excluded")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    if let Err(resp) = super::require_conversation_read_by_id(&state, &caller, cid).await {
+        return resp;
+    }
     // Flip already-buffered rows FIRST and surface any failure — the retroactive
     // training-exclusion guarantee depends on this UPDATE, so a swallowed error
     // (e.g. a busy WAL) must not be reported as success. Only persist the pref
@@ -198,6 +223,44 @@ pub async fn exclude(State(state): State<ServerState>, Json(body): Json<Value>) 
     }
     Json(json!({ "conversation_id": cid, "excluded": excluded, "rows_updated": flipped }))
         .into_response()
+}
+
+/// `GET /api/learn/exclude/:conversation_id` — read one conversation's
+/// exclusion state for the sidebar toggle. The same conversation read ACL used
+/// by synthesis applies because the id is a client-supplied resource selector.
+#[utoipa::path(
+    get,
+    path = "/api/learn/exclude/{conversation_id}",
+    tag = "Learning",
+    summary = "read a conversation's learning exclusion state.",
+    params(("conversation_id" = String, Path, description = "Conversation id")),
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn exclusion(
+    State(state): State<ServerState>,
+    axum::Extension(caller): axum::Extension<Option<crate::identity_verify::VerifiedCaller>>,
+    Path(conversation_id): Path<String>,
+) -> Response {
+    if let Err(resp) =
+        super::require_conversation_read_by_id(&state, &caller, &conversation_id).await
+    {
+        return resp;
+    }
+    let key = format!("{}{conversation_id}", ryu_learning::LEARNING_EXCLUDE_PREFIX);
+    let excluded = state
+        .preferences
+        .get(&key)
+        .await
+        .ok()
+        .flatten()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    Json(json!({ "conversation_id": conversation_id, "excluded": excluded })).into_response()
 }
 
 fn err(e: anyhow::Error) -> Response {

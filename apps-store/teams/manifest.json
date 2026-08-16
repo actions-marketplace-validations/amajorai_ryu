@@ -2,6 +2,7 @@
   "id": "@ryu/teams",
   "name": "Teams",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Communication",
   "description": "Teams: named groups of agents you can address as one. Governance shell over the in-crate teams store (agent-id membership only); no documents, no external dependencies. Runs the out-of-process ryu-teams sidecar; Core proxies /api/teams/* to it.",
   "tagline": "Address a group of agents as one",

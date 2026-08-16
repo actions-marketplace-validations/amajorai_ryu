@@ -166,7 +166,7 @@ export function SettingsSyncTab() {
 								disabled={!enabled}
 								onClick={handleSyncNow}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Sync now
 							</Button>
@@ -222,14 +222,14 @@ export function SettingsSyncTab() {
 							<Button
 								onClick={() => resolveAllConflicts("remote")}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Use cloud for all
 							</Button>
 							<Button
 								onClick={() => resolveAllConflicts("local")}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Keep this machine
 							</Button>
@@ -255,7 +255,7 @@ export function SettingsSyncTab() {
 											className="mt-1 self-start"
 											onClick={() => resolveConflict(conflict.key, "local")}
 											size="sm"
-											variant="outline"
+											variant="ghost"
 										>
 											Keep this
 										</Button>
@@ -271,7 +271,7 @@ export function SettingsSyncTab() {
 											className="mt-1 self-start"
 											onClick={() => resolveConflict(conflict.key, "remote")}
 											size="sm"
-											variant="outline"
+											variant="ghost"
 										>
 											Use cloud
 										</Button>
@@ -306,7 +306,7 @@ export function SettingsSyncTab() {
 				<SettingsGroup>
 					<SettingsItem
 						actions={
-							<Button onClick={handleForget} size="sm" variant="outline">
+							<Button onClick={handleForget} size="sm" variant="ghost">
 								Delete cloud copy
 							</Button>
 						}

@@ -561,7 +561,10 @@ mod tests {
     fn clean_verdict_needs_no_categories() {
         let v = parse_verdict(r#"{"flagged": false, "categories": []}"#).expect("parses");
         assert!(!v.flagged);
-        assert!(v.available, "the judge did answer; the seed must not override");
+        assert!(
+            v.available,
+            "the judge did answer; the seed must not override"
+        );
         // A clean verdict may even carry topic words without being discarded —
         // the in-enum rule gates blocking, not allowing.
         let v = parse_verdict(r#"{"flagged": false, "categories": ["weather"]}"#).expect("parses");

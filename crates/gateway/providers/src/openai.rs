@@ -10,8 +10,8 @@ use crate::{error::ProviderError, quota::ProviderQuotas};
 
 use super::{
     audio_response_to_envelope, audio_speech_url, audio_transcriptions_url, chat_completions_url,
-    check_response_status, check_stream_status, discover_openai_models, images_url,
-    models_from_response, send_with_retry, Provider,
+    check_response_status, check_stream_status, discover_openai_models, embeddings_url, images_url,
+    models_from_response, rerank_url, send_with_retry, Provider,
 };
 
 pub struct OpenAiProvider {
@@ -157,6 +157,64 @@ impl Provider for OpenAiProvider {
                 retry_after: None,
                 reset_at: None,
             }))
+        })
+    }
+
+    fn embed<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let url = embeddings_url(&self.base_url);
+            let attempts = self.keys.len().max(1);
+            let mut last_err = None;
+            for _ in 0..attempts {
+                let key = self.next_key();
+                let resp = send_with_retry(
+                    || {
+                        let req = self.client.post(&url).bearer_auth(&key).json(&payload);
+                        Box::pin(async move { req.send().await })
+                    },
+                    "openai",
+                    3,
+                )
+                .await?;
+                match check_response_status(resp, "openai", Some(&self.quota)).await {
+                    Err(e @ ProviderError::RateLimited { .. }) if attempts > 1 => {
+                        last_err = Some(e);
+                    }
+                    result => return result,
+                }
+            }
+            Err(last_err.unwrap_or_else(|| {
+                ProviderError::Provider("openai embeddings request was rate limited".to_owned())
+            }))
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let url = rerank_url(&self.base_url);
+            let key = self.next_key();
+            let resp = send_with_retry(
+                || {
+                    let req = self.client.post(&url).bearer_auth(&key).json(&payload);
+                    Box::pin(async move { req.send().await })
+                },
+                "openai",
+                3,
+            )
+            .await?;
+            check_response_status(resp, "openai", Some(&self.quota)).await
         })
     }
 
@@ -433,6 +491,48 @@ mod tests {
         let rendered = format!("{err}{err:?}");
         assert!(!rendered.contains(SECRET), "leaked: {rendered}");
         assert!(rendered.contains("bad key"));
+    }
+
+    #[tokio::test]
+    async fn embed_forwards_dimensions_and_routed_model() {
+        let server = MockServer::always(MockResponse::ok_json(
+            r#"{"data":[{"embedding":[0.1,0.2]}]}"#,
+        ))
+        .await;
+        let p = provider_with(server.base_url().to_string(), vec!["sk-embed"]);
+        p.embed(
+            "text-embedding-3-small",
+            &json!({ "input": "hello", "dimensions": 2 }),
+        )
+        .await
+        .unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.path, "/embeddings");
+        assert_eq!(request.header("authorization").as_deref(), Some("Bearer sk-embed"));
+        assert_eq!(request.json()["model"], json!("text-embedding-3-small"));
+        assert_eq!(request.json()["dimensions"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn rerank_forwards_documents_and_routed_model() {
+        let server = MockServer::always(MockResponse::ok_json(
+            r#"{"results":[{"index":0,"relevance_score":0.9}]}"#,
+        ))
+        .await;
+        let p = provider_with(server.base_url().to_string(), vec!["sk-rerank"]);
+        p.rerank(
+            "bge-reranker",
+            &json!({ "query": "hello", "documents": ["hello world"] }),
+        )
+        .await
+        .unwrap();
+
+        let request = &server.requests()[0];
+        assert_eq!(request.path, "/rerank");
+        assert_eq!(request.header("authorization").as_deref(), Some("Bearer sk-rerank"));
+        assert_eq!(request.json()["model"], json!("bge-reranker"));
+        assert_eq!(request.json()["documents"][0], json!("hello world"));
     }
 
     #[tokio::test]

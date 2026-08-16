@@ -1,6 +1,6 @@
 [package]
 name = "ryu-gw-firewall"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/amajorai/ryu"
@@ -9,4 +9,5 @@ description = "Ryu Gateway firewall scanning core: the pure regex detection engi
 [dependencies]
 regex = "1"
 serde = { version = "1", features = ["derive"] }
+shell-words = "1"
 tracing = "0.1"

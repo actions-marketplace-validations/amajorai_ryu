@@ -157,10 +157,7 @@ fn archive_url() -> Result<(String, bool)> {
         )
     })?;
     Ok((
-        format!(
-            "https://pkgs.tailscale.com/stable/{}",
-            artifact_name(arch)
-        ),
+        format!("https://pkgs.tailscale.com/stable/{}", artifact_name(arch)),
         false,
     ))
 }
@@ -361,10 +358,7 @@ impl TailscaleDownloader {
                      publishes no `{}` for this architecture ({}) — install the official \
                      client from https://tailscale.com/download, or set {RELEASE_URL_ENV} to \
                      an archive containing `{DAEMON_BIN}` and `{CLI_BIN}`.",
-                    goarch().map_or_else(
-                        || "tailscale_<ver>_<arch>.tgz".to_owned(),
-                        artifact_name
-                    ),
+                    goarch().map_or_else(|| "tailscale_<ver>_<arch>.tgz".to_owned(), artifact_name),
                     std::env::consts::ARCH,
                 )
             })?;
@@ -646,8 +640,11 @@ mod tests {
         let _g = EnvGuard::set("  https://mirror.test/ts.tgz  ");
         let (url, is_override) = archive_url().expect("a url");
         assert_eq!(url, "https://mirror.test/ts.tgz");
-        assert!(is_override, "the override must be flagged: it is the ONLY leg \
-                              allowed to download without a verified checksum");
+        assert!(
+            is_override,
+            "the override must be flagged: it is the ONLY leg \
+                              allowed to download without a verified checksum"
+        );
     }
 
     #[test]
@@ -661,7 +658,10 @@ mod tests {
         if goarch().is_some() {
             let (url, is_override) = archive_url().expect("a url");
             assert!(!is_override);
-            assert!(url.starts_with("https://pkgs.tailscale.com/stable/"), "got: {url}");
+            assert!(
+                url.starts_with("https://pkgs.tailscale.com/stable/"),
+                "got: {url}"
+            );
         }
     }
 

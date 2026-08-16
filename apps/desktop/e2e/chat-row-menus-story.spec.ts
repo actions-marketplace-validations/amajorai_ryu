@@ -31,10 +31,8 @@ function row(page: Page) {
 /**
  * Open the ⋯ dropdown. Two quirks make this fiddlier than a click: the trigger
  * is `display:none` until the row is hovered, and that same hover opens the
- * row's HoverCard preview, which portals to the row's right and sits over the
- * trigger for as long as the pointer stays on the row. So the pointer opens the
- * trigger and the keyboard activates it — the one combination that is not a race
- * with the preview.
+ * row's HoverCard preview. So the pointer opens the trigger and the keyboard
+ * activates it — the one combination that is not a race with the preview.
  */
 async function openDropdown(page: Page) {
 	await row(page).hover();
@@ -68,6 +66,26 @@ async function menuLabels(
 }
 
 test.describe("sidebar chat row — contributed rows on both menus", () => {
+	test("the item preview clears the sidebar edge", async ({ page }) => {
+		await page.goto(STORY_URL);
+		await row(page).hover();
+
+		const boundary = page.locator("[data-sidebar-preview-boundary]");
+		const preview = page.locator('[data-slot="hover-card-content"]');
+		await expect(preview).toBeVisible();
+
+		const boundaryBox = await boundary.boundingBox();
+		const previewBox = await preview.boundingBox();
+		expect(boundaryBox).not.toBeNull();
+		expect(previewBox).not.toBeNull();
+		if (!(boundaryBox && previewBox)) {
+			return;
+		}
+		expect(previewBox.x).toBeGreaterThanOrEqual(
+			boundaryBox.x + boundaryBox.width + 7
+		);
+	});
+
 	test("the ⋯ dropdown lists the app-contributed rows", async ({ page }) => {
 		await page.goto(STORY_URL);
 		await openDropdown(page);

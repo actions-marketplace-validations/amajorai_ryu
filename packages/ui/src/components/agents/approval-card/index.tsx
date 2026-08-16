@@ -4,7 +4,7 @@
 
 import { AgentDisclosure } from "@ryu/ui/components/agents/agent-disclosure";
 import { ActionSwapRollText } from "@ryu/ui/components/motion/action-swap-roll";
-import { Button } from "@ryu/ui/components/motion/button";
+import { Button } from "@ryu/ui/components/motion/button/index";
 import { Checkbox } from "@ryu/ui/components/motion/checkbox";
 import { Input } from "@ryu/ui/components/motion/input";
 import { RadioGroup, RadioGroupItem } from "@ryu/ui/components/motion/radio";

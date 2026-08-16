@@ -123,12 +123,15 @@ mod tests {
     // parse, or a user who turned it off still gets the download.
     #[test]
     fn mesh_client_preinstall_defaults_on_and_is_opt_outable() {
-        use super::{MESH_PREINSTALL_DEFAULT, preinstall_client_from_pref};
+        use super::{preinstall_client_from_pref, MESH_PREINSTALL_DEFAULT};
         assert!(
             MESH_PREINSTALL_DEFAULT,
             "first run must stage the mesh client, like llama.cpp + the default GGUF"
         );
-        assert!(preinstall_client_from_pref(None), "unwritten pref = fresh install = on");
+        assert!(
+            preinstall_client_from_pref(None),
+            "unwritten pref = fresh install = on"
+        );
         for off in ["false", "0", "no", "", "  FALSE  "] {
             assert!(
                 !preinstall_client_from_pref(Some(off)),
@@ -136,7 +139,10 @@ mod tests {
             );
         }
         for on in ["true", "1", "yes"] {
-            assert!(preinstall_client_from_pref(Some(on)), "{on:?} must keep it on");
+            assert!(
+                preinstall_client_from_pref(Some(on)),
+                "{on:?} must keep it on"
+            );
         }
     }
 
@@ -145,8 +151,14 @@ mod tests {
     // documented failure mode.
     #[test]
     fn mesh_preinstall_key_is_distinct_from_the_enable_key() {
-        assert_ne!(super::MESH_PREINSTALL_PREF_KEY, super::MESH_ENABLED_PREF_KEY);
-        assert_ne!(super::MESH_PREINSTALL_PREF_KEY, super::MESH_BACKEND_PREF_KEY);
+        assert_ne!(
+            super::MESH_PREINSTALL_PREF_KEY,
+            super::MESH_ENABLED_PREF_KEY
+        );
+        assert_ne!(
+            super::MESH_PREINSTALL_PREF_KEY,
+            super::MESH_BACKEND_PREF_KEY
+        );
     }
 
     #[test]
@@ -245,14 +257,12 @@ mod tests {
         assert!(ryu_mesh::resolve_mesh_bearer(Some("change_me")).is_none());
         // Proof the placeholder rejection is not arbitrary: a peer with it refuses
         // to start under mesh, so it could never authenticate anyway.
-        assert!(
-            crate::server::enforce_remote_auth(
-                Some("CHANGE_ME".to_owned()),
-                Some(crate::node_token::TokenSource::Env),
-                true,
-                false
-            )
-            .is_err()
-        );
+        assert!(crate::server::enforce_remote_auth(
+            Some("CHANGE_ME".to_owned()),
+            Some(crate::node_token::TokenSource::Env),
+            true,
+            false
+        )
+        .is_err());
     }
 }

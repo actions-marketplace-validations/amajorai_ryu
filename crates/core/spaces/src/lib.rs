@@ -39,13 +39,16 @@
 //! `bundled-sqlcipher` later turns it into real at-rest encryption with no code
 //! change. We also restrict the db file permissions on Unix. See `apply_encryption`.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use anyhow::{Context, Result};
 use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 // Spaces reuse the async `Embedder` from the RAG primitive (Local hashing +
@@ -68,6 +71,9 @@ pub const DEFAULT_EMBED_DIMS: usize = 768;
 /// used by the in-memory/test store. Production stores receive the registry value
 /// through the Core-side shim.
 pub const DEFAULT_GRAPH_EXTRACTION_MODEL: &str = "local-cooccurrence";
+
+const RETRIEVAL_REBUILD_BATCH_SIZE: usize = 32;
+const MAX_RETRIEVAL_MODE_TERMINAL_STATUSES: usize = 16;
 
 /// Owner attribution for a Spaces/documents row — the extracted, apps/core-free
 /// twin of Core's `conversations::Tenancy`. It is a plain data record (NOT a
@@ -306,7 +312,8 @@ const DOC_TENANCY_VISIBLE_PREDICATE: &str = "(
         :bound = 0
         OR (:uid IS NOT NULL AND d.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND d.org_id = :org
-            AND d.visibility IN ('org', 'team'))
+            AND (d.visibility = 'org'
+                 OR (d.visibility = 'team' AND :team IS NOT NULL AND d.team_id = :team)))
      )";
 
 /// Space visibility filter — the SQL twin for the `spaces` table (alias `s`).
@@ -318,7 +325,8 @@ const SPACE_TENANCY_VISIBLE_PREDICATE: &str = "(
         OR :bound = 0
         OR (:uid IS NOT NULL AND s.owner_user_id = :uid)
         OR (:uid IS NOT NULL AND :org IS NOT NULL AND s.org_id = :org
-            AND s.visibility IN ('org', 'team'))
+            AND (s.visibility = 'org'
+                 OR (s.visibility = 'team' AND :team IS NOT NULL AND s.team_id = :team)))
      )";
 
 /// The caller context a tenancy-filtered Spaces query is evaluated against. Cheap
@@ -332,6 +340,10 @@ pub struct DocFilter<'a> {
     owner_user_id: Option<&'a str>,
     /// The caller's org (already narrowed to this node's org by identity verify).
     org_id: Option<&'a str>,
+    /// One team membership used by the SQL list/search gate. By-id access still
+    /// checks the full verified team set; callers with multiple teams should use
+    /// the first matching team for the list path and can open other rows by id.
+    team_id: Option<&'a str>,
 }
 
 impl<'a> DocFilter<'a> {
@@ -342,6 +354,7 @@ impl<'a> DocFilter<'a> {
             node_bound: false,
             owner_user_id: None,
             org_id: None,
+            team_id: None,
         }
     }
 
@@ -353,10 +366,21 @@ impl<'a> DocFilter<'a> {
         org_id: Option<&'a str>,
         node_bound: bool,
     ) -> Self {
+        Self::for_caller_with_team(owner_user_id, org_id, None, node_bound)
+    }
+
+    /// Build a caller filter with a team-scoped visibility context.
+    pub fn for_caller_with_team(
+        owner_user_id: Option<&'a str>,
+        org_id: Option<&'a str>,
+        team_id: Option<&'a str>,
+        node_bound: bool,
+    ) -> Self {
         Self {
             node_bound,
             owner_user_id,
             org_id,
+            team_id,
         }
     }
 
@@ -558,6 +582,45 @@ pub struct RetrievalModeChange {
     pub graph_nodes: usize,
     /// Co-occurrence edges written by the rebuild.
     pub graph_edges: usize,
+}
+
+/// A retrieval-mode rebuild accepted by the background worker.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetrievalModeJob {
+    pub job_id: String,
+    pub space_id: String,
+    pub requested_mode: RetrievalMode,
+}
+
+#[derive(Debug)]
+pub struct RetrievalModeRebuildConflict;
+
+impl std::fmt::Display for RetrievalModeRebuildConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("another retrieval-mode rebuild is active")
+    }
+}
+
+impl std::error::Error for RetrievalModeRebuildConflict {}
+
+/// Observable state for a retrieval-mode rebuild.
+///
+/// `state = "cancelled"` means the transaction was rolled back. The progress
+/// counters then describe work attempted before the cooperative cancellation
+/// point, not rows that were committed.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetrievalModeJobStatus {
+    pub job_id: String,
+    pub space_id: String,
+    pub requested_mode: RetrievalMode,
+    pub previous_mode: Option<RetrievalMode>,
+    pub state: String,
+    pub total_chunks: usize,
+    pub processed_chunks: usize,
+    pub graph_nodes: usize,
+    pub graph_edges: usize,
+    pub change: Option<RetrievalModeChange>,
+    pub error: Option<String>,
 }
 
 // ── Domain types ───────────────────────────────────────────────────────────────
@@ -787,6 +850,10 @@ pub struct EmbeddingModelPref {
     pub base_url: Option<String>,
     #[serde(default)]
     pub dims: Option<usize>,
+    /// `gateway` keeps cloud credentials and upstream URLs inside Gateway.
+    /// `None` preserves the local/self-hosted OpenAI-compatible behavior.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Preferences KV key for the user-chosen default embedding model.
@@ -1139,6 +1206,9 @@ pub struct SpaceStore {
     blob_root: PathBuf,
     /// Background re-index coordination (single-run guard + last error).
     reindex: Arc<Mutex<ReindexInner>>,
+    /// Retrieval-mode rebuild coordination. This is a std mutex because the
+    /// worker updates progress from `spawn_blocking` at chunk boundaries.
+    retrieval_mode: Arc<StdMutex<RetrievalModeInner>>,
 }
 
 /// Internal re-index run state.
@@ -1146,6 +1216,26 @@ pub struct SpaceStore {
 struct ReindexInner {
     running: bool,
     errored: Option<String>,
+    target_model: Option<String>,
+    target_dims: Option<usize>,
+}
+
+struct RetrievalModeInner {
+    statuses: HashMap<String, RetrievalModeJobStatus>,
+    terminal_job_ids: VecDeque<String>,
+    cancel: Option<Arc<AtomicBool>>,
+    finalizing: bool,
+}
+
+impl Default for RetrievalModeInner {
+    fn default() -> Self {
+        Self {
+            statuses: HashMap::new(),
+            terminal_job_ids: VecDeque::new(),
+            cancel: None,
+            finalizing: false,
+        }
+    }
 }
 
 fn now_millis() -> i64 {
@@ -1246,6 +1336,7 @@ impl SpaceStore {
             reranker,
             blob_root,
             reindex: Arc::new(Mutex::new(ReindexInner::default())),
+            retrieval_mode: Arc::new(StdMutex::new(RetrievalModeInner::default())),
         })
     }
 
@@ -1270,6 +1361,7 @@ impl SpaceStore {
             reranker: Reranker::Local,
             blob_root,
             reindex: Arc::new(Mutex::new(ReindexInner::default())),
+            retrieval_mode: Arc::new(StdMutex::new(RetrievalModeInner::default())),
         })
     }
 
@@ -1678,6 +1770,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":team": filter.team_id,
             },
             |row| {
                 let mode_str: String = row.get(6)?;
@@ -1728,6 +1821,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":team": filter.team_id,
             },
             |row| {
                 let icon_raw: Option<String> = row.get(9)?;
@@ -2606,6 +2700,38 @@ impl SpaceStore {
         }
     }
 
+    /// Set the native visibility of a document. The server layer performs the
+    /// caller/resource authorization; this store method owns the schema update so
+    /// every document-access writer uses the same validated values.
+    pub async fn set_document_access(
+        &self,
+        doc_id: &str,
+        visibility: &str,
+        team_id: Option<&str>,
+    ) -> Result<bool> {
+        let visibility = visibility.trim();
+        if !matches!(visibility, "private" | "org" | "team") {
+            anyhow::bail!(
+                "invalid document visibility {visibility:?}: expected private, org, or team"
+            );
+        }
+        let team_id = team_id.map(str::trim).filter(|id| !id.is_empty());
+        if visibility == "team" && team_id.is_none() {
+            anyhow::bail!("team visibility requires a team_id");
+        }
+        let now = now_millis();
+        let conn = self.conn.lock().await;
+        let updated = conn
+            .execute(
+                "UPDATE documents
+                 SET visibility = ?1, team_id = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![visibility, team_id, now, doc_id],
+            )
+            .context("updating document access")?;
+        Ok(updated > 0)
+    }
+
     /// Fetch a single document with its full markdown source.
     /// Load the tenancy quartet (owner / org / visibility / team) for a document,
     /// for the realtime WS gateway's access decision. Returns `Ok(None)` when the
@@ -2772,33 +2898,28 @@ impl SpaceStore {
     /// [`build_graph_for_chunks`] for the full table, the reproduction command, and
     /// the `O(chunks × entities²)` shape. The unbounded dimension is the chunk
     /// count, which is whatever the Space happens to hold, so one UI click on a
-    /// large Space is **minutes** of uninterruptible SQLite work.
+    /// large Space is **minutes** of SQLite work.
     ///
-    /// So the whole transaction runs on [`tokio::task::spawn_blocking`]. Be precise
-    /// about what that fixes, because the two are easy to conflate:
+    /// The direct store method still runs its all-or-nothing transaction on
+    /// [`tokio::task::spawn_blocking`]. The background HTTP path uses staged,
+    /// 32-chunk transactions instead, then atomically swaps the staged graph after
+    /// validating that the source chunks did not change.
     ///
     /// - **Fixed:** the tokio worker thread is no longer occupied for the duration.
     ///   Before, a large rebuild parked a runtime worker in a minutes-long
     ///   `rusqlite` call with no yield point, so unrelated Core requests scheduled
     ///   onto that worker stalled behind a Spaces button.
-    /// - **NOT fixed:** the *Space* is still unavailable for the duration, and on
-    ///   the numbers above that duration is minutes, not a blink. The connection
-    ///   mutex is held across the whole rebuild (it has to be — the column write and
-    ///   the graph rebuild are one transaction, which is the crash-consistency
-    ///   guarantee above), so every other `SpaceStore` call — search, list, ingest,
-    ///   *and every other Space*, since one connection serves all of them — waits.
-    ///   Moving the work to a blocking thread changes *who* waits, not *whether*.
-    /// - **Also NOT fixed:** the call is uncancellable and reports no progress.
-    ///   Dropping the caller's future (client disconnect, request timeout) does not
-    ///   stop the blocking task; it runs to completion and only then releases the
-    ///   guard. The HTTP caller may time out while the node stays busy.
+    /// - **Background path fixed:** the connection mutex is released between
+    ///   staging batches, so unrelated calls can run between bounded bursts. The
+    ///   mode and live graph remain unchanged until the final atomic swap.
+    /// - **The direct store method remains synchronous.** The HTTP layer uses
+    ///   [`Self::start_retrieval_mode_rebuild`] instead: it returns a job id,
+    ///   exposes progress, and cooperatively cancels at chunk boundaries. A
+    ///   cancelled job returns before commit, so the transaction rolls back.
     ///
-    /// Both remaining problems have the same root — one `Connection` behind one
-    /// mutex, one transaction — so neither is fixable by tweaking this call. A
-    /// rebuild that is concurrent, cancellable, or resumable needs a second
-    /// connection (WAL readers) and chunked commits, which trades away the
-    /// all-or-nothing guarantee documented above. That trade has not been made;
-    /// this doc exists so it is made deliberately rather than discovered.
+    /// The background path is cancellable at batch boundaries and rejects source
+    /// changes before the swap. Its staging commits are not user-visible, so a
+    /// crash or cancellation leaves the previous mode and graph intact.
     pub async fn set_retrieval_mode(
         &self,
         space_id: &str,
@@ -2825,6 +2946,398 @@ impl SpaceStore {
         space_id: &str,
         mode: RetrievalMode,
     ) -> Result<Option<RetrievalModeChange>> {
+        Self::set_retrieval_mode_blocking_with_control(
+            conn,
+            space_id,
+            mode,
+            &|| false,
+            &mut |_processed, _nodes, _edges, _total| {},
+        )
+    }
+
+    fn set_retrieval_mode_chunked_with_control(
+        store: &Self,
+        space_id: &str,
+        mode: RetrievalMode,
+        should_cancel: &dyn Fn() -> bool,
+        prepare_finalization: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(usize, usize, usize, usize),
+    ) -> Result<Option<RetrievalModeChange>> {
+        let (previous, total_chunks) = {
+            let conn = store.conn.blocking_lock();
+            let previous = conn
+                .query_row(
+                    "SELECT retrieval_mode FROM spaces WHERE id = ?1",
+                    params![space_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|value| RetrievalMode::from_str(&value));
+            let Some(previous) = previous else {
+                return Ok(None);
+            };
+            let total = conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE space_id = ?1",
+                params![space_id],
+                |row| row.get::<_, i64>(0),
+            )? as usize;
+            (previous, total)
+        };
+        progress(0, 0, 0, total_chunks);
+        if mode == RetrievalMode::Vector {
+            if !prepare_finalization() {
+                anyhow::bail!("retrieval-mode rebuild cancelled");
+            }
+            let mut conn = store.conn.blocking_lock();
+            return Self::set_retrieval_mode_blocking_with_control(
+                &mut conn,
+                space_id,
+                mode,
+                should_cancel,
+                &mut |_p, _n, _e, _t| {},
+            );
+        }
+
+        {
+            let conn = store.conn.blocking_lock();
+            conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS retrieval_rebuild_nodes (
+                   id TEXT PRIMARY KEY, space_id TEXT NOT NULL, entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+                 );
+                 CREATE TEMP TABLE IF NOT EXISTS retrieval_rebuild_edges (
+                   id TEXT PRIMARY KEY, space_id TEXT NOT NULL, src_entity TEXT NOT NULL,
+                   dst_entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+                 );
+                 DELETE FROM retrieval_rebuild_nodes;
+                 DELETE FROM retrieval_rebuild_edges;",
+            )?;
+        }
+
+        let mut fingerprint = Sha256::new();
+        let mut last_rowid = 0i64;
+        let mut processed = 0usize;
+        let mut nodes = 0usize;
+        let mut edges = 0usize;
+        loop {
+            if should_cancel() {
+                break;
+            }
+            let mut conn = store.conn.blocking_lock();
+            let rows: Vec<(i64, String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT rowid, id, content FROM chunks
+                     WHERE space_id = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3",
+                )?;
+                let rows = stmt
+                    .query_map(
+                        params![space_id, last_rowid, RETRIEVAL_REBUILD_BATCH_SIZE as i64],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (rowid, id, content) in &rows {
+                update_rebuild_fingerprint(&mut fingerprint, *rowid, id, content);
+            }
+            let pairs: Vec<(&str, &str)> = rows
+                .iter()
+                .map(|(_, id, content)| (id.as_str(), content.as_str()))
+                .collect();
+            let tx = conn.transaction()?;
+            let (batch_nodes, batch_edges) = build_graph_for_tables(
+                &tx,
+                "retrieval_rebuild_nodes",
+                "retrieval_rebuild_edges",
+                space_id,
+                &pairs,
+                should_cancel,
+            )?;
+            tx.commit()?;
+            processed += rows.len();
+            nodes += batch_nodes;
+            edges += batch_edges;
+            last_rowid = rows
+                .last()
+                .map(|(rowid, _, _)| *rowid)
+                .unwrap_or(last_rowid);
+            progress(processed, nodes, edges, total_chunks);
+        }
+        if should_cancel() {
+            let conn = store.conn.blocking_lock();
+            cleanup_retrieval_staging(&conn)?;
+            anyhow::bail!("retrieval-mode rebuild cancelled");
+        }
+
+        let fingerprint = format!("{:x}", fingerprint.finalize());
+        if !prepare_finalization() {
+            anyhow::bail!("retrieval-mode rebuild cancelled");
+        }
+        let mut conn = store.conn.blocking_lock();
+        let result = finalize_chunked_retrieval_mode(
+            &mut conn,
+            space_id,
+            previous,
+            total_chunks,
+            processed,
+            nodes,
+            edges,
+            &fingerprint,
+            should_cancel,
+        );
+        cleanup_retrieval_staging(&conn)?;
+        result
+    }
+
+    /// Start a single crash-consistent retrieval-mode rebuild in the background.
+    ///
+    /// The worker stages graph rows in bounded transactions and holds the
+    /// connection only for each batch. The live mode and graph change only in the
+    /// final atomic swap. Cancellation is cooperative at batch boundaries and
+    /// therefore never commits a partial user-visible graph.
+    pub async fn start_retrieval_mode_rebuild(
+        &self,
+        space_id: &str,
+        mode: RetrievalMode,
+    ) -> Result<Option<RetrievalModeJob>> {
+        let previous = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT retrieval_mode FROM spaces WHERE id = ?1",
+                params![space_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("reading current retrieval_mode")?
+            .map(|value| RetrievalMode::from_str(&value))
+        };
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = RetrievalModeJob {
+            job_id: uuid::Uuid::new_v4().simple().to_string(),
+            space_id: space_id.to_owned(),
+            requested_mode: mode,
+        };
+        {
+            let mut state = self
+                .retrieval_mode
+                .lock()
+                .expect("retrieval-mode state mutex poisoned");
+            if let Some(current) = state
+                .statuses
+                .values()
+                .find(|s| matches!(s.state.as_str(), "running" | "cancelling"))
+            {
+                if current.space_id == space_id && current.requested_mode == mode {
+                    return Ok(Some(RetrievalModeJob {
+                        job_id: current.job_id.clone(),
+                        space_id: current.space_id.clone(),
+                        requested_mode: current.requested_mode,
+                    }));
+                }
+                return Err(RetrievalModeRebuildConflict.into());
+            }
+            state.statuses.insert(
+                job.job_id.clone(),
+                RetrievalModeJobStatus {
+                    job_id: job.job_id.clone(),
+                    space_id: job.space_id.clone(),
+                    requested_mode: mode,
+                    previous_mode: Some(previous),
+                    state: "running".to_owned(),
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    graph_nodes: 0,
+                    graph_edges: 0,
+                    change: None,
+                    error: None,
+                },
+            );
+            state.cancel = Some(cancel.clone());
+        }
+
+        let store = self.clone();
+        let job_id = job.job_id.clone();
+        let space_id = job.space_id.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let worker_store = store.clone();
+                let worker_cancel = cancel.clone();
+                let worker_job_id = job_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut progress = |processed, nodes, edges, total| {
+                        worker_store.update_retrieval_mode_progress(
+                            &worker_job_id,
+                            processed,
+                            nodes,
+                            edges,
+                            total,
+                        );
+                    };
+                    let result = Self::set_retrieval_mode_chunked_with_control(
+                        &worker_store,
+                        &space_id,
+                        mode,
+                        &|| worker_cancel.load(Ordering::SeqCst),
+                        &|| worker_store.begin_retrieval_mode_finalization(&worker_job_id),
+                        &mut progress,
+                    );
+                    if result.is_err() {
+                        if let Ok(conn) = worker_store.conn.try_lock() {
+                            let _ = cleanup_retrieval_staging(&conn);
+                        }
+                    }
+                    result
+                })
+                .await
+                .context("retrieval-mode rebuild task panicked")?
+            }
+            .await;
+            store.finish_retrieval_mode_job(&job_id, cancel.load(Ordering::SeqCst), result);
+        });
+        Ok(Some(job))
+    }
+
+    /// Return the requested job for `space_id`, if it is retained.
+    pub fn retrieval_mode_status(
+        &self,
+        space_id: &str,
+        job_id: &str,
+    ) -> Option<RetrievalModeJobStatus> {
+        let state = self
+            .retrieval_mode
+            .lock()
+            .expect("retrieval-mode state mutex poisoned");
+        state
+            .statuses
+            .get(job_id)
+            .filter(|status| status.space_id == space_id)
+            .cloned()
+    }
+
+    /// Request cooperative cancellation. The worker checks this flag between
+    /// chunks and exits before commit, so callers never observe a partial graph.
+    pub fn cancel_retrieval_mode_rebuild(&self, space_id: &str, job_id: &str) -> bool {
+        let mut state = self
+            .retrieval_mode
+            .lock()
+            .expect("retrieval-mode state mutex poisoned");
+        if state.finalizing {
+            return false;
+        }
+        let Some(status) = state.statuses.get_mut(job_id) else {
+            return false;
+        };
+        if status.space_id != space_id || status.job_id != job_id || status.state != "running" {
+            return false;
+        }
+        status.state = "cancelling".to_owned();
+        if let Some(cancel) = state.cancel.as_ref() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        true
+    }
+
+    fn begin_retrieval_mode_finalization(&self, job_id: &str) -> bool {
+        let mut state = self
+            .retrieval_mode
+            .lock()
+            .expect("retrieval-mode state mutex poisoned");
+        if state
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            return false;
+        }
+        let Some(_status) = state
+            .statuses
+            .get_mut(job_id)
+            .filter(|status| status.job_id == job_id && status.state == "running")
+        else {
+            return false;
+        };
+        state.finalizing = true;
+        true
+    }
+
+    fn update_retrieval_mode_progress(
+        &self,
+        job_id: &str,
+        processed: usize,
+        nodes: usize,
+        edges: usize,
+        total: usize,
+    ) {
+        let mut state = self
+            .retrieval_mode
+            .lock()
+            .expect("retrieval-mode state mutex poisoned");
+        if let Some(status) = state.statuses.get_mut(job_id) {
+            status.processed_chunks = processed;
+            status.graph_nodes = nodes;
+            status.graph_edges = edges;
+            status.total_chunks = total;
+        }
+    }
+
+    fn finish_retrieval_mode_job(
+        &self,
+        job_id: &str,
+        cancel_requested: bool,
+        result: Result<Option<RetrievalModeChange>>,
+    ) {
+        let mut state = self
+            .retrieval_mode
+            .lock()
+            .expect("retrieval-mode state mutex poisoned");
+        let Some(status) = state.statuses.get_mut(job_id) else {
+            return;
+        };
+        match result {
+            Ok(Some(change)) => {
+                status.state = "completed".to_owned();
+                status.previous_mode = Some(change.previous);
+                status.processed_chunks = change.chunks_scanned;
+                status.total_chunks = change.chunks_scanned;
+                status.graph_nodes = change.graph_nodes;
+                status.graph_edges = change.graph_edges;
+                status.change = Some(change);
+            }
+            Ok(None) => {
+                status.state = "failed".to_owned();
+                status.error = Some("space not found".to_owned());
+            }
+            Err(_error) if cancel_requested => {
+                status.state = "cancelled".to_owned();
+            }
+            Err(error) => {
+                status.state = "failed".to_owned();
+                status.error = Some(format!("{error:#}"));
+            }
+        }
+        state.terminal_job_ids.push_back(job_id.to_owned());
+        while state.terminal_job_ids.len() > MAX_RETRIEVAL_MODE_TERMINAL_STATUSES {
+            if let Some(expired_job_id) = state.terminal_job_ids.pop_front() {
+                state.statuses.remove(&expired_job_id);
+            }
+        }
+        state.finalizing = false;
+        state.cancel = None;
+    }
+
+    fn set_retrieval_mode_blocking_with_control(
+        conn: &mut Connection,
+        space_id: &str,
+        mode: RetrievalMode,
+        should_cancel: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(usize, usize, usize, usize),
+    ) -> Result<Option<RetrievalModeChange>> {
         let now = now_millis();
         let tx = conn
             .transaction()
@@ -2842,6 +3355,10 @@ impl SpaceStore {
             return Ok(None);
         };
         let previous = RetrievalMode::from_str(&previous);
+
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled")
+        }
 
         tx.execute(
             "UPDATE spaces SET retrieval_mode = ?1, updated_at = ?2 WHERE id = ?3",
@@ -2885,9 +3402,21 @@ impl SpaceStore {
                 .iter()
                 .map(|(id, content)| (id.as_str(), content.as_str()))
                 .collect();
-            let (n, e) = build_graph_for_chunks(&tx, space_id, &pairs)?;
+            let (n, e) = build_graph_for_chunks_with_control(
+                &tx,
+                space_id,
+                &pairs,
+                should_cancel,
+                &mut |processed, nodes, edges| {
+                    progress(processed, nodes, edges, chunks_scanned);
+                },
+            )?;
             graph_nodes = n;
             graph_edges = e;
+        }
+
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled")
         }
 
         tx.commit().context("committing retrieval-mode change")?;
@@ -3361,6 +3890,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":team": filter.team_id,
             },
             |row| row.get::<_, String>(0),
         )?;
@@ -3434,6 +3964,13 @@ impl SpaceStore {
         limit: usize,
     ) -> Result<Vec<ChunkMatch>> {
         let emb = self.embedder_snapshot().await;
+        // A caller can temporarily install a new embedder before its reindex has
+        // completed. Never send a vector of the new width to the old vec0 table:
+        // sqlite-vec rejects that query, and treating the old vectors as valid
+        // would be silent cross-dimension corruption.
+        if self.vec_dims.load(Ordering::SeqCst) != emb.dims() {
+            return Ok(Vec::new());
+        }
         let model_id = emb.model_id().to_string();
         let query_vec = emb.embed(query).await?;
         let bytes = vec_to_bytes(&query_vec);
@@ -3450,16 +3987,20 @@ impl SpaceStore {
                AND k = ?2
                AND c.space_id = ?3
                AND c.embed_model = ?4
+               AND c.embed_dims = ?5
              ORDER BY v.distance",
         )?;
-        let rows = stmt.query_map(params![bytes, limit as i64, space_id, model_id], |row| {
-            Ok(ChunkMatch {
-                chunk_id: row.get(0)?,
-                document_id: row.get(1)?,
-                content: row.get(2)?,
-                distance: row.get::<_, f64>(3)? as f32,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![bytes, limit as i64, space_id, model_id, emb.dims() as i64],
+            |row| {
+                Ok(ChunkMatch {
+                    chunk_id: row.get(0)?,
+                    document_id: row.get(1)?,
+                    content: row.get(2)?,
+                    distance: row.get::<_, f64>(3)? as f32,
+                })
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -3746,6 +4287,7 @@ impl SpaceStore {
                 ":bound": filter.bound_flag(),
                 ":uid": filter.owner_user_id,
                 ":org": filter.org_id,
+                ":team": filter.team_id,
             },
             |row| {
                 Ok((
@@ -4006,13 +4548,20 @@ impl SpaceStore {
     /// Report re-index progress: how many chunks were embedded by a model/dims
     /// other than the current one (and therefore await re-embedding).
     pub async fn reindex_status(&self) -> Result<ReindexStatus> {
-        let (current_model, current_dims) = {
+        let (active_model, active_dims) = {
             let emb = self.embedder.lock().await;
             (emb.model_id().to_string(), emb.dims())
         };
-        let (running, errored) = {
+        let (current_model, current_dims, running, errored) = {
             let g = self.reindex.lock().await;
-            (g.running, g.errored.clone())
+            (
+                g.target_model
+                    .clone()
+                    .unwrap_or_else(|| active_model.clone()),
+                g.target_dims.unwrap_or(active_dims),
+                g.running,
+                g.errored.clone(),
+            )
         };
         let conn = self.conn.lock().await;
         let total_chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
@@ -4037,85 +4586,149 @@ impl SpaceStore {
     /// recreated first. Idempotent + resumable: re-running only touches chunks that
     /// are still stale. Guarded so only one pass runs at a time.
     pub async fn reindex_all(&self) -> Result<()> {
+        let embedder = self.embedder_snapshot().await;
+        self.run_reindex(embedder).await.map(|_| ())
+    }
+
+    async fn run_reindex(&self, embedder: Embedder) -> Result<bool> {
+        let target_model = embedder.model_id().to_string();
+        let target_dims = embedder.dims();
         {
             let mut g = self.reindex.lock().await;
             if g.running {
-                return Ok(());
+                return Ok(false);
             }
             g.running = true;
             g.errored = None;
+            g.target_model = Some(target_model);
+            g.target_dims = Some(target_dims);
         }
-        let result = self.reindex_inner().await;
+        let result = self.reindex_inner(&embedder).await.map(|_| true);
         let mut g = self.reindex.lock().await;
         g.running = false;
         if let Err(e) = &result {
             g.errored = Some(format!("{e:#}"));
+        } else {
+            g.target_model = None;
+            g.target_dims = None;
         }
         result
     }
 
-    async fn reindex_inner(&self) -> Result<()> {
-        let emb = self.embedder_snapshot().await;
-        let model_id = emb.model_id().to_string();
-        let dims = emb.dims();
+    async fn reindex_inner(&self, embedder: &Embedder) -> Result<bool> {
+        let model_id = embedder.model_id().to_string();
+        let dims = embedder.dims();
+        let old_dims = self.vec_dims.load(Ordering::SeqCst);
 
-        // The vec0 table width is fixed at creation; a dims change requires
-        // recreating it. All old vectors are then gone, so mark every chunk stale.
-        if self.vec_dims.load(Ordering::SeqCst) != dims {
-            {
-                let conn = self.conn.lock().await;
-                conn.execute_batch(&format!(
-                    "DROP TABLE IF EXISTS chunk_vectors;
-                     CREATE VIRTUAL TABLE chunk_vectors
-                         USING vec0(rowid INTEGER PRIMARY KEY, embedding float[{dims}]);"
-                ))
-                .context("recreating chunk_vectors for new dims")?;
-                conn.execute("UPDATE chunks SET embed_model = '', embed_dims = 0", [])?;
+        // Snapshot the source rows before doing network work. The active table is
+        // intentionally left untouched until every replacement vector exists.
+        let snapshot: Vec<(String, i64, String, String, i64)> = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn.prepare(
+                "SELECT id, rowid, content, embed_model, embed_dims FROM chunks ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let rebuild_table = "chunk_vectors_rebuild";
+        {
+            let conn = self.conn.lock().await;
+            conn.execute_batch(&format!(
+                "DROP TABLE IF EXISTS {rebuild_table};
+                 CREATE VIRTUAL TABLE {rebuild_table}
+                     USING vec0(rowid INTEGER PRIMARY KEY, embedding float[{dims}]);"
+            ))
+            .context("creating staged embedding table")?;
+
+            // Same-dimension vectors produced by the target can be copied without
+            // a provider call. A dimension change cannot copy anything safely.
+            if old_dims == dims {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {rebuild_table} (rowid, embedding)
+                         SELECT rowid, embedding FROM chunk_vectors
+                         WHERE rowid IN (
+                           SELECT rowid FROM chunks
+                           WHERE embed_model = ?1 AND embed_dims = ?2
+                         )"
+                    ),
+                    params![model_id, dims as i64],
+                )?;
             }
-            self.vec_dims.store(dims, Ordering::SeqCst);
         }
 
-        // Re-embed stale chunks in batches; embedding happens outside the lock.
-        loop {
-            let batch: Vec<(String, i64, String)> = {
-                let conn = self.conn.lock().await;
-                let mut stmt = conn.prepare(
-                    "SELECT id, rowid, content FROM chunks
-                     WHERE embed_model != ?1 OR embed_dims != ?2
-                     LIMIT 64",
-                )?;
-                let rows = stmt.query_map(params![model_id, dims as i64], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })?;
-                let mut v = Vec::new();
-                for row in rows {
-                    v.push(row?);
+        // Embed stale rows outside the SQLite mutex. If any provider request
+        // fails, the staged table is discarded and the active index remains
+        // searchable with the previous model.
+        for batch in snapshot.chunks(64) {
+            let mut embedded = Vec::new();
+            for (id, rowid, content, stored_model, stored_dims) in batch {
+                if old_dims == dims && stored_model == &model_id && *stored_dims == dims as i64 {
+                    continue;
                 }
-                v
-            };
-            if batch.is_empty() {
-                break;
+                embedded.push((id, rowid, embedder.embed(content).await?));
             }
-            let mut embedded = Vec::with_capacity(batch.len());
-            for (id, rowid, content) in &batch {
-                embedded.push((id.clone(), *rowid, emb.embed(content).await?));
+            if embedded.is_empty() {
+                continue;
             }
             let mut conn = self.conn.lock().await;
             let tx = conn.transaction()?;
-            for (id, rowid, vec) in &embedded {
-                tx.execute("DELETE FROM chunk_vectors WHERE rowid = ?1", params![rowid])?;
+            for (_id, rowid, vector) in embedded {
                 tx.execute(
-                    "INSERT INTO chunk_vectors (rowid, embedding) VALUES (?1, ?2)",
-                    params![rowid, vec_to_bytes(vec)],
-                )?;
-                tx.execute(
-                    "UPDATE chunks SET embed_model = ?1, embed_dims = ?2 WHERE id = ?3",
-                    params![model_id, dims as i64, id],
+                    &format!("INSERT INTO {rebuild_table} (rowid, embedding) VALUES (?1, ?2)"),
+                    params![rowid, vec_to_bytes(&vector)],
                 )?;
             }
             tx.commit()?;
         }
-        Ok(())
+
+        let mut conn = self.conn.lock().await;
+        let current: Vec<(String, i64, String)> = {
+            let mut stmt = conn.prepare("SELECT id, rowid, content FROM chunks ORDER BY rowid")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let expected: Vec<(String, i64, String)> = snapshot
+            .iter()
+            .map(|(id, rowid, content, _, _)| (id.clone(), *rowid, content.clone()))
+            .collect();
+        anyhow::ensure!(
+            current == expected,
+            "space contents changed during embedding reindex; active index was preserved"
+        );
+        let staged_count: i64 =
+            conn.query_row(&format!("SELECT COUNT(*) FROM {rebuild_table}"), [], |r| {
+                r.get(0)
+            })?;
+        anyhow::ensure!(
+            staged_count == snapshot.len() as i64,
+            "staged embedding index is incomplete; active index was preserved"
+        );
+
+        // DDL and metadata swap together. sqlite-vec virtual tables carry shadow
+        // tables, so renaming the virtual table is not safe: the module would
+        // still look for shadow tables under the old name. Recreate the live
+        // table inside this transaction and copy the fully-built staged table;
+        // rollback restores the old table if any DDL or copy step fails.
+        let tx = conn.transaction()?;
+        tx.execute_batch(&format!(
+            "DROP TABLE chunk_vectors;
+             CREATE VIRTUAL TABLE chunk_vectors
+                 USING vec0(rowid INTEGER PRIMARY KEY, embedding float[{dims}]);
+             INSERT INTO chunk_vectors (rowid, embedding)
+                 SELECT rowid, embedding FROM {rebuild_table};
+             DROP TABLE {rebuild_table};"
+        ))?;
+        tx.execute(
+            "UPDATE chunks SET embed_model = ?1, embed_dims = ?2",
+            params![model_id, dims as i64],
+        )?;
+        tx.commit()?;
+        self.vec_dims.store(dims, Ordering::SeqCst);
+        Ok(true)
     }
 
     /// Apply a resolved default `embedder` and, if it differs from what the store
@@ -4128,13 +4741,26 @@ impl SpaceStore {
             let g = self.embedder.lock().await;
             g.model_id() != embedder.model_id() || g.dims() != embedder.dims()
         };
-        self.set_embedder(embedder).await;
-        if changed {
-            let store = self.clone();
-            tokio::spawn(async move {
-                let _ = store.reindex_all().await;
-            });
+        if !changed {
+            let pending = self
+                .reindex_status()
+                .await
+                .map(|status| status.pending_chunks > 0)
+                .unwrap_or(false);
+            if pending {
+                let store = self.clone();
+                tokio::spawn(async move {
+                    let _ = store.reindex_all().await;
+                });
+            }
+            return;
         }
+        let store = self.clone();
+        tokio::spawn(async move {
+            if matches!(store.run_reindex(embedder.clone()).await, Ok(true)) {
+                store.set_embedder(embedder).await;
+            }
+        });
     }
 }
 
@@ -4743,6 +5369,211 @@ fn build_graph_for_chunks(
     space_id: &str,
     chunks: &[(&str, &str)],
 ) -> Result<GraphCounts> {
+    build_graph_for_chunks_with_control(tx, space_id, chunks, &|| false, &mut |_p, _n, _e| {})
+}
+
+fn update_rebuild_fingerprint(hasher: &mut Sha256, rowid: i64, id: &str, content: &str) {
+    hasher.update(rowid.to_le_bytes());
+    hasher.update((id.len() as u64).to_le_bytes());
+    hasher.update(id.as_bytes());
+    hasher.update((content.len() as u64).to_le_bytes());
+    hasher.update(content.as_bytes());
+}
+
+fn build_graph_for_tables(
+    tx: &rusqlite::Transaction<'_>,
+    node_table: &str,
+    edge_table: &str,
+    space_id: &str,
+    chunks: &[(&str, &str)],
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<GraphCounts> {
+    let node_sql = format!(
+        "INSERT INTO {node_table} (id, space_id, entity, chunk_id) VALUES (?1, ?2, ?3, ?4)"
+    );
+    let edge_sql = format!(
+        "INSERT INTO {edge_table} (id, space_id, src_entity, dst_entity, chunk_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)"
+    );
+    let mut node_stmt = tx.prepare(&node_sql)?;
+    let mut edge_stmt = tx.prepare(&edge_sql)?;
+    let mut nodes = 0usize;
+    let mut edges = 0usize;
+    for (chunk_id, content) in chunks {
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled");
+        }
+        let entities = extract_entities(content);
+        for entity in &entities {
+            nodes += node_stmt.execute(params![graph_row_id(), space_id, entity, chunk_id])?;
+        }
+        for i in 0..entities.len() {
+            for j in 0..entities.len() {
+                if i == j {
+                    continue;
+                }
+                edges += edge_stmt.execute(params![
+                    graph_row_id(),
+                    space_id,
+                    &entities[i],
+                    &entities[j],
+                    chunk_id
+                ])?;
+            }
+        }
+    }
+    Ok((nodes, edges))
+}
+
+fn finalize_chunked_retrieval_mode(
+    conn: &mut Connection,
+    space_id: &str,
+    previous: RetrievalMode,
+    total_chunks: usize,
+    processed: usize,
+    nodes: usize,
+    edges: usize,
+    expected_fingerprint: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<Option<RetrievalModeChange>> {
+    let tx = conn.transaction()?;
+    let mut actual = Sha256::new();
+    let mut stmt =
+        tx.prepare("SELECT rowid, id, content FROM chunks WHERE space_id = ?1 ORDER BY rowid")?;
+    let mut rows = stmt.query(params![space_id])?;
+    let mut actual_chunks = 0usize;
+    while let Some(row) = rows.next()? {
+        update_rebuild_fingerprint(
+            &mut actual,
+            row.get(0)?,
+            &row.get::<_, String>(1)?,
+            &row.get::<_, String>(2)?,
+        );
+        actual_chunks += 1;
+    }
+    drop(rows);
+    drop(stmt);
+    if should_cancel() {
+        anyhow::bail!("retrieval-mode rebuild cancelled");
+    }
+    if actual_chunks != total_chunks
+        || processed != total_chunks
+        || format!("{:x}", actual.finalize()) != expected_fingerprint
+    {
+        anyhow::bail!("chunks changed during retrieval-mode rebuild");
+    }
+    if should_cancel() {
+        anyhow::bail!("retrieval-mode rebuild cancelled");
+    }
+    tx.execute(
+        "UPDATE spaces SET retrieval_mode = ?1, updated_at = ?2 WHERE id = ?3",
+        params![RetrievalMode::Graph.as_str(), now_millis(), space_id],
+    )?;
+    if should_cancel() {
+        anyhow::bail!("retrieval-mode rebuild cancelled");
+    }
+    tx.execute(
+        "DELETE FROM graph_edges WHERE space_id = ?1",
+        params![space_id],
+    )?;
+    if should_cancel() {
+        anyhow::bail!("retrieval-mode rebuild cancelled");
+    }
+    tx.execute(
+        "DELETE FROM graph_nodes WHERE space_id = ?1",
+        params![space_id],
+    )?;
+    copy_staged_graph_table(
+        &tx,
+        "retrieval_rebuild_nodes",
+        "graph_nodes",
+        "id, space_id, entity, chunk_id",
+        space_id,
+        should_cancel,
+    )?;
+    copy_staged_graph_table(
+        &tx,
+        "retrieval_rebuild_edges",
+        "graph_edges",
+        "id, space_id, src_entity, dst_entity, chunk_id",
+        space_id,
+        should_cancel,
+    )?;
+    if should_cancel() {
+        anyhow::bail!("retrieval-mode rebuild cancelled");
+    }
+    tx.commit()?;
+    Ok(Some(RetrievalModeChange {
+        previous,
+        mode: RetrievalMode::Graph,
+        changed: previous != RetrievalMode::Graph,
+        graph_rebuilt: true,
+        chunks_scanned: total_chunks,
+        graph_nodes: nodes,
+        graph_edges: edges,
+    }))
+}
+
+fn copy_staged_graph_table(
+    tx: &rusqlite::Transaction<'_>,
+    source_table: &str,
+    destination_table: &str,
+    columns: &str,
+    space_id: &str,
+    should_cancel: &dyn Fn() -> bool,
+) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {destination_table} SELECT {columns}
+         FROM {source_table} WHERE space_id = ?1 AND rowid > ?2
+         ORDER BY rowid LIMIT ?3"
+    );
+    let mut last_rowid = 0i64;
+    loop {
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled");
+        }
+        let copied = tx.execute(
+            &sql,
+            params![space_id, last_rowid, RETRIEVAL_REBUILD_BATCH_SIZE as i64],
+        )?;
+        if copied == 0 {
+            break;
+        }
+        last_rowid = tx
+            .query_row(
+                &format!(
+                    "SELECT MAX(rowid) FROM (
+                   SELECT rowid FROM {source_table}
+                   WHERE space_id = ?1 AND rowid > ?2
+                   ORDER BY rowid LIMIT ?3
+                 )"
+                ),
+                params![space_id, last_rowid, RETRIEVAL_REBUILD_BATCH_SIZE as i64],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .context("finding the staged graph copy keyset boundary")?;
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled");
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_retrieval_staging(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp.retrieval_rebuild_nodes;
+         DROP TABLE IF EXISTS temp.retrieval_rebuild_edges;",
+    )?;
+    Ok(())
+}
+
+fn build_graph_for_chunks_with_control(
+    tx: &rusqlite::Transaction<'_>,
+    space_id: &str,
+    chunks: &[(&str, &str)],
+    should_cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(usize, usize, usize),
+) -> Result<GraphCounts> {
     // Prepared ONCE for the whole pass, not once per row. `Transaction::execute`
     // (what this used to call) parses + plans its SQL string on every invocation
     // and drops the statement afterwards, so a 4.7M-row rebuild paid 4.7M parses.
@@ -4762,7 +5593,10 @@ fn build_graph_for_chunks(
 
     let mut nodes = 0usize;
     let mut edges = 0usize;
-    for (chunk_id, chunk_content) in chunks {
+    for (chunk_index, (chunk_id, chunk_content)) in chunks.iter().enumerate() {
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled")
+        }
         let entities = extract_entities(chunk_content);
         for entity in &entities {
             let node_id = graph_row_id();
@@ -4786,6 +5620,10 @@ fn build_graph_for_chunks(
                     ])
                     .context("inserting graph edge")?;
             }
+        }
+        progress(chunk_index + 1, nodes, edges);
+        if should_cancel() {
+            anyhow::bail!("retrieval-mode rebuild cancelled")
         }
     }
     Ok((nodes, edges))
@@ -4975,6 +5813,76 @@ mod tests {
         assert!(anon_meta.org_id.is_none());
     }
 
+    #[tokio::test]
+    async fn document_access_updates_visibility_and_team() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("S", None, &owned("alice"))
+            .await
+            .unwrap();
+        let doc = store
+            .create_page(&space, "Shared", &owned("alice"))
+            .await
+            .unwrap();
+
+        assert!(store
+            .set_document_access(&doc, "team", Some("team-1"))
+            .await
+            .unwrap());
+        let team = store.get_access_meta(&doc).await.unwrap().unwrap();
+        assert_eq!(team.visibility, "team");
+        assert_eq!(team.team_id.as_deref(), Some("team-1"));
+
+        store.set_document_access(&doc, "org", None).await.unwrap();
+        let org = store.get_access_meta(&doc).await.unwrap().unwrap();
+        assert_eq!(org.visibility, "org");
+        assert!(org.team_id.is_none());
+
+        assert!(store.set_document_access(&doc, "team", None).await.is_err());
+        assert!(store
+            .set_document_access(&doc, "unknown", None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn team_visibility_filters_list_and_search_to_the_team() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("S", None, &owned("alice"))
+            .await
+            .unwrap();
+        let doc = store
+            .create_page(&space, "Team note", &owned("alice"))
+            .await
+            .unwrap();
+        store
+            .set_document_access(&doc, "team", Some("team-1"))
+            .await
+            .unwrap();
+
+        let wrong_team = store
+            .list_documents(
+                &space,
+                DocFilter::for_caller_with_team(Some("bob"), Some("org1"), Some("team-2"), true),
+            )
+            .await
+            .unwrap();
+        assert!(wrong_team.is_empty());
+
+        let right_team = store
+            .list_documents(
+                &space,
+                DocFilter::for_caller_with_team(Some("bob"), Some("org1"), Some("team-1"), true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            right_team.iter().map(|d| &d.id).collect::<Vec<_>>(),
+            vec![&doc]
+        );
+    }
+
     /// list_spaces filters by owner too, but system spaces (`system = 1`) stay
     /// shared to every member (the `OR s.system = 1` predicate branch).
     #[tokio::test]
@@ -5105,7 +6013,12 @@ mod tests {
         // It really is a Space: an app-owned document can be created in it and listed
         // back, which is the whole point of resolving the id.
         let doc = store
-            .app_create_doc("@ryu/no-more-mistakes", &first, "Never run git stash", &owned("alice"))
+            .app_create_doc(
+                "@ryu/no-more-mistakes",
+                &first,
+                "Never run git stash",
+                &owned("alice"),
+            )
             .await
             .unwrap();
         let docs = store
@@ -5603,6 +6516,65 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_does_not_query_old_vectors_after_dimension_swap() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("D", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let doc = store
+            .create_page(&space, "T", &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .update_document(&doc, "T", "old width vectors must not be queried")
+            .await
+            .unwrap();
+
+        store
+            .set_embedder(Embedder::Local {
+                dims: DEFAULT_EMBED_DIMS / 2,
+            })
+            .await;
+
+        assert!(
+            store.search(&space, "old width", 5).await.unwrap().is_empty(),
+            "a dimension-swapped embedder must not query the old vec0 table"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_remote_reindex_preserves_the_active_index() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Safe", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let doc = store
+            .create_page(&space, "T", &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .update_document(&doc, "T", "the active index remains searchable")
+            .await
+            .unwrap();
+
+        let target = Embedder::remote(
+            "http://127.0.0.1:1",
+            "cloud/embed",
+            DEFAULT_EMBED_DIMS,
+            None,
+        );
+        assert!(store.run_reindex(target).await.is_err());
+        assert!(!store
+            .search(&space, "active index searchable", 5)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store.reindex_status().await.unwrap().errored.is_some());
     }
 
     #[tokio::test]
@@ -6219,6 +7191,352 @@ mod tests {
              (this is what an empty graph would silently fail to do); got: {:?}",
             hits.iter().map(|c| &c.content).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn background_rebuild_reports_progress_and_commits_staged_graph_atomically() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Chunked", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        for (title, body) in [
+            ("A", "Alice works at Acme."),
+            ("B", "Acme is based in Paris."),
+            ("C", "Paris has the Eiffel Tower."),
+        ] {
+            store
+                .ingest_document(&space, title, body, &DocOwner::unattributed())
+                .await
+                .unwrap();
+        }
+
+        let job = store
+            .start_retrieval_mode_rebuild(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .unwrap();
+        let status = loop {
+            let status = store.retrieval_mode_status(&space, &job.job_id).unwrap();
+            if status.state != "running" {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(status.job_id, job.job_id);
+        assert_eq!(status.state, "completed");
+        assert_eq!(status.total_chunks, 3);
+        assert_eq!(status.processed_chunks, 3);
+        assert!(status.graph_nodes > 0);
+        assert!(status.graph_edges > 0);
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Graph
+        );
+        assert_eq!(
+            graph_row_counts(&store, &space).await,
+            (status.graph_nodes as i64, status.graph_edges as i64)
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieval_mode_status_is_job_scoped_and_bounded() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Status history", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let mut job_ids = Vec::new();
+
+        for index in 0..=MAX_RETRIEVAL_MODE_TERMINAL_STATUSES {
+            let mode = if index % 2 == 0 {
+                RetrievalMode::Graph
+            } else {
+                RetrievalMode::Vector
+            };
+            let job = store
+                .start_retrieval_mode_rebuild(&space, mode)
+                .await
+                .unwrap()
+                .unwrap();
+            let status = loop {
+                let status = store.retrieval_mode_status(&space, &job.job_id).unwrap();
+                if status.state != "running" && status.state != "cancelling" {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            };
+            assert_eq!(status.job_id, job.job_id);
+            assert!(matches!(status.state.as_str(), "completed" | "cancelled"));
+            job_ids.push(job.job_id);
+        }
+
+        assert!(store.retrieval_mode_status(&space, &job_ids[0]).is_none());
+        assert!(store
+            .retrieval_mode_status(&space, job_ids.last().expect("at least one completed job"))
+            .is_some());
+        assert!(store
+            .retrieval_mode_status("another-space", job_ids.last().unwrap())
+            .is_none());
+        assert!(!store.cancel_retrieval_mode_rebuild(&space, &job_ids[0]));
+        assert!(!store.cancel_retrieval_mode_rebuild(&space, job_ids.last().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_final_graph_copy_rolls_back_the_swap() -> Result<()> {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space_with_mode(
+                "Already graph",
+                None,
+                RetrievalMode::Graph,
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "Existing",
+                "Alice works at Acme and Acme is based in Paris.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let before = graph_row_counts(&store, &space).await;
+
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let mut conn = store.conn.lock().await;
+        conn.execute_batch(
+            "CREATE TEMP TABLE retrieval_rebuild_nodes (
+               id TEXT PRIMARY KEY, space_id TEXT NOT NULL, entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+             );
+             CREATE TEMP TABLE retrieval_rebuild_edges (
+               id TEXT PRIMARY KEY, space_id TEXT NOT NULL, src_entity TEXT NOT NULL,
+               dst_entity TEXT NOT NULL, chunk_id TEXT NOT NULL
+             );",
+        )?;
+        for index in 0..(RETRIEVAL_REBUILD_BATCH_SIZE + 1) {
+            conn.execute(
+                "INSERT INTO retrieval_rebuild_nodes
+                 (id, space_id, entity, chunk_id) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    format!("staged-node-{index}"),
+                    &space,
+                    format!("entity-{index}"),
+                    "staged-chunk"
+                ],
+            )?;
+            conn.execute(
+                "INSERT INTO retrieval_rebuild_edges
+                 (id, space_id, src_entity, dst_entity, chunk_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    format!("staged-edge-{index}"),
+                    &space,
+                    format!("src-{index}"),
+                    format!("dst-{index}"),
+                    "staged-chunk"
+                ],
+            )?;
+        }
+
+        let mut fingerprint = Sha256::new();
+        let mut stmt = conn
+            .prepare("SELECT rowid, id, content FROM chunks WHERE space_id = ?1 ORDER BY rowid")?;
+        let rows = stmt.query_map(params![&space], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut total_chunks = 0usize;
+        for row in rows {
+            let (rowid, id, content) = row?;
+            update_rebuild_fingerprint(&mut fingerprint, rowid, &id, &content);
+            total_chunks += 1;
+        }
+        drop(stmt);
+        let expected_fingerprint = format!("{:x}", fingerprint.finalize());
+        let result = finalize_chunked_retrieval_mode(
+            &mut conn,
+            &space,
+            RetrievalMode::Graph,
+            total_chunks,
+            total_chunks,
+            RETRIEVAL_REBUILD_BATCH_SIZE + 1,
+            RETRIEVAL_REBUILD_BATCH_SIZE + 1,
+            &expected_fingerprint,
+            &|| calls.fetch_add(1, Ordering::SeqCst) >= 7,
+        );
+        assert!(result.is_err(), "cancellation must abort finalization");
+        cleanup_retrieval_staging(&conn)?;
+        drop(conn);
+
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Graph
+        );
+        assert_eq!(graph_row_counts(&store, &space).await, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_background_rebuild_preserves_the_previous_mode_and_graph() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Cancelled", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        store
+            .ingest_document(
+                &space,
+                "Doc",
+                "Alice works at Acme and Acme is based in Paris.",
+                &DocOwner::unattributed(),
+            )
+            .await
+            .unwrap();
+        let job = store
+            .start_retrieval_mode_rebuild(&space, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.cancel_retrieval_mode_rebuild(&space, &job.job_id));
+        let status = loop {
+            let status = store.retrieval_mode_status(&space, &job.job_id).unwrap();
+            if status.state != "running" && status.state != "cancelling" {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(status.state, "cancelled");
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Vector
+        );
+        assert_eq!(graph_row_counts(&store, &space).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn vector_rebuild_arbitrates_cancellation_before_commit() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let space = store
+            .create_space("Vector", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let job_id = "vector-finalization".to_owned();
+        {
+            let mut state = store.retrieval_mode.lock().unwrap();
+            state.statuses.insert(
+                job_id.clone(),
+                RetrievalModeJobStatus {
+                    job_id: job_id.clone(),
+                    space_id: space.clone(),
+                    requested_mode: RetrievalMode::Vector,
+                    previous_mode: Some(RetrievalMode::Graph),
+                    state: "running".to_owned(),
+                    total_chunks: 0,
+                    processed_chunks: 0,
+                    graph_nodes: 0,
+                    graph_edges: 0,
+                    change: None,
+                    error: None,
+                },
+            );
+            state.cancel = Some(Arc::new(AtomicBool::new(false)));
+        }
+
+        let worker_store = store.clone();
+        let worker_space = space.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result = SpaceStore::set_retrieval_mode_chunked_with_control(
+                &worker_store,
+                &worker_space,
+                RetrievalMode::Vector,
+                &|| false,
+                &|| {
+                    assert!(worker_store.begin_retrieval_mode_finalization(&job_id));
+                    assert!(!worker_store.cancel_retrieval_mode_rebuild(&worker_space, &job_id));
+                    true
+                },
+                &mut |_processed, _nodes, _edges, _total| {},
+            );
+            result
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(result.unwrap().mode, RetrievalMode::Vector);
+        assert_eq!(
+            store.space_mode(&space).await.unwrap(),
+            RetrievalMode::Vector
+        );
+    }
+
+    #[tokio::test]
+    async fn active_retrieval_job_does_not_leak_metadata_or_allow_conflicting_requests() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let first_space = store
+            .create_space("First", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+        let other_space = store
+            .create_space("Other", None, &DocOwner::unattributed())
+            .await
+            .unwrap();
+
+        for state_name in ["running", "cancelling"] {
+            let job_id = format!("job-{state_name}");
+            let cancel = Arc::new(AtomicBool::new(state_name == "cancelling"));
+            {
+                let mut state = store.retrieval_mode.lock().unwrap();
+                state.statuses.insert(
+                    job_id.clone(),
+                    RetrievalModeJobStatus {
+                        job_id: job_id.clone(),
+                        space_id: first_space.clone(),
+                        requested_mode: RetrievalMode::Graph,
+                        previous_mode: Some(RetrievalMode::Vector),
+                        state: state_name.to_owned(),
+                        total_chunks: 0,
+                        processed_chunks: 0,
+                        graph_nodes: 0,
+                        graph_edges: 0,
+                        change: None,
+                        error: None,
+                    },
+                );
+                state.cancel = Some(cancel);
+            }
+
+            assert!(store
+                .start_retrieval_mode_rebuild(&first_space, RetrievalMode::Vector)
+                .await
+                .is_err());
+            assert!(store
+                .start_retrieval_mode_rebuild(&other_space, RetrievalMode::Graph)
+                .await
+                .is_err());
+            let status = store.retrieval_mode_status(&first_space, &job_id).unwrap();
+            assert_eq!(status.job_id, job_id);
+            assert_eq!(status.space_id, first_space);
+            assert_eq!(status.state, state_name);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_space_is_not_confused_with_an_active_rebuild() {
+        let store = SpaceStore::open_in_memory().unwrap();
+        let missing = "missing-space";
+
+        assert!(store
+            .start_retrieval_mode_rebuild(missing, RetrievalMode::Graph)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// Re-asserting `graph` on a Space that is already `graph` must not duplicate

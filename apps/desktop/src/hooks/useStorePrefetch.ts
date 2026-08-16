@@ -41,6 +41,7 @@ import {
 	mcpSourcesQuery,
 } from "./useMcpCatalog.ts";
 import { MODEL_LIST_DEFAULTS, modelListQuery } from "./useModelCatalog.ts";
+import { skillPacksQuery } from "./useSkillPacks.ts";
 import {
 	installedSkillsQuery,
 	skillListQuery,
@@ -93,6 +94,8 @@ export function useStorePrefetch(): void {
 			)
 			.catch(ignore);
 		qc.prefetchQuery(installedSkillsQuery(target)).catch(ignore);
+		// Skill packs — the Packs shelf above the skills list.
+		qc.prefetchQuery(skillPacksQuery(target)).catch(ignore);
 
 		// MCP — same source-keyed shape, plus the registered-servers read the
 		// section derives installed-state from.

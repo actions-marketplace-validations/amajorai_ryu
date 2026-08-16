@@ -2,6 +2,7 @@
   "id": "@ryu/meetings",
   "name": "Meetings",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Communication",
   "description": "Meeting notes: record → live transcript → AI notes, auto-saved into the Meetings Space so they stay editable and RAG-searchable.",
   "tagline": "Record, transcribe, and write up your meetings",

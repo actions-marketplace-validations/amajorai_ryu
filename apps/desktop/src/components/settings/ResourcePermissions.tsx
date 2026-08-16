@@ -751,7 +751,7 @@ export function ResourcePermissions({
 						key={t}
 						onClick={() => addTarget(t)}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Add {TARGET_LABEL[t].toLowerCase()}
 					</Button>

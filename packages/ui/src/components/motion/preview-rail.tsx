@@ -16,6 +16,8 @@ export interface PreviewRailItem {
 	href?: string;
 	target?: "_blank" | "_self" | "_parent" | "_top";
 	rel?: string;
+	/** Arbitrary consumer payload carried through to `renderPreview`. */
+	data?: unknown;
 }
 
 export interface PreviewRailProps {

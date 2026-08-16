@@ -25,6 +25,7 @@ import {
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import { toast } from "@ryu/ui/components/sileo";
+import { SuccessCheck } from "@ryu/ui/components/success-check.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
@@ -298,9 +299,12 @@ export function ProviderLoginDialog({
 
 				<div className="flex flex-col gap-4">
 					{done ? (
-						<p className="text-sm">
-							Connected. {providerLabel} is ready to use.
-						</p>
+						<div className="flex items-center gap-3">
+							<SuccessCheck className="size-8 shrink-0 text-success" />
+							<p className="text-sm">
+								Connected. {providerLabel} is ready to use.
+							</p>
+						</div>
 					) : null}
 
 					{error ? <p className="text-destructive text-sm">{error}</p> : null}
@@ -314,7 +318,7 @@ export function ProviderLoginDialog({
 							<Button
 								onClick={() => openInBrowser(authUrl)}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Open the authorization page
 							</Button>
@@ -332,7 +336,7 @@ export function ProviderLoginDialog({
 							<Button
 								onClick={() => openInBrowser(deviceCode.verificationUri)}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Open the verification page
 							</Button>
@@ -379,7 +383,7 @@ export function ProviderLoginDialog({
 													.finally(() => setSubmitting(false));
 											}}
 											size="sm"
-											variant="outline"
+											variant="ghost"
 										>
 											{option.label}
 										</Button>

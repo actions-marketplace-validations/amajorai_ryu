@@ -65,9 +65,9 @@ import { RouteOutlet } from "@/src/contributions/RouteOutlet.tsx";
 import { useCompanionAlias } from "@/src/contributions/use-companion-alias.ts";
 import { useApprovalEvents } from "@/src/hooks/useApprovalEvents.ts";
 import { usePluginThemeSync } from "@/src/hooks/useContributedThemes.ts";
+import { useCreditAlertEvents } from "@/src/hooks/useCreditAlertEvents.ts";
 import { useDesktopNotificationsStream } from "@/src/hooks/useDesktopNotificationsStream.ts";
 import { useDownloadsStream } from "@/src/hooks/useDownloadsStream.ts";
-import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useEditorUploader } from "@/src/hooks/useEditorUploader.ts";
 import { useMeetingStream } from "@/src/hooks/useMeetingStream.ts";
 import { useMonitorAlertsStream } from "@/src/hooks/useMonitorAlertsStream.ts";
@@ -96,6 +96,7 @@ import {
 import { toggleFullscreen } from "@/src/lib/fullscreen.ts";
 import { DESKTOP_HOTKEYS } from "@/src/lib/hotkeys/actions.ts";
 import { coreKvHotkeyStorage } from "@/src/lib/hotkeys/storage.ts";
+import { useLiveActivities } from "@/src/live/useLiveActivities.ts";
 import { useAssistantStore } from "@/src/store/useAssistantStore.ts";
 import { useChatHotkeyTargets } from "@/src/store/useChatHotkeyTargets.ts";
 import { useSettingsDialog } from "@/src/store/useSettingsDialog.ts";
@@ -216,6 +217,7 @@ function PaneBadge({
 			>
 				<TabGlyph
 					busy={busy}
+					busySpeed={tab.busySpeed}
 					className={cn(
 						"size-3 shrink-0",
 						focused ? "text-primary-foreground" : "text-muted-foreground"
@@ -290,6 +292,10 @@ function LayoutContent({
 	// App-wide subscription to Core's desktop-notification SSE stream → in-app
 	// toast + native OS notification from built-in agent actions (notify__desktop).
 	useDesktopNotificationsStream();
+
+	// Cloud credit alerts are edge-triggered after the server's atomic threshold
+	// claim; keep this separate from Core's notification streams.
+	useCreditAlertEvents();
 
 	// App-wide subscription to Core's per-user notification SSE stream → toast +
 	// OS notification for user-targeted pings (notify_user workflow node) and a
@@ -853,6 +859,7 @@ function LayoutContent({
 				>
 					<div
 						className="ryu-sidebar-surface absolute top-2 bottom-2 left-2 flex flex-col overflow-hidden rounded-2xl bg-card shadow-2xl"
+						data-sidebar-preview-boundary=""
 						onMouseEnter={showFloat}
 						onMouseLeave={scheduleHide}
 						style={{

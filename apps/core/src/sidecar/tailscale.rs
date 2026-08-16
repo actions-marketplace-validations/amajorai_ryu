@@ -382,7 +382,9 @@ fn resolve_pair_in(
             return Some(std::fs::canonicalize(&p).unwrap_or(p));
         }
         // A bare name in the override still resolves on PATH, as it did before.
-        binary_resolves(raw).then(|| lookup_in(path_dirs, raw)).flatten()
+        binary_resolves(raw)
+            .then(|| lookup_in(path_dirs, raw))
+            .flatten()
     };
     let env_daemon_path = explicit(env_daemon);
     let env_cli_path = explicit(env_cli);
@@ -418,7 +420,9 @@ fn resolve_pair_in(
     // Report what is genuinely absent EVERYWHERE, which is what a user can act on.
     let mut missing: Vec<String> = [DAEMON_BIN, CLI_BIN]
         .into_iter()
-        .filter(|bin| lookup_in(path_dirs, bin).is_none() && lookup_in(&managed_dirs, bin).is_none())
+        .filter(|bin| {
+            lookup_in(path_dirs, bin).is_none() && lookup_in(&managed_dirs, bin).is_none()
+        })
         .map(exe_name)
         .collect();
     if missing.is_empty() {
@@ -1064,12 +1068,12 @@ mod tests {
 
         let pair = resolve_pair_in(&[path_dir.clone()], &managed, None, None).expect("a pair");
         assert_eq!(pair.origin, "PATH");
-        assert!(pair.daemon.starts_with(
-            std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())
-        ));
-        assert!(pair.cli.starts_with(
-            std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())
-        ));
+        assert!(pair
+            .daemon
+            .starts_with(std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())));
+        assert!(pair
+            .cli
+            .starts_with(std::fs::canonicalize(&path_dir).unwrap_or_else(|_| path_dir.clone())));
     }
 
     #[test]

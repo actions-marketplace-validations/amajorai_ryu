@@ -186,7 +186,7 @@ async function credential() {
 // is already chat/completions-shaped deletes this whole section and forwards as-is.
 
 /** chat/completions request → Responses request. */
-function translateRequest(chat) {
+function translateRequest(chat, stream = false) {
 	const input = (chat.messages || []).map((m) => ({
 		role: m.role,
 		content: [
@@ -197,7 +197,7 @@ function translateRequest(chat) {
 			},
 		],
 	}));
-	const out = { model: chat.model, input, stream: false };
+	const out = { model: chat.model, input, stream };
 	if (chat.temperature != null) {
 		out.temperature = chat.temperature;
 	}
@@ -270,6 +270,91 @@ async function callUpstream(payload) {
 	return JSON.parse(text);
 }
 
+/**
+ * Forward Responses SSE events as OpenAI chat/completions chunks. The bootstrap
+ * owns the actual socket writes; this generator only translates provider events
+ * as they arrive.
+ */
+async function* streamUpstream(model, payload) {
+	const cred = await credential();
+	const headers = {
+		authorization: `Bearer ${cred.accessToken}`,
+		"content-type": "application/json",
+	};
+	if (cred.accountId) {
+		headers["chatgpt-account-id"] = cred.accountId;
+	}
+	const res = await fetch(`${UPSTREAM}/responses`, {
+		method: "POST",
+		headers,
+		body: JSON.stringify(payload),
+	});
+	if (!res.ok) {
+		const text = await res.text().catch(() => "");
+		throw new Error(`upstream ${res.status}: ${text.slice(0, 300)}`);
+	}
+
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let responseId = `chatcmpl-${Date.now()}`;
+	let sentDone = false;
+	for await (const bytes of res.body ?? []) {
+		buffer += decoder.decode(bytes, { stream: true });
+		const frames = buffer.split(/\r?\n\r?\n/);
+		buffer = frames.pop() ?? "";
+		for (const frame of frames) {
+			const data = frame
+				.split(/\r?\n/)
+				.filter((line) => line.startsWith("data:"))
+				.map((line) => line.slice(5).trimStart())
+				.join("\n");
+			if (!data || data === "[DONE]") {
+				continue;
+			}
+			const event = JSON.parse(data);
+			responseId = event.response?.id || responseId;
+			if (event.type === "response.output_text.delta") {
+				yield `data: ${JSON.stringify({
+					id: responseId,
+					object: "chat.completion.chunk",
+					created: Math.floor(Date.now() / 1000),
+					model,
+					choices: [{ index: 0, delta: { content: event.delta }, finish_reason: null }],
+				})}\n\n`;
+			}
+			if (event.type === "response.completed") {
+				const finishReason = event.response?.status === "incomplete" ? "length" : "stop";
+				yield `data: ${JSON.stringify({
+					id: responseId,
+					object: "chat.completion.chunk",
+					created: Math.floor(Date.now() / 1000),
+					model,
+					choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+				})}\n\n`;
+				sentDone = true;
+			}
+		}
+	}
+	if (buffer.trim()) {
+		const data = buffer
+			.split(/\r?\n/)
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice(5).trimStart())
+			.join("\n");
+		if (data && data !== "[DONE]") {
+			const event = JSON.parse(data);
+			if (event.type === "response.completed") {
+				sentDone = true;
+			}
+		}
+	}
+	if (!sentDone) {
+		yield "data: [DONE]\n\n";
+	} else {
+		yield "data: [DONE]\n\n";
+	}
+}
+
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 function log(message) {
@@ -303,36 +388,16 @@ async function chatCompletions(body) {
 	}
 
 	const model = chat.model || MODELS[0];
-	const upstream = await callUpstream(translateRequest(chat));
-	const completion = translateResponse(model, upstream);
-
-	// The extension-host bootstrap buffers responses (`res.end`), so incremental SSE
-	// is not available. A `stream: true` request is answered with a protocol-valid
-	// event stream delivered in one shot: correct for clients that parse SSE, but
-	// without token-by-token arrival. See README ("Streaming").
 	if (chat.stream) {
-		const chunk = {
-			id: completion.id,
-			object: "chat.completion.chunk",
-			created: completion.created,
-			model,
-			choices: [
-				{
-					index: 0,
-					delta: {
-						role: "assistant",
-						content: completion.choices[0].message.content,
-					},
-					finish_reason: completion.choices[0].finish_reason,
-				},
-			],
-		};
 		return {
 			status: 200,
 			headers: { "content-type": "text/event-stream" },
-			body: `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
+			stream: streamUpstream(model, translateRequest(chat, true)),
 		};
 	}
+
+	const upstream = await callUpstream(translateRequest(chat));
+	const completion = translateResponse(model, upstream);
 
 	return { status: 200, json: completion };
 }

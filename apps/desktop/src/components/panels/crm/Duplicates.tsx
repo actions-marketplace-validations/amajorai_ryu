@@ -157,7 +157,7 @@ export function Duplicates({
 				</div>
 			)}
 
-			<div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+			<div className="scroll-fade min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
 				{loading && groups.length === 0 && <Skeleton className="h-28 w-full" />}
 
 				{!loading && groups.length === 0 && (

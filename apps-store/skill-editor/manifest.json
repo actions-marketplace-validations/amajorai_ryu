@@ -2,6 +2,7 @@
   "id": "@ryu/skill-editor",
   "name": "Skill Editor",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Author a user-owned Agent Skill (SKILL.md): front-matter fields (name / description / allowed tools / always-on), a markdown body editor, debounced autosave, and server-backed undoable version history.",
   "tagline": "Write and version your own agent skills",

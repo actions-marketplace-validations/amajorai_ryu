@@ -11,8 +11,8 @@
 //! 2. **Per-store coverage** — what is sealed today, store by store, with live
 //!    row counts where they can be measured cheaply. Encryption-at-rest landed as
 //!    slices (`docs/encryption-at-rest.md` §8): chat content, long-term memory,
-//!    identity-vault state and plugin secrets are sealed; preferences, the device
-//!    token, and Spaces/RAG chunks are **not** yet. A single "Encrypted ✓" badge
+//!    identity-vault state and plugin secrets are sealed; Spaces/RAG chunks are
+//!    **not** yet. A single "Encrypted ✓" badge
 //!    would misreport the node, so this endpoint names every store's real state.
 //!
 //! Deliberately read-only and secret-free: no key material in any form (not the
@@ -101,7 +101,7 @@ pub async fn encryption_status(State(state): State<ServerState>) -> impl IntoRes
         {
             "id": "memory",
             "label": "Long-term memory",
-            "status": SEALED,
+            "status": PARTIAL,
             "sealed": memory_total,
             "total": memory_total,
             "detail": "Every entry's content is stored as ciphertext; only its category, tags and scope stay readable so recall can filter.",
@@ -125,10 +125,10 @@ pub async fn encryption_status(State(state): State<ServerState>) -> impl IntoRes
         {
             "id": "preferences",
             "label": "Preferences & provider keys",
-            "status": PLAINTEXT,
+            "status": PARTIAL,
             "sealed": serde_json::Value::Null,
             "total": serde_json::Value::Null,
-            "detail": "Settings — including provider API keys stored here — are still written in the clear. Anyone who can read the data folder can read them.",
+            "detail": "Credential preferences (provider keys, tokens and passwords) are sealed with the master key; ordinary settings remain plaintext so they stay queryable.",
         },
         {
             // Reported as PARTIAL rather than plaintext because the honest answer
@@ -149,10 +149,10 @@ pub async fn encryption_status(State(state): State<ServerState>) -> impl IntoRes
         {
             "id": "device-token",
             "label": "Device token",
-            "status": PLAINTEXT,
+            "status": PARTIAL,
             "sealed": serde_json::Value::Null,
             "total": serde_json::Value::Null,
-            "detail": "This node's sign-in token is stored unencrypted in the data folder.",
+            "detail": "The Core sign-in token and multi-account bearer tokens are sealed before auth.json or accounts.json; the separate early-boot node-auth.token remains plaintext until its boot-order path is redesigned.",
         },
         {
             "id": "spaces",
@@ -165,10 +165,10 @@ pub async fn encryption_status(State(state): State<ServerState>) -> impl IntoRes
         {
             "id": "gateway-audit",
             "label": "Gateway audit log",
-            "status": PLAINTEXT,
+            "status": PARTIAL,
             "sealed": serde_json::Value::Null,
             "total": serde_json::Value::Null,
-            "detail": "Request metadata only — no prompts or replies — but the API key of each request is written to disk unredacted (it is masked on read, not on write).",
+            "detail": "Request metadata stays readable; API keys are represented on disk by a SHA-256 lookup key and a short display prefix, never by the raw credential.",
         },
     ]);
 

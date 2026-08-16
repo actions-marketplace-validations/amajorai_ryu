@@ -295,7 +295,7 @@ export function FileUpload({
 				/>
 			</div>
 			{items.length > 0 ? (
-				<ul className="flex max-h-60 flex-col gap-1.5 overflow-y-auto">
+				<ul className="scroll-fade flex max-h-60 flex-col gap-1.5 overflow-y-auto">
 					{items.map((item) => (
 						<FileUploadRow
 							item={item}

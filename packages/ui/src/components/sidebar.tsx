@@ -378,7 +378,7 @@ function SidebarContent({ className, ...props }: ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-auto [--radius:var(--radius-xl)] group-data-[collapsible=icon]:overflow-hidden",
+				"scroll-fade no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-auto [--radius:var(--radius-xl)] group-data-[collapsible=icon]:overflow-hidden",
 				className
 			)}
 			data-sidebar="content"

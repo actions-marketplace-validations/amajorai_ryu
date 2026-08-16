@@ -988,13 +988,13 @@ mod tests {
     #[test]
     fn node_identity_and_runtime_files_never_travel_between_profiles() {
         for name in [
-            "core.token",       // target would claim the source's node identity (409 on init)
-            "node-auth.token",  // this node's minted RYU_TOKEN — copying it leaks the secret
-            "nodes.json",     // absolute URLs with the SOURCE profile's hardcoded port
-            "auth.json",      // plaintext device sign-in token
-            "ryu-core.pid",   // the source's live process id
-            ".reset-pending", // a pending wipe would fire on the target
-            "bin",            // .version markers make the target adopt source binaries
+            "core.token",      // target would claim the source's node identity (409 on init)
+            "node-auth.token", // this node's minted RYU_TOKEN — copying it leaks the secret
+            "nodes.json",      // absolute URLs with the SOURCE profile's hardcoded port
+            "auth.json",       // plaintext device sign-in token
+            "ryu-core.pid",    // the source's live process id
+            ".reset-pending",  // a pending wipe would fire on the target
+            "bin",             // .version markers make the target adopt source binaries
             "tmp",
             "cache",
         ] {

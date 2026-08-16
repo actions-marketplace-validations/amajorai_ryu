@@ -79,6 +79,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "./shared/settings-items.tsx";
+import { TrainingDataNotice } from "./TrainingDataNotice.tsx";
 
 // Hard-expiry duration options for a support-access grant. The §6 / §5.1 design
 // keeps the support tier short (the impersonation tier uses <=1 hr); the user
@@ -383,6 +384,7 @@ export function PrivacySettings() {
 	// so settings search can still reveal a row behind a closed page.
 	const disclosureIntro = (
 		<div className="space-y-6">
+			<TrainingDataNotice />
 			{disclosureAck ? null : (
 				<SettingsCard className="flex flex-col gap-3 border-primary/40">
 					<div className="flex items-start gap-2.5">

@@ -130,6 +130,16 @@ impl SecureExecExecutor {
         invoker: Arc<SandboxToolInvoker>,
         _agent_id: &str,
     ) -> ExecOutcome {
+        self.execute_with_deadline(code, invoker, Duration::from_secs(DEFAULT_DEADLINE_SECS))
+            .await
+    }
+
+    pub async fn execute_with_deadline(
+        &self,
+        code: &str,
+        invoker: Arc<SandboxToolInvoker>,
+        deadline: Duration,
+    ) -> ExecOutcome {
         if !securexec_available() {
             return ExecOutcome::error(
                 "secure-exec backend unavailable: needs Linux + `bun` on PATH + RYU_SECUREXEC_DIR \
@@ -155,7 +165,7 @@ impl SecureExecExecutor {
             return ExecOutcome::error(format!("failed to write securexec program: {e}"));
         }
 
-        let result = run_harness(&dir, &harness_path, &code_path, invoker).await;
+        let result = run_harness(&dir, &harness_path, &code_path, invoker, deadline).await;
 
         let _ = std::fs::remove_file(&harness_path);
         let _ = std::fs::remove_file(&code_path);
@@ -170,6 +180,7 @@ async fn run_harness(
     harness_path: &Path,
     code_path: &Path,
     invoker: Arc<SandboxToolInvoker>,
+    active_deadline: Duration,
 ) -> ExecOutcome {
     let mut child = match Command::new(bun_bin())
         .arg(harness_path)
@@ -189,7 +200,7 @@ async fn run_harness(
     let mut stdin = child.stdin.take().expect("piped stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
     let mut logs: Vec<String> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(DEFAULT_DEADLINE_SECS);
+    let deadline = Instant::now() + active_deadline;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -412,7 +423,10 @@ mod tests {
     /// different text depending on which sandbox was built.
     #[test]
     fn strip_control_keeps_newlines_and_drops_carriage_returns() {
-        assert_eq!(strip_control("para one\n\npara two"), "para one\n\npara two");
+        assert_eq!(
+            strip_control("para one\n\npara two"),
+            "para one\n\npara two"
+        );
         assert_eq!(strip_control("kept\r\ngone"), "kept\ngone");
     }
 

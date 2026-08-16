@@ -2,6 +2,7 @@
   "id": "@ryu/no-ai-slop",
   "name": "No AI Slop",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Bundles the `no-ai-slop` editing skill and runs it on every finished answer: a separate reviewer with a fresh context reads the reply, names the AI-slop patterns it finds, and the agent rewrites the answer to fix them. One pass by default, configurable up to twelve, or set to 0 and trigger it by hand from the composer '+' menu. A clean answer is left alone silently.",
   "tagline": "Every answer edited until it stops sounding like AI",
   "keywords": ["writing", "editing", "quality", "style", "turn"],

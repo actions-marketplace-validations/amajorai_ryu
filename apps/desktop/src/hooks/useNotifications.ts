@@ -6,20 +6,24 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type AppNotification,
 	ackNotification,
+	archiveNotification,
 	listNotifications,
 	markNotificationRead,
+	unarchiveNotification,
 } from "@/src/lib/api/notifications.ts";
 import { useActiveNode } from "./useActiveNode.ts";
 
 export interface UseNotificationsResult {
 	ack: (id: string) => Promise<boolean>;
 	acking: string | null;
+	archive: (id: string) => Promise<void>;
 	error: string | null;
 	loading: boolean;
 	markRead: (id: string) => Promise<void>;
 	/** The signed-in user id used for the feed, or null when signed out. */
 	meId: string | null;
 	notifications: AppNotification[];
+	unarchive: (id: string) => Promise<void>;
 }
 
 /**
@@ -28,6 +32,10 @@ export interface UseNotificationsResult {
  * before the session query resolves / offline). Liveness comes from the global
  * `useNotificationEvents` hook, which invalidates the `notifications` query on
  * each SSE ping — mirroring how `useApprovals` stays live via `useApprovalEvents`.
+ *
+ * The feed served is the LIVE inbox (un-archived rows). `archive` moves a row to
+ * the archive; `unarchive` restores it — both invalidate the feed so the tray and
+ * the Inbox page stay consistent.
  */
 export function useNotifications(): UseNotificationsResult {
 	const node = useActiveNode();
@@ -65,6 +73,18 @@ export function useNotifications(): UseNotificationsResult {
 		onError,
 	});
 
+	const archiveMutation = useMutation({
+		mutationFn: (id: string) => archiveNotification(target, id),
+		onSuccess: invalidate,
+		onError,
+	});
+
+	const unarchiveMutation = useMutation({
+		mutationFn: (id: string) => unarchiveNotification(target, id),
+		onSuccess: invalidate,
+		onError,
+	});
+
 	return {
 		notifications: listQuery.data ?? [],
 		loading: meId !== null && listQuery.isLoading,
@@ -72,6 +92,8 @@ export function useNotifications(): UseNotificationsResult {
 		meId,
 		markRead: (id) => readMutation.mutateAsync(id),
 		ack: (id) => ackMutation.mutateAsync(id),
+		archive: (id) => archiveMutation.mutateAsync(id),
+		unarchive: (id) => unarchiveMutation.mutateAsync(id),
 		acking:
 			ackMutation.isPending && typeof ackMutation.variables === "string"
 				? ackMutation.variables

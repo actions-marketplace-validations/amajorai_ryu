@@ -156,7 +156,7 @@ export const ModelPicker = memo(function ModelPicker({
 						</div>
 					</div>
 				)}
-				<div className="min-h-0 flex-1 overflow-y-auto">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto">
 					{filteredModels.length === 0 ? (
 						<p className="px-3 py-4 text-center text-muted-foreground text-xs">
 							No models match &ldquo;{query.trim()}&rdquo;

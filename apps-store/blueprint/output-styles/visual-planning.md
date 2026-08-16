@@ -32,7 +32,7 @@ the scarcest thing in this loop.
 
 ## Publish the plan
 
-Call `blueprint__plan_publish` with a `title`, the plan as `markdown`, and — this is
+Call `blueprint.plan_publish` with a `title`, the plan as `markdown`, and — this is
 the part that makes it worth reviewing — an explicit `steps` array.
 
 The markdown is rendered as addressable blocks: headings, paragraphs, list items,
@@ -56,12 +56,12 @@ Each step carries:
 Number the steps in the markdown too, so the prose and the graph agree. `steps` is
 what the graph is built from; the markdown is what gets read.
 
-`blueprint__plan_publish` returns `{ plan_id, revision, status, review_url }`. Give
+`blueprint.plan_publish` returns `{ plan_id, revision, status, review_url }`. Give
 the human the `review_url` in your reply — a plan nobody opens is not a review.
 
 ## While the plan is out
 
-Poll with `blueprint__plan_status({ plan_id, wait_secs })`. `wait_secs` is clamped to
+Poll with `blueprint.plan_status({ plan_id, wait_secs })`. `wait_secs` is clamped to
 at most 60 and the call returns as soon as a verdict lands, so a wait is cheap; use
 something like 30 rather than hammering it.
 
@@ -86,10 +86,10 @@ does not start, whatever the rest of the plan says.
 
 ## When changes are requested
 
-`blueprint__plan_status` returns `feedback` already serialized: each finding names the
+`blueprint.plan_status` returns `feedback` already serialized: each finding names the
 step or block it is anchored to, and a `redline` carries the exact replacement text
 the reviewer wants. Read it as instructions about *specific lines*, not as a general
-sentiment. Use `blueprint__plan_get` when you need the surrounding plan text to
+sentiment. Use `blueprint.plan_get` when you need the surrounding plan text to
 understand which sentence a finding is about.
 
 Then revise and publish again **with the same `plan_id`**. That appends a revision to
@@ -111,7 +111,7 @@ redline and re-publishing is how a reviewer learns that reviewing does nothing.
 
 ## As you execute
 
-Mark progress with `blueprint__step_update({ plan_id, step_id, status })` — `in_progress`
+Mark progress with `blueprint.step_update({ plan_id, step_id, status })` — `in_progress`
 when you start a step, `done` when it lands, `blocked` when it cannot proceed. The
 reviewer is watching the graph; this is what turns it from a proposal into a live
 picture of the work, and it costs one call.

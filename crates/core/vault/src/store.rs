@@ -19,13 +19,15 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use ryu_crypto::global_cipher;
 
 use super::source::{is_known_source, known_source_ids};
-use super::{ConnectionRecord, ConnectionStatus, FlowStatus, Profile, SealedState, SecretState};
+use super::{
+    ConnectionRecord, ConnectionStatus, FlowStatus, McpOAuthConnectionRecord,
+    McpOAuthConnectionStatus, Profile, SealedState, SecretState,
+};
 
 /// Default backend id used when a connection's `source` is unspecified.
 const DEFAULT_SOURCE: &str = "manual";
@@ -118,7 +120,27 @@ impl IdentityStore {
                 updated_at      INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_connections_profile
-                ON connections(profile_id);",
+                ON connections(profile_id);
+
+            CREATE TABLE IF NOT EXISTS mcp_oauth_connections (
+                id              TEXT PRIMARY KEY,
+                owner_user_id   TEXT NOT NULL,
+                profile_id      TEXT NOT NULL,
+                plugin_id       TEXT NOT NULL,
+                server_name     TEXT NOT NULL,
+                resource_uri    TEXT NOT NULL,
+                issuer          TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'REAUTH_REQUIRED',
+                account_label   TEXT,
+                scopes_json     TEXT NOT NULL DEFAULT '[]',
+                expires_at      INTEGER,
+                encrypted_state TEXT,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL,
+                UNIQUE(owner_user_id, profile_id, plugin_id, server_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mcp_oauth_owner_plugin
+                ON mcp_oauth_connections(owner_user_id, plugin_id);",
         )
         .context("running identities schema migration")?;
 
@@ -385,6 +407,195 @@ impl IdentityStore {
         let removed = conn.execute("DELETE FROM connections WHERE id = ?1", params![id])?;
         Ok(removed > 0)
     }
+
+    // ── Remote MCP OAuth ───────────────────────────────────────────────────
+
+    /// Insert or replace the single active OAuth account for a
+    /// `(owner, profile, plugin, server)` binding. The token bundle is sealed
+    /// before the transaction acquires the database lock.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_mcp_oauth_connection(
+        &self,
+        owner_user_id: &str,
+        profile_id: &str,
+        plugin_id: &str,
+        server_name: &str,
+        resource_uri: &str,
+        issuer: &str,
+        account_label: Option<&str>,
+        scopes: &[String],
+        expires_at: Option<i64>,
+        raw_state: &SecretState,
+    ) -> Result<McpOAuthConnectionRecord> {
+        let cipher = global_cipher().context("loading the at-rest cipher for MCP OAuth state")?;
+        let sealed = cipher
+            .seal(raw_state.expose())
+            .context("sealing MCP OAuth token state")?;
+        let scopes_json = serde_json::to_string(scopes).context("serializing OAuth scopes")?;
+        let now = now_unix();
+        let id = format!("mcp_oauth_{}", uuid::Uuid::new_v4().simple());
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO mcp_oauth_connections
+                (id, owner_user_id, profile_id, plugin_id, server_name, resource_uri,
+                 issuer, status, account_label, scopes_json, expires_at,
+                 encrypted_state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+             ON CONFLICT(owner_user_id, profile_id, plugin_id, server_name) DO UPDATE SET
+                 resource_uri = excluded.resource_uri,
+                 issuer = excluded.issuer,
+                 status = excluded.status,
+                 account_label = excluded.account_label,
+                 scopes_json = excluded.scopes_json,
+                 expires_at = excluded.expires_at,
+                 encrypted_state = excluded.encrypted_state,
+                 updated_at = excluded.updated_at",
+            params![
+                id,
+                owner_user_id,
+                profile_id,
+                plugin_id,
+                server_name,
+                resource_uri,
+                issuer,
+                McpOAuthConnectionStatus::Connected.as_str(),
+                account_label,
+                scopes_json,
+                expires_at,
+                sealed,
+                now,
+            ],
+        )?;
+        drop(conn);
+        self.find_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
+            .await?
+            .context("OAuth connection disappeared after upsert")
+    }
+
+    /// Metadata-only list of OAuth connections owned by one principal and plugin.
+    pub async fn list_mcp_oauth_connections(
+        &self,
+        owner_user_id: &str,
+        plugin_id: &str,
+    ) -> Result<Vec<McpOAuthConnectionRecord>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, owner_user_id, profile_id, plugin_id, server_name,
+                    resource_uri, issuer, status, account_label, scopes_json,
+                    expires_at, encrypted_state, created_at, updated_at
+             FROM mcp_oauth_connections
+             WHERE owner_user_id = ?1 AND plugin_id = ?2
+             ORDER BY server_name, profile_id",
+        )?;
+        let rows = stmt
+            .query_map(params![owner_user_id, plugin_id], row_to_mcp_oauth_record)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Internal lifecycle view across every owner. This is intentionally not
+    /// used by REST handlers; uninstall needs it so every locally held binding
+    /// owned by the removed plugin can be revoked and erased.
+    pub async fn list_mcp_oauth_connections_for_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Vec<McpOAuthConnectionRecord>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, owner_user_id, profile_id, plugin_id, server_name,
+                    resource_uri, issuer, status, account_label, scopes_json,
+                    expires_at, encrypted_state, created_at, updated_at
+             FROM mcp_oauth_connections
+             WHERE plugin_id = ?1
+             ORDER BY owner_user_id, server_name, profile_id",
+        )?;
+        let rows = stmt
+            .query_map(params![plugin_id], row_to_mcp_oauth_record)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Find the exact owner/profile/plugin/server binding.
+    pub async fn find_mcp_oauth_connection(
+        &self,
+        owner_user_id: &str,
+        profile_id: &str,
+        plugin_id: &str,
+        server_name: &str,
+    ) -> Result<Option<McpOAuthConnectionRecord>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT id, owner_user_id, profile_id, plugin_id, server_name,
+                    resource_uri, issuer, status, account_label, scopes_json,
+                    expires_at, encrypted_state, created_at, updated_at
+             FROM mcp_oauth_connections
+             WHERE owner_user_id = ?1 AND profile_id = ?2
+               AND plugin_id = ?3 AND server_name = ?4",
+            params![owner_user_id, profile_id, plugin_id, server_name],
+            row_to_mcp_oauth_record,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Decrypt the token bundle for runtime use. It must never cross an API or
+    /// logging boundary.
+    pub async fn open_mcp_oauth_state(&self, id: &str) -> Result<Option<SecretState>> {
+        let sealed = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT encrypted_state FROM mcp_oauth_connections WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        };
+        let Some(sealed) = sealed else {
+            return Ok(None);
+        };
+        let cipher = global_cipher().context("loading the at-rest cipher for MCP OAuth state")?;
+        let plain = cipher
+            .open(&sealed)
+            .context("opening sealed MCP OAuth token state")?;
+        Ok(Some(SecretState::new(plain)))
+    }
+
+    /// Mark a connection unusable without retaining an apparently-live access
+    /// token. Used on refresh `invalid_grant` and binding changes.
+    pub async fn mark_mcp_oauth_reauth_required(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE mcp_oauth_connections
+             SET status = ?2, encrypted_state = NULL, expires_at = NULL, updated_at = ?3
+             WHERE id = ?1",
+            params![
+                id,
+                McpOAuthConnectionStatus::ReauthRequired.as_str(),
+                now_unix()
+            ],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// Delete the exact OAuth binding. Ownership stays in the predicate so a
+    /// guessed connection id cannot cross a principal boundary.
+    pub async fn delete_mcp_oauth_connection(
+        &self,
+        owner_user_id: &str,
+        profile_id: &str,
+        plugin_id: &str,
+        server_name: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let removed = conn.execute(
+            "DELETE FROM mcp_oauth_connections
+             WHERE owner_user_id = ?1 AND profile_id = ?2
+               AND plugin_id = ?3 AND server_name = ?4",
+            params![owner_user_id, profile_id, plugin_id, server_name],
+        )?;
+        Ok(removed > 0)
+    }
 }
 
 #[cfg(test)]
@@ -533,6 +744,74 @@ mod tests {
         );
         assert!(record.encrypted_state.is_some());
     }
+
+    #[tokio::test]
+    async fn mcp_oauth_is_unique_owner_bound_encrypted_and_metadata_only() {
+        let store = IdentityStore::open_in_memory().unwrap();
+        let scopes = vec!["email.send".to_owned()];
+        let first = store
+            .upsert_mcp_oauth_connection(
+                "user_a",
+                "personal",
+                "com.example.mail",
+                "mail",
+                "https://mcp.example.com/",
+                "https://auth.example.com/",
+                Some("alice@example.com"),
+                &scopes,
+                Some(1_800_000_000),
+                &SecretState::new(r#"{"access_token":"top-secret"}"#.to_owned()),
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_mcp_oauth_connection(
+                "user_a",
+                "personal",
+                "com.example.mail",
+                "mail",
+                "https://mcp.example.com/",
+                "https://auth.example.com/",
+                Some("alice@example.com"),
+                &scopes,
+                Some(1_900_000_000),
+                &SecretState::new(r#"{"access_token":"rotated-secret"}"#.to_owned()),
+            )
+            .await
+            .unwrap();
+
+        let records = store
+            .list_mcp_oauth_connections("user_a", "com.example.mail")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1, "the binding permits one active account");
+        assert!(!serde_json::to_string(&records[0])
+            .unwrap()
+            .contains("secret"));
+        assert!(store
+            .list_mcp_oauth_connections("user_b", "com.example.mail")
+            .await
+            .unwrap()
+            .is_empty());
+
+        let opened = store
+            .open_mcp_oauth_state(&records[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(opened.expose().contains("rotated-secret"));
+        let conn = store.conn.lock().await;
+        let sealed: String = conn
+            .query_row(
+                "SELECT encrypted_state FROM mcp_oauth_connections WHERE id = ?1",
+                params![records[0].id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sealed.starts_with("enc:v1:"));
+        assert!(!sealed.contains("rotated-secret"));
+        assert_eq!(first.owner_user_id, "user_a");
+    }
 }
 
 /// Parse a row into a [`ConnectionRecord`]. Unknown enum strings fail soft to the
@@ -552,5 +831,27 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRecord> 
         last_checked: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+    })
+}
+
+fn row_to_mcp_oauth_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpOAuthConnectionRecord> {
+    let status: String = row.get(7)?;
+    let scopes_json: String = row.get(9)?;
+    let encrypted_state: Option<String> = row.get(11)?;
+    Ok(McpOAuthConnectionRecord {
+        id: row.get(0)?,
+        owner_user_id: row.get(1)?,
+        profile_id: row.get(2)?,
+        plugin_id: row.get(3)?,
+        server_name: row.get(4)?,
+        resource_uri: row.get(5)?,
+        issuer: row.get(6)?,
+        status: McpOAuthConnectionStatus::from_str(&status),
+        account_label: row.get(8)?,
+        scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
+        expires_at: row.get(10)?,
+        encrypted_state: encrypted_state.map(SealedState::new),
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }

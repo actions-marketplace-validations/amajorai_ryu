@@ -43,6 +43,13 @@
       "tsHost": true
     },
     {
+      "capability": "app.http",
+      "grant": "app:http",
+      "method": "app.request",
+      "streaming": false,
+      "tsHost": true
+    },
+    {
       "capability": "ui.displayMode",
       "grant": null,
       "method": "ui.requestDisplayMode",
@@ -153,6 +160,13 @@
       "method": "agent.run",
       "streaming": false,
       "tsHost": true
+    },
+    {
+      "capability": "agent.run",
+      "grant": "hook:run-agent",
+      "method": "agent.runFanout",
+      "streaming": false,
+      "tsHost": false
     },
     {
       "capability": "storage.kv",
@@ -1240,5 +1254,5 @@
       "tsHost": false
     }
   ],
-  "version": "1.0.0"
+  "version": "1.2.0"
 }

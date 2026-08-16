@@ -37,6 +37,6 @@ pub use ryu_vault::{health, source};
 pub use ryu_vault::{
     global, is_known_source, known_source_ids, set_global, ConnectionRecord, ConnectionStatus,
     CredentialBackend, CredentialSource, CredentialSourceRegistry, FlowStatus, HealthEngine,
-    HealthEvent, IdentityStore, LoginFlow, LoginKind, ManualImport, Profile, SealedState,
-    SecretState, DEFAULT_SOURCE_ENV,
+    HealthEvent, IdentityStore, LoginFlow, LoginKind, ManualImport, McpOAuthConnectionRecord,
+    McpOAuthConnectionStatus, Profile, SealedState, SecretState, DEFAULT_SOURCE_ENV,
 };

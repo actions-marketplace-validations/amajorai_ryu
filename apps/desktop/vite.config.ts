@@ -13,6 +13,11 @@ export default defineConfig({
 	clearScreen: false,
 	// The Lanyard component (@ryu/ui) imports a binary .glb model as a URL asset.
 	assetsInclude: ["**/*.glb"],
+	optimizeDeps: {
+		esbuildOptions: {
+			target: "chrome105",
+		},
+	},
 	server: {
 		port: 5173,
 		strictPort: true,

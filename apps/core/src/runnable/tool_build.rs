@@ -264,7 +264,12 @@ pub fn scan_purity(source: &str) -> Vec<PurityViolation> {
                     column: m.start() + 1,
                     what: rule.what,
                     instead: rule.instead,
-                    source: source.split('\n').nth(index).unwrap_or_default().trim().to_owned(),
+                    source: source
+                        .split('\n')
+                        .nth(index)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned(),
                 });
             }
         }
@@ -417,7 +422,7 @@ const frozenCopy = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringi
 // a real read-after-write Map, every call is recorded in order.
 function buildHost(fixture, calls) {
 	const queues = new Map();
-	for (const key of ["sideModel", "runAgent"]) {
+	for (const key of ["sideModel", "runAgent", "runFanout"]) {
 		const value = fixture && fixture[key];
 		queues.set(key, Array.isArray(value) ? [...value] : []);
 	}
@@ -434,6 +439,7 @@ function buildHost(fixture, calls) {
 	return {
 		sideModel: async (args = {}) => { rec("host.sideModel", args); return dequeue("sideModel", args); },
 		runAgent: async (args = {}) => { rec("host.runAgent", args); return dequeue("runAgent", args); },
+		runFanout: async (args = {}) => { rec("host.runFanout", args); return dequeue("runFanout", args); },
 		storage: {
 			get: async (key, namespace) => {
 				rec("host.storage.get", { key, namespace });
@@ -591,8 +597,12 @@ impl GateReport {
 /// first" condition, not a gate finding.
 fn load_package(dir: &Path) -> Result<(ToolSpec, String, Value), String> {
     let cases_path = dir.join("cases.json");
-    let raw_spec = std::fs::read_to_string(&cases_path)
-        .map_err(|e| format!("no cases.json at {} ({e}) — run write_tool first", cases_path.display()))?;
+    let raw_spec = std::fs::read_to_string(&cases_path).map_err(|e| {
+        format!(
+            "no cases.json at {} ({e}) — run write_tool first",
+            cases_path.display()
+        )
+    })?;
     let spec: ToolSpec = serde_json::from_str(&raw_spec)
         .map_err(|e| format!("cases.json is not a valid case table: {e}"))?;
 
@@ -622,29 +632,48 @@ fn check_body_shape(body: &str, report: &mut GateReport) {
         }
         p
     };
-    report.push("body is non-trivial", problems.is_empty(), problems.join("; "));
+    report.push(
+        "body is non-trivial",
+        problems.is_empty(),
+        problems.join("; "),
+    );
 }
 
 /// Step 2 + 3: the manifest must seat the body, be routable, be callable, and
 /// carry exactly the body the cases test. A port of `manifest.mjs`'s
 /// `checkManifestContract` / `checkBodyDrift`, adapted to runtime ids
 /// (reverse-domain, not `@scope/name`).
-fn check_manifest(spec: &ToolSpec, body: &str, manifest: &Value, expected_id: &str, report: &mut GateReport) {
+fn check_manifest(
+    spec: &ToolSpec,
+    body: &str,
+    manifest: &Value,
+    expected_id: &str,
+    report: &mut GateReport,
+) {
     let mut problems = Vec::new();
 
-    let manifest_id = manifest.get("id").and_then(Value::as_str).unwrap_or_default();
+    let manifest_id = manifest
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if manifest_id != expected_id {
         problems.push(format!(
             "manifest id '{manifest_id}' does not match the tool's id '{expected_id}'"
         ));
     }
 
-    let version = manifest.get("version").and_then(Value::as_str).unwrap_or_default();
+    let version = manifest
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if semver::Version::parse(version).is_err() {
         problems.push(format!("version '{version}' is not semver"));
     }
 
-    let description = manifest.get("description").and_then(Value::as_str).unwrap_or_default();
+    let description = manifest
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if description.is_empty() || description.starts_with("TODO") {
         problems.push("manifest description is missing or still the TODO placeholder — it is what the model routes on".to_owned());
     }
@@ -679,7 +708,10 @@ fn check_manifest(spec: &ToolSpec, body: &str, manifest: &Value, expected_id: &s
         report.push(
             "manifest seats the body",
             false,
-            format!("manifest.json does not declare tool '{}' — a body nothing references never runs", spec.tool),
+            format!(
+                "manifest.json does not declare tool '{}' — a body nothing references never runs",
+                spec.tool
+            ),
         );
         return;
     };
@@ -688,21 +720,33 @@ fn check_manifest(spec: &ToolSpec, body: &str, manifest: &Value, expected_id: &s
         problems.push(format!(
             "runnable for '{}' has backend '{}', expected 'inline_deno'",
             spec.tool,
-            config.get("backend").and_then(Value::as_str).unwrap_or("(none)")
+            config
+                .get("backend")
+                .and_then(Value::as_str)
+                .unwrap_or("(none)")
         ));
     }
 
-    let tool_description = config.get("description").and_then(Value::as_str).unwrap_or_default();
+    let tool_description = config
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if tool_description.is_empty() || tool_description.starts_with("TODO") {
         problems.push(format!("tool '{}' has no real description — the model picks tools by description, so a TODO makes it unroutable", spec.tool));
     }
 
     if !config.get("input_schema").map_or(false, Value::is_object) {
-        problems.push(format!("tool '{}' declares no input_schema — the model would have to guess the arguments", spec.tool));
+        problems.push(format!(
+            "tool '{}' declares no input_schema — the model would have to guess the arguments",
+            spec.tool
+        ));
     }
 
     // Drift: the manifest `code` string must be exactly the body the cases test.
-    let sealed = config.get("code").and_then(Value::as_str).unwrap_or_default();
+    let sealed = config
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if sealed != body {
         problems.push(format!(
             "manifest `code` for '{}' has drifted from {}. The body file is the source form; re-run write_tool with the current body before installing.",
@@ -710,7 +754,11 @@ fn check_manifest(spec: &ToolSpec, body: &str, manifest: &Value, expected_id: &s
         ));
     }
 
-    report.push("manifest seats the body and matches it", problems.is_empty(), problems.join("; "));
+    report.push(
+        "manifest seats the body and matches it",
+        problems.is_empty(),
+        problems.join("; "),
+    );
 }
 
 /// Step 4: the case table must be worth running — at least three cases, unique
@@ -726,7 +774,10 @@ fn check_case_shape(spec: &ToolSpec, report: &mut GateReport) {
     let mut seen = std::collections::HashSet::new();
     for c in &spec.cases {
         if !seen.insert(c.name.as_str()) {
-            problems.push(format!("two cases share a name '{0}' — a failure would not say which one broke", c.name));
+            problems.push(format!(
+                "two cases share a name '{0}' — a failure would not say which one broke",
+                c.name
+            ));
         }
         let expectations = [
             c.expect.is_some(),
@@ -743,16 +794,16 @@ fn check_case_shape(spec: &ToolSpec, report: &mut GateReport) {
             ));
         }
     }
-    report.push("case table is well-formed", problems.is_empty(), problems.join("; "));
+    report.push(
+        "case table is well-formed",
+        problems.is_empty(),
+        problems.join("; "),
+    );
 }
 
 /// Run one case against the sandbox report. `runs` is the `{ run1, run2 }` pair
 /// the program returned; `expect_calls` gates the recorded effect sequence.
-fn assert_case(
-    tc: &ToolCase,
-    runs: &Value,
-    spec_kind: &str,
-) -> Result<(), String> {
+fn assert_case(tc: &ToolCase, runs: &Value, spec_kind: &str) -> Result<(), String> {
     let run1 = &runs["run1"];
     let run2 = &runs["run2"];
 
@@ -770,26 +821,45 @@ fn assert_case(
     // `expectImpure`: the body must have been rejected at the moment it reached
     // for a shadowed global.
     if let Some(pattern) = &tc.expect_impure {
-        let msg = err1.clone().unwrap_or_else(|| format!("the body returned {:?} instead of being rejected as impure", run1["value"]));
-        let re = Regex::new(pattern).map_err(|e| format!("expectImpure is not a valid regex: {e}"))?;
+        let msg = err1.clone().unwrap_or_else(|| {
+            format!(
+                "the body returned {:?} instead of being rejected as impure",
+                run1["value"]
+            )
+        });
+        let re =
+            Regex::new(pattern).map_err(|e| format!("expectImpure is not a valid regex: {e}"))?;
         let is_impure = msg.starts_with("nondeterministic access:");
         if !is_impure {
-            return Err(format!("expected the body to be rejected as impure, but it returned {}", run1["value"]));
+            return Err(format!(
+                "expected the body to be rejected as impure, but it returned {}",
+                run1["value"]
+            ));
         }
         if !re.is_match(&msg) {
-            return Err(format!("impure access '{}' did not match expectImpure /{pattern}/", msg));
+            return Err(format!(
+                "impure access '{}' did not match expectImpure /{pattern}/",
+                msg
+            ));
         }
         return Ok(());
     }
 
     // `expectError`: the body must have thrown a message matching the regex.
     if let Some(pattern) = &tc.expect_error {
-        let re = Regex::new(pattern).map_err(|e| format!("expectError is not a valid regex: {e}"))?;
+        let re =
+            Regex::new(pattern).map_err(|e| format!("expectError is not a valid regex: {e}"))?;
         let Some(msg) = &err1 else {
-            return Err(format!("expected an error but the body returned {}", run1["value"]));
+            return Err(format!(
+                "expected an error but the body returned {}",
+                run1["value"]
+            ));
         };
         if !re.is_match(msg) {
-            return Err(format!("error '{}' did not match expectError /{pattern}/", msg));
+            return Err(format!(
+                "error '{}' did not match expectError /{pattern}/",
+                msg
+            ));
         }
         return Ok(());
     }
@@ -800,7 +870,10 @@ fn assert_case(
     }
     if let Some(expected) = &tc.expect {
         if run1["value"] != *expected {
-            return Err(format!("expected {} but the body returned {}", expected, run1["value"]));
+            return Err(format!(
+                "expected {} but the body returned {}",
+                expected, run1["value"]
+            ));
         }
     }
 
@@ -836,14 +909,22 @@ async fn run_cases_in_sandbox(spec: &ToolSpec, body: &str, report: &mut GateRepo
         }
         ryu_tool_exec::EvalJsOutcome::Value(report_value) => {
             let Some(cases) = report_value.get("cases").and_then(Value::as_array) else {
-                report.push("cases", false, "the sandbox returned no per-case results".to_owned());
+                report.push(
+                    "cases",
+                    false,
+                    "the sandbox returned no per-case results".to_owned(),
+                );
                 return;
             };
             if cases.len() != spec.cases.len() {
                 report.push(
                     "cases",
                     false,
-                    format!("expected {} case results, got {}", spec.cases.len(), cases.len()),
+                    format!(
+                        "expected {} case results, got {}",
+                        spec.cases.len(),
+                        cases.len()
+                    ),
                 );
                 return;
             }
@@ -889,11 +970,7 @@ async fn run_cases_in_sandbox(spec: &ToolSpec, body: &str, report: &mut GateRepo
 pub async fn verify_tool_package(dir: &Path, expected_id: &str) -> Result<GateReport, String> {
     let (spec, body, manifest) = load_package(dir)?;
 
-    let mut report = GateReport::check(
-        "purity (static denylist)",
-        true,
-        "no violations",
-    );
+    let mut report = GateReport::check("purity (static denylist)", true, "no violations");
 
     // Step 1: purity. On violation, STOP — the denylist covers every escape from
     // the sandbox, so nothing impure may execute, and the sandbox run is only
@@ -936,7 +1013,13 @@ pub async fn verify_tool_package(dir: &Path, expected_id: &str) -> Result<GateRe
 
 /// The manifest `write_tool` seals, as a JSON value. `code` is the body; this is
 /// the ONLY form Core loads for an `inline_deno` tool.
-pub fn tool_manifest_json(id: &str, slug: &str, description: &str, input_schema: Value, code: &str) -> Value {
+pub fn tool_manifest_json(
+    id: &str,
+    slug: &str,
+    description: &str,
+    input_schema: Value,
+    code: &str,
+) -> Value {
     json!({
         "id": id,
         "name": id.rsplit('.').next().unwrap_or(id),
@@ -1033,7 +1116,10 @@ return { length: text.length };
         let body = "const s = 'a\\nmulti'\nreturn Date.now();";
         let violations = scan_purity(body);
         assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].line, 2, "the \n inside the string must not shift lines");
+        assert_eq!(
+            violations[0].line, 2,
+            "the \n inside the string must not shift lines"
+        );
     }
 
     #[test]
@@ -1121,7 +1207,9 @@ return { length: text.length };
             .unwrap(),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let report = rt.block_on(verify_tool_package(&dir, "com.acme.demo")).unwrap();
+        let report = rt
+            .block_on(verify_tool_package(&dir, "com.acme.demo"))
+            .unwrap();
         assert!(!report.passed);
         assert!(!report.checks[0].ok);
         assert!(report.checks[0].detail.contains("Math.random()"));
@@ -1138,10 +1226,22 @@ return { length: text.length };
             r#"{"tool":"demo","kind":"inline_tool","code_file":"tools/demo.js","cases":[{"name":"a","input":{},"expect":{}},{"name":"b","input":{},"expect":{}},{"name":"c","input":{},"expect":{}}]}"#,
         );
         write(&dir, "tools/demo.js", "return { ok: true };");
-        let manifest = tool_manifest_json("com.acme.demo", "demo", "Demo tool.", json!({"type":"object"}), "return { ok: false };");
-        write(&dir, "manifest.json", &serde_json::to_string_pretty(&manifest).unwrap());
+        let manifest = tool_manifest_json(
+            "com.acme.demo",
+            "demo",
+            "Demo tool.",
+            json!({"type":"object"}),
+            "return { ok: false };",
+        );
+        write(
+            &dir,
+            "manifest.json",
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let report = rt.block_on(verify_tool_package(&dir, "com.acme.demo")).unwrap();
+        let report = rt
+            .block_on(verify_tool_package(&dir, "com.acme.demo"))
+            .unwrap();
         assert!(!report.passed);
         let drift = report
             .checks
@@ -1173,12 +1273,23 @@ return { length: text.length };
             r#"{"tool":"demo","kind":"inline_tool","code_file":"tools/demo.js","cases":[{"name":"a","input":{},"expect":{}},{"name":"b","input":{},"expect":{}},{"name":"c","input":{},"expect":{}}]}"#,
         );
         write(&dir, "tools/demo.js", "return { ok: true };");
-        let mut manifest =
-            tool_manifest_json("com.acme.demo", "demo", "Demo tool.", json!({"type":"object"}), "return { ok: true };");
+        let mut manifest = tool_manifest_json(
+            "com.acme.demo",
+            "demo",
+            "Demo tool.",
+            json!({"type":"object"}),
+            "return { ok: true };",
+        );
         manifest["permission_grants"] = json!([]);
-        write(&dir, "manifest.json", &serde_json::to_string_pretty(&manifest).unwrap());
+        write(
+            &dir,
+            "manifest.json",
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let report = rt.block_on(verify_tool_package(&dir, "com.acme.demo")).unwrap();
+        let report = rt
+            .block_on(verify_tool_package(&dir, "com.acme.demo"))
+            .unwrap();
         assert!(!report.passed);
         let grant = report
             .checks
@@ -1219,7 +1330,11 @@ return { length: text.length };
             .join("toolsmith-example");
         let dir = tmp_dir();
         std::fs::create_dir_all(dir.join("tools")).unwrap();
-        std::fs::copy(root.join("tools/text_chunk.js"), dir.join("tools/text_chunk.js")).unwrap();
+        std::fs::copy(
+            root.join("tools/text_chunk.js"),
+            dir.join("tools/text_chunk.js"),
+        )
+        .unwrap();
         std::fs::copy(root.join("cases.json"), dir.join("cases.json")).unwrap();
         let body = std::fs::read_to_string(dir.join("tools/text_chunk.js")).unwrap();
         let manifest = tool_manifest_json(
@@ -1237,10 +1352,16 @@ return { length: text.length };
             }),
             &body,
         );
-        write(&dir, "manifest.json", &serde_json::to_string_pretty(&manifest).unwrap());
+        write(
+            &dir,
+            "manifest.json",
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let report = rt.block_on(verify_tool_package(&dir, "com.acme.text-chunk")).unwrap();
+        let report = rt
+            .block_on(verify_tool_package(&dir, "com.acme.text-chunk"))
+            .unwrap();
         assert!(report.passed, "{:#?}", report);
         assert_eq!(report.cases.len(), 7, "every case ran");
         assert!(report.cases.iter().all(|c| c.ok));
@@ -1270,15 +1391,39 @@ return { length: text.length };
         );
         // Calls host.sideModel TWICE but the fixture queues only ONE response —
         // the sandbox must reject the second call loudly, not silently reuse.
-        write(&dir, "tools/demo.js", "await host.sideModel({}); await host.sideModel({}); return { hi: true };");
-        let manifest = tool_manifest_json("com.acme.demo", "demo", "Demo tool.", json!({"type":"object"}), "await host.sideModel({}); await host.sideModel({}); return { hi: true };");
-        write(&dir, "manifest.json", &serde_json::to_string_pretty(&manifest).unwrap());
+        write(
+            &dir,
+            "tools/demo.js",
+            "await host.sideModel({}); await host.sideModel({}); return { hi: true };",
+        );
+        let manifest = tool_manifest_json(
+            "com.acme.demo",
+            "demo",
+            "Demo tool.",
+            json!({"type":"object"}),
+            "await host.sideModel({}); await host.sideModel({}); return { hi: true };",
+        );
+        write(
+            &dir,
+            "manifest.json",
+            &serde_json::to_string_pretty(&manifest).unwrap(),
+        );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let report = rt.block_on(verify_tool_package(&dir, "com.acme.demo")).unwrap();
+        let report = rt
+            .block_on(verify_tool_package(&dir, "com.acme.demo"))
+            .unwrap();
         assert!(!report.passed, "{:#?}", report);
-        let failing = report.cases.iter().find(|c| !c.ok).expect("a case must fail");
-        assert!(failing.detail.contains("no response left"), "{}", failing.detail);
+        let failing = report
+            .cases
+            .iter()
+            .find(|c| !c.ok)
+            .expect("a case must fail");
+        assert!(
+            failing.detail.contains("no response left"),
+            "{}",
+            failing.detail
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,9 +1,15 @@
 ﻿"use client";
 
 import { Button } from "@ryu/ui/components/button";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@ryu/ui/components/popover";
 import { Wave } from "@ryu/ui/components/wave";
 import { cn } from "@ryu/ui/lib/utils";
 import type { ChatStatus } from "ai";
+import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 
 /**
@@ -27,13 +33,23 @@ const DEFAULT_INPUT_CONFIG: InputConfig = {
 const noopTranscribe = async (): Promise<string> => "";
 
 import {
+	IconBookmark,
 	IconChevronDown,
 	IconChevronUp,
+	IconCircle,
+	IconCircleCheck,
 	IconGhost2,
+	IconLoader2,
 	IconMessageCircleQuestion,
+	IconWorld,
 	IconX,
 } from "@tabler/icons-react";
 import type { ContextUsage } from "./context-usage.tsx";
+import { FileTypeIcon } from "./file-type-icon.tsx";
+import type {
+	ComposerMenuGroup,
+	ComposerMenuItem,
+} from "./input/composer-menu.tsx";
 import { ComposerToolbar } from "./input/composer-toolbar.tsx";
 import { FileAttachment } from "./input/file-attachment.tsx";
 import { GoalBar, type GoalBarProps } from "./input/goal-bar.tsx";
@@ -45,6 +61,7 @@ import type {
 } from "./input/goal-plus-button.tsx";
 import { useInputTyping } from "./input/input-typing.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
+import { findMentionAt } from "./mention-format.ts";
 import { NumberRoll } from "./number-roll.tsx";
 import type {
 	QuestionAnswer,
@@ -52,6 +69,7 @@ import type {
 } from "./question/question-prompt.tsx";
 import { QuestionPrompt } from "./question/question-prompt.tsx";
 import { QueueBar, type QueueBarProps } from "./queue/queue-bar.tsx";
+import type { MentionItem } from "./types.ts";
 import { useVoiceRecorder } from "./useVoiceRecorder.ts";
 
 export interface AttachedImage {
@@ -60,6 +78,18 @@ export interface AttachedImage {
 	mimeType?: string;
 	size?: number;
 	url: string;
+}
+
+export interface ComposerDraftItem {
+	id: string;
+	preview: string;
+	text: string;
+}
+export interface ComposerDraftControls {
+	items: ComposerDraftItem[];
+	onDelete: (id: string) => void;
+	onInsert: (text: string) => void;
+	onSave: (text: string) => void;
 }
 
 export interface AttachedFile {
@@ -123,6 +153,8 @@ export interface InputBarProps {
 	 * `bg-muted` fill so it reads as part of the composer.
 	 */
 	composerHeader?: React.ReactNode;
+	/** Searchable apps/plugins/context rows shown by the shared + menu. */
+	composerMenuGroups?: ComposerMenuGroup[];
 
 	/**
 	 * Context-window usage for the persistent composer meter (donut ring +
@@ -141,6 +173,7 @@ export interface InputBarProps {
 	 * badge appears beside the "+" once a review has run.
 	 */
 	doubleCheckControls?: DoubleCheckControls;
+	draftControls?: ComposerDraftControls;
 	/**
 	 * When true (default) clicking a staged image attachment opens a
 	 * fullscreen lightbox preview. Set to false to render thumbnails as
@@ -150,7 +183,7 @@ export interface InputBarProps {
 
 	/**
 	 * Allow submitting while a run is streaming. When true, pressing Enter (or the
-	 * queue button) calls `onSend` even mid-stream so the host can enqueue the
+	 * primary send button) calls `onSend` even mid-stream so the host can enqueue the
 	 * message instead of dropping it. Defaults to false (legacy block behaviour).
 	 */
 	enableQueue?: boolean;
@@ -187,10 +220,13 @@ export interface InputBarProps {
 
 	/** Content rendered on the left of the toolbar, next to the attachment button. */
 	leftActions?: React.ReactNode;
+	/** Resolved @ mentions used to paint the live composer preview. */
+	mentionItems?: MentionItem[];
 
 	// Attachment support
 	onAttach?: () => void;
 	onChange?: (value: string) => void;
+	onComposerMenuSelect?: (item: ComposerMenuItem) => void;
 
 	/**
 	 * Image generation. When provided, an image button appears in the toolbar
@@ -220,6 +256,8 @@ export interface InputBarProps {
 	/** Optional host-level keyboard handling for the raw textarea. */
 	onTextareaKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
 	placeholder?: string;
+	/** Ghost prompt and keyboard-navigable prompt list supplied by a host/plugin. */
+	placeholderSuggestion?: string;
 
 	/**
 	 * Composer toggles contributed by enabled plugins (`composer_controls`). Each
@@ -259,6 +297,8 @@ export interface InputBarProps {
 				className?: string;
 				itemClassName?: string;
 		  };
+	/** Live plan and file edits derived from the current user turn. */
+	turnProgress?: InputBarTurnProgress;
 
 	// Typing animation
 	typingAnimation?: {
@@ -302,17 +342,37 @@ export interface InputBarProps {
 	workspaceBar?: React.ReactNode;
 }
 
+export interface InputBarTurnProgress {
+	deletions: number;
+	files: {
+		deletions: number;
+		insertions: number;
+		path: string;
+	}[];
+	insertions: number;
+	plan?: {
+		current: number;
+		items: {
+			label: string;
+			status: "completed" | "in_progress" | "pending";
+		}[];
+		total: number;
+	};
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
 export const InputBar = memo(function InputBar({
 	onSend,
 	status,
 	onStop,
 	placeholder,
+	placeholderSuggestion,
 	className,
 	onAttach,
 	attachedImages = [],
 	attachedFiles = [],
 	changeSummary,
+	turnProgress,
 	onRemoveImage,
 	onRemoveFile,
 	onPaste,
@@ -335,6 +395,7 @@ export const InputBar = memo(function InputBar({
 	enableQueue,
 	leftActions,
 	rightActions,
+	draftControls,
 	voice,
 	voiceMode,
 	onGenerateImage,
@@ -345,6 +406,9 @@ export const InputBar = memo(function InputBar({
 	goalBar,
 	workspaceBar,
 	composerHeader,
+	composerMenuGroups,
+	mentionItems,
+	onComposerMenuSelect,
 	onTextareaKeyDown,
 }: InputBarProps) {
 	const [internalInput, setInternalInput] = useState("");
@@ -353,6 +417,7 @@ export const InputBar = memo(function InputBar({
 		null
 	);
 	const [questionBarIndex, setQuestionBarIndex] = useState(1);
+	const [suggestionIndex, setSuggestionIndex] = useState(-1);
 	const isControlled = controlledValue !== undefined;
 	const input = isControlled ? controlledValue : internalInput;
 	const setInput = useCallback(
@@ -366,6 +431,9 @@ export const InputBar = memo(function InputBar({
 		[isControlled, controlledOnChange]
 	);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const [plusMenuQueryStart, setPlusMenuQueryStart] = useState<number | null>(
+		null
+	);
 	const config = DEFAULT_INPUT_CONFIG;
 
 	// Voice input: record from the default mic, show a live waveform, and append
@@ -463,7 +531,7 @@ export const InputBar = memo(function InputBar({
 	const canQueueNow = Boolean(enableQueue) && isStreaming;
 	const effectivePlaceholder =
 		canQueueNow && !isTyping
-			? "Queue a message…"
+			? "Send a message…"
 			: (placeholder ?? config.inputBarPlaceholder);
 
 	const showAttach = Boolean(onAttach);
@@ -538,7 +606,7 @@ export const InputBar = memo(function InputBar({
 		<div
 			className={cn(
 				"flex h-[34px] items-center justify-between gap-3 px-3",
-				"overflow-hidden transition-all duration-150 ease-out",
+				"overflow-hidden transition-[max-height,opacity] duration-150 ease-out",
 				isInfoBarOpen ? "max-h-[34px] opacity-100" : "max-h-0 opacity-0",
 				infoBarPosition === "top" ? "rounded-t-2xl" : "rounded-b-2xl",
 				isDestructiveInfoBar && "bg-destructive/10"
@@ -768,26 +836,88 @@ export const InputBar = memo(function InputBar({
 			if (e.defaultPrevented) {
 				return;
 			}
+			const promptItems = Array.isArray(suggestions)
+				? suggestions
+				: (suggestions?.items ?? []);
+			if (
+				!(input.trim() || isStreaming) &&
+				e.key === "Tab" &&
+				placeholderSuggestion
+			) {
+				e.preventDefault();
+				setInput(placeholderSuggestion);
+				return;
+			}
+			if (
+				!(input.trim() || isStreaming) &&
+				(e.key === "ArrowDown" || e.key === "ArrowUp")
+			) {
+				e.preventDefault();
+				setSuggestionIndex((current) =>
+					Math.max(
+						-1,
+						Math.min(
+							promptItems.length - 1,
+							current + (e.key === "ArrowDown" ? 1 : -1)
+						)
+					)
+				);
+				return;
+			}
+			if (
+				!(input.trim() || isStreaming) &&
+				e.key === "Enter" &&
+				suggestionIndex >= 0
+			) {
+				e.preventDefault();
+				const item = promptItems[suggestionIndex];
+				if (item) {
+					setInput(item.value ?? item.label);
+				}
+				setSuggestionIndex(-1);
+				return;
+			}
 			if (e.key === "Enter" && !e.shiftKey) {
 				e.preventDefault();
 				handleSubmit(e.ctrlKey || e.metaKey ? "opposite" : undefined);
 			}
 		},
-		[handleSubmit, onTextareaKeyDown]
+		[
+			handleSubmit,
+			input,
+			isStreaming,
+			onTextareaKeyDown,
+			setInput,
+			suggestionIndex,
+			suggestions,
+		]
 	);
 
 	const hasInput = input.trim().length > 0;
+	const composerSuggestions = Array.isArray(suggestions)
+		? suggestions
+		: (suggestions?.items ?? []);
+	const showComposerSuggestions =
+		composerSuggestions.length > 0 && !hasInput && !isStreaming;
 	const hasContextItems = attachedImages.length > 0 || attachedFiles.length > 0;
 	const showContextItems =
 		hasContextItems && config.attachmentPreviewStyle !== "hidden";
 	const imageDisplayMode =
 		config.attachmentPreviewStyle === "thumbnail" ? "image-only" : "chip";
+	const effectiveChangeSummary = turnProgress
+		? {
+				files: turnProgress.files.length,
+				insertions: turnProgress.insertions,
+				deletions: turnProgress.deletions,
+			}
+		: changeSummary;
 	const showChangeSummary = Boolean(
-		changeSummary &&
-			(changeSummary.files > 0 ||
-				changeSummary.insertions > 0 ||
-				changeSummary.deletions > 0)
+		effectiveChangeSummary &&
+			(effectiveChangeSummary.files > 0 ||
+				effectiveChangeSummary.insertions > 0 ||
+				effectiveChangeSummary.deletions > 0)
 	);
+	const showTurnProgress = showChangeSummary || Boolean(turnProgress?.plan);
 
 	const handleContainerClick = useCallback((e: React.MouseEvent) => {
 		const target = e.target as HTMLElement;
@@ -823,6 +953,44 @@ export const InputBar = memo(function InputBar({
 		},
 		[disabled, isStreaming, setInput]
 	);
+	const renderComposerPreview = useCallback((): ReactNode[] => {
+		const parts: ReactNode[] = [];
+		let cursor = 0;
+		for (let index = 0; index < input.length; index += 1) {
+			const mention = findMentionAt(input, index, mentionItems);
+			const isUrl =
+				(index === 0 || /\s/.test(input[index - 1] ?? "")) &&
+				/^https?:\/\//i.test(input.slice(index));
+			if (!(mention || isUrl)) {
+				continue;
+			}
+			const end = mention
+				? mention.end
+				: (() => {
+						let urlEnd = index;
+						while (urlEnd < input.length && !/\s|</.test(input[urlEnd] ?? "")) {
+							urlEnd += 1;
+						}
+						return urlEnd;
+					})();
+			parts.push(input.slice(cursor, index));
+			const token = input.slice(index, end);
+			parts.push(
+				<span className="font-semibold text-primary" key={`${index}-${token}`}>
+					<span aria-hidden="true" className="mr-1 inline-flex align-[-2px]">
+						{mention?.item?.icon ?? <IconWorld className="size-3.5" />}
+					</span>
+					{mention?.item ? `@${mention.item.label}` : token}
+				</span>
+			);
+			cursor = end;
+			index = end - 1;
+		}
+		if (cursor < input.length) {
+			parts.push(input.slice(cursor));
+		}
+		return parts;
+	}, [input, mentionItems]);
 
 	const suggestionItems = Array.isArray(suggestions)
 		? suggestions
@@ -863,21 +1031,59 @@ export const InputBar = memo(function InputBar({
 		);
 	} else {
 		inputContent = (
-			<textarea
-				className={cn(
-					"w-full resize-none border-0 bg-transparent text-[14px] text-foreground leading-[1.6] outline-none placeholder:text-muted-foreground",
-					"overflow-hidden",
-					disabled && "cursor-not-allowed opacity-50"
+			<div className="relative">
+				{showComposerSuggestions &&
+					placeholderSuggestion &&
+					suggestionIndex < 0 && (
+						<div className="pointer-events-none absolute inset-x-0 top-0 z-10 truncate text-[14px] text-muted-foreground/60 leading-[1.6]">
+							{placeholderSuggestion}
+							<span className="ml-2 rounded border px-1 text-[10px]">Tab</span>
+						</div>
+					)}
+				{showComposerSuggestions && suggestionIndex >= 0 && (
+					<div className="absolute inset-x-0 top-full z-20 mt-1 rounded-lg border bg-popover p-1 shadow-lg">
+						{composerSuggestions.map((item, index) => (
+							<button
+								className={cn(
+									"block w-full rounded px-2 py-1.5 text-left text-sm",
+									index === suggestionIndex && "bg-accent"
+								)}
+								key={item.id}
+								onClick={() => handleSuggestionSelect(item)}
+								type="button"
+							>
+								{item.label}
+							</button>
+						))}
+					</div>
 				)}
-				disabled={disabled}
-				onChange={(e) => setInput(e.target.value)}
-				onKeyDown={handleKeyDown}
-				onPaste={onPaste}
-				placeholder={effectivePlaceholder}
-				ref={textareaRef}
-				rows={1}
-				value={input}
-			/>
+				{input && (
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute inset-0 whitespace-pre-wrap break-words text-[14px] text-foreground leading-[1.6]"
+					>
+						{renderComposerPreview()}
+					</div>
+				)}
+				<textarea
+					className={cn(
+						"relative w-full resize-none border-0 bg-transparent text-transparent leading-[1.6] caret-foreground outline-none placeholder:text-muted-foreground",
+						"overflow-hidden",
+						disabled && "cursor-not-allowed opacity-50"
+					)}
+					disabled={disabled}
+					onChange={(e) => {
+						setSuggestionIndex(-1);
+						setInput(e.target.value);
+					}}
+					onKeyDown={handleKeyDown}
+					onPaste={onPaste}
+					placeholder={effectivePlaceholder}
+					ref={textareaRef}
+					rows={1}
+					value={input}
+				/>
+			</div>
 		);
 	}
 
@@ -885,9 +1091,12 @@ export const InputBar = memo(function InputBar({
 	// every surface and in both densities.
 	const composerToolbar = (
 		<ComposerToolbar
-			canQueue={canQueueNow && hasInput}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={contextMeterOnOpen}
+			directoryGroups={composerMenuGroups}
+			directoryQuery={
+				plusMenuQueryStart === null ? "" : input.slice(plusMenuQueryStart)
+			}
 			disabled={disabled}
 			doubleCheckControls={doubleCheckControls}
 			ghostControls={ghostControls}
@@ -903,14 +1112,92 @@ export const InputBar = memo(function InputBar({
 			isTranscribing={isTranscribing}
 			leftActions={leftActions}
 			onAttach={onAttach}
+			onDirectorySelect={(item) => {
+				const start = plusMenuQueryStart ?? input.length;
+				const prefix = input.slice(0, start).trimEnd();
+				setInput(`${prefix}${prefix ? " " : ""}@${item.label} `);
+				setPlusMenuQueryStart(null);
+				onComposerMenuSelect?.(item);
+			}}
 			onGenerateImage={handleGenerateImage}
 			onGenerateVideo={handleGenerateVideo}
+			onMenuOpenChange={(open) => {
+				setPlusMenuQueryStart(open ? input.length : null);
+				if (open) {
+					requestAnimationFrame(() => textareaRef.current?.focus());
+				}
+			}}
 			onStartVoice={startVoice}
 			onStop={onStop}
 			onStopVoice={stopVoice}
 			onSubmit={handleSubmit}
 			pluginControls={pluginControls}
-			rightActions={rightActions}
+			rightActions={
+				<>
+					{draftControls && (
+						<Popover>
+							<PopoverTrigger asChild>
+								<Button
+									aria-label="Drafts"
+									className="size-8"
+									size="icon"
+									variant="ghost"
+								>
+									<IconBookmark className="size-4" />
+								</Button>
+							</PopoverTrigger>
+							<PopoverContent align="end" className="w-80 p-2">
+								<div className="mb-1 px-2 py-1 font-medium text-sm">Drafts</div>
+								{draftControls.items.length === 0 ? (
+									<div className="px-2 py-3 text-muted-foreground text-sm">
+										No drafts for this project
+									</div>
+								) : (
+									draftControls.items.map((item) => (
+										<div
+											className="group flex items-center gap-1 rounded-md px-2 py-1 hover:bg-muted"
+											key={item.id}
+										>
+											<button
+												className="min-w-0 flex-1 truncate text-left text-sm"
+												onClick={() => draftControls.onInsert(item.text)}
+												type="button"
+											>
+												{item.preview}
+											</button>
+											<Button
+												aria-label={`Delete ${item.preview}`}
+												className="size-7 opacity-0 group-hover:opacity-100"
+												onClick={() => draftControls.onDelete(item.id)}
+												size="icon"
+												variant="ghost"
+											>
+												<IconX className="size-3.5" />
+											</Button>
+										</div>
+									))
+								)}
+							</PopoverContent>
+						</Popover>
+					)}
+					{draftControls && (
+						<Button
+							aria-label="Save draft"
+							className="size-8"
+							disabled={!hasInput}
+							onClick={() => {
+								draftControls.onSave(input);
+								setInput("");
+							}}
+							size="icon"
+							variant="ghost"
+						>
+							<IconBookmark className="size-4" />
+						</Button>
+					)}
+					{rightActions}
+				</>
+			}
 			showAttach={showAttach}
 			voiceDisabled={voice?.disabled}
 			voiceMode={voiceMode}
@@ -920,22 +1207,126 @@ export const InputBar = memo(function InputBar({
 	return (
 		<div className={cn("shrink-0 px-3 pb-3", className)}>
 			<div className="mx-auto max-w-[720px]">
-				{showChangeSummary && changeSummary ? (
+				{showTurnProgress ? (
 					<div
 						aria-live="polite"
 						className="mb-2 flex justify-center text-[13px]"
 					>
-						<div className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-popover/95 px-3 text-muted-foreground shadow-sm backdrop-blur">
-							<span>
-								<NumberRoll value={changeSummary.files} /> file
-								{changeSummary.files === 1 ? "" : "s"} changed
-							</span>
-							<span className="font-medium text-emerald-600 dark:text-emerald-400">
-								+<NumberRoll trend="up" value={changeSummary.insertions} />
-							</span>
-							<span className="font-medium text-red-600 dark:text-red-400">
-								-<NumberRoll trend="down" value={changeSummary.deletions} />
-							</span>
+						<div className="inline-flex h-8 items-center rounded-full border border-border/70 bg-popover/95 px-1.5 text-muted-foreground shadow-sm backdrop-blur">
+							{turnProgress?.plan ? (
+								<Popover>
+									<PopoverTrigger
+										render={
+											<button
+												className="inline-flex h-7 items-center gap-1.5 rounded-full px-1.5 transition-colors hover:bg-muted"
+												type="button"
+											/>
+										}
+									>
+										<IconLoader2 className="size-3.5 text-primary" />
+										<span>
+											Step {turnProgress.plan.current} /{" "}
+											{turnProgress.plan.total}
+										</span>
+									</PopoverTrigger>
+									<PopoverContent
+										align="center"
+										className="max-h-80 w-[min(30rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-2"
+										side="top"
+										sideOffset={8}
+									>
+										{turnProgress.plan.items.map((item, index) => {
+											const PlanIcon =
+												item.status === "completed"
+													? IconCircleCheck
+													: item.status === "in_progress"
+														? IconLoader2
+														: IconCircle;
+											return (
+												<div
+													className="flex items-start gap-2 rounded-xl px-2 py-1.5 text-sm"
+													key={`${index}-${item.label}`}
+												>
+													<PlanIcon
+														className={cn(
+															"mt-0.5 size-4 shrink-0",
+															item.status === "in_progress" &&
+																"animate-spin text-primary"
+														)}
+													/>
+													<span>{item.label}</span>
+												</div>
+											);
+										})}
+									</PopoverContent>
+								</Popover>
+							) : null}
+							{turnProgress?.plan && showChangeSummary ? (
+								<span aria-hidden className="px-0.5 text-border">
+									·
+								</span>
+							) : null}
+							{showChangeSummary && effectiveChangeSummary ? (
+								<Popover>
+									<PopoverTrigger
+										render={
+											<button
+												className="inline-flex h-7 items-center gap-1.5 rounded-full px-1.5 transition-colors hover:bg-muted"
+												type="button"
+											/>
+										}
+									>
+										<span>
+											<NumberRoll value={effectiveChangeSummary.files} /> file
+											{effectiveChangeSummary.files === 1 ? "" : "s"} changed
+										</span>
+										<span className="font-medium text-emerald-600 dark:text-emerald-400">
+											+
+											<NumberRoll
+												trend="up"
+												value={effectiveChangeSummary.insertions}
+											/>
+										</span>
+										<span className="font-medium text-red-600 dark:text-red-400">
+											-
+											<NumberRoll
+												trend="down"
+												value={effectiveChangeSummary.deletions}
+											/>
+										</span>
+									</PopoverTrigger>
+									{turnProgress?.files.length ? (
+										<PopoverContent
+											align="center"
+											className="max-h-80 w-[min(24rem,calc(100vw-2rem))] gap-0 overflow-y-auto rounded-2xl p-1.5"
+											side="top"
+											sideOffset={8}
+										>
+											{turnProgress.files.map((file) => (
+												<div
+													className="flex items-center gap-2 rounded-xl px-2 py-1.5 text-sm"
+													key={file.path}
+													title={file.path}
+												>
+													<FileTypeIcon
+														className="size-4 shrink-0"
+														path={file.path}
+													/>
+													<span className="min-w-0 flex-1 truncate">
+														{file.path}
+													</span>
+													<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
+														+{file.insertions}
+													</span>
+													<span className="text-red-600 tabular-nums dark:text-red-400">
+														-{file.deletions}
+													</span>
+												</div>
+											))}
+										</PopoverContent>
+									) : null}
+								</Popover>
+							) : null}
 						</div>
 					</div>
 				) : null}

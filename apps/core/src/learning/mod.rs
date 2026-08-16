@@ -149,7 +149,7 @@ impl LearningHost for CoreLearningHost {
         let rows = self
             .state
             .conversations
-            .get_messages(conversation_id)
+            .get_learning_messages(conversation_id)
             .await?;
         Ok(rows
             .into_iter()
@@ -214,6 +214,10 @@ impl LearningHost for CoreLearningHost {
 
     async fn dispatch_finetune(&self, body: Value) -> Result<Value, String> {
         self.state.finetune.start(body).await
+    }
+
+    async fn merge_finetune(&self, body: Value) -> Result<Value, String> {
+        self.state.finetune.merge(body).await
     }
 }
 

@@ -420,6 +420,38 @@ pub trait Provider: Send + Sync {
         body: &'a Value,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Body, ProviderError>> + Send + 'a>>;
 
+    /// Generate embeddings. Providers that expose an OpenAI-compatible
+    /// embeddings endpoint can override this; other providers remain valid and
+    /// report an unsupported operation.
+    fn embed<'a>(
+        &'a self,
+        _model: &'a str,
+        _body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        let name = self.name();
+        Box::pin(async move {
+            Err(ProviderError::Provider(format!(
+                "{name} does not support embeddings"
+            )))
+        })
+    }
+
+    /// Rerank documents. This is intentionally a separate capability from
+    /// chat completion: model routing may select a provider that supports one
+    /// without silently pretending to support the other.
+    fn rerank<'a>(
+        &'a self,
+        _model: &'a str,
+        _body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        let name = self.name();
+        Box::pin(async move {
+            Err(ProviderError::Provider(format!(
+                "{name} does not support reranking"
+            )))
+        })
+    }
+
     /// Image generation. `body` follows the OpenAI `/v1/images/generations` shape.
     /// Returns the full response JSON. Default implementation returns an error so
     /// providers that don't support image-gen don't need to implement it.
@@ -519,6 +551,16 @@ pub(crate) fn audio_speech_url(base_url: &str) -> String {
 /// Build an `/v1/audio/transcriptions` URL from a base URL.
 pub(crate) fn audio_transcriptions_url(base_url: &str) -> String {
     format!("{}/audio/transcriptions", base_url.trim_end_matches('/'))
+}
+
+/// Build an OpenAI-compatible `/v1/embeddings` URL from a provider base URL.
+pub(crate) fn embeddings_url(base_url: &str) -> String {
+    format!("{}/embeddings", base_url.trim_end_matches('/'))
+}
+
+/// Build a `/v1/rerank` URL from a provider base URL.
+pub(crate) fn rerank_url(base_url: &str) -> String {
+    format!("{}/rerank", base_url.trim_end_matches('/'))
 }
 
 // ─── Shared media-output normalization (cloud media providers) ────────────────
@@ -1150,7 +1192,9 @@ mod media_output_tests {
         // rate rather than billing zero seconds.
         for empty in [json!({}), json!(null), json!({ "inference_time": 0.0 })] {
             assert!(
-                with_media_usage(normalized(), &empty).get("usage").is_none(),
+                with_media_usage(normalized(), &empty)
+                    .get("usage")
+                    .is_none(),
                 "no usage key for {empty:?}"
             );
         }

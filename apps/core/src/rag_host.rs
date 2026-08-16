@@ -135,8 +135,26 @@ pub fn embedder_from_registry(registry: &ModelRegistry) -> Embedder {
 /// preference, or the agent-auto-routing embedder). Routes through the same origin
 /// as [`embedder_from_registry`] so a provider swap reaches these consumers too.
 pub fn embedder_from_config(base_url: &str, model: &str, dims: usize) -> Embedder {
+    if std::env::var("RYU_EMBED_PROVIDER")
+        .ok()
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("gateway"))
+    {
+        return gateway_embedder(model, dims);
+    }
     let api_key = embed_api_key();
     Embedder::remote(base_url, model, dims, api_key)
+}
+
+/// Build a cloud-safe embedder through the local/managed Gateway. The Gateway
+/// owns upstream provider selection and credentials; Core never sends a cloud
+/// API key directly to a provider when this path is selected.
+pub fn gateway_embedder(model: &str, dims: usize) -> Embedder {
+    let base_url = crate::sidecar::gateway::gateway_url();
+    let token = crate::sidecar::gateway::gateway_bearer().ok();
+    // Keep provider identity in the stored vector tag. Gateway removes this
+    // namespace before model routing, so a local `model-x` and cloud
+    // `gateway/model-x` can never silently share vectors.
+    Embedder::remote(&base_url, &format!("gateway/{model}"), dims, token)
 }
 
 /// Bearer key for the embeddings endpoint (`RYU_EMBED_API_KEY`, then `OPENAI_API_KEY`).
@@ -187,6 +205,17 @@ fn embed_api_key() -> Option<String> {
 /// The remote branch reached by an operator's own export behaves identically; the
 /// profile just makes it the default nobody chose.
 pub fn reranker_from_registry(registry: &ModelRegistry) -> Reranker {
+    if std::env::var("RYU_RERANKER_PROVIDER")
+        .ok()
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("gateway"))
+    {
+        let base_url = format!("{}/v1", crate::sidecar::gateway::gateway_url());
+        return Reranker::remote(
+            &base_url,
+            &format!("gateway/{}", registry.reranker.id),
+            crate::sidecar::gateway::gateway_bearer().ok(),
+        );
+    }
     match std::env::var("RYU_RERANKER_BASE_URL")
         .ok()
         .filter(|s| !s.is_empty())

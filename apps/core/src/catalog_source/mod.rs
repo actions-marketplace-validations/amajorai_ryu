@@ -148,9 +148,8 @@ pub use registry::{CatalogSourceRegistry, CustomSourceSpec, SourceMeta};
 pub use sources::{
     integration_brand_slug, integrations_sh_brands, with_buyer_token, HfSource, IntegrationBrand,
     IntegrationConnection, IntegrationsShSource, MarketplaceSource, ModelIndexSource,
-    OfficialMcpSource, OkfBundleSource,
-    RyuHostedMcpSource, RyuMarketplaceSource, SkillsShSource, SmitherySource, Source, SourceAuth,
-    StubSource, RYU_MARKETPLACE_API_ENV, SMITHERY_API_KEY_PREF,
+    OfficialMcpSource, OkfBundleSource, RyuHostedMcpSource, RyuMarketplaceSource, SkillsShSource,
+    SmitherySource, Source, SourceAuth, StubSource, RYU_MARKETPLACE_API_ENV, SMITHERY_API_KEY_PREF,
 };
 
 use anyhow::{bail, Result};

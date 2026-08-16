@@ -2,6 +2,7 @@
   "id": "@ryu/typescript-lsp",
   "name": "TypeScript & JavaScript LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "TypeScript/JavaScript language server for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install typescript-language-server; the plugin ships config.",
   "tagline": "TS/JS code intelligence via typescript-language-server",

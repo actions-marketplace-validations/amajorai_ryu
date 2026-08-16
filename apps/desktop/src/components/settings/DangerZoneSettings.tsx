@@ -438,7 +438,7 @@ export function DangerZoneSettings() {
 								refetch().catch(() => undefined);
 							}}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							Retry
 						</Button>
@@ -620,7 +620,7 @@ export function DangerZoneSettings() {
 					<DialogFooter>
 						<Button
 							onClick={() => setDeepCleanOptionsOpen(false)}
-							variant="outline"
+							variant="ghost"
 						>
 							Cancel
 						</Button>

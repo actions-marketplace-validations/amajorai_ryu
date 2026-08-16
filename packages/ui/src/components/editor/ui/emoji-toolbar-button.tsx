@@ -353,7 +353,7 @@ function EmojiPickerContent({
 	return (
 		<div
 			className={cn(
-				"h-full min-h-[50%] overflow-y-auto overflow-x-hidden px-2",
+				"scroll-fade h-full min-h-[50%] overflow-y-auto overflow-x-hidden px-2",
 				"[&::-webkit-scrollbar]:w-4",
 				"[&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-button]:size-0",
 				"[&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted [&::-webkit-scrollbar-thumb]:hover:bg-muted-foreground/25",

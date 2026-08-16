@@ -466,7 +466,15 @@
         "title": "Browser",
         "icon": "hugeicons:globe-02",
         "placement": "both",
-        "panel": "native"
+        "panel": "native",
+        "spec": {
+          "linkHandler": {
+            "schemes": ["http", "https"],
+            "method": "POST",
+            "path": "/api/ext/@ryu/browser/tabs",
+            "bodyKey": "url"
+          }
+        }
       }
     ]
   }

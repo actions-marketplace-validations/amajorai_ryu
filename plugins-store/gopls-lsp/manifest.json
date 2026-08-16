@@ -2,6 +2,7 @@
   "id": "@ryu/gopls-lsp",
   "name": "Go LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Go language server (gopls) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install gopls; the plugin ships config.",
   "tagline": "Go code intelligence via gopls",

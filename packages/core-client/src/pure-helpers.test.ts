@@ -9,7 +9,13 @@
 import { describe, expect, test } from "bun:test";
 import { type AcpConfigOption, flattenConfigOptions } from "./acp.ts";
 import { bumpPatchVersion } from "./agents.ts";
-import { chatHeaders, chatStreamUrl } from "./chat.ts";
+import {
+	cancelChat,
+	chatHeaders,
+	chatStreamResumeUrl,
+	chatStreamUrl,
+	fetchNextPromptSuggestions,
+} from "./chat.ts";
 import type { ApiTarget } from "./client.ts";
 import { isInFlight, isTerminal } from "./downloads.ts";
 import { generateGatewayKey } from "./gateway.ts";
@@ -260,6 +266,38 @@ describe("chat URL + headers", () => {
 			Authorization: "Bearer t",
 		});
 		expect(chatHeaders(target())).toEqual({});
+	});
+
+	test("chatStreamResumeUrl encodes conversation ids", () => {
+		expect(chatStreamResumeUrl(target(), "thread/a b")).toBe(
+			"http://127.0.0.1:7980/api/chat/stream/resume/thread%2Fa%20b"
+		);
+	});
+
+	test("cancelChat posts the conversation id and returns the server result", async () => {
+		const originalFetch = globalThis.fetch;
+		let body = "";
+		globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+			body = String(init?.body ?? "");
+			return Promise.resolve(Response.json({ cancelled: true }));
+		}) as unknown as typeof fetch;
+		try {
+			expect(await cancelChat(target(), "c1")).toBe(true);
+			expect(body).toBe(JSON.stringify({ conversation_id: "c1" }));
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	test("suggestion failures degrade to an empty list", async () => {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (() =>
+			Promise.reject(new Error("offline"))) as unknown as typeof fetch;
+		try {
+			expect(await fetchNextPromptSuggestions(target(), "c1")).toEqual([]);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 });
 

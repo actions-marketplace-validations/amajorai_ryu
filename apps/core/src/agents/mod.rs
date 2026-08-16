@@ -701,6 +701,81 @@ impl AgentStore {
             }
         }
 
+        // Published-agent installs are keyed separately from agent ids. The
+        // idempotency key is client-controlled, so bind it to the server-verified
+        // caller scope before it can select an existing agent or disclosure.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS published_agent_installs (
+                idempotency_key TEXT NOT NULL,
+                caller_user_id  TEXT NOT NULL DEFAULT '',
+                caller_org_id   TEXT NOT NULL DEFAULT '',
+                listing_id      TEXT NOT NULL DEFAULT '',
+                agent_id        TEXT NOT NULL,
+                disclosure      TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL,
+                PRIMARY KEY (idempotency_key, caller_user_id, caller_org_id)
+            );",
+        )
+        .context("creating published agent install keys")?;
+
+        // The original table used idempotency_key as its sole primary key. Rebuild
+        // that legacy table once so the same client key can be used independently
+        // by different verified callers. Legacy rows get an empty scope and can
+        // never replay for a verified caller; an unbound local node retains its
+        // existing single-principal behavior through the empty scope.
+        let has_caller_scope = conn
+            .prepare("PRAGMA table_info(published_agent_installs)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "caller_user_id");
+        if !has_caller_scope {
+            conn.execute_batch(
+                "ALTER TABLE published_agent_installs
+                 RENAME TO published_agent_installs_legacy;
+                 CREATE TABLE published_agent_installs (
+                    idempotency_key TEXT NOT NULL,
+                    caller_user_id  TEXT NOT NULL DEFAULT '',
+                    caller_org_id   TEXT NOT NULL DEFAULT '',
+                    listing_id      TEXT NOT NULL DEFAULT '',
+                    agent_id        TEXT NOT NULL,
+                    disclosure      TEXT NOT NULL DEFAULT '{}',
+                    created_at      TEXT NOT NULL,
+                    PRIMARY KEY (idempotency_key, caller_user_id, caller_org_id)
+                 );
+                 INSERT INTO published_agent_installs
+                    (idempotency_key, caller_user_id, caller_org_id, listing_id,
+                     agent_id, disclosure, created_at)
+                 SELECT idempotency_key, '', '', listing_id, agent_id, disclosure,
+                        created_at
+                 FROM published_agent_installs_legacy;
+                 DROP TABLE published_agent_installs_legacy;",
+            )
+            .context("binding legacy published agent install keys")?;
+        }
+        match conn.execute_batch(
+            "ALTER TABLE published_agent_installs
+             ADD COLUMN listing_id TEXT NOT NULL DEFAULT ''",
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(e).context("adding published agent install listing identity");
+                }
+            }
+        }
+        match conn.execute_batch(
+            "ALTER TABLE published_agent_installs
+             ADD COLUMN disclosure TEXT NOT NULL DEFAULT '{}'",
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(e).context("adding published agent install disclosure");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -825,10 +900,185 @@ impl AgentStore {
         self.create_with_id(id, input).await
     }
 
+    /// Materialize a published agent once for an install key. The key lookup,
+    /// agent insert, and key insert share one SQLite transaction, so retries and
+    /// concurrent requests cannot create two records.
+    pub async fn create_published_idempotent(
+        &self,
+        listing_id: &str,
+        idempotency_key: &str,
+        caller_user_id: Option<&str>,
+        caller_org_id: Option<&str>,
+        input: CreateAgent,
+        disclosure: AgentInstallDisclosure,
+    ) -> Result<(AgentRecord, bool, AgentInstallDisclosure)> {
+        let listing = listing_id.trim();
+        if listing.is_empty() {
+            anyhow::bail!("invalid published-agent listing id");
+        }
+        let key = idempotency_key.trim();
+        if key.is_empty() || key.len() > 2048 {
+            anyhow::bail!("invalid published-agent idempotency key");
+        }
+        let caller_user_id = caller_user_id.unwrap_or("");
+        let caller_org_id = caller_org_id.unwrap_or("");
+
+        let conn = self.conn.lock().await;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let existing = conn
+                .query_row(
+                    "SELECT listing_id, agent_id, disclosure
+                     FROM published_agent_installs
+                     WHERE idempotency_key = ?1 AND caller_user_id = ?2 AND caller_org_id = ?3",
+                    params![key, caller_user_id, caller_org_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((stored_listing, agent_id, stored_disclosure)) = existing {
+                if stored_listing != listing {
+                    anyhow::bail!(
+                        "published-agent idempotency key already used for listing '{}', not '{}'",
+                        stored_listing,
+                        listing
+                    );
+                }
+                let record = conn.query_row(
+                    "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
+                            created_at, updated_at, chat_model, stt, tts, image_model, memory,
+                            persona, policy_ref, version, locked, inference, composio_actions,
+                            skills, identity_profile_ids, orchestrator, can_create_agents, video_model
+                     FROM agents WHERE id = ?1",
+                    params![agent_id],
+                    row_to_record,
+                ).optional()?;
+                if let Some(record) = record {
+                    let stored_disclosure = serde_json::from_str(&stored_disclosure)
+                        .context("decoding published agent install disclosure")?;
+                    return Ok((record, true, stored_disclosure));
+                }
+
+                // Recover mappings left behind by older versions that deleted
+                // the agent row without deleting its idempotency record.
+                conn.execute(
+                    "DELETE FROM published_agent_installs
+                     WHERE idempotency_key = ?1 AND caller_user_id = ?2 AND caller_org_id = ?3",
+                    params![key, caller_user_id, caller_org_id],
+                )?;
+            }
+
+            let id = format!("agent_{}", uuid::Uuid::new_v4().simple());
+            let record = Self::insert_with_id(&conn, id, input)?;
+            conn.execute(
+                "INSERT INTO published_agent_installs
+                    (idempotency_key, caller_user_id, caller_org_id, listing_id,
+                     agent_id, disclosure, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    key,
+                    caller_user_id,
+                    caller_org_id,
+                    listing,
+                    record.id,
+                    serde_json::to_string(&disclosure)?,
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )?;
+            Ok((record, false, disclosure))
+        })();
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Return a completed published-agent install without consulting the
+    /// current catalog descriptor. Replays must use the disclosure captured at
+    /// the original install, even if the listing has since been edited.
+    pub async fn get_published_idempotent(
+        &self,
+        listing_id: &str,
+        idempotency_key: &str,
+        caller_user_id: Option<&str>,
+        caller_org_id: Option<&str>,
+    ) -> Result<Option<(AgentRecord, AgentInstallDisclosure)>> {
+        let listing = listing_id.trim();
+        if listing.is_empty() {
+            anyhow::bail!("invalid published-agent listing id");
+        }
+        let key = idempotency_key.trim();
+        if key.is_empty() || key.len() > 2048 {
+            anyhow::bail!("invalid published-agent idempotency key");
+        }
+        let caller_user_id = caller_user_id.unwrap_or("");
+        let caller_org_id = caller_org_id.unwrap_or("");
+
+        let conn = self.conn.lock().await;
+        let Some((stored_listing, agent_id, stored_disclosure)) = conn
+            .query_row(
+                "SELECT listing_id, agent_id, disclosure
+                 FROM published_agent_installs
+                 WHERE idempotency_key = ?1 AND caller_user_id = ?2 AND caller_org_id = ?3",
+                params![key, caller_user_id, caller_org_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if stored_listing != listing {
+            anyhow::bail!(
+                "published-agent idempotency key already used for listing '{}', not '{}'",
+                stored_listing,
+                listing
+            );
+        }
+        let Some(record) = conn
+            .query_row(
+                "SELECT id, name, description, system_prompt, tools, model, engine, built_in,
+                        created_at, updated_at, chat_model, stt, tts, image_model, memory,
+                        persona, policy_ref, version, locked, inference, composio_actions,
+                        skills, identity_profile_ids, orchestrator, can_create_agents, video_model
+                 FROM agents WHERE id = ?1",
+                params![agent_id],
+                row_to_record,
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let disclosure = serde_json::from_str(&stored_disclosure)
+            .context("decoding published agent install disclosure")?;
+        Ok(Some((record, disclosure)))
+    }
+
     /// Create an agent with a caller-supplied `id` instead of a generated one.
     /// Used by the migrate-to-ryu endpoint to create the Ryu agent under a
     /// stable well-known id. Fails if a row with that id already exists.
     pub async fn create_with_id(&self, id: String, input: CreateAgent) -> Result<AgentRecord> {
+        let conn = self.conn.lock().await;
+        Self::insert_with_id(&conn, id, input)
+    }
+
+    fn insert_with_id(conn: &Connection, id: String, input: CreateAgent) -> Result<AgentRecord> {
         let now = chrono::Utc::now().to_rfc3339();
         let tools_json = serde_json::to_string(&input.tools).unwrap_or_else(|_| "[]".to_owned());
         let composio_json =
@@ -850,7 +1100,6 @@ impl AgentStore {
             }
         });
 
-        let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO agents
                 (id, name, description, system_prompt, tools, model, engine, built_in,
@@ -1098,19 +1347,36 @@ impl AgentStore {
     /// errors if the target is a built-in agent (those stay selectable).
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
-        let built_in: Option<bool> = conn
-            .query_row(
-                "SELECT built_in FROM agents WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, i64>(0).map(|v| v != 0),
-            )
-            .optional()?;
-        match built_in {
-            None => Ok(false),
-            Some(true) => anyhow::bail!("cannot delete built-in agent '{id}'"),
-            Some(false) => {
-                conn.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
-                Ok(true)
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let built_in: Option<bool> = conn
+                .query_row(
+                    "SELECT built_in FROM agents WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0).map(|v| v != 0),
+                )
+                .optional()?;
+            match built_in {
+                None => Ok(false),
+                Some(true) => anyhow::bail!("cannot delete built-in agent '{id}'"),
+                Some(false) => {
+                    conn.execute("DELETE FROM agents WHERE id = ?1", params![id])?;
+                    conn.execute(
+                        "DELETE FROM published_agent_installs WHERE agent_id = ?1",
+                        params![id],
+                    )?;
+                    Ok(true)
+                }
+            }
+        })();
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
             }
         }
     }
@@ -1151,6 +1417,11 @@ pub struct AgentTemplateConfig {
     pub system_prompt: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Ryu plugin ids the template expects to be installed. This is a
+    /// declaration only: published-agent installs report these ids and never
+    /// enable a plugin or grant it capabilities implicitly.
+    #[serde(default)]
+    pub required_plugins: Vec<String>,
     /// Composio action allowlist (portable across export/import).
     #[serde(default)]
     pub composio_actions: Vec<String>,
@@ -1197,6 +1468,7 @@ impl AgentRecord {
                 description: self.description.clone(),
                 system_prompt: self.system_prompt.clone(),
                 tools: self.tools.clone(),
+                required_plugins: Vec::new(),
                 composio_actions: self.composio_actions.clone(),
                 skills: self.skills.clone(),
                 identity_profile_ids: self.identity_profile_ids.clone(),
@@ -1239,6 +1511,10 @@ pub struct AgentInstallDisclosure {
     /// user should see what the agent expects to reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Plugin ids requested by the publisher and left for the installer to
+    /// review/install explicitly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_plugins: Vec<String>,
     /// Composio actions the template requested. **Removed** — their
     /// `composio__<slug>` ids are merged into the effective tool allowlist, so
     /// carrying them widens what the agent may call, against the installer's own
@@ -1312,6 +1588,7 @@ impl AgentTemplate {
         let cfg = &mut self.agent_config;
         let mut disclosure = AgentInstallDisclosure {
             tools: cfg.tools.clone(),
+            required_plugins: cfg.required_plugins.clone(),
             composio_actions: std::mem::take(&mut cfg.composio_actions),
             identity_profile_ids: std::mem::take(&mut cfg.identity_profile_ids),
             ..Default::default()
@@ -1751,6 +2028,242 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         AgentStore::migrate(&conn).unwrap();
         AgentStore::migrate(&conn).unwrap();
+    }
+
+    #[tokio::test]
+    async fn published_install_key_replays_the_same_agent() {
+        let store = store();
+        let input = CreateAgent {
+            name: "Published once".into(),
+            ..Default::default()
+        };
+        let (first, first_replay, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input.clone(),
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+        let (second, second_replay, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input,
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!first_replay);
+        assert!(second_replay);
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            store
+                .list()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|agent| agent.id == first.id)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn published_install_key_cannot_replay_across_accounts() {
+        let store = store();
+        let input = CreateAgent {
+            name: "Published once".into(),
+            ..Default::default()
+        };
+
+        let (account_a, replayed, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "predictable-key",
+                Some("account-a"),
+                Some("org-a"),
+                input.clone(),
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!replayed);
+
+        let (account_b, replayed, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "predictable-key",
+                Some("account-b"),
+                Some("org-b"),
+                input,
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!replayed);
+        assert_ne!(account_a.id, account_b.id);
+
+        assert!(store
+            .get_published_idempotent(
+                "listing-1",
+                "predictable-key",
+                Some("account-a"),
+                Some("org-a"),
+            )
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_published_idempotent(
+                "listing-1",
+                "predictable-key",
+                Some("account-c"),
+                Some("org-c"),
+            )
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn published_install_key_replays_the_original_disclosure_after_listing_mutation() {
+        let store = store();
+        let original = AgentInstallDisclosure {
+            required_plugins: vec!["com.example.original".into()],
+            identity_profile_ids: vec!["publisher-profile".into()],
+            ..Default::default()
+        };
+        let mutated = AgentInstallDisclosure {
+            required_plugins: vec!["com.example.mutated".into()],
+            identity_profile_ids: vec!["different-profile".into()],
+            ..Default::default()
+        };
+        let input = CreateAgent {
+            name: "Published once".into(),
+            ..Default::default()
+        };
+
+        let (_, replayed, installed_disclosure) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input.clone(),
+                original.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(!replayed);
+        assert_eq!(installed_disclosure, original);
+
+        let (_, replayed, replay_disclosure) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input,
+                mutated,
+            )
+            .await
+            .unwrap();
+        assert!(replayed);
+        assert_eq!(replay_disclosure, original);
+
+        let Some((_, stored_disclosure)) = store
+            .get_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("completed published install should be replayable");
+        };
+        assert_eq!(stored_disclosure, original);
+    }
+
+    #[tokio::test]
+    async fn published_install_key_rejects_a_different_listing() {
+        let store = store();
+        let input = CreateAgent {
+            name: "Published once".into(),
+            ..Default::default()
+        };
+        store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:install-1",
+                Some("account-a"),
+                Some("org-a"),
+                input.clone(),
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+
+        let error = store
+            .create_published_idempotent(
+                "listing-2",
+                "node-a:account-a:install-1",
+                Some("account-a"),
+                Some("org-a"),
+                input,
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .expect_err("a key cannot replay a different listing");
+        assert!(error
+            .to_string()
+            .contains("already used for listing 'listing-1'"));
+    }
+
+    #[tokio::test]
+    async fn published_install_key_can_be_reused_after_agent_deletion() {
+        let store = store();
+        let input = CreateAgent {
+            name: "Published once".into(),
+            ..Default::default()
+        };
+        let (first, first_replay, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input.clone(),
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!first_replay);
+
+        assert!(store.delete(&first.id).await.unwrap());
+
+        let (second, second_replay, _) = store
+            .create_published_idempotent(
+                "listing-1",
+                "node-a:account-a:listing-1",
+                Some("account-a"),
+                Some("org-a"),
+                input,
+                AgentInstallDisclosure::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!second_replay);
+        assert_ne!(first.id, second.id);
     }
 
     // ── Identity Vault binding (epic #517, Unit 4) ────────────────────────────
@@ -2282,6 +2795,7 @@ mod tests {
                 description: Some("totally benign".into()),
                 system_prompt: Some("You are helpful.".into()),
                 tools: vec!["shell__exec".into()],
+                required_plugins: vec!["com.ryu.sentry".into()],
                 composio_actions: vec!["GMAIL_SEND_EMAIL".into()],
                 skills: vec!["research".into()],
                 identity_profile_ids: vec!["prof_victim".into()],
@@ -2326,7 +2840,10 @@ mod tests {
             "composio ids are merged into the effective allowlist — never carry them"
         );
         assert!(cfg.memory.is_none(), "Spaces + memory scopes must not bind");
-        assert!(cfg.policy_ref.is_none(), "a template must not pick a policy");
+        assert!(
+            cfg.policy_ref.is_none(),
+            "a template must not pick a policy"
+        );
         assert_eq!(
             cfg.persona.as_ref().and_then(|p| p.avatar_url.as_deref()),
             None,
@@ -2393,8 +2910,7 @@ mod tests {
     fn sanitize_truncates_an_oversized_system_prompt_on_a_char_boundary() {
         let mut template = hostile_template();
         // 3 bytes per char, so the cap lands mid-character and must be walked back.
-        template.agent_config.system_prompt =
-            Some("→".repeat(UNTRUSTED_SYSTEM_PROMPT_MAX_BYTES));
+        template.agent_config.system_prompt = Some("→".repeat(UNTRUSTED_SYSTEM_PROMPT_MAX_BYTES));
         let (safe, requires) = template.sanitize_for_untrusted_install();
         let prompt = safe.agent_config.system_prompt.unwrap();
         assert!(prompt.len() <= UNTRUSTED_SYSTEM_PROMPT_MAX_BYTES);

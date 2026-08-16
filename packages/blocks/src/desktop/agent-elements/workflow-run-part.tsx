@@ -6,46 +6,33 @@
 // `apps/core/src/sidecar/adapters/mod.rs` (`route_workflow_chat_stream`).
 
 import { TodoList } from "@ryu/ui/components/agents/todo-list";
+import { Button } from "@ryu/ui/components/button";
+import { Input } from "@ryu/ui/components/input";
 import type { UIMessage } from "ai";
+import { type FormEvent, useEffect, useState } from "react";
+import {
+	extractWorkflowRun,
+	type WorkflowRunProgress,
+} from "./workflow-run-data.ts";
 
-const WORKFLOW_PART_TYPE = "data-ryu-workflow";
+export type {
+	WorkflowNodeProgress,
+	WorkflowRunProgress,
+} from "./workflow-run-data.ts";
+export {
+	extractWorkflowRun,
+	isWorkflowRunProgress,
+} from "./workflow-run-data.ts";
 
-export interface WorkflowNodeProgress {
-	error?: string | null;
-	id: string;
-	kind?: string | null;
-	output?: string | null;
-	status: "pending" | "running" | "completed" | "failed" | "skipped";
-}
-
-export interface WorkflowRunProgress {
-	/** Stable part id — every frame re-emits this so the SDK reconciles in place. */
-	id: string;
-	nodes: WorkflowNodeProgress[];
-	runId: string;
-	status: "running" | "completed" | "failed" | "awaiting_input";
-	workflowId: string;
-	workflowName: string;
-}
+export type WorkflowResumeHandler = (
+	runId: string,
+	payload: string
+) => Promise<unknown>;
 
 /** The latest `data-ryu-workflow` snapshot on a message, or null. A repeated
  *  frame of the same type can arrive as a single object (in-place reconcile) or
  *  an array of frames (older merge behaviour); both are handled by taking the
  *  newest. */
-export function extractWorkflowRun(msg: UIMessage): WorkflowRunProgress | null {
-	const parts = (msg.parts ?? []) as Array<{ type?: string; data?: unknown }>;
-	for (const part of parts) {
-		if (part?.type !== WORKFLOW_PART_TYPE || !part.data) {
-			continue;
-		}
-		const data = Array.isArray(part.data) ? part.data.at(-1) : part.data;
-		if (data && typeof data === "object") {
-			return data as WorkflowRunProgress;
-		}
-	}
-	return null;
-}
-
 /** Map a workflow node status onto the TodoList vocabulary. "running" and
  *  "failed" have no TodoList twin, so they borrow "in-progress" / "cancelled"
  *  (the red X surface) — the animated ring of in-progress reads as "doing this
@@ -62,7 +49,13 @@ const NODE_STATUS_TO_TODO = {
  *  title, one row per node with a status ring/check. `collapseOnComplete` is
  *  off so the finished "planner → implementer → verifier" chain stays visible
  *  under the streamed answer instead of folding away the moment it finishes. */
-export function WorkflowRunProgressCard({ msg }: { msg: UIMessage }) {
+export function WorkflowRunProgressCard({
+	msg,
+	onResume,
+}: {
+	msg: UIMessage;
+	onResume?: WorkflowResumeHandler;
+}) {
 	const run = extractWorkflowRun(msg);
 	if (!run) {
 		return null;
@@ -77,12 +70,94 @@ export function WorkflowRunProgressCard({ msg }: { msg: UIMessage }) {
 		detail: node.status === "failed" && node.error ? node.error : undefined,
 	}));
 	return (
-		<TodoList
-			collapseOnComplete={false}
-			defaultOpen
-			items={items}
-			maxHeight={320}
-			title={`Workflow: ${run.workflowName}`}
-		/>
+		<>
+			<TodoList
+				collapseOnComplete={false}
+				defaultOpen
+				items={items}
+				maxHeight={320}
+				title={`Workflow: ${run.workflowName}`}
+			/>
+			{run.status === "awaiting_input" && onResume ? (
+				<WorkflowResumePrompt key={run.runId} onResume={onResume} run={run} />
+			) : null}
+		</>
+	);
+}
+
+function WorkflowResumePrompt({
+	onResume,
+	run,
+}: {
+	onResume: WorkflowResumeHandler;
+	run: WorkflowRunProgress;
+}) {
+	const [payload, setPayload] = useState("");
+	const [submitting, setSubmitting] = useState(false);
+	const [submitted, setSubmitted] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		setPayload("");
+		setSubmitting(false);
+		setSubmitted(false);
+		setError(null);
+	}, [run.runId]);
+
+	const submit = async (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		if (submitting || submitted) {
+			return;
+		}
+		setSubmitting(true);
+		setError(null);
+		try {
+			await onResume(run.runId, payload);
+			setSubmitted(true);
+		} catch (cause) {
+			setError(
+				cause instanceof Error ? cause.message : "Could not resume workflow."
+			);
+		} finally {
+			setSubmitting(false);
+		}
+	};
+
+	if (submitted) {
+		return (
+			<p
+				aria-live="polite"
+				className="mt-2 rounded-lg bg-muted/50 px-3 py-2 text-muted-foreground text-sm"
+			>
+				Response sent. The workflow will continue when the run updates.
+			</p>
+		);
+	}
+
+	return (
+		<form
+			aria-label={`Resume workflow ${run.workflowName}`}
+			className="mt-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-muted/20 p-3"
+			onSubmit={submit}
+		>
+			<p className="font-medium text-sm">This workflow is waiting for input.</p>
+			<div className="flex items-center gap-2">
+				<Input
+					aria-label="Workflow response"
+					disabled={submitting}
+					onChange={(event) => setPayload(event.target.value)}
+					placeholder="Enter a response…"
+					value={payload}
+				/>
+				<Button disabled={submitting} size="sm" type="submit">
+					{submitting ? "Resuming…" : "Resume"}
+				</Button>
+			</div>
+			{error ? (
+				<p aria-live="assertive" className="text-destructive text-xs">
+					{error}
+				</p>
+			) : null}
+		</form>
 	);
 }

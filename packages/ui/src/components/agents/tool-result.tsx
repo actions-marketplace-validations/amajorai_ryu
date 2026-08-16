@@ -12,13 +12,16 @@ import { SPRING_PRESS, SPRING_SWAP } from "@ryu/ui/lib/ease";
 import { cn } from "@ryu/ui/lib/utils";
 import {
 	Ban,
+	BookOpen,
 	Braces,
 	Check,
 	ChevronDown,
 	CircleCheck,
 	CircleX,
 	Copy,
+	Globe2,
 	LoaderCircle,
+	Pencil,
 	RotateCcw,
 	SquareTerminal,
 	Wrench,
@@ -95,11 +98,29 @@ function getStatusClass(status: ToolResultStatus) {
 	return "text-muted-foreground";
 }
 
-function KindIcon({ kind }: { kind: ToolResultKind }) {
+function KindIcon({ kind, tool }: { kind: ToolResultKind; tool: ReactNode }) {
+	const toolName = typeof tool === "string" ? tool.toLowerCase() : "";
+	if (toolName.includes("read")) {
+		return <BookOpen className="size-4" />;
+	}
+	if (
+		toolName.includes("write") ||
+		toolName.includes("edit") ||
+		toolName.includes("patch")
+	) {
+		return <Pencil className="size-4" />;
+	}
+	if (
+		toolName.includes("web") ||
+		toolName.includes("search") ||
+		toolName.includes("fetch")
+	) {
+		return <Globe2 className="size-4" />;
+	}
 	if (kind === "terminal") {
 		return <SquareTerminal className="size-4" />;
 	}
-	if (kind === "request") {
+	if (kind === "request" && toolName.includes("json")) {
 		return <Braces className="size-4" />;
 	}
 	return <Wrench className="size-4" />;
@@ -287,7 +308,7 @@ export function ToolResult({
 					aria-hidden="true"
 					className="grid size-4 shrink-0 place-items-center text-muted-foreground"
 				>
-					{icon ?? <KindIcon kind={kind} />}
+					{icon ?? <KindIcon kind={kind} tool={tool} />}
 				</span>
 				<span className="flex min-w-0 flex-1 items-baseline gap-2">
 					<span className="min-w-0 truncate font-medium text-foreground/90">
@@ -331,7 +352,7 @@ export function ToolResult({
 					<div className="overflow-hidden rounded-xl bg-muted/80">
 						<div
 							aria-live="polite"
-							className="scrollbar-hide overflow-y-auto"
+							className="scroll-fade scrollbar-hide overflow-y-auto"
 							ref={viewportRef}
 							role="log"
 							style={{ maxHeight }}

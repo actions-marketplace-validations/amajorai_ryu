@@ -27,6 +27,7 @@
 // Hermetic by construction: `InputBar` is presentational, so no Core node, no
 // Tauri, and none of the desktop's context tree is involved.
 
+import type { ComposerMenuGroup } from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
 import { InputBar } from "@ryu/blocks/desktop/agent-elements/input-bar";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -35,6 +36,33 @@ import "../../src/index.css";
 function noop() {
 	return undefined;
 }
+
+const DIRECTORY_GROUPS: ComposerMenuGroup[] = [
+	{
+		id: "plugins",
+		label: "Plugins",
+		items: [
+			{
+				id: "plugin:proof",
+				label: "Proof",
+				description: "Verify the answer step by step",
+				badge: "Plugin",
+			},
+		],
+	},
+	{
+		id: "apps",
+		label: "Apps",
+		items: [
+			{
+				id: "app:calendar",
+				label: "Calendar",
+				description: "Find events and availability",
+				badge: "App",
+			},
+		],
+	},
+];
 
 function Story() {
 	const [attachCount, setAttachCount] = useState(0);
@@ -47,11 +75,29 @@ function Story() {
 			<section className="flex flex-col gap-2" data-testid="minimal">
 				<h2 className="font-medium text-sm">Attach only</h2>
 				<InputBar
+					composerMenuGroups={DIRECTORY_GROUPS}
 					onAttach={() => setAttachCount((n) => n + 1)}
 					onSend={noop}
 					onStop={noop}
 					placeholder="What do you want to do?"
 					status="ready"
+					turnProgress={{
+						insertions: 18,
+						deletions: 3,
+						files: [
+							{ path: "src/composer.tsx", insertions: 12, deletions: 2 },
+							{ path: "src/menu.tsx", insertions: 6, deletions: 1 },
+						],
+						plan: {
+							current: 2,
+							total: 3,
+							items: [
+								{ label: "Inspect", status: "completed" },
+								{ label: "Build", status: "in_progress" },
+								{ label: "Verify", status: "pending" },
+							],
+						},
+					}}
 				/>
 			</section>
 
@@ -61,6 +107,7 @@ function Story() {
 					Attach + temporary chat + plugin
 				</h2>
 				<InputBar
+					composerMenuGroups={DIRECTORY_GROUPS}
 					ghostControls={{ active: ghost, onToggle: () => setGhost((o) => !o) }}
 					onAttach={() => setAttachCount((n) => n + 1)}
 					onSend={noop}
@@ -87,6 +134,7 @@ function Story() {
 				<h2 className="font-medium text-sm">Compact (chat with history)</h2>
 				<InputBar
 					compact
+					composerMenuGroups={DIRECTORY_GROUPS}
 					leftActions={
 						<button data-testid="agent-trigger" type="button">
 							Ryu

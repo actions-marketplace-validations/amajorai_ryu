@@ -997,7 +997,7 @@ function CampaignsView({
 						<span className="sr-only">New campaign</span>
 					</Button>
 				</div>
-				<div className="min-h-0 flex-1 overflow-y-auto">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto">
 					{loading && campaigns.length === 0 ? <LoadingRow /> : null}
 					{error ? (
 						<div className="p-2">
@@ -1051,7 +1051,7 @@ function CampaignsView({
 					</ul>
 				</div>
 			</aside>
-			<div className="min-w-0 flex-1 overflow-y-auto">
+			<div className="scroll-fade min-w-0 flex-1 overflow-y-auto">
 				{selected ? (
 					<CampaignDetail
 						campaign={selected}
@@ -1327,7 +1327,7 @@ function CampaignDetail({
 							: "Refresh metrics for every approved submission"
 					}
 					type="button"
-					variant="outline"
+					variant="ghost"
 				>
 					{refreshing ? (
 						<Spinner className="size-3" />
@@ -1427,7 +1427,7 @@ function CampaignDetail({
 						onClick={onOpenSettings}
 						size="xs"
 						type="button"
-						variant="outline"
+						variant="ghost"
 					>
 						<HugeiconsIcon icon={Settings01Icon} />
 						Add a key
@@ -1924,7 +1924,7 @@ function PayoutsView({
 				</PanelNotice>
 			) : null}
 			{payouts.length > 0 ? (
-				<div className="min-h-0 flex-1 overflow-y-auto">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto">
 					<PayoutsTable
 						creatorName={creatorName}
 						onAct={setPending}
@@ -2028,7 +2028,7 @@ function PayoutRowAction({
 				onClick={() => onAct({ payout, step: "paid" })}
 				size="xs"
 				type="button"
-				variant="outline"
+				variant="ghost"
 			>
 				Mark paid
 			</Button>

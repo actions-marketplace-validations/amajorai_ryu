@@ -50,45 +50,45 @@ pub const STATE_FILE: &str = "pending-app-update.json";
 /// in, so a machine without a config dir simply cannot defer, and the caller is
 /// told so rather than being handed a record that silently collides.
 fn config_dir() -> Option<PathBuf> {
-	dirs::config_dir().map(|d| d.join(format!("ryu{}", crate::profile::suffix())))
+    dirs::config_dir().map(|d| d.join(format!("ryu{}", crate::profile::suffix())))
 }
 
 fn state_path() -> Option<PathBuf> {
-	config_dir().map(|d| d.join(STATE_FILE))
+    config_dir().map(|d| d.join(STATE_FILE))
 }
 
 /// An app update booked for the machine's next quiet hour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingAppUpdate {
-	/// The whole update verdict the user was shown, PINNED verbatim.
-	///
-	/// Opaque here on purpose — this side stores it, the webview interprets it —
-	/// but storing the WHOLE verdict rather than just a version string is what
-	/// makes the pin real. Re-checking at the window would resolve the static
-	/// feed to whatever is newest THEN, which is a different build with different
-	/// release notes on a machine the user deliberately chose not to touch.
-	pub verdict: serde_json::Value,
-	/// The version named to the user when they deferred. Duplicated out of the
-	/// verdict so the row can render without parsing it.
-	pub version: String,
-	/// The instant to install at, epoch milliseconds UTC.
-	///
-	/// Computed by the caller, in the machine's own local zone. Stored as an
-	/// absolute instant rather than "03:00" so a DST change between booking and
-	/// the window cannot move it, and so the comparison below needs no timezone
-	/// database on this side.
-	pub scheduled_for_ms: i64,
-	/// The zone the quiet hour was computed in, for display only.
-	pub time_zone: String,
+    /// The whole update verdict the user was shown, PINNED verbatim.
+    ///
+    /// Opaque here on purpose — this side stores it, the webview interprets it —
+    /// but storing the WHOLE verdict rather than just a version string is what
+    /// makes the pin real. Re-checking at the window would resolve the static
+    /// feed to whatever is newest THEN, which is a different build with different
+    /// release notes on a machine the user deliberately chose not to touch.
+    pub verdict: serde_json::Value,
+    /// The version named to the user when they deferred. Duplicated out of the
+    /// verdict so the row can render without parsing it.
+    pub version: String,
+    /// The instant to install at, epoch milliseconds UTC.
+    ///
+    /// Computed by the caller, in the machine's own local zone. Stored as an
+    /// absolute instant rather than "03:00" so a DST change between booking and
+    /// the window cannot move it, and so the comparison below needs no timezone
+    /// database on this side.
+    pub scheduled_for_ms: i64,
+    /// The zone the quiet hour was computed in, for display only.
+    pub time_zone: String,
 }
 
 /// Wall-clock now, epoch milliseconds. Returns 0 if the system clock is before
 /// the Unix epoch, which reads as "nothing is due yet" — the safe direction.
 fn now_ms() -> i64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.map(|d| d.as_millis() as i64)
-		.unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// The booked update, or `None`.
@@ -98,9 +98,9 @@ fn now_ms() -> i64 {
 /// normally.
 #[tauri::command]
 pub fn get_pending_app_update() -> Option<PendingAppUpdate> {
-	let path = state_path()?;
-	let bytes = std::fs::read(path).ok()?;
-	serde_json::from_slice(&bytes).ok()
+    let path = state_path()?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Persist a booked update, replacing any existing one.
@@ -110,16 +110,16 @@ pub fn get_pending_app_update() -> Option<PendingAppUpdate> {
 /// protecting. (Core's `set_pending` makes the same choice for the same reason.)
 #[tauri::command]
 pub fn set_pending_app_update(pending: PendingAppUpdate) -> Result<PendingAppUpdate, String> {
-	let path = state_path().ok_or_else(|| {
+    let path = state_path().ok_or_else(|| {
 		"could not resolve this machine's config directory, so a deferred update has nowhere to live"
 			.to_string()
 	})?;
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-	}
-	let json = serde_json::to_vec_pretty(&pending).map_err(|e| e.to_string())?;
-	std::fs::write(&path, json).map_err(|e| e.to_string())?;
-	Ok(pending)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_vec_pretty(&pending).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(pending)
 }
 
 /// Forget the booked update. Idempotent — a missing file is success, because
@@ -132,14 +132,14 @@ pub fn set_pending_app_update(pending: PendingAppUpdate) -> Result<PendingAppUpd
 /// instead of a restart loop — the same trade Core's scheduler makes.
 #[tauri::command]
 pub fn clear_pending_app_update() -> Result<(), String> {
-	let Some(path) = state_path() else {
-		return Ok(());
-	};
-	match std::fs::remove_file(&path) {
-		Ok(()) => Ok(()),
-		Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-		Err(e) => Err(e.to_string()),
-	}
+    let Some(path) = state_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The booked update if its window has passed, else `None`.
@@ -150,89 +150,89 @@ pub fn clear_pending_app_update() -> Result<(), String> {
 /// the deferral simply never happened on a laptop.
 #[tauri::command]
 pub fn due_app_update() -> Option<PendingAppUpdate> {
-	get_pending_app_update().filter(|p| p.scheduled_for_ms <= now_ms())
+    get_pending_app_update().filter(|p| p.scheduled_for_ms <= now_ms())
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	fn sample(scheduled_for_ms: i64) -> PendingAppUpdate {
-		PendingAppUpdate {
-			verdict: serde_json::json!({ "latest": "0.1.5", "tag": "v0.1.5" }),
-			version: "0.1.5".to_string(),
-			scheduled_for_ms,
-			time_zone: "Europe/Berlin".to_string(),
-		}
-	}
+    fn sample(scheduled_for_ms: i64) -> PendingAppUpdate {
+        PendingAppUpdate {
+            verdict: serde_json::json!({ "latest": "0.1.5", "tag": "v0.1.5" }),
+            version: "0.1.5".to_string(),
+            scheduled_for_ms,
+            time_zone: "Europe/Berlin".to_string(),
+        }
+    }
 
-	/// The collision this basename exists to prevent. Core's record is
-	/// `paths::ryu_dir().join("pending-update.json")`, and the desktop can
-	/// resolve that same directory — so sharing the name would mean a local
-	/// node's Core deferral and the app's own deferral overwriting each other.
-	#[test]
-	fn the_record_cannot_collide_with_cores() {
-		assert_ne!(STATE_FILE, "pending-update.json");
-		assert_eq!(STATE_FILE, "pending-app-update.json");
-		let Some(path) = state_path() else {
-			return; // No config dir on this machine; nothing to assert.
-		};
-		assert!(
-			!path.starts_with(crate::profile::ryu_home_dir()),
-			"the record must not live in Core's data folder"
-		);
-	}
+    /// The collision this basename exists to prevent. Core's record is
+    /// `paths::ryu_dir().join("pending-update.json")`, and the desktop can
+    /// resolve that same directory — so sharing the name would mean a local
+    /// node's Core deferral and the app's own deferral overwriting each other.
+    #[test]
+    fn the_record_cannot_collide_with_cores() {
+        assert_ne!(STATE_FILE, "pending-update.json");
+        assert_eq!(STATE_FILE, "pending-app-update.json");
+        let Some(path) = state_path() else {
+            return; // No config dir on this machine; nothing to assert.
+        };
+        assert!(
+            !path.starts_with(crate::profile::ryu_home_dir()),
+            "the record must not live in Core's data folder"
+        );
+    }
 
-	/// Profile-suffixed like every other cross-surface file, so a canary install
-	/// does not book an update for the stable one.
-	#[test]
-	fn the_record_is_scoped_to_this_profile() {
-		let Some(path) = state_path() else {
-			return;
-		};
-		assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(STATE_FILE));
-		let parent = path
-			.parent()
-			.and_then(|p| p.file_name())
-			.and_then(|n| n.to_str());
-		assert_eq!(
-			parent,
-			Some(format!("ryu{}", crate::profile::suffix()).as_str())
-		);
-	}
+    /// Profile-suffixed like every other cross-surface file, so a canary install
+    /// does not book an update for the stable one.
+    #[test]
+    fn the_record_is_scoped_to_this_profile() {
+        let Some(path) = state_path() else {
+            return;
+        };
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(STATE_FILE));
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        assert_eq!(
+            parent,
+            Some(format!("ryu{}", crate::profile::suffix()).as_str())
+        );
+    }
 
-	/// The pin has to survive the round trip: what installs at the window is the
-	/// verdict the user agreed to, not a re-resolved one.
-	#[test]
-	fn the_pinned_verdict_survives_serialization() {
-		let pending = sample(1_800_000_000_000);
-		let bytes = serde_json::to_vec(&pending).expect("serializes");
-		let back: PendingAppUpdate = serde_json::from_slice(&bytes).expect("round-trips");
-		assert_eq!(back.version, "0.1.5");
-		assert_eq!(back.scheduled_for_ms, 1_800_000_000_000);
-		assert_eq!(back.time_zone, "Europe/Berlin");
-		assert_eq!(back.verdict["tag"], "v0.1.5");
-	}
+    /// The pin has to survive the round trip: what installs at the window is the
+    /// verdict the user agreed to, not a re-resolved one.
+    #[test]
+    fn the_pinned_verdict_survives_serialization() {
+        let pending = sample(1_800_000_000_000);
+        let bytes = serde_json::to_vec(&pending).expect("serializes");
+        let back: PendingAppUpdate = serde_json::from_slice(&bytes).expect("round-trips");
+        assert_eq!(back.version, "0.1.5");
+        assert_eq!(back.scheduled_for_ms, 1_800_000_000_000);
+        assert_eq!(back.time_zone, "Europe/Berlin");
+        assert_eq!(back.verdict["tag"], "v0.1.5");
+    }
 
-	/// A record whose file is garbage must read as absent. The alternative — a
-	/// hard error at launch — would make a corrupt byte able to stop the app.
-	#[test]
-	fn a_corrupt_record_reads_as_absent() {
-		let parsed: Result<PendingAppUpdate, _> = serde_json::from_slice(b"{ not json");
-		assert!(parsed.is_err());
-		let as_option: Option<PendingAppUpdate> = parsed.ok();
-		assert!(as_option.is_none());
-	}
+    /// A record whose file is garbage must read as absent. The alternative — a
+    /// hard error at launch — would make a corrupt byte able to stop the app.
+    #[test]
+    fn a_corrupt_record_reads_as_absent() {
+        let parsed: Result<PendingAppUpdate, _> = serde_json::from_slice(b"{ not json");
+        assert!(parsed.is_err());
+        let as_option: Option<PendingAppUpdate> = parsed.ok();
+        assert!(as_option.is_none());
+    }
 
-	/// Late is due. The app is normally not running at the quiet hour, so the
-	/// overwhelmingly common case is noticing the record hours or days after the
-	/// instant it names.
-	#[test]
-	fn a_window_that_passed_long_ago_is_still_due() {
-		let now = now_ms();
-		let long_past = sample(now - 3 * 24 * 60 * 60 * 1000);
-		assert!(long_past.scheduled_for_ms <= now);
-		let future = sample(now + 60 * 60 * 1000);
-		assert!(future.scheduled_for_ms > now);
-	}
+    /// Late is due. The app is normally not running at the quiet hour, so the
+    /// overwhelmingly common case is noticing the record hours or days after the
+    /// instant it names.
+    #[test]
+    fn a_window_that_passed_long_ago_is_still_due() {
+        let now = now_ms();
+        let long_past = sample(now - 3 * 24 * 60 * 60 * 1000);
+        assert!(long_past.scheduled_for_ms <= now);
+        let future = sample(now + 60 * 60 * 1000);
+        assert!(future.scheduled_for_ms > now);
+    }
 }

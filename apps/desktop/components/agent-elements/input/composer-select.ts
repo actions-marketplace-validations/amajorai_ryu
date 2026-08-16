@@ -17,7 +17,7 @@ export const COMPOSER_SELECT_TRIGGER =
 // the in-textarea chips (COMPOSER_SELECT_TRIGGER): the ghost Button supplies the
 // hover background, the label stays muted, and there's no dropdown chevron.
 export const WORKSPACE_SELECT_TRIGGER =
-	"h-7 gap-1.5 rounded-md px-1.5 font-medium text-[12px] leading-4 text-muted-foreground";
+	"h-7 gap-1.5 rounded-md px-1.5 font-medium text-[12px] text-foreground/90 leading-4 data-popup-open:bg-foreground/10";
 
 // The ONE width for every workspace picker menu body (folder · branch · run
 // mode), whether it is the inline picker's root menu, one of its submenus, or a

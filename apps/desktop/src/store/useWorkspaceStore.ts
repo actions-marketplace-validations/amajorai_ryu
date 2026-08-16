@@ -13,6 +13,8 @@ const WORKTREE_BRANCH_KEY = "ryu_workspace_worktree_branch";
 const TERMINAL_SHELL_KEY = "ryu_workspace_terminal_shell";
 const ICONS_KEY = "ryu_workspace_icons";
 const NAMES_KEY = "ryu_workspace_names";
+const ENVIRONMENTS_KEY = "ryu_workspace_environments_v1";
+const ACTIVE_ENVIRONMENTS_KEY = "ryu_workspace_active_environments_v1";
 const MAX_RECENTS = 10;
 
 /**
@@ -21,6 +23,42 @@ const MAX_RECENTS = 10;
  * presentational desktop-local state in localStorage.
  */
 export type ProjectIcon = Exclude<GlyphValue, null>;
+
+export interface ProjectEnvironmentScripts {
+	default: string;
+	linux: string;
+	macos: string;
+	windows: string;
+}
+
+export interface ProjectEnvironmentVariable {
+	id: string;
+	key: string;
+	value: string;
+}
+
+export interface ProjectEnvironmentAction {
+	id: string;
+	name: string;
+	scripts: ProjectEnvironmentScripts;
+}
+
+/** A named, desktop-local setup profile for one project folder. */
+export interface ProjectEnvironment {
+	actions: ProjectEnvironmentAction[];
+	cleanup: ProjectEnvironmentScripts;
+	id: string;
+	name: string;
+	setup: ProjectEnvironmentScripts;
+	variables: ProjectEnvironmentVariable[];
+}
+
+export const emptyEnvironmentScripts = (): ProjectEnvironmentScripts => ({
+	default: "",
+	macos: "",
+	linux: "",
+	windows: "",
+});
 
 /** Parse an optional dither layer from a stored glyph object. */
 function normalizeDither(raw: unknown): GlyphDitherValue | undefined {
@@ -90,6 +128,8 @@ function normalizeProjectIcon(raw: unknown): ProjectIcon | null {
 }
 
 interface WorkspaceState {
+	/** Selected environment id for each project folder. */
+	activeProjectEnvironments: Record<string, string>;
 	/**
 	 * Register a folder as a project WITHOUT making it the active folder or
 	 * touching disk. Adds it to `recentFolders` (so it shows in the sidebar's
@@ -105,6 +145,8 @@ interface WorkspaceState {
 	/** Clear a custom display name, reverting to the folder basename. */
 	clearProjectName: (path: string) => void;
 	folder: string | null;
+	/** Named local setup profiles, keyed by project folder path. */
+	projectEnvironments: Record<string, ProjectEnvironment[]>;
 	/** Custom per-project glyphs (avatar/icon/emoji/dicebear), keyed by folder path. */
 	projectIcons: Record<string, ProjectIcon>;
 	/**
@@ -132,7 +174,13 @@ interface WorkspaceState {
 	removeProject: (path: string) => void;
 	/** Drop a recent without marking it removed (e.g. a stale/missing path). */
 	removeRecentFolder: (path: string) => void;
+	selectProjectEnvironment: (path: string, environmentId: string) => void;
 	setFolder: (path: string) => Promise<void>;
+	setProjectEnvironments: (
+		path: string,
+		environments: ProjectEnvironment[],
+		activeId: string | null
+	) => void;
 	/** Assign a custom glyph (avatar/icon/emoji/dicebear) to a project folder. */
 	setProjectIcon: (path: string, icon: ProjectIcon) => void;
 	/** Assign a custom sidebar/picker label for a project folder. */
@@ -252,6 +300,108 @@ function saveNames(names: Record<string, string>) {
 	localStorage.setItem(NAMES_KEY, JSON.stringify(names));
 }
 
+function isScripts(value: unknown): value is ProjectEnvironmentScripts {
+	if (!(value && typeof value === "object")) {
+		return false;
+	}
+	const scripts = value as Record<string, unknown>;
+	return ["default", "macos", "linux", "windows"].every(
+		(key) => typeof scripts[key] === "string"
+	);
+}
+
+function normalizeEnvironments(raw: unknown): ProjectEnvironment[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const environments: ProjectEnvironment[] = [];
+	for (const value of raw) {
+		if (!(value && typeof value === "object")) {
+			continue;
+		}
+		const environment = value as Record<string, unknown>;
+		if (
+			typeof environment.id !== "string" ||
+			typeof environment.name !== "string" ||
+			!environment.name.trim() ||
+			!isScripts(environment.setup) ||
+			!isScripts(environment.cleanup)
+		) {
+			continue;
+		}
+		const variables = Array.isArray(environment.variables)
+			? environment.variables.filter(
+					(variable): variable is ProjectEnvironmentVariable =>
+						Boolean(
+							variable &&
+								typeof variable === "object" &&
+								typeof variable.id === "string" &&
+								typeof variable.key === "string" &&
+								typeof variable.value === "string"
+						)
+				)
+			: [];
+		const actions = Array.isArray(environment.actions)
+			? environment.actions.filter(
+					(action): action is ProjectEnvironmentAction =>
+						Boolean(
+							action &&
+								typeof action === "object" &&
+								typeof action.id === "string" &&
+								typeof action.name === "string" &&
+								isScripts(action.scripts)
+						)
+				)
+			: [];
+		environments.push({
+			id: environment.id,
+			name: environment.name.trim(),
+			setup: environment.setup,
+			cleanup: environment.cleanup,
+			variables,
+			actions,
+		});
+	}
+	return environments;
+}
+
+function loadProjectEnvironments(): Record<string, ProjectEnvironment[]> {
+	try {
+		const parsed = JSON.parse(localStorage.getItem(ENVIRONMENTS_KEY) ?? "{}");
+		if (!(parsed && typeof parsed === "object")) {
+			return {};
+		}
+		const result: Record<string, ProjectEnvironment[]> = {};
+		for (const [path, value] of Object.entries(parsed)) {
+			const environments = normalizeEnvironments(value);
+			if (environments.length > 0) {
+				result[path] = environments;
+			}
+		}
+		return result;
+	} catch {
+		return {};
+	}
+}
+
+function loadActiveProjectEnvironments(): Record<string, string> {
+	try {
+		const parsed = JSON.parse(
+			localStorage.getItem(ACTIVE_ENVIRONMENTS_KEY) ?? "{}"
+		);
+		if (!(parsed && typeof parsed === "object")) {
+			return {};
+		}
+		return Object.fromEntries(
+			Object.entries(parsed).filter(
+				(entry): entry is [string, string] => typeof entry[1] === "string"
+			)
+		);
+	} catch {
+		return {};
+	}
+}
+
 // Conductor-style memorable, collision-resistant names so parallel worktrees
 // are scannable at a glance (e.g. `ryu/swift-otter`) instead of opaque uuids.
 const NAME_ADJECTIVES = [
@@ -310,6 +460,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 	folder: localStorage.getItem(STORAGE_KEY) ?? null,
 	projectIcons: loadIcons(),
 	projectNames: loadNames(),
+	projectEnvironments: loadProjectEnvironments(),
+	activeProjectEnvironments: loadActiveProjectEnvironments(),
 	recentFolders: loadRecents(),
 	removedProjects: loadRemoved(),
 	terminalShell: localStorage.getItem(TERMINAL_SHELL_KEY) ?? "auto",
@@ -424,6 +576,60 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 		});
 	},
 
+	setProjectEnvironments: (path, environments, activeId) => {
+		set((state) => {
+			const projectEnvironments = { ...state.projectEnvironments };
+			if (environments.length === 0) {
+				delete projectEnvironments[path];
+			} else {
+				projectEnvironments[path] = environments;
+			}
+			const activeProjectEnvironments = {
+				...state.activeProjectEnvironments,
+			};
+			const resolvedActive =
+				activeId &&
+				environments.some((environment) => environment.id === activeId)
+					? activeId
+					: environments[0]?.id;
+			if (resolvedActive) {
+				activeProjectEnvironments[path] = resolvedActive;
+			} else {
+				delete activeProjectEnvironments[path];
+			}
+			localStorage.setItem(
+				ENVIRONMENTS_KEY,
+				JSON.stringify(projectEnvironments)
+			);
+			localStorage.setItem(
+				ACTIVE_ENVIRONMENTS_KEY,
+				JSON.stringify(activeProjectEnvironments)
+			);
+			return { projectEnvironments, activeProjectEnvironments };
+		});
+	},
+
+	selectProjectEnvironment: (path, environmentId) => {
+		set((state) => {
+			if (
+				!state.projectEnvironments[path]?.some(
+					(environment) => environment.id === environmentId
+				)
+			) {
+				return state;
+			}
+			const activeProjectEnvironments = {
+				...state.activeProjectEnvironments,
+				[path]: environmentId,
+			};
+			localStorage.setItem(
+				ACTIVE_ENVIRONMENTS_KEY,
+				JSON.stringify(activeProjectEnvironments)
+			);
+			return { activeProjectEnvironments };
+		});
+	},
+
 	removeRecentFolder: (path) => {
 		set((state) => {
 			const next = state.recentFolders.filter((p) => !sameFolder(p, path));
@@ -464,12 +670,28 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 				projectNames = rest;
 				saveNames(rest);
 			}
+			const projectEnvironments = { ...state.projectEnvironments };
+			delete projectEnvironments[path];
+			const activeProjectEnvironments = {
+				...state.activeProjectEnvironments,
+			};
+			delete activeProjectEnvironments[path];
+			localStorage.setItem(
+				ENVIRONMENTS_KEY,
+				JSON.stringify(projectEnvironments)
+			);
+			localStorage.setItem(
+				ACTIVE_ENVIRONMENTS_KEY,
+				JSON.stringify(activeProjectEnvironments)
+			);
 			return {
 				recentFolders: next,
 				removedProjects: removed,
 				folder,
 				projectIcons,
 				projectNames,
+				projectEnvironments,
+				activeProjectEnvironments,
 			};
 		});
 	},

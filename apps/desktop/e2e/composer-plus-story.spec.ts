@@ -28,14 +28,14 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await page.goto(STORY_URL);
 		// Nothing is open until the "+" is clicked.
 		await expect(
-			page.getByRole("button", { name: "Files and images" })
+			page.getByRole("option", { name: "Files and images" })
 		).toHaveCount(0);
 
 		await plusIn(page, "minimal").click();
 
 		// The affordance is a menu, not a straight-to-file-dialog button.
 		await expect(
-			page.getByRole("button", { name: "Files and images" })
+			page.getByRole("option", { name: "Files and images" })
 		).toBeVisible();
 	});
 
@@ -46,9 +46,25 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(page.getByTestId("attach-count")).toHaveText("0");
 
 		await plusIn(page, "minimal").click();
-		await page.getByRole("button", { name: "Files and images" }).click();
+		await page.getByRole("option", { name: "Files and images" }).click();
 
 		await expect(page.getByTestId("attach-count")).toHaveText("1");
+	});
+
+	test("the shared menu searches apps from the textarea and inserts a tag", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		const mount = page.getByTestId("minimal");
+		await plusIn(page, "minimal").click();
+		await expect(page.getByRole("option", { name: /Calendar/ })).toBeVisible();
+
+		await mount.locator("textarea").fill("cal");
+		await expect(page.getByRole("option", { name: /Calendar/ })).toBeVisible();
+		await expect(page.getByRole("option", { name: /Proof/ })).toHaveCount(0);
+		await page.getByRole("option", { name: /Calendar/ }).click();
+
+		await expect(mount.locator("textarea")).toHaveValue("@Calendar ");
 	});
 
 	test("the richer surface opens the SAME menu, with its extra rows", async ({
@@ -59,14 +75,14 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 
 		// Same attach row as the minimal surface — one affordance, not two designs.
 		await expect(
-			page.getByRole("button", { name: "Files and images" })
+			page.getByRole("option", { name: "Files and images" })
 		).toBeVisible();
 		// Plus what this host wired on top.
 		await expect(
-			page.getByRole("button", { name: "Temporary chat" })
+			page.getByRole("option", { name: "Temporary chat" })
 		).toBeVisible();
 		await expect(
-			page.getByRole("button", { name: "Double-check" })
+			page.getByRole("option", { name: "Double-check" })
 		).toBeVisible();
 	});
 
@@ -113,6 +129,32 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		// Left-aligned, in order: "+" then the agent selector — the launchpad's
 		// arrangement, which compact used to invert (agent selector on the right).
 		expect(agentBox.x).toBeGreaterThan(plusBox.x);
+
+		await plus.click();
+		const menuBox = await page.getByRole("listbox").boundingBox();
+		if (!menuBox) {
+			throw new Error("composer menu did not lay out");
+		}
+		expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(plusBox.y);
+	});
+
+	test("shows current-turn plan and file details above the composer", async ({
+		page,
+	}) => {
+		await page.goto(STORY_URL);
+		await expect(
+			page.getByRole("button", { name: "Step 2 / 3" })
+		).toBeVisible();
+		const filesButton = page.getByRole("button", { name: /2 files changed/ });
+		await expect(filesButton).toBeVisible();
+		await expect(filesButton).toContainText("+18");
+		await expect(filesButton).toContainText("-3");
+
+		await page.getByRole("button", { name: "Step 2 / 3" }).click();
+		await expect(page.getByText("Verify", { exact: true })).toBeVisible();
+		await page.keyboard.press("Escape");
+		await page.getByRole("button", { name: /2 files changed/ }).click();
+		await expect(page.getByText("src/composer.tsx")).toBeVisible();
 	});
 
 	// The roomy textarea block's vertical rhythm. It used to pin its content with
@@ -150,7 +192,7 @@ test.describe("composer + menu — real InputBar in isolation", () => {
 		await expect(page.getByTestId("ghost-state")).toHaveText("off");
 
 		await plusIn(page, "full").click();
-		await page.getByRole("button", { name: "Temporary chat" }).click();
+		await page.getByRole("option", { name: "Temporary chat" }).click();
 
 		await expect(page.getByTestId("ghost-state")).toHaveText("on");
 	});

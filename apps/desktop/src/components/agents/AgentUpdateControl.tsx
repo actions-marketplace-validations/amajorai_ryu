@@ -73,7 +73,7 @@ export function AgentUpdateControl({ agentId }: { agentId: string }) {
 						handleUpdate().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{updating ? <Spinner className="size-3" /> : null}
 					{updating ? "Updating…" : "Update"}

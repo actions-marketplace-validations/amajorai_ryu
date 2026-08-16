@@ -52,7 +52,7 @@
 #![allow(dead_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
@@ -224,8 +224,8 @@ impl Default for RoomConfig {
 /// is done via the shared atomic under the registry lock; these commands carry the
 /// *side effects* (presence mutation, idle-clock updates, test queries).
 enum RoomCommand {
-    /// A member joined — clear the idle clock.
-    Joined,
+    /// A member joined — record it, announce it, and clear the idle clock.
+    Joined { member_id: String },
     /// A member left — decrement already happened on the atomic; drop its presence
     /// and broadcast a `presence_leave` delta, then arm the idle clock if empty.
     Left { member_id: String },
@@ -233,6 +233,10 @@ enum RoomCommand {
     Presence { member_id: String, value: Value },
     /// Test/diagnostic: snapshot the live presence member ids.
     PresenceMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Snapshot the active room roster, including each member's latest presence
+    /// payload when one exists. Members without an explicit payload still appear
+    /// as a `presence_join` entry so a late joiner sees the complete roster.
+    PresenceRoster { reply: oneshot::Sender<Vec<Value>> },
     /// A typed [`Connection`] opened: register its private delivery channel so
     /// [`RoomCommand::SendTo`] can address it.
     OpenConn {
@@ -315,10 +319,13 @@ impl RoomRegistry {
         handle.members.fetch_add(1, Ordering::SeqCst);
         drop(map);
         // Reset the actor's idle clock; done outside the lock (channel send only).
-        let _ = handle.cmd.send(RoomCommand::Joined);
+        let member_id = member_id.into();
+        let _ = handle.cmd.send(RoomCommand::Joined {
+            member_id: member_id.clone(),
+        });
         RoomMembership {
             handle,
-            member_id: member_id.into(),
+            member_id,
             left: false,
         }
     }
@@ -444,10 +451,13 @@ impl RoomHandle {
     /// [`RoomRegistry::join`] instead; this method is for single-threaded tests.
     pub fn join(&self, member_id: impl Into<String>) -> RoomMembership {
         self.members.fetch_add(1, Ordering::SeqCst);
-        let _ = self.cmd.send(RoomCommand::Joined);
+        let member_id = member_id.into();
+        let _ = self.cmd.send(RoomCommand::Joined {
+            member_id: member_id.clone(),
+        });
         RoomMembership {
             handle: self.clone(),
-            member_id: member_id.into(),
+            member_id,
             left: false,
         }
     }
@@ -532,6 +542,21 @@ impl RoomHandle {
         if self
             .cmd
             .send(RoomCommand::PresenceMembers { reply })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Snapshot every active member's latest presence payload. This is used by
+    /// the WebSocket join ack so a late joiner does not wait for a future delta
+    /// before it can render the room's current roster.
+    pub async fn presence_roster(&self) -> Vec<Value> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd
+            .send(RoomCommand::PresenceRoster { reply })
             .is_err()
         {
             return Vec::new();
@@ -690,6 +715,9 @@ async fn run_room(
     registry: Weak<Mutex<RoomMap>>,
     config: RoomConfig,
 ) {
+    // Active room members. This is the in-process roster; the latest presence
+    // payload below is optional and independently TTL-reaped.
+    let mut active_members: HashSet<String> = HashSet::new();
     // Presence: member_id -> (latest value, last heartbeat). Never persisted.
     let mut presence: HashMap<String, (Value, Instant)> = HashMap::new();
     // Typed connections: conn_id -> its private targeted-delivery channel. Used only
@@ -714,11 +742,16 @@ async fn run_room(
                         evict(&registry, &room_id, "all handles dropped");
                         return;
                     }
-                    Some(RoomCommand::Joined) => {
+                    Some(RoomCommand::Joined { member_id }) => {
+                        if active_members.insert(member_id.clone()) {
+                            let _ = broadcast_tx.send(Frame::Presence(presence_join(&member_id)));
+                        }
                         empty_since = None;
                     }
                     Some(RoomCommand::Left { member_id }) => {
-                        if presence.remove(&member_id).is_some() {
+                        let was_member = active_members.remove(&member_id);
+                        let had_presence = presence.remove(&member_id).is_some();
+                        if was_member || had_presence {
                             let _ = broadcast_tx.send(Frame::Presence(presence_leave(&member_id)));
                         }
                         if members.load(Ordering::SeqCst) == 0 {
@@ -733,6 +766,20 @@ async fn run_room(
                         let mut ids: Vec<String> = presence.keys().cloned().collect();
                         ids.sort();
                         let _ = reply.send(ids);
+                    }
+                    Some(RoomCommand::PresenceRoster { reply }) => {
+                        let mut ids: Vec<String> = active_members.iter().cloned().collect();
+                        ids.sort();
+                        let roster = ids
+                            .into_iter()
+                            .map(|id| {
+                                presence
+                                    .get(&id)
+                                    .map(|(value, _)| value.clone())
+                                    .unwrap_or_else(|| presence_join(&id))
+                            })
+                            .collect();
+                        let _ = reply.send(roster);
                     }
                     Some(RoomCommand::OpenConn { conn_id, tx }) => {
                         conns.insert(conn_id, tx);
@@ -785,6 +832,12 @@ async fn run_room(
 /// Build a `presence_leave` delta frame body for a departed/reaped member.
 fn presence_leave(member_id: &str) -> Value {
     json!({ "type": "presence_leave", "member_id": member_id })
+}
+
+/// Build the initial roster entry for a member who has joined but has not yet
+/// published an application-specific presence payload.
+fn presence_join(member_id: &str) -> Value {
+    json!({ "type": "presence_join", "member_id": member_id })
 }
 
 /// Attempt eviction under the registry lock, rechecking member count so a join
@@ -916,11 +969,48 @@ mod tests {
 
         member.publish_presence(json!({"member_id": "alice", "cursor": [1, 2]}));
 
-        let frame = rx.recv().await.expect("frame");
-        match frame {
-            Frame::Presence(v) => assert_eq!(v["cursor"][0], 1),
-            _ => panic!("expected presence frame"),
+        loop {
+            let frame = rx.recv().await.expect("frame");
+            if let Frame::Presence(v) = frame {
+                if v["cursor"][0] == 1 {
+                    break;
+                }
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn presence_roster_includes_members_before_their_first_delta() {
+        let reg = RoomRegistry::new();
+        let handle = reg.get_or_create("room-roster");
+        let _alice = handle.join("alice");
+        let bob = handle.join("bob");
+
+        bob.publish_presence(json!({"member_id": "bob", "name": "Bob"}));
+        let roster = handle.presence_roster().await;
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0]["member_id"], "alice");
+        assert_eq!(roster[0]["type"], "presence_join");
+        assert_eq!(roster[1]["member_id"], "bob");
+        assert_eq!(roster[1]["name"], "Bob");
+    }
+
+    #[tokio::test]
+    async fn leaving_without_presence_still_broadcasts_roster_leave() {
+        let reg = RoomRegistry::new();
+        let handle = reg.get_or_create("room-roster-leave");
+        let member = handle.join("alice");
+        let mut rx = handle.subscribe();
+        // Drain the join announcement emitted by the actor.
+        let _ = rx.recv().await.expect("join announcement");
+
+        drop(member);
+        let frame = rx.recv().await.expect("leave announcement");
+        assert!(matches!(
+            frame,
+            Frame::Presence(value)
+                if value["type"] == "presence_leave" && value["member_id"] == "alice"
+        ));
     }
 
     #[tokio::test]

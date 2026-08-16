@@ -147,7 +147,10 @@ mod tests {
         });
         let team: TeamRecord = serde_json::from_value(body["team"].clone())
             .expect("an unknown strategy must not fail the record");
-        assert_eq!(team.coordination, ryu_teams_contracts::Coordination::Broadcast);
+        assert_eq!(
+            team.coordination,
+            ryu_teams_contracts::Coordination::Broadcast
+        );
         assert_eq!(team.members.len(), 2);
     }
 
@@ -161,7 +164,13 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        for key in ["name", "description", "members", "coordination", "lead_agent_id"] {
+        for key in [
+            "name",
+            "description",
+            "members",
+            "coordination",
+            "lead_agent_id",
+        ] {
             assert!(body.get(key).is_some(), "missing {key} in {body}");
         }
         assert_eq!(body["coordination"], serde_json::json!("router"));

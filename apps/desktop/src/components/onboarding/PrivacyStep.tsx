@@ -184,7 +184,7 @@ export function PrivacyStep({ busy = false, onContinue }: PrivacyStepProps) {
 		// Mirrors the shared OnboardingShell: the outer box owns the scroll and the
 		// inner column uses `min-h-full` so it centres when it fits and grows when it
 		// doesn't (the page wrapper is `h-screen overflow-hidden`).
-		<div className="h-full w-full overflow-y-auto">
+		<div className="scroll-fade h-full w-full overflow-y-auto">
 			<div
 				className="flex min-h-full w-full flex-col items-center justify-center gap-8 p-8"
 				data-tauri-drag-region="true"

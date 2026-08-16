@@ -107,6 +107,31 @@ impl ActivityStore {
         Ok(out)
     }
 
+    /// List items in an inclusive/exclusive epoch-seconds range, newest first.
+    /// This is the bounded read used by period reports; it does not add a new
+    /// event source or persist any derived telemetry.
+    pub async fn list_between(
+        &self,
+        start: i64,
+        end: i64,
+        limit: u32,
+    ) -> Result<Vec<ActivityItem>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT json FROM activity_items
+             WHERE created_at >= ?1 AND created_at < ?2
+             ORDER BY created_at DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![start, end, limit], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(item) = serde_json::from_str::<ActivityItem>(&row?) {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
     /// Subscribe to live activity items (used by the SSE endpoint).
     pub fn subscribe(&self) -> broadcast::Receiver<ActivityItem> {
         self.tx.subscribe()
@@ -152,5 +177,23 @@ mod tests {
         store.record(item.clone()).await.unwrap();
         let got = rx.recv().await.unwrap();
         assert_eq!(got.id, item.id);
+    }
+
+    #[tokio::test]
+    async fn list_between_is_exact_and_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ActivityStore::open(dir.path().join("activity.db")).unwrap();
+        let before = ActivityItem::new("note", "manual", "before").with_created_at(99);
+        let start = ActivityItem::new("note", "manual", "start").with_created_at(100);
+        let inside = ActivityItem::new("note", "manual", "inside").with_created_at(150);
+        let end = ActivityItem::new("note", "manual", "end").with_created_at(200);
+        for item in [before, start, inside, end] {
+            store.record(item).await.unwrap();
+        }
+
+        let items = store.list_between(100, 200, 10).await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "inside");
+        assert_eq!(items[1].title, "start");
     }
 }

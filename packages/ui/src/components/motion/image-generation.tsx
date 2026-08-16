@@ -13,7 +13,7 @@
 // like its neighbours in this directory.
 
 import { useHoverCapable } from "@ryu/ui/hooks/use-hover-capable.ts";
-import { EASE_IN_OUT, EASE_OUT, SPRING_PRESS } from "@ryu/ui/lib/ease";
+import { EASE_OUT, SPRING_PRESS } from "@ryu/ui/lib/ease";
 import { cn } from "@ryu/ui/lib/utils";
 import { Check, CircleAlert, RotateCcw } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -158,7 +158,7 @@ function DitherMark({
 			className="grid size-3.5 grid-cols-2 place-items-center gap-0.5"
 			transition={{
 				duration: 2.4,
-				ease: EASE_IN_OUT,
+				ease: "linear",
 				repeat: Number.POSITIVE_INFINITY,
 			}}
 		>

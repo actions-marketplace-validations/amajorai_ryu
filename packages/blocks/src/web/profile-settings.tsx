@@ -1,7 +1,7 @@
 "use client";
 
 import { Badge } from "@ryu/ui/components/badge";
-import { Button } from "@ryu/ui/components/button";
+import { Button, buttonVariants } from "@ryu/ui/components/button";
 import { Card, CardContent } from "@ryu/ui/components/card";
 import {
 	ContributionsGraph,
@@ -41,6 +41,7 @@ import {
 	Coins,
 	Cpu,
 	Gauge,
+	Github,
 	Globe2,
 	Lock,
 	Network,
@@ -844,6 +845,45 @@ export default function ProfileSettings({
 										disabled={isSavingProfileVisibility}
 										onCheckedChange={onProfilePublicToggle}
 									/>
+								</div>
+							</div>
+						</CardContent>
+					</Card>
+					<Card>
+						<CardContent className="space-y-3">
+							<div className="space-y-1">
+								<p className="font-medium">Train on my data</p>
+								<p className="text-muted-foreground text-sm leading-relaxed">
+									We never use your chats, files, or activity to train Ryu
+									models. Core and Gateway are open source, so you can inspect
+									them. A model provider, app, or plugin only processes content
+									when you choose to use it, under that service&apos;s own terms
+									and privacy policy.
+								</p>
+							</div>
+							<div className="flex flex-wrap items-center gap-3">
+								<a
+									className={buttonVariants({ size: "sm", variant: "outline" })}
+									href="https://github.com/amajorai/ryu"
+									rel="noopener noreferrer"
+									target="_blank"
+								>
+									<Github className="size-4" />
+									GitHub
+								</a>
+								<div className="flex gap-3 text-muted-foreground text-xs">
+									<a
+										className="hover:text-foreground hover:underline"
+										href="/privacy"
+									>
+										Privacy
+									</a>
+									<a
+										className="hover:text-foreground hover:underline"
+										href="/terms"
+									>
+										Terms
+									</a>
 								</div>
 							</div>
 						</CardContent>

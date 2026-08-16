@@ -325,9 +325,7 @@ mod tests {
         b.add_text("skills", "Skills", None);
         b.add_text("persona", "Persona", Some(""));
         b.add_text("memory", "Memory", Some("remembered fact"));
-        let out = b
-            .finish(ContextPlane::Openai)
-            .expect("one non-empty layer");
+        let out = b.finish(ContextPlane::Openai).expect("one non-empty layer");
         assert_eq!(out.segments.len(), 1);
         assert_eq!(out.segments[0].kind, "memory");
     }

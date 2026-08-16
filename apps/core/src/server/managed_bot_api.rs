@@ -369,7 +369,10 @@ pub async fn cancel_pairing(Path(nonce): Path<String>) -> Response {
     // Local state is already gone, so report success either way — but say whether the
     // manager agreed, because a manager that still holds the token is a fact the
     // operator (and the user, who can send /deletebot) may need.
-    let manager_forgot = match ManagerClient::from_env().delete(&nonce, &claim_secret).await {
+    let manager_forgot = match ManagerClient::from_env()
+        .delete(&nonce, &claim_secret)
+        .await
+    {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!(nonce = %nonce, error = %format!("{e:#}"), "manager did not forget a cancelled managed-bot pairing");

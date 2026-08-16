@@ -33,6 +33,7 @@ import { ToolTimingProvider } from "./tool-timing.tsx";
 export interface ToolRendererProps {
 	chatStatus?: string;
 	nestedTools?: any[];
+	onAgentUiSubmit?: (value: unknown) => void | Promise<void>;
 	part: any;
 	toolRenderers?: Record<string, React.ComponentType<CustomToolRendererProps>>;
 }
@@ -132,6 +133,7 @@ const ToolRendererInner = memo(function ToolRendererInner({
 	nestedTools,
 	chatStatus,
 	toolRenderers,
+	onAgentUiSubmit,
 }: ToolRendererProps) {
 	const partType = part.type as string;
 	const { groupToolUses, expandFileEdits, expandCommands } =
@@ -160,7 +162,13 @@ const ToolRendererInner = memo(function ToolRendererInner({
 		if (status === "streaming" || status === "pending" || input.spec == null) {
 			return <GenericTool isPending title="Rendering UI" />;
 		}
-		return <AgentUI spec={input.spec} title={input.title} />;
+		return (
+			<AgentUI
+				onSubmit={onAgentUiSubmit}
+				spec={input.spec}
+				title={input.title}
+			/>
+		);
 	}
 
 	// App widget (Ryu Apps): a `data-tool-widget-available` data part carries the

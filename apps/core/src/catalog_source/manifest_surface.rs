@@ -202,6 +202,30 @@ fn sidecars(raw: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
+/// Project provider declarations without exposing the sidecar process or code.
+/// A provider-backed sidecar can hold a user's live subscription credential and
+/// see the traffic routed through it, so the desktop enable confirmation needs a
+/// stable, non-executable disclosure of what it serves.
+fn model_providers(raw: Option<&Value>) -> Vec<Value> {
+    let Some(items) = raw.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .take(MAX_ITEMS)
+        .filter_map(|spec| {
+            let provider = spec.get("provides_provider")?.as_object()?;
+            let id = text(provider.get("id"), MAX_NAME)?;
+            Some(serde_json::json!({
+                "id": id,
+                "label": text_value(provider.get("label"), MAX_TEXT),
+                "api": text_value(provider.get("api"), MAX_NAME),
+                "models": Value::Array(string_list(provider.get("models"))),
+            }))
+        })
+        .collect()
+}
+
 /// Project the declarative UI contributions (views + settings tabs). Only the
 /// identifying/labelling keys are lifted; the render payload stays behind.
 fn ui_contributions(raw: Option<&Value>, id_key: &str, title_key: &str) -> Vec<Value> {
@@ -372,6 +396,7 @@ pub(crate) fn project_manifest(manifest: &Value) -> Map<String, Value> {
             "policies": Value::Array(c("policies")),
             "mcpServers": Value::Array(mcp_servers(obj.get("mcp_servers"))),
             "sidecars": Value::Array(sidecars(obj.get("sidecars"))),
+            "modelProviders": Value::Array(model_providers(obj.get("sidecars"))),
             "views": Value::Array(ui_contributions(
                 contributes.and_then(|v| v.get("views")),
                 "id",
@@ -523,6 +548,30 @@ mod tests {
         assert!(
             !json.contains("server.js"),
             "process spec must not travel: {json}"
+        );
+    }
+
+    #[test]
+    fn provider_declaration_is_surfaced_for_consent_without_process_details() {
+        let s = surface(serde_json::json!({
+            "sidecars": [{
+                "name": "bridge",
+                "process": { "kind": "node", "entry": "backend.js" },
+                "provides_provider": {
+                    "id": "chatgpt-bridge",
+                    "label": "ChatGPT subscription",
+                    "api": "openai-completions",
+                    "models": ["gpt-5"]
+                }
+            }]
+        }));
+        assert_eq!(s["modelProviders"][0]["id"], "chatgpt-bridge");
+        assert_eq!(s["modelProviders"][0]["label"], "ChatGPT subscription");
+        assert_eq!(s["modelProviders"][0]["models"][0], "gpt-5");
+        let json = serde_json::to_string(&s).expect("serializes");
+        assert!(
+            !json.contains("backend.js"),
+            "provider disclosure must not carry process details: {json}"
         );
     }
 

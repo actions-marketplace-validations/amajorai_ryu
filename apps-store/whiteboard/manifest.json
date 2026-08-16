@@ -2,6 +2,7 @@
   "id": "@ryu/whiteboard",
   "name": "Whiteboard",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "An Excalidraw whiteboard shipped as a Ryu app: draw, diagram, and rearrange freely, with Mermaid-to-Excalidraw bundled so a diagram can be imported straight from text. Each board persists as a Space document, so it stays editable, shareable, and searchable.",
   "tagline": "Draw and diagram, saved into your Spaces",
   "keywords": ["whiteboard", "drawing", "diagrams", "excalidraw"],

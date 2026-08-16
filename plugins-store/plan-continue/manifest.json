@@ -2,6 +2,7 @@
   "id": "@ryu/plan-continue",
   "name": "Plan Continue",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "While plan mode is on and the plan has not been accepted, this injects a follow-up turn after each completed turn asking the agent to carry on planning — so a plan never stalls waiting for you to type \"continue\".",
   "tagline": "Stop typing \"continue\" during plan mode",
   "keywords": ["planning", "automation", "loop", "productivity"],

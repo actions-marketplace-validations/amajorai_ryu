@@ -11,6 +11,7 @@
 //     attributed to its server instead of being dropped;
 //   - web results come from the tool OUTPUT, so a search shows the links it
 //     found and not just the query string;
+//   - user attachments come from the same file parts the transcript renders;
 //   - items dedupe, so reading one file ten times is one row.
 
 import { describe, expect, test } from "bun:test";
@@ -21,6 +22,74 @@ function toolMessage(parts: Record<string, unknown>[]) {
 }
 
 describe("extractSources", () => {
+	test("lists image and document attachments from user chat messages", () => {
+		const sources = extractSources([
+			{
+				role: "user",
+				parts: [
+					{
+						type: "file",
+						filename: "reference.png",
+						mediaType: "image/png",
+						url: "data:image/png;base64,abc",
+					},
+					{
+						type: "file",
+						filename: "brief.pdf",
+						mediaType: "application/pdf",
+					},
+				],
+			},
+			{
+				role: "user",
+				experimental_attachments: [
+					{
+						name: "legacy-photo.jpg",
+						contentType: "image/jpeg",
+						url: "data:image/jpeg;base64,abc",
+					},
+				],
+			},
+			toolMessage([
+				{ type: "tool-Read", input: { file_path: "/repo/src/main.rs" } },
+			]),
+		]);
+
+		expect(sources.map((source) => source.id)).toEqual([
+			"attachments",
+			"local",
+		]);
+		const attachments = sources[0];
+		expect(attachments.label).toBe("Chat attachments");
+		expect(attachments.items.map((item) => item.label)).toEqual([
+			"reference.png",
+			"brief.pdf",
+			"legacy-photo.jpg",
+		]);
+		expect(attachments.items.map((item) => item.detail)).toEqual([
+			"image/png",
+			"application/pdf",
+			"image/jpeg",
+		]);
+	});
+
+	test("does not treat assistant-generated files as input sources", () => {
+		expect(
+			extractSources([
+				{
+					role: "assistant",
+					parts: [
+						{
+							type: "file",
+							filename: "result.png",
+							mediaType: "image/png",
+						},
+					],
+				},
+			])
+		).toEqual([]);
+	});
+
 	test("lists the files a run read and wrote, by basename", () => {
 		const sources = extractSources([
 			toolMessage([

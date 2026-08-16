@@ -15,6 +15,7 @@
 //   ACTIONS (confirm-gated — they install/connect, i.e. have a side effect):
 //     ryu://models/<source>/<id…>?node=…      install/switch a model
 //     ryu://skills/<source>/<id…>?node=…      install a skill
+//     ryu://apps/<id…>?node=…                 install an app (plugin id)
 //     ryu://nodes/connect?url=…&token=…&name=…  connect to a Core node
 //
 // The node link is also the CONNECTION STRING: one line carrying everything a
@@ -52,6 +53,7 @@
 export type DeepLinkIntent =
 	| { kind: "model"; source: string; id: string; node: string | null }
 	| { kind: "skill"; source: string; id: string; node: string | null }
+	| { kind: "app"; id: string; node: string | null }
 	| { kind: "node"; name: string; url: string; token: string | null }
 	| { kind: "page"; page: string }
 	| {
@@ -70,6 +72,7 @@ export type DeepLinkIntent =
 export type DeepLinkBuildInput =
 	| { kind: "model"; source: string; id: string; node?: string | null }
 	| { kind: "skill"; source: string; id: string; node?: string | null }
+	| { kind: "app"; id: string; node?: string | null }
 	| { kind: "node"; name: string; url: string; token?: string | null }
 	| { kind: "page"; page: string }
 	| {
@@ -281,6 +284,15 @@ export function parseRyuDeepLink(raw: string): DeepLinkIntent | null {
 	if (category === "models" || category === "skills") {
 		return parseCatalog(category, pathSegments, params);
 	}
+	if (category === "apps") {
+		// No `<source>` — everything after `apps/` is the plugin id itself
+		// (a scoped `@ryu/clips` is two segments, a reverse-DNS `com.ryu.x` is one).
+		const id = pathSegments.join("/");
+		if (!id) {
+			return null;
+		}
+		return { kind: "app", id, node: parseNodeHint(params) };
+	}
 	return null;
 }
 
@@ -328,14 +340,17 @@ export function buildRyuDeepLink(intent: DeepLinkBuildInput): string {
 		const query = params.join("&");
 		return `ryu://chat/${path}${query ? `?${query}` : ""}`;
 	}
-	const category = intent.kind === "model" ? "models" : "skills";
 	// Keep `/` separators in the id readable; encode each segment's reserved
 	// characters so the round-trip through `parseRyuDeepLink` is lossless.
 	const idPath = intent.id
 		.split("/")
 		.map((s) => encodeURIComponent(s))
 		.join("/");
-	const base = `ryu://${category}/${encodeURIComponent(intent.source)}/${idPath}`;
+	// An app has no catalog `<source>` — its id IS the plugin id.
+	const base =
+		intent.kind === "app"
+			? `ryu://apps/${idPath}`
+			: `ryu://${intent.kind === "model" ? "models" : "skills"}/${encodeURIComponent(intent.source)}/${idPath}`;
 	// Only an http(s) node url is emitted, matching what the parser will accept —
 	// a builder that emitted more than the parser reads would drift immediately.
 	const node = intent.node?.trim();

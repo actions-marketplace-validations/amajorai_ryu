@@ -408,13 +408,12 @@ pub fn validate_dependents_of_update(
                 // No floor declared — any version is acceptable.
                 continue;
             };
-            let req =
-                parse_min_version(min).map_err(|e| DependencyError::InvalidVersionReq {
-                    plugin: dependent.id.clone(),
-                    dependency: updated.id.clone(),
-                    requirement: min.clone(),
-                    reason: e,
-                })?;
+            let req = parse_min_version(min).map_err(|e| DependencyError::InvalidVersionReq {
+                plugin: dependent.id.clone(),
+                dependency: updated.id.clone(),
+                requirement: min.clone(),
+                reason: e,
+            })?;
             if !req.matches(&incoming) {
                 return Err(DependencyError::DependentVersionMismatch {
                     plugin: dependent.id.clone(),
@@ -698,7 +697,11 @@ mod tests {
     fn a_major_bump_that_breaks_an_installed_dependent_is_refused() {
         let installed = vec![
             m("@ryu/spaces", "1.2.0", &[]),
-            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2, <2"))]),
+            m(
+                "@ryu/meetings",
+                "1.0.0",
+                &[("@ryu/spaces", Some(">=1.2, <2"))],
+            ),
         ];
         let updated = m("@ryu/spaces", "2.0.0", &[]);
 
@@ -720,7 +723,11 @@ mod tests {
     fn an_update_the_dependents_still_accept_is_allowed() {
         let installed = vec![
             m("@ryu/spaces", "1.2.0", &[]),
-            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some(">=1.2, <2"))]),
+            m(
+                "@ryu/meetings",
+                "1.0.0",
+                &[("@ryu/spaces", Some(">=1.2, <2"))],
+            ),
         ];
         let updated = m("@ryu/spaces", "1.9.3", &[]);
         assert!(validate_dependents_of_update(&updated, &installed).is_ok());
@@ -753,7 +760,11 @@ mod tests {
     /// be mistaken for a dependent of itself.
     #[test]
     fn the_targets_own_stale_record_is_not_its_dependent() {
-        let installed = vec![m("@ryu/spaces", "1.2.0", &[("@ryu/storage", Some("1.0.0"))])];
+        let installed = vec![m(
+            "@ryu/spaces",
+            "1.2.0",
+            &[("@ryu/storage", Some("1.0.0"))],
+        )];
         let updated = m("@ryu/spaces", "2.0.0", &[("@ryu/storage", Some("1.0.0"))]);
         assert!(validate_dependents_of_update(&updated, &installed).is_ok());
     }
@@ -763,7 +774,11 @@ mod tests {
     fn an_unparseable_dependent_floor_refuses_rather_than_passes() {
         let installed = vec![
             m("@ryu/spaces", "1.2.0", &[]),
-            m("@ryu/meetings", "1.0.0", &[("@ryu/spaces", Some("not-a-req"))]),
+            m(
+                "@ryu/meetings",
+                "1.0.0",
+                &[("@ryu/spaces", Some("not-a-req"))],
+            ),
         ];
         let updated = m("@ryu/spaces", "2.0.0", &[]);
         let err = validate_dependents_of_update(&updated, &installed)

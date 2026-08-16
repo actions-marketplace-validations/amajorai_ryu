@@ -175,7 +175,7 @@ export function HardPaywallPage({ onApplyLicenseKey }: HardPaywallPageProps) {
 				className="h-10 w-full shrink-0"
 				data-tauri-drag-region="true"
 			/>
-			<div className="min-h-0 flex-1 overflow-y-auto">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto">
 				<div className="mx-auto flex min-h-full w-full max-w-3xl flex-col items-center gap-8 px-6 pt-10 pb-16">
 					<StaggerReveal>
 						<div className="flex w-full max-w-md flex-col items-center gap-6">

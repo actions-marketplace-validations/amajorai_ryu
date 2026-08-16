@@ -8,6 +8,7 @@ import {
 import { cn } from "@ryu/ui/lib/utils";
 import { motion, useReducedMotion } from "motion/react";
 import { memo, type ReactNode, useEffect, useState } from "react";
+import { FileTypeIcon } from "./file-type-icon.tsx";
 
 export interface ChatTocFileChange {
 	/** Basename or relative path shown in the popover. */
@@ -97,7 +98,7 @@ export const ChatToc = memo(function ChatToc({
 		<nav
 			aria-label="Message navigation"
 			className={cn(
-				"group/toc no-scrollbar pointer-events-auto absolute inset-s-2 top-1/2 z-20 hidden max-h-[70%] -translate-y-1/2 flex-col gap-2 overflow-y-auto py-2 lg:flex",
+				"scroll-fade group/toc no-scrollbar pointer-events-auto absolute inset-s-2 top-1/2 z-20 hidden max-h-[70%] -translate-y-1/2 flex-col gap-2 overflow-y-auto py-2 lg:flex",
 				className
 			)}
 			onMouseLeave={() => setHoveredIndex(NO_HOVER)}
@@ -174,7 +175,11 @@ export const ChatToc = memo(function ChatToc({
 													className="flex min-w-0 items-baseline justify-between gap-2 text-xs"
 													key={file.name}
 												>
-													<span className="min-w-0 truncate font-mono text-[11px]">
+													<span className="flex min-w-0 items-center gap-1.5 truncate font-mono text-[11px]">
+														<FileTypeIcon
+															className="size-3.5"
+															path={file.name}
+														/>
 														{file.name}
 													</span>
 													{file.stats ? (

@@ -188,7 +188,7 @@ export default function WorkflowsPage({
 						connection and try again.
 					</EmptyDescription>
 				</EmptyHeader>
-				<Button onClick={() => reload()} variant="outline">
+				<Button onClick={() => reload()} variant="ghost">
 					Try again
 				</Button>
 			</Empty>
@@ -221,7 +221,7 @@ export default function WorkflowsPage({
 						New workflow
 					</Button>
 				</div>
-				<div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto px-2 pb-2">
 					{loading ? (
 						<div className="flex items-center gap-2 px-2 py-3 text-muted-foreground text-xs">
 							<Spinner className="size-3" />
@@ -253,7 +253,7 @@ export default function WorkflowsPage({
 
 			{/* Main: builder guidance + a live snapshot of the workflow being built,
 			    plus a jump into the visual canvas (the companion app). */}
-			<div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-6">
+			<div className="scroll-fade flex min-w-0 flex-1 flex-col overflow-y-auto p-6">
 				<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 					<div className="flex items-start justify-between gap-3">
 						<div className="min-w-0">
@@ -272,7 +272,7 @@ export default function WorkflowsPage({
 								selected &&
 								openTab(`/workflows/${selected.id}`, { title: selected.name })
 							}
-							variant="outline"
+							variant="ghost"
 						>
 							Open in canvas
 						</Button>

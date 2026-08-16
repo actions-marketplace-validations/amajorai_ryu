@@ -128,7 +128,7 @@ function LicensesBody({
 					</EmptyDescription>
 				</EmptyHeader>
 				<EmptyContent>
-					<Button onClick={onRetry} size="sm" variant="outline">
+					<Button onClick={onRetry} size="sm" variant="ghost">
 						<HugeiconsIcon className="mr-2 size-3.5" icon={Refresh01Icon} />
 						Retry
 					</Button>

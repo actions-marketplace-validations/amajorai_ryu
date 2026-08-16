@@ -42,8 +42,10 @@ import {
 	NOT_CONTENT_SEARCHABLE_STATES,
 	type RetrievalMode,
 	type RetrievalModeChange,
+	type RetrievalModeProgress,
 	SPACE_UPLOAD_MAX_BYTES,
 	type SpaceFileIndexState,
+	setSpaceRetrievalMode,
 	toFileIndexState,
 	toRetrievalMode,
 } from "./spaces.ts";
@@ -216,23 +218,59 @@ describe("retrieval-mode wire spellings mirror Core", () => {
 		).toBe(ANCHOR_PRESENT);
 	});
 
-	it("reads every field the change response reports", () => {
+	it("mirrors Core's asynchronous 202 job contract", () => {
+		const route = rustItemBody(
+			serverRs,
+			SERVER_RS,
+			"async fn set_retrieval_mode("
+		);
+		expect(route).toContain("StatusCode::ACCEPTED");
+		expect(route).toContain('"job_id"');
+		expect(route).toContain('"status"');
+		expect(route).toContain('"cancel"');
+		const status = rustItemBody(
+			serverRs,
+			SERVER_RS,
+			"async fn retrieval_mode_status("
+		);
+		expect(status).toContain("retrieval_mode_status");
+		const cancel = rustItemBody(
+			serverRs,
+			SERVER_RS,
+			"async fn cancel_retrieval_mode("
+		);
+		expect(cancel).toContain("cancel_retrieval_mode_rebuild");
+	});
+
+	it("pins the final graph copy to keyset pagination", () => {
+		const copy = rustItemBody(
+			spacesRs,
+			SPACES_RS,
+			"fn copy_staged_graph_table("
+		);
+		expect(copy).toContain("rowid > ?2");
+		expect(copy).not.toContain("OFFSET");
+	});
+
+	it("reads every field the completed status reports", () => {
 		// Each of these maps to a field of `RetrievalModeChange` in spaces.ts. A key
 		// renamed in Core would arrive as `undefined` and fall through this client's
 		// `??` defaults — reporting "0 entities" for a rebuild that mapped hundreds.
 		const keys = [
-			'"retrieval_mode"',
-			'"previous_retrieval_mode"',
-			'"changed"',
-			'"graph_rebuilt"',
-			'"chunks_scanned"',
-			'"graph_nodes"',
-			'"graph_edges"',
-			'"note"',
+			"change",
+			"previous_mode",
+			"state",
+			"processed_chunks",
+			"total_chunks",
 		];
 		expect(
 			keys.map((key) =>
-				rustContains(serverRs, SERVER_RS, "async fn set_retrieval_mode(", key)
+				rustContains(
+					spacesRs,
+					SPACES_RS,
+					"pub struct RetrievalModeJobStatus",
+					key
+				)
 			)
 		).toEqual(keys.map(() => ANCHOR_PRESENT));
 	});
@@ -261,6 +299,274 @@ describe("retrieval-mode wire spellings mirror Core", () => {
 		const fromStr = rustItemBody(spacesRs, SPACES_RS, "fn from_str(s: &str)");
 		expect(squeeze(fromStr)).toContain('"graph" => Self::Graph');
 		expect(squeeze(fromStr)).toContain("_ => Self::Vector");
+	});
+});
+
+describe("retrieval-mode progress shape", () => {
+	it("keeps progress counters separate from the committed mode change", () => {
+		const progress: RetrievalModeProgress = {
+			jobId: "job",
+			state: "running",
+			processedChunks: 4,
+			totalChunks: 10,
+		};
+		expect(progress.processedChunks).toBeLessThan(progress.totalChunks);
+		expect(progress.state).toBe("running");
+	});
+});
+
+const RETRIEVAL_TARGET = { url: "https://node.test", token: null };
+
+function completedRetrievalStatus(jobId: string) {
+	return {
+		job_id: jobId,
+		state: "completed",
+		change: {
+			mode: "graph",
+			previous: "vector",
+			changed: true,
+			graph_rebuilt: true,
+			chunks_scanned: 1,
+			graph_nodes: 2,
+			graph_edges: 1,
+			note: "done",
+		},
+	};
+}
+
+describe("retrieval-mode job ownership", () => {
+	it("cancels a job accepted before the initial response when the signal aborts", async () => {
+		const originalFetch = globalThis.fetch;
+		const acceptedJobId = "accepted-before-response-job";
+		const controller = new AbortController();
+		const requests: Array<{ method: string; url: string; body?: string }> = [];
+
+		globalThis.fetch = (async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			requests.push({
+				method,
+				url,
+				body: typeof init?.body === "string" ? init.body : undefined,
+			});
+			if (method === "POST" && url.endsWith("/retrieval-mode")) {
+				// Model Core having accepted the job while the response is still in
+				// flight. Fetch loses the response if the caller's signal is attached.
+				if (init?.signal) {
+					return new Promise<Response>((_resolve, reject) => {
+						init.signal?.addEventListener(
+							"abort",
+							() =>
+								reject(
+									new DOMException("The request was aborted.", "AbortError")
+								),
+							{ once: true }
+						);
+						controller.abort();
+					});
+				}
+				controller.abort();
+				return Response.json({ job_id: acceptedJobId });
+			}
+			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
+				return Response.json({ cancelled: true });
+			}
+			if (url.includes("/retrieval-mode/status")) {
+				return Response.json({
+					job_id: acceptedJobId,
+					state: "cancelled",
+				});
+			}
+			throw new Error(`unexpected request: ${method} ${url}`);
+		}) as typeof globalThis.fetch;
+
+		try {
+			await expect(
+				setSpaceRetrievalMode(RETRIEVAL_TARGET, "space", "graph", {
+					signal: controller.signal,
+				})
+			).rejects.toMatchObject({ name: "AbortError" });
+			expect(
+				requests.find(
+					({ method, url }) => method === "POST" && url.endsWith("/cancel")
+				)?.body
+			).toContain(acceptedJobId);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("ignores a status snapshot belonging to another job", async () => {
+		const originalFetch = globalThis.fetch;
+		const urls: string[] = [];
+		const acceptedJobId = "accepted-job";
+		let statusCalls = 0;
+		globalThis.fetch = (async (input) => {
+			const url = String(input);
+			urls.push(url);
+			if (url.endsWith("/retrieval-mode")) {
+				return Response.json({ job_id: acceptedJobId });
+			}
+			if (url.includes("/retrieval-mode/status")) {
+				statusCalls += 1;
+				return Response.json(
+					statusCalls === 1
+						? completedRetrievalStatus("other-job")
+						: completedRetrievalStatus(acceptedJobId)
+				);
+			}
+			throw new Error(`unexpected request: ${url}`);
+		}) as typeof globalThis.fetch;
+
+		try {
+			const result = await setSpaceRetrievalMode(
+				RETRIEVAL_TARGET,
+				"space",
+				"graph"
+			);
+			expect(result.note).toBe("done");
+			expect(statusCalls).toBe(2);
+			expect(new URL(urls[1]).searchParams.get("job_id")).toBe(acceptedJobId);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("removes the polling abort listener after the timer completes", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalRemoveEventListener = AbortSignal.prototype.removeEventListener;
+		const controller = new AbortController();
+		const removedListeners: EventListener[] = [];
+		let statusCalls = 0;
+		AbortSignal.prototype.removeEventListener = function (type, listener, options) {
+			if (type === "abort" && listener) {
+				removedListeners.push(listener as EventListener);
+			}
+			return originalRemoveEventListener.call(this, type, listener, options);
+		};
+		globalThis.fetch = (async (input) => {
+			const url = String(input);
+			if (url.endsWith("/retrieval-mode")) {
+				return Response.json({ job_id: "listener-cleanup-job" });
+			}
+			if (url.includes("/retrieval-mode/status")) {
+				statusCalls += 1;
+				return Response.json(
+					statusCalls === 1
+						? { job_id: "listener-cleanup-job", state: "running" }
+						: completedRetrievalStatus("listener-cleanup-job")
+				);
+			}
+			throw new Error(`unexpected request: ${url}`);
+		}) as typeof globalThis.fetch;
+
+		try {
+			await setSpaceRetrievalMode(RETRIEVAL_TARGET, "space", "graph", {
+				signal: controller.signal,
+			});
+			expect(removedListeners).toHaveLength(1);
+		} finally {
+			AbortSignal.prototype.removeEventListener = originalRemoveEventListener;
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("polls to the actual outcome when cancellation is refused", async () => {
+		const originalFetch = globalThis.fetch;
+		const acceptedJobId = "finalizing-job";
+		const controller = new AbortController();
+		const requests: Array<{ method: string; url: string; body?: string }> = [];
+		let statusCalls = 0;
+		globalThis.fetch = (async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			requests.push({
+				method,
+				url,
+				body: typeof init?.body === "string" ? init.body : undefined,
+			});
+			if (method === "POST" && url.endsWith("/retrieval-mode")) {
+				return Response.json({ job_id: acceptedJobId });
+			}
+			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
+				return Response.json({ cancelled: false, finalizing: true });
+			}
+			if (url.includes("/retrieval-mode/status")) {
+				statusCalls += 1;
+				if (statusCalls === 1) {
+					return Response.json({
+						job_id: acceptedJobId,
+						state: "running",
+						processed_chunks: 1,
+						total_chunks: 2,
+					});
+				}
+				return Response.json(completedRetrievalStatus(acceptedJobId));
+			}
+			throw new Error(`unexpected request: ${method} ${url}`);
+		}) as typeof globalThis.fetch;
+
+		try {
+			const result = await setSpaceRetrievalMode(
+				RETRIEVAL_TARGET,
+				"space",
+				"graph",
+				{
+					signal: controller.signal,
+					onProgress: () => controller.abort(),
+				}
+			);
+			expect(result.note).toBe("done");
+			expect(statusCalls).toBe(2);
+			expect(requests.at(-1)?.url).toContain("/retrieval-mode/status");
+			expect(requests.at(-1)?.body).toBeUndefined();
+			expect(
+				requests.find(
+					({ method, url }) => method === "POST" && url.endsWith("/cancel")
+				)?.body
+			).toContain(acceptedJobId);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("polls to the terminal cancelled state after cancellation is accepted", async () => {
+		const originalFetch = globalThis.fetch;
+		const acceptedJobId = "accepted-cancel-job";
+		const controller = new AbortController();
+		let statusCalls = 0;
+		globalThis.fetch = (async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			if (method === "POST" && url.endsWith("/retrieval-mode")) {
+				return Response.json({ job_id: acceptedJobId });
+			}
+			if (method === "POST" && url.endsWith("/retrieval-mode/cancel")) {
+				return Response.json({ cancelled: true });
+			}
+			if (url.includes("/retrieval-mode/status")) {
+				statusCalls += 1;
+				return Response.json({
+					job_id: acceptedJobId,
+					state: statusCalls === 1 ? "cancelling" : "cancelled",
+					processed_chunks: 1,
+					total_chunks: 2,
+				});
+			}
+			throw new Error(`unexpected request: ${method} ${url}`);
+		}) as typeof globalThis.fetch;
+
+		try {
+			await expect(
+				setSpaceRetrievalMode(RETRIEVAL_TARGET, "space", "graph", {
+					signal: controller.signal,
+					onProgress: () => controller.abort(),
+				})
+			).rejects.toMatchObject({ name: "AbortError" });
+			expect(statusCalls).toBe(2);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 });
 

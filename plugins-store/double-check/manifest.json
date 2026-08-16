@@ -2,6 +2,7 @@
   "id": "@ryu/double-check",
   "name": "Double Check",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Sends every answer to a second model for review before you act on it, so mistakes get caught by a fresh set of eyes. Off until you flip the Double-check toggle in the composer; the reviewer model is configurable in settings.",
   "tagline": "A second model reviews every answer",
   "keywords": ["review", "verification", "quality", "accuracy"],
@@ -40,7 +41,8 @@
           {
             "type": "model_picker",
             "pref_key": "double-check-model",
-            "label": "Reviewer model"
+            "label": "Reviewer model",
+            "description": "Optional model used for the independent review. Leave empty to use the node's default."
           }
         ]
       }

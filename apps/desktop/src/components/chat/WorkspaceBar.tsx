@@ -1,6 +1,6 @@
 // apps/desktop/src/components/chat/WorkspaceBar.tsx
 //
-// The composer workspace strip (project folder ▸ git branch ▸ run mode): the row
+// The composer workspace strip (project folder ▸ run location ▸ git branch): the row
 // of borderless chips that sit in the composer's bottom bar (the info-bar-style
 // footer shell rendered by InputBar's `workspaceBar` slot). Each segment is a
 // click-to-change popover. The branch and worktree segments render only for a

@@ -17,27 +17,27 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Extension adding `.no_window()` to both `std` and `tokio` `Command` builders.
 pub trait NoWindow {
-	/// Spawn the child without a console window on Windows (no-op elsewhere).
-	fn no_window(&mut self) -> &mut Self;
+    /// Spawn the child without a console window on Windows (no-op elsewhere).
+    fn no_window(&mut self) -> &mut Self;
 }
 
 impl NoWindow for std::process::Command {
-	fn no_window(&mut self) -> &mut Self {
-		#[cfg(windows)]
-		{
-			use std::os::windows::process::CommandExt;
-			self.creation_flags(CREATE_NO_WINDOW);
-		}
-		self
-	}
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(CREATE_NO_WINDOW);
+        }
+        self
+    }
 }
 
 impl NoWindow for tokio::process::Command {
-	fn no_window(&mut self) -> &mut Self {
-		#[cfg(windows)]
-		{
-			self.creation_flags(CREATE_NO_WINDOW);
-		}
-		self
-	}
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            self.creation_flags(CREATE_NO_WINDOW);
+        }
+        self
+    }
 }

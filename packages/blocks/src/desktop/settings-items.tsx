@@ -26,7 +26,14 @@ import {
 } from "@ryu/ui/components/item";
 import { cn } from "@ryu/ui/lib/utils";
 // biome-ignore lint/correctness/noUnresolvedImports: Children, Fragment, and isValidElement are valid React exports; biome's resolver misreports them
-import { Children, Fragment, isValidElement, type ReactNode } from "react";
+import {
+	Children,
+	cloneElement,
+	Fragment,
+	isValidElement,
+	type ReactElement,
+	type ReactNode,
+} from "react";
 
 const toItems = (children: ReactNode): ReactNode[] =>
 	Children.toArray(children).filter(Boolean);
@@ -71,6 +78,36 @@ const childIsBare = (child: ReactNode): boolean => {
 	}
 	return (child.props as { bare?: boolean }).bare === true;
 };
+
+const isFullBleedTextControl = (child: ReactNode): boolean => {
+	if (!isValidElement(child)) {
+		return false;
+	}
+
+	const type = child.type;
+	if (typeof type !== "function") {
+		return false;
+	}
+
+	return type.name === "Input" || type.name === "Textarea";
+};
+
+const renderSettingControl = (children: ReactNode): ReactNode => {
+	if (!isFullBleedTextControl(children)) {
+		return children;
+	}
+
+	const control = children as ReactElement<{ className?: string }>;
+	return cloneElement(control, {
+		className: cn(
+			"-mx-3.5 w-[calc(100%+1.75rem)] rounded-none",
+			control.props.className
+		),
+	});
+};
+
+const hasFullBleedTextControl = (children: ReactNode): boolean =>
+	isFullBleedTextControl(children);
 
 interface SettingsGroupProps {
 	children: ReactNode;
@@ -294,11 +331,14 @@ export const SettingsItem = ({
 				<div className="flex min-w-0 flex-1 flex-col gap-0.5">
 					<ItemTitle className="font-medium text-sm">{title}</ItemTitle>
 				</div>
-				{actions ? (
+				{actions && !hasFullBleedTextControl(actions) ? (
 					<ItemActions className="shrink-0">{actions}</ItemActions>
 				) : null}
 			</div>
-			{children}
+			{actions && hasFullBleedTextControl(actions)
+				? renderSettingControl(actions)
+				: null}
+			{renderSettingControl(children)}
 		</Item>
 	);
 

@@ -99,7 +99,7 @@ export function SessionsTab() {
 							We couldn't load your sessions. Check your connection and try
 							again.
 						</p>
-						<Button onClick={() => refetch()} size="sm" variant="outline">
+						<Button onClick={() => refetch()} size="sm" variant="ghost">
 							Retry
 						</Button>
 					</div>

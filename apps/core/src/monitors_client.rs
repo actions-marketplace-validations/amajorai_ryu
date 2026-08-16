@@ -399,6 +399,27 @@ pub(crate) async fn host_monitor_alert(
             hook_event: alert.clone(),
         };
         crate::notify::notify_all(&state.client, &store, &body.targets, &fanout).await;
+
+        // (1b) App-inbox copy: the same fired alert lands in the user's Inbox feed
+        // (`source_app_id` = @ryu/monitors), so the desktop shows it with the
+        // Monitors icon and a per-user read/archive trail. The external fan-out
+        // above is unchanged; this is the inbox row the Inbox tray + page render.
+        let level = if kind == "uptime_down" {
+            "warning"
+        } else {
+            "info"
+        };
+        if let Some(active) = crate::auth::load_accounts().active_user_id {
+            let _ = crate::notify::deliver_app_notification(
+                &store,
+                MONITORS_PLUGIN_ID,
+                &active,
+                &title,
+                &message,
+                level,
+            )
+            .await;
+        }
     } else {
         tracing::warn!("monitors: notify store not ready; dropping alert fan-out");
     }

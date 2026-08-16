@@ -64,6 +64,7 @@ import {
 	SettingsItem,
 	SettingsSection,
 } from "./shared/settings-items.tsx";
+import { TrainingDataNotice } from "./TrainingDataNotice.tsx";
 
 // What the window opens on at launch — a Chrome-style "On startup" choice.
 const STARTUP_OPTIONS: { value: StartupBehavior; label: string }[] = [
@@ -75,6 +76,8 @@ const STARTUP_OPTIONS: { value: StartupBehavior; label: string }[] = [
 
 // How the message queue drains while an agent is still responding.
 const QUEUE_DRAIN_OPTIONS: { value: QueueDrainMode; label: string }[] = [
+	{ value: "off", label: "Off (send immediately)" },
+	{ value: "auto", label: "Auto (Claude Code)" },
 	{ value: "oldest-first", label: "Oldest first" },
 	{ value: "latest-first", label: "Latest first" },
 	{ value: "send-all", label: "Send all together" },
@@ -288,6 +291,7 @@ export function GeneralTab() {
 					/>
 				</SettingsGroup>
 			</SettingsSection>
+			<TrainingDataNotice />
 		</div>
 	);
 
@@ -469,7 +473,7 @@ export function GeneralTab() {
 								</SelectContent>
 							</Select>
 						}
-						description="When you send messages while an agent is still replying, they wait in a queue and drain one per turn. Choose which goes next: the oldest waiting message (first in, first out), the latest one you typed (jump the line with a correction), or collapse the whole queue into a single combined turn."
+						description="When you send messages while an agent is still replying, they wait in a queue. Auto delivers all pending messages together at the next safe turn boundary, like Claude Code; the other choices let you choose oldest-first, latest-first, or send-all behavior explicitly."
 						title="Queued messages send"
 					/>
 				</SettingsGroup>

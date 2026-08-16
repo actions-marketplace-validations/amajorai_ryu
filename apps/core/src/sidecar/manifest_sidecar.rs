@@ -496,8 +496,8 @@ fn missing_sidecar_binary_reason(name: &str) -> Option<String> {
 /// would lose the port number and the OS error, which are the two things the operator
 /// needs). Written by the manager's register path, cleared the moment registration
 /// succeeds or the sidecar is deregistered.
-fn registration_failure_record() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>>
-{
+fn registration_failure_record(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
     static RECORD: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, String>>,
     > = std::sync::OnceLock::new();
@@ -1157,7 +1157,9 @@ async fn ensure_binary(
 ) -> anyhow::Result<PathBuf> {
     let dir = version_dir(plugin_dir, bin);
     let sha = bin.sha256.clone().filter(|s| !s.is_empty());
-    let community = crate::plugins::builtins::tier_for(plugin_id)
+    let community = owning_manifest(plugin_id)
+        .map(|manifest| crate::plugins::builtins::tier_for_manifest(&manifest))
+        .unwrap_or_else(|| crate::plugins::builtins::tier_for(plugin_id))
         == crate::plugin_manifest::PluginTier::Community;
     if community && sha.is_none() {
         return Err(anyhow::anyhow!(
@@ -1659,7 +1661,10 @@ enum SpecBody {
 /// The content-length check is an early-out, not the bound: a lying or absent header
 /// changes nothing, because the streaming total below is what actually stops the read.
 async fn read_capped_spec_body(mut resp: reqwest::Response, url: &str) -> SpecBody {
-    if resp.content_length().is_some_and(|len| len > EXT_API_SPEC_MAX_BYTES) {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > EXT_API_SPEC_MAX_BYTES)
+    {
         return SpecBody::TooLarge;
     }
     let mut buf: Vec<u8> = Vec::new();
@@ -1889,30 +1894,32 @@ async fn import_openapi(
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => match read_capped_spec_body(resp, url).await {
-                SpecBody::Body(b) => {
-                    found = Some((url.clone(), b));
-                    break;
+            Ok(resp) if resp.status().is_success() => {
+                match read_capped_spec_body(resp, url).await {
+                    SpecBody::Body(b) => {
+                        found = Some((url.clone(), b));
+                        break;
+                    }
+                    // DEFINITIVE. An over-cap body is a property of the document the app
+                    // publishes, not a hiccup: retrying re-downloads the same oversized
+                    // bytes on every 30s health poll forever, which is the amplification
+                    // the cap exists to prevent. Recording zero routes stops the loop.
+                    SpecBody::TooLarge => {
+                        tracing::warn!(
+                            plugin = %spec.plugin_id,
+                            "ext_api: {url} exceeds the {EXT_API_SPEC_MAX_BYTES}-byte spec cap; \
+                             deriving no tools for this sidecar. Narrow the document, or the \
+                             manifest's `http.routes`, rather than expecting a retry."
+                        );
+                        return Some(Vec::new());
+                    }
+                    // A truncated body is a transport failure, not an answer about the app.
+                    SpecBody::Transport(e) => {
+                        tracing::debug!(plugin = %spec.plugin_id, "ext_api: reading {url} failed: {e}");
+                        return None;
+                    }
                 }
-                // DEFINITIVE. An over-cap body is a property of the document the app
-                // publishes, not a hiccup: retrying re-downloads the same oversized
-                // bytes on every 30s health poll forever, which is the amplification
-                // the cap exists to prevent. Recording zero routes stops the loop.
-                SpecBody::TooLarge => {
-                    tracing::warn!(
-                        plugin = %spec.plugin_id,
-                        "ext_api: {url} exceeds the {EXT_API_SPEC_MAX_BYTES}-byte spec cap; \
-                         deriving no tools for this sidecar. Narrow the document, or the \
-                         manifest's `http.routes`, rather than expecting a retry."
-                    );
-                    return Some(Vec::new());
-                }
-                // A truncated body is a transport failure, not an answer about the app.
-                SpecBody::Transport(e) => {
-                    tracing::debug!(plugin = %spec.plugin_id, "ext_api: reading {url} failed: {e}");
-                    return None;
-                }
-            },
+            }
             // TRANSIENT by status. The Healthy edge fires the instant the health route
             // first answers, which is exactly when a sidecar still warming up (workers
             // forking, a router mounted after the health probe, a rate limiter shedding
@@ -1996,12 +2003,8 @@ async fn import_openapi(
         }
     };
 
-    let (routes, dropped_undeclared) = crate::ext_api::lower(
-        &spec.plugin_id,
-        &api,
-        &upstream_mount,
-        &declared_paths,
-    );
+    let (routes, dropped_undeclared) =
+        crate::ext_api::lower(&spec.plugin_id, &api, &upstream_mount, &declared_paths);
     // The two drop counters are reported SEPARATELY on purpose. `api.dropped` is the
     // importer's cap truncation ("your spec is bigger than we will expose"); the other
     // is a manifest-declaration gap ("the proxy would 404 this path"). Different
@@ -2762,7 +2765,8 @@ mod tests {
     /// The `models.json` row for `id`, read straight off disk — the persisted form Pi
     /// actually loads, not an in-memory projection of it.
     fn provider_row(id: &str) -> Option<serde_json::Value> {
-        let raw = std::fs::read_to_string(crate::pi_config::config_dir().join("models.json")).ok()?;
+        let raw =
+            std::fs::read_to_string(crate::pi_config::config_dir().join("models.json")).ok()?;
         let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
         json.get("providers")?.get(id).cloned()
     }
@@ -3599,11 +3603,7 @@ mod tests {
         );
 
         import_openapi_once(probe_import(&registry), port, Arc::clone(&latch)).await;
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            2,
-            "a re-wake must not refetch"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "a re-wake must not refetch");
     }
 
     /// The ROOT is tried first. `http.mount` says where the sidecar nests its routes,
@@ -3812,7 +3812,8 @@ mod tests {
             .await
             .expect("the probe answers");
         assert!(
-            resp.content_length().is_none_or(|l| l <= EXT_API_SPEC_MAX_BYTES),
+            resp.content_length()
+                .is_none_or(|l| l <= EXT_API_SPEC_MAX_BYTES),
             "precondition: the header must not be what trips the cap"
         );
         assert!(
@@ -3890,12 +3891,16 @@ mod tests {
             vec![derived_row("ryu_ext__ryu_twin__get_beta", "@ryu/twin")],
         );
         assert!(
-            registry.describe("ryu_ext__ryu_twin__get_alpha").await.is_some(),
+            registry
+                .describe("ryu_ext__ryu_twin__get_alpha")
+                .await
+                .is_some(),
             "the first sidecar's rows must survive the second's lowering"
         );
-        assert!(
-            registry.describe("ryu_ext__ryu_twin__get_beta").await.is_some()
-        );
+        assert!(registry
+            .describe("ryu_ext__ryu_twin__get_beta")
+            .await
+            .is_some());
     }
 
     /// …and the plugin-scoped clear must reach BOTH of them. `deactivate_plugin` and

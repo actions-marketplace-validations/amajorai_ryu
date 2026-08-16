@@ -318,7 +318,7 @@ export const CREDITS_TOPUP_BINDING: PolarBinding = {
 /**
  * The ONE rule for a plan's included credit pool: a fixed FRACTION of its
  * recurring price, documented once, here. The default is 50% — a $40/mo plan
- * grants $20/mo of credits, and Teams' $30/seat grants $15/seat (then × seats,
+ * grants $20/mo of credits, and Teams' $49/seat grants $15/seat (then × seats,
  * applied by {@link resolveEntitlement}). A plan
  * with no recurring price (the one-time desktop license) grants 0.
  *

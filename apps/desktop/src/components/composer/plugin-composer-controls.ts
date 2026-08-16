@@ -68,13 +68,29 @@ function isNonEmptyString(v: unknown): v is string {
 export function isKnownComposerControl(
 	control: PluginComposerControl
 ): control is KnownComposerControl {
-	return (
+	const hasIdentity =
 		(COMPOSER_CONTROL_TYPES as readonly string[]).includes(control.type) &&
 		isNonEmptyString(control.id) &&
 		isNonEmptyString(control.flag) &&
 		isNonEmptyString(control.label) &&
-		isNonEmptyString(control.plugin)
-	);
+		isNonEmptyString(control.plugin);
+	if (!hasIdentity) {
+		return false;
+	}
+	// These two types have no useful fallback when their wire contract is
+	// incomplete: an action cannot dispatch without a capability, and a chip
+	// cannot observe a live value without a Core-relative source. Reject them at
+	// the contribution boundary instead of letting the composer render inert UI.
+	if (control.type === "action") {
+		return isNonEmptyString(control.capability);
+	}
+	if (control.type === "chip") {
+		const path = control.source?.http?.path;
+		return (
+			isNonEmptyString(path) && (path === "/api" || path.startsWith("/api/"))
+		);
+	}
+	return true;
 }
 
 /**

@@ -75,7 +75,7 @@ describe("request", () => {
 		globalThis.fetch = ((_url: string, init: RequestInit) => {
 			capturedInit = init;
 			return Promise.resolve(new Response('{"v":1}', { status: 200 }));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		const data = await request<{ v: number }>(
 			target({ token: "t" }),
 			"/api/x",
@@ -95,7 +95,7 @@ describe("request", () => {
 		globalThis.fetch = ((_url: string, init: RequestInit) => {
 			capturedInit = init;
 			return Promise.resolve(new Response("{}", { status: 200 }));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		await request(target(), "/api/x", { method: "POST", body: { a: 1 } });
 		expect(capturedInit?.method).toBe("POST");
 		expect(capturedInit?.body).toBe('{"a":1}');
@@ -106,14 +106,16 @@ describe("request", () => {
 		globalThis.fetch = ((_url: string, init: RequestInit) => {
 			capturedInit = init;
 			return Promise.resolve(new Response("{}", { status: 200 }));
-		}) as typeof fetch;
+		}) as unknown as typeof fetch;
 		await request(target(), "/api/x");
 		expect(capturedInit?.body).toBeUndefined();
 	});
 
 	test("returns undefined for an empty response body", async () => {
 		globalThis.fetch = (() =>
-			Promise.resolve(new Response("", { status: 204 }))) as typeof fetch;
+			Promise.resolve(
+				new Response("", { status: 204 })
+			)) as unknown as typeof fetch;
 		expect(await request(target(), "/api/x")).toBeUndefined();
 	});
 
@@ -121,7 +123,7 @@ describe("request", () => {
 		globalThis.fetch = (() =>
 			Promise.resolve(
 				new Response("ignored body", { status: 404 })
-			)) as typeof fetch;
+			)) as unknown as typeof fetch;
 		await expect(request(target(), "/api/x")).rejects.toThrow(
 			"/api/x failed: 404"
 		);

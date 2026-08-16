@@ -39,7 +39,9 @@ const input: MonitorInput = {
 
 function stubJson(bodyText: string, status = 200): void {
 	globalThis.fetch = (() =>
-		Promise.resolve(new Response(bodyText, { status }))) as typeof fetch;
+		Promise.resolve(
+			new Response(bodyText, { status })
+		)) as unknown as typeof fetch;
 }
 
 describe("monitors error envelopes", () => {
@@ -106,7 +108,7 @@ describe("streamMonitorAlerts", () => {
 					}),
 					init
 				)
-			)) as typeof fetch;
+			)) as unknown as typeof fetch;
 	}
 
 	async function collect(chunks: string[]): Promise<Alert[]> {

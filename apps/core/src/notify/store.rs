@@ -179,7 +179,9 @@ impl NotifyStore {
                  ack_required    INTEGER NOT NULL DEFAULT 0,
                  acked           INTEGER NOT NULL DEFAULT 0,
                  read_at         TEXT,
-                 created_at      TEXT NOT NULL
+                 created_at      TEXT NOT NULL,
+                 source_app_id   TEXT,
+                 archived_at     TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_notifications_user
                  ON notifications(user_id, created_at DESC);
@@ -193,6 +195,32 @@ impl NotifyStore {
              );",
         )
         .context("initializing notify schema")?;
+        // Idempotent additive migration for DBs created before the app-inbox feed
+        // recorded who sent a row (`source_app_id`) or whether the user archived it
+        // (`archived_at`). `CREATE TABLE IF NOT EXISTS` above already shapes a fresh
+        // DB; an existing one gains the two columns here, one ALTER per missing one.
+        for (column, decl) in [
+            (
+                "source_app_id",
+                "ALTER TABLE notifications ADD COLUMN source_app_id TEXT",
+            ),
+            (
+                "archived_at",
+                "ALTER TABLE notifications ADD COLUMN archived_at TEXT",
+            ),
+        ] {
+            let has: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('notifications') WHERE name = ?1",
+                    params![column],
+                    |r| r.get(0),
+                )
+                .context("reading notifications columns")?;
+            if has == 0 {
+                conn.execute(decl, [])
+                    .with_context(|| format!("adding notifications.{column}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -273,22 +301,37 @@ impl NotifyStore {
         token: &str,
         platform: Option<&str>,
         user_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().await;
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO push_tokens (token, platform, user_id, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(token) DO UPDATE SET platform = ?2, user_id = ?3",
+             ON CONFLICT(token) DO UPDATE SET platform = ?2, created_at = ?4
+             WHERE push_tokens.user_id IS ?3",
             params![token, platform, user_id, now],
         )
         .context("registering push token")?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Remove a push token (device opted out / token rotated).
     pub async fn remove_push_token(&self, token: &str) -> Result<bool> {
         let conn = self.conn.lock().await;
         let n = conn.execute("DELETE FROM push_tokens WHERE token = ?1", params![token])?;
+        Ok(n > 0)
+    }
+
+    /// Remove a push token only when it belongs to `user_id`.
+    ///
+    /// The token is the public path identifier, so callers handling an
+    /// authenticated member request must use this owner-scoped variant rather
+    /// than the node-level removal above.
+    pub async fn remove_push_token_for_user(&self, token: &str, user_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "DELETE FROM push_tokens WHERE token = ?1 AND user_id = ?2",
+            params![token, user_id],
+        )?;
         Ok(n > 0)
     }
 
@@ -325,8 +368,8 @@ impl NotifyStore {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO notifications
-                 (id, user_id, title, body, level, workflow_run_id, node_id, ack_required, acked, read_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 (id, user_id, title, body, level, workflow_run_id, node_id, ack_required, acked, read_at, created_at, source_app_id, archived_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 n.id,
                 n.user_id,
@@ -339,6 +382,8 @@ impl NotifyStore {
                 n.acked as i64,
                 n.read_at,
                 n.created_at,
+                n.source_app_id,
+                n.archived_at,
             ],
         )
         .context("inserting notification")?;
@@ -346,21 +391,35 @@ impl NotifyStore {
     }
 
     /// The most recent notifications for a member, newest first.
+    ///
+    /// `archived` filters by the archive state: `None` = every row, `Some(true)` =
+    /// only archived rows, `Some(false)` (the API default) = only un-archived rows.
     pub async fn list_notifications_for_user(
         &self,
         user_id: &str,
         limit: i64,
+        archived: Option<bool>,
     ) -> Result<Vec<NotificationRow>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, user_id, title, body, level, workflow_run_id, node_id,
-                    ack_required, acked, read_at, created_at
+                    ack_required, acked, read_at, created_at, source_app_id, archived_at
              FROM notifications
              WHERE user_id = ?1
+               AND (?2 = 0 OR archived_at IS NOT NULL)
+               AND (?3 = 0 OR archived_at IS NULL)
              ORDER BY created_at DESC
-             LIMIT ?2",
+             LIMIT ?4",
         )?;
-        let rows = stmt.query_map(params![user_id, limit], NotificationRow::from_row)?;
+        let rows = stmt.query_map(
+            params![
+                user_id,
+                (archived == Some(true)) as i64,
+                (archived == Some(false)) as i64,
+                limit,
+            ],
+            NotificationRow::from_row,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -374,7 +433,7 @@ impl NotifyStore {
         let row = conn
             .query_row(
                 "SELECT id, user_id, title, body, level, workflow_run_id, node_id,
-                        ack_required, acked, read_at, created_at
+                        ack_required, acked, read_at, created_at, source_app_id, archived_at
                  FROM notifications WHERE id = ?1",
                 params![id],
                 NotificationRow::from_row,
@@ -405,6 +464,32 @@ impl NotifyStore {
         )?;
         Ok(n > 0)
     }
+
+    /// Archive a notification (stamps `archived_at`, also marking it read). Returns
+    /// true when a row changed. Idempotent: re-archiving an archived row is a no-op.
+    pub async fn mark_notification_archived(&self, id: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE notifications
+                SET archived_at = ?2, read_at = COALESCE(read_at, ?2)
+              WHERE id = ?1 AND archived_at IS NULL",
+            params![id, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Un-archive a notification (clears `archived_at`). Returns true when a row
+    /// changed. Idempotent: un-archiving an already-live row is a no-op.
+    pub async fn mark_notification_unarchived(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE notifications SET archived_at = NULL
+              WHERE id = ?1 AND archived_at IS NOT NULL",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 /// One row of the app-inbox notification feed.
@@ -426,6 +511,15 @@ pub struct NotificationRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
     pub created_at: String,
+    /// The plugin/app id that raised this notification (an out-of-process app via
+    /// the `notify.deliver` kernel capability, or a Core-internal producer that
+    /// named itself). `None` for legacy Core producers that did not identify
+    /// themselves. The desktop resolves the app's icon/name from this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_app_id: Option<String>,
+    /// When the user archived this row. `None` = live in the inbox.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
 }
 
 impl NotificationRow {
@@ -442,6 +536,8 @@ impl NotificationRow {
             acked: row.get::<_, i64>(8)? != 0,
             read_at: row.get(9)?,
             created_at: row.get(10)?,
+            source_app_id: row.get(11)?,
+            archived_at: row.get(12)?,
         })
     }
 }
@@ -472,6 +568,43 @@ mod tests {
         assert!(!store.claim_policy_alert("k1", 300).await.unwrap());
         assert!(store.claim_policy_alert("k2", 300).await.unwrap());
         assert!(store.claim_policy_alert("k1", 0).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn owner_scoped_push_token_removal_cannot_cross_members() {
+        let store = temp_store();
+        store
+            .register_push_token("tok-owner", Some("ios"), Some("alice"))
+            .await
+            .unwrap();
+
+        assert!(!store
+            .remove_push_token_for_user("tok-owner", "bob")
+            .await
+            .unwrap());
+        assert_eq!(store.push_tokens().await.unwrap(), vec!["tok-owner"]);
+        assert!(store
+            .remove_push_token_for_user("tok-owner", "alice")
+            .await
+            .unwrap());
+        assert!(store.push_tokens().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn push_token_registration_cannot_transfer_another_members_device() {
+        let store = temp_store();
+        assert!(store
+            .register_push_token("tok-owner", Some("ios"), Some("alice"))
+            .await
+            .unwrap());
+        assert!(!store
+            .register_push_token("tok-owner", Some("android"), Some("bob"))
+            .await
+            .unwrap());
+        assert!(store
+            .remove_push_token_for_user("tok-owner", "alice")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -506,12 +639,51 @@ mod tests {
             acked: false,
             read_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            source_app_id: Some("@ryu/monitors".into()),
+            archived_at: None,
         };
         store.insert_notification(&row).await.unwrap();
-        let list = store.list_notifications_for_user("u1", 10).await.unwrap();
-        assert_eq!(list.len(), 1);
+        // Un-archived filter is the default view.
+        let live = store
+            .list_notifications_for_user("u1", 10, Some(false))
+            .await
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].source_app_id.as_deref(), Some("@ryu/monitors"));
+        // No filter sees everything.
+        let all = store
+            .list_notifications_for_user("u1", 10, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
         assert!(store.mark_notification_read("ntf_1").await.unwrap());
         assert!(store.mark_notification_acked("ntf_1").await.unwrap());
+        // Archive hides the row from the live feed but keeps it readable.
+        assert!(store.mark_notification_archived("ntf_1").await.unwrap());
+        assert!(store
+            .list_notifications_for_user("u1", 10, Some(false))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_notifications_for_user("u1", 10, Some(true))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Re-archive is a no-op; un-archive restores it.
+        assert!(!store.mark_notification_archived("ntf_1").await.unwrap());
+        assert!(store.mark_notification_unarchived("ntf_1").await.unwrap());
+        assert_eq!(
+            store
+                .list_notifications_for_user("u1", 10, Some(false))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     /// Seed a legacy `monitors.db` with the two pre-decomposition tables + rows.

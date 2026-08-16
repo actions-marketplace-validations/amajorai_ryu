@@ -9,6 +9,7 @@
 // the client-side view exposed to React components. The internal symbol names
 // (App*, fetchApps, etc.) are kept stable to limit churn across importers.
 
+import type { LiveActivityContribution } from "@ryu/app-host/live-activity";
 import type {
 	DockPanelSpec,
 	SidebarSectionSpec,
@@ -16,7 +17,6 @@ import type {
 	ViewContribution,
 	ViewSource,
 } from "@ryu/app-host/views";
-import type { LiveActivityContribution } from "@ryu/app-host/live-activity";
 import type {
 	CardDither,
 	CardThemePreview,
@@ -86,6 +86,13 @@ interface AppManifestWire {
 	local_only: boolean;
 	/** Required for Core — Disable/Uninstall are refused (403, no force). */
 	mandatory?: boolean;
+	mcp_servers?: Record<
+		string,
+		{
+			auth?: { type?: string; client_id?: string | null } | null;
+			url?: string | null;
+		}
+	>;
 	name: string;
 	permission_grants: string[];
 	/** Plugin-to-plugin dependencies. Absent (`skip_serializing_if`) = none. */
@@ -213,6 +220,8 @@ export interface AppInfo extends AppPresentation {
 	 *  ever produce an error. Stamped by Core from its own `MANDATORY_PLUGINS`
 	 *  constant, never from the manifest's claim of it. */
 	mandatory: boolean;
+	/** Remote MCP servers whose OAuth lifecycle is owned by Core. */
+	mcpOAuthServers: McpOAuthServerDeclaration[];
 	name: string;
 	permissionGrants: string[];
 	/** Declared dependencies. `null` = none (the common case). */
@@ -228,6 +237,12 @@ export interface AppInfo extends AppPresentation {
 	targets: Surface[];
 	version: string;
 	windowsFirst: boolean;
+}
+
+export interface McpOAuthServerDeclaration {
+	clientId: string | null;
+	name: string;
+	resource: string;
 }
 
 export interface AppRecord {
@@ -395,6 +410,18 @@ function toAppInfo(w: AppManifestWire): AppInfo {
 		installedVersion: w.installed_version,
 		localOnly: w.local_only ?? false,
 		mandatory: w.mandatory ?? false,
+		mcpOAuthServers: Object.entries(w.mcp_servers ?? {}).flatMap(
+			([name, server]) =>
+				server.auth?.type === "oauth" && server.url
+					? [
+							{
+								clientId: server.auth.client_id ?? null,
+								name,
+								resource: server.url,
+							},
+						]
+					: []
+		),
 		name: w.name,
 		permissionGrants: w.permission_grants,
 		requires: w.requires
@@ -543,6 +570,10 @@ export interface PluginHookEvent {
 }
 
 export interface PluginContributions {
+	/** Agent Edit panels supplied by enabled plugins. Panels are interpreted by
+	 * the desktop shell only by their declared type; the owning plugin id is
+	 * provenance, never a routing switch. */
+	agent_edit_panels: PluginAgentEditPanel[];
 	/** Messaging-channel adapters an enabled plugin makes available. */
 	channels: PluginChannel[];
 	/** Companion surfaces (overlay/sidebar panels) an enabled plugin declares. */
@@ -565,6 +596,10 @@ export interface PluginContributions {
 	 *  is {@link PluginContributions.turn_hooks}: this is the catalog a user picks
 	 *  from when subscribing a workflow or a hook to "when X happens". */
 	hook_events: PluginHookEvent[];
+	/** Live activities contributed by enabled plugins (`contributes.live_activities`),
+	 *  tagged with `plugin`. Each is a {@link LiveActivityContribution} the desktop's
+	 *  "Dynamic Island" dock renders from a declared Core `/api/` path. */
+	live_activities: PluginLiveActivity[];
 	/** Per-message toolbar actions enabled plugins contribute
 	 *  (`contributes.message_actions`), tagged with `plugin`. */
 	message_actions: PluginMessageAction[];
@@ -591,11 +626,6 @@ export interface PluginContributions {
 	 *  installed theme and a built-in one are the same object by the time the
 	 *  Appearance picker renders them. */
 	themes: PluginTheme[];
-	/** Live activities contributed by enabled plugins (`contributes.live_activities`),
-	 *  tagged with `plugin`. Each is a {@link LiveActivityContribution} the desktop's
-	 *  "Dynamic Island" dock (empty-shell launchpad + sidebar) renders: a small,
-	 *  always-live status card sourced from a declared Core `/api/` path. */
-	live_activities: PluginLiveActivity[];
 	turn_hooks: Record<string, unknown>[];
 	/** Declarative views (the Raycast tier) contributed by enabled plugins. Each is a
 	 *  {@link ViewContribution} the desktop/island renderer maps to native components,
@@ -604,6 +634,16 @@ export interface PluginContributions {
 	/** Enabled apps that render interactive cards inline in chat (status only —
 	 *  the widget bindings themselves are Core-interpreted and not served here). */
 	widget_apps: PluginWidgetApp[];
+}
+
+/** A panel contributed to the per-agent editor. */
+export interface PluginAgentEditPanel {
+	description?: string;
+	id: string;
+	plugin: string;
+	pref_key_prefix?: string;
+	title: string;
+	type: string;
 }
 
 /** An app-registered sidebar SECTION as served by Core (`contributes.sidebar_sections[]`),
@@ -1000,6 +1040,7 @@ export async function getPluginContributions(
 		Omit<PluginContributions, "companions">
 	> & { companions?: PluginCompanionWire[] };
 	return {
+		agent_edit_panels: json.agent_edit_panels ?? [],
 		composer_controls: json.composer_controls ?? [],
 		settings_tabs: json.settings_tabs ?? [],
 		message_actions: json.message_actions ?? [],
@@ -1512,6 +1553,8 @@ export interface CatalogEntry {
 	descriptor_only?: boolean;
 	/** Publisher / developer name shown on the card + detail. */
 	developer?: string | null;
+	/** Public release-asset downloads, summed across release payloads only. */
+	downloads?: number | null;
 	/** Icon-primitive glyph id painted inside the tile. Declared here as well as on
 	 *  `@ryu/marketplace`'s `CatalogEntry` because it is on the same wire and the
 	 *  Store's Home rows read it — without it those rows fell back to the

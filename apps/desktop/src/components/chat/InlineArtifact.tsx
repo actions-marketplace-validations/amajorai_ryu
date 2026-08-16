@@ -80,7 +80,7 @@ export function InlineArtifact({
 				<Button
 					onClick={() => host?.openInPanel(payload, id)}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Open
 				</Button>

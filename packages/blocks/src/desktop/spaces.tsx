@@ -438,6 +438,8 @@ export interface SpacesDetailProps {
 	ingestError?: string | null;
 	// Ingest form
 	ingestTitle: string;
+	/** Omit (together with `space.retrievalMode`) to hide the Retrieval card. */
+	onCancelRetrievalMode?: () => void;
 	onIngestContentChange?: (value: string) => void;
 	onIngestSubmit?: () => void;
 	onIngestTitleChange?: (value: string) => void;
@@ -445,18 +447,20 @@ export interface SpacesDetailProps {
 	onNewPage?: () => void;
 	onNewWhiteboard?: () => void;
 	onOpenDoc?: (docId: string, title: string) => void;
-	/** Omit (together with `space.retrievalMode`) to hide the Retrieval card. */
 	onRetrievalModeChange?: (mode: SpaceRetrievalMode) => void;
 	onSearchQueryChange?: (value: string) => void;
 	onSearchSubmit?: () => void;
-	/** True while Core is rebuilding the graph. The picker MUST stay disabled for
-	 *  the whole call: the rebuild runs inline in Core, so a second click would
-	 *  queue a second full rebuild of the same Space. */
+	/** True while Core's background rebuild is running. The picker stays disabled
+	 *  while polling so a second click cannot queue another full rebuild. */
 	retrievalModeBusy?: boolean;
 	retrievalModeError?: string | null;
 	/** What the last switch actually did (entity/connection counts), so the result
 	 *  is reported rather than assumed. */
 	retrievalModeNotice?: string | null;
+	retrievalModeProgress?: {
+		processedChunks: number;
+		totalChunks: number;
+	} | null;
 	searchBusy?: boolean;
 	searchError?: string | null;
 	// Search
@@ -636,8 +640,10 @@ function SpaceDetail(props: SpacesDetailProps) {
 		onNewWhiteboard,
 		onOpenDoc,
 		onRetrievalModeChange,
+		onCancelRetrievalMode,
 		retrievalModeBusy,
 		retrievalModeError,
+		retrievalModeProgress,
 		retrievalModeNotice,
 		searchQuery,
 		searchBusy,
@@ -712,12 +718,28 @@ function SpaceDetail(props: SpacesDetailProps) {
 								: RETRIEVAL_MODE_SWITCH_DISCLOSURE}
 						</p>
 						{retrievalModeBusy ? (
-							<p className="flex items-center gap-2 text-muted-foreground text-xs">
-								<Spinner className="size-3" />
-								{friendly
-									? "Working out how these documents connect…"
-									: "Rebuilding this space's entity graph…"}
-							</p>
+							<div className="flex items-center justify-between gap-3 text-muted-foreground text-xs">
+								<p className="flex items-center gap-2">
+									<Spinner className="size-3" />
+									{friendly
+										? "Working out how these documents connect…"
+										: "Rebuilding this space's entity graph…"}
+									{retrievalModeProgress &&
+									retrievalModeProgress.totalChunks > 0
+										? ` ${retrievalModeProgress.processedChunks}/${retrievalModeProgress.totalChunks} chunks`
+										: null}
+								</p>
+								{onCancelRetrievalMode ? (
+									<Button
+										onClick={onCancelRetrievalMode}
+										size="sm"
+										type="button"
+										variant="outline"
+									>
+										Cancel
+									</Button>
+								) : null}
+							</div>
 						) : null}
 						{retrievalModeError ? (
 							<p className="text-destructive text-sm">{retrievalModeError}</p>

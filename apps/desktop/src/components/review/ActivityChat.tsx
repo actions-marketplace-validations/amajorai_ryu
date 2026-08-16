@@ -106,7 +106,7 @@ export function ActivityChat(props: { className?: string }) {
 				Ask about your activity
 			</div>
 			<div
-				className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4"
+				className="scroll-fade min-h-0 flex-1 space-y-3 overflow-y-auto p-4"
 				ref={scrollRef}
 			>
 				{messages.length === 0 && !busy && (

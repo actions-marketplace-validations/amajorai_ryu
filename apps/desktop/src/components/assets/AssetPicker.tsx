@@ -23,6 +23,7 @@ import {
 } from "@ryu/ui/components/tabs";
 import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { TitleTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
 import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import {
 	type AssetSelection,
@@ -63,15 +64,16 @@ function Tile({
 	children: React.ReactNode;
 }) {
 	return (
-		<button
-			aria-label={label}
-			className="flex aspect-square items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/30 p-2 transition-colors hover:border-primary hover:bg-muted"
-			onClick={onClick}
-			title={label}
-			type="button"
-		>
-			{children}
-		</button>
+		<TitleTooltip content={label}>
+			<button
+				aria-label={label}
+				className="flex aspect-square items-center justify-center overflow-hidden rounded-lg border border-border bg-muted/30 p-2 transition-colors hover:border-primary hover:bg-muted"
+				onClick={onClick}
+				type="button"
+			>
+				{children}
+			</button>
+		</TitleTooltip>
 	);
 }
 
@@ -228,7 +230,7 @@ export function AssetPicker({
 						/>
 					</div>
 
-					<div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+					<div className="scroll-fade mt-3 min-h-0 flex-1 overflow-y-auto">
 						{loading ? (
 							<div className="flex h-40 items-center justify-center">
 								<Spinner />

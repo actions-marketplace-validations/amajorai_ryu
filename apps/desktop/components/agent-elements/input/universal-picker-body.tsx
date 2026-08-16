@@ -47,6 +47,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { SvglIcon } from "@ryu/blocks/web/svgl-icon.tsx";
 import { Button } from "@ryu/ui/components/button.tsx";
+import { CommandItem } from "@ryu/ui/components/command.tsx";
 import {
 	DropdownMenuItem,
 	DropdownMenuSub,
@@ -60,6 +61,7 @@ import {
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
+import { IconGitBranch } from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useContext, useMemo, useState } from "react";
 import type {
@@ -69,6 +71,7 @@ import type {
 import { EffortSliderRow } from "@/components/agent-elements/input/effort-slider-row.tsx";
 import { groupModelItems } from "@/components/agent-elements/input/model-groups.ts";
 import { createModelMenuRenderer } from "@/components/agent-elements/input/model-menu-content.tsx";
+import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import {
 	AgentUsageBadge,
 	ProviderCreditsBadge,
@@ -81,6 +84,7 @@ import { useInterfaceLevel } from "@/src/hooks/useInterfaceLevel.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { AgentLogo } from "@/src/lib/agent-logos.tsx";
 import type { AgentCatalogEntry, AgentSummary } from "@/src/lib/api/agents.ts";
+import { fetchAgentAccounts } from "@/src/lib/api/agents.ts";
 import { toTarget } from "@/src/lib/api/client.ts";
 import { formatMicroUsd } from "@/src/lib/api/credits.ts";
 import { discoverModels, isPiModelEnabled } from "@/src/lib/api/pi-config.ts";
@@ -98,12 +102,12 @@ import { svglForProvider } from "@/src/lib/provider-brand.tsx";
 /** One account a Pi provider / ACP agent holds (labels only — never a credential). */
 export interface ProviderAccount {
 	accountId: string;
-	/** Display name (email, provider label, or "Account N"). */
-	label: string;
-	/** "api_key" | "oauth" | "opaque". */
-	kind: string;
 	/** Whether this is the account in use right now. */
 	active: boolean;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Display name (email, provider label, or "Account N"). */
+	label: string;
 	/** For the managed Pi agent's accounts, the provider id they belong to. */
 	provider?: string;
 }
@@ -229,19 +233,17 @@ export interface UniversalPickerData {
 	installedExternal: AgentSummary[];
 	/** Id of the external agent whose install is in flight, or null. */
 	installPendingId: string | null;
-	/** Open the agent-auto rules editor (the picker "Auto" row's Configure…). */
-	onConfigureAuto: () => void;
 	onConfigureCredentials: () => void;
 	onCreateAgent?: () => void;
 	onInstallExternal: (id: string) => void;
+	/** Remove an ACP agent account. */
+	onRemoveAgentAccount: (agentId: string, accountId: string) => void;
+	/** Remove an account from a Pi provider. */
+	onRemoveProviderAccount: (providerId: string, accountId: string) => void;
 	onSelectAgent: (id: string) => void;
 	onSelectProviderModel: (providerId: string, modelId: string) => void;
 	onSelectProviderThinking: (providerId: string, level: string) => void;
 	onSelectTeam?: (id: string) => void;
-	/** Switch the active account for a Pi provider (sealed vault + materialize). */
-	onSwitchProviderAccount: (providerId: string, accountId: string) => void;
-	/** Remove an account from a Pi provider. */
-	onRemoveProviderAccount: (providerId: string, accountId: string) => void;
 	/** Switch an ACP agent's active account (`provider` required for the managed
 	 *  Pi's accounts, which live in a provider scope). */
 	onSwitchAgentAccount: (
@@ -249,8 +251,8 @@ export interface UniversalPickerData {
 		accountId: string,
 		provider?: string
 	) => void;
-	/** Remove an ACP agent account. */
-	onRemoveAgentAccount: (agentId: string, accountId: string) => void;
+	/** Switch the active account for a Pi provider (sealed vault + materialize). */
+	onSwitchProviderAccount: (providerId: string, accountId: string) => void;
 	/** Open the subscription upgrade / paywall (managed-provider upsell). */
 	onUpgrade: () => void;
 	onUseProvider: (providerId: string) => void;
@@ -274,7 +276,7 @@ function SectionHeader({
 	tooltip?: string;
 }) {
 	return (
-		<div className="flex items-center gap-1 px-3 pt-2 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
+		<div className="sticky top-0 z-10 flex items-center gap-1 border-border/40 border-b bg-popover/95 px-3 pt-2 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wide backdrop-blur supports-backdrop-filter:bg-popover/80">
 			<span>{label}</span>
 			{tooltip && (
 				<Tooltip>
@@ -497,11 +499,15 @@ function ExternalAgentSettings({
 	agents,
 	isActive,
 	onSelect,
+	onRemoveAccount,
+	onSwitchAccount,
 }: {
 	agent: AgentSummary;
 	agents: AgentSummary[];
 	isActive: boolean;
+	onRemoveAccount: (accountId: string) => void;
 	onSelect: () => void;
+	onSwitchAccount: (account: ProviderAccount) => void;
 }) {
 	const noModelOptions = useMemo<ModelOption[]>(() => [], []);
 	// Interface level decides whether this agent's row offers anything BUT "Use
@@ -540,6 +546,16 @@ function ExternalAgentSettings({
 		renderContent: modelSection.renderContent,
 		loading: modelSection.loading,
 	};
+	// The agent's sign-in accounts (sealed vault, labels only). Fetched lazily —
+	// this component only mounts when its submenu opens. For the managed Pi agent
+	// these are its provider accounts; for any other agent its opaque sign-ins.
+	const node = useActiveNode();
+	const accountsQuery = useQuery({
+		queryKey: ["agent-accounts", node.url, agent.id],
+		queryFn: () => fetchAgentAccounts(toTarget(node), agent.id),
+		staleTime: 30_000,
+	});
+	const accounts: ProviderAccount[] = accountsQuery.data ?? [];
 	return (
 		<>
 			<UseTargetItem
@@ -548,6 +564,11 @@ function ExternalAgentSettings({
 				onSelect={() => {
 					onSelect();
 				}}
+			/>
+			<AccountsSection
+				accounts={accounts}
+				onRemove={onRemoveAccount}
+				onSwitch={onSwitchAccount}
 			/>
 			{showModelSection && <SettingSub section={modelAsSection} />}
 			{showTuningSections &&
@@ -616,22 +637,22 @@ function AccountRow({
 }: {
 	account: ProviderAccount;
 	onRemove: (accountId: string) => void;
-	onSwitch: (accountId: string) => void;
+	onSwitch: (account: ProviderAccount) => void;
 }) {
 	return (
 		<div className="flex items-center gap-1">
 			<DropdownMenuItem
-				className={cn(
-					"min-w-0 flex-1",
-					account.active && "bg-foreground/10"
-				)}
+				className={cn("min-w-0 flex-1", account.active && "bg-foreground/10")}
 				closeOnClick={false}
-				onClick={() => onSwitch(account.accountId)}
+				onClick={() => onSwitch(account)}
 			>
 				<span className="min-w-0 flex-1 truncate text-[13px]">
 					{account.label}
 					{account.provider ? (
-						<span className="text-muted-foreground/60"> · {account.provider}</span>
+						<span className="text-muted-foreground/60">
+							{" "}
+							· {account.provider}
+						</span>
 					) : null}
 				</span>
 				{account.active && (
@@ -675,13 +696,13 @@ function AccountsSection({
 }: {
 	accounts: ProviderAccount[];
 	onRemove: (accountId: string) => void;
-	onSwitch: (accountId: string) => void;
+	onSwitch: (account: ProviderAccount) => void;
 }) {
 	if (!accounts.length) {
 		return null;
 	}
 	return (
-		<div className="border-t border-border/50 pt-1">
+		<div className="border-border/50 border-t pt-1">
 			<div className="px-3 pt-1 pb-0.5 font-medium text-[11px] text-muted-foreground uppercase tracking-wide">
 				Account
 			</div>
@@ -719,7 +740,7 @@ function ProviderSubBody({
 	onConfigure: () => void;
 	onModel: (modelId: string) => void;
 	onRemoveAccount: (accountId: string) => void;
-	onSwitchAccount: (accountId: string) => void;
+	onSwitchAccount: (account: ProviderAccount) => void;
 	onThinking: (level: string) => void;
 	onUpgrade: () => void;
 	onUse: () => void;
@@ -932,9 +953,24 @@ function TargetSub({
 	 */
 	trailing?: ReactNode;
 }) {
+	const commandNavigation = useProviderCommandNavigation();
 	// Provider rows carry a Pi id (groq, cerebras, nvidia, …) whose bundled brand
 	// mark lives in `/logos/`. Agents (no providerId) keep the engine logo.
 	const providerSpec = providerId ? svglForProvider(providerId) : null;
+	if (commandNavigation) {
+		return (
+			<CommandItem
+				data-checked={isActive}
+				onSelect={() =>
+					commandNavigation.push({ body: children, title: label })
+				}
+			>
+				<span className="flex min-w-0 flex-1 items-center gap-2">{label}</span>
+				{trailing}
+			</CommandItem>
+		);
+	}
+
 	return (
 		<DropdownMenuSub>
 			<DropdownMenuSubTrigger className={cn(isActive && "bg-foreground/10")}>
@@ -1063,7 +1099,7 @@ function AvailableAgentRow({
 				}}
 				size="sm"
 				type="button"
-				variant="outline"
+				variant="ghost"
 			>
 				{installing ? (
 					<HugeiconsIcon
@@ -1084,59 +1120,41 @@ function AvailableAgentRow({
 /**
  * The special "Auto" row (Plane B): selecting it points the composer at the
  * sentinel `auto` agent, so Core resolves the best agent per-turn by the user's
- * rules. Visually distinct (a sparkle mark) and carries a small "Configure…"
- * affordance that opens the agent-auto rules editor.
+ * rules. It uses the same unadorned branch mark as the message action; the
+ * configuration action lives in the picker footer beside model management.
  */
 function AutoTargetRow({
 	isActive,
 	onSelect,
-	onConfigure,
 }: {
 	isActive: boolean;
-	onConfigure: () => void;
 	onSelect: () => void;
 }) {
 	return (
-		<div className="flex items-center gap-1">
-			<DropdownMenuItem
-				className={cn(
-					"min-w-0 flex-1 flex-col items-start gap-0.5",
-					isActive && "bg-foreground/10"
+		<DropdownMenuItem
+			className={cn(
+				"min-w-0 flex-col items-start gap-0.5",
+				isActive && "bg-foreground/10"
+			)}
+			closeOnClick={false}
+			onClick={onSelect}
+		>
+			<span className="flex w-full items-center gap-2">
+				<IconGitBranch className="size-4 shrink-0 text-purple-500" />
+				<span className="flex-1 truncate font-medium">Auto</span>
+				{isActive && (
+					<HugeiconsIcon
+						className="shrink-0 text-muted-foreground"
+						icon={Tick02Icon}
+						size={16}
+						strokeWidth={2}
+					/>
 				)}
-				closeOnClick={false}
-				onClick={onSelect}
-			>
-				<span className="flex w-full items-center gap-2">
-					<span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-primary/15 text-primary">
-						<HugeiconsIcon icon={SparklesIcon} size={13} strokeWidth={2} />
-					</span>
-					<span className="flex-1 truncate font-medium">Auto</span>
-					{isActive && (
-						<HugeiconsIcon
-							className="shrink-0 text-muted-foreground"
-							icon={Tick02Icon}
-							size={16}
-							strokeWidth={2}
-						/>
-					)}
-				</span>
-				<span className="w-full truncate pl-7 text-left font-normal text-muted-foreground text-xs">
-					Routes each turn to the best agent by your rules.
-				</span>
-			</DropdownMenuItem>
-			<Button
-				className="h-6 shrink-0 px-2 text-xs"
-				onClick={(e) => {
-					e.stopPropagation();
-					onConfigure();
-				}}
-				size="sm"
-				type="button"
-				variant="ghost"
-			>
-				Configure
-			</Button>
-		</div>
+			</span>
+			<span className="w-full truncate pl-6 text-left font-normal text-muted-foreground text-xs">
+				Routes each turn to the best agent by your rules.
+			</span>
+		</DropdownMenuItem>
 	);
 }
 
@@ -1154,9 +1172,11 @@ function matches(
 export function UniversalPickerBody({
 	data,
 	close,
+	mode = "all",
 }: {
 	close: () => void;
 	data: UniversalPickerData;
+	mode?: "agents" | "models" | "all";
 }) {
 	const [query, setQuery] = useState("");
 	const q = query.trim().toLowerCase();
@@ -1177,7 +1197,6 @@ export function UniversalPickerBody({
 		customAgents = [],
 		installedExternal,
 		installPendingId,
-		onConfigureAuto,
 		onConfigureCredentials,
 		onCreateAgent,
 		onInstallExternal,
@@ -1185,6 +1204,10 @@ export function UniversalPickerBody({
 		onSelectProviderModel,
 		onSelectProviderThinking,
 		onSelectTeam,
+		onSwitchProviderAccount,
+		onRemoveProviderAccount,
+		onSwitchAgentAccount,
+		onRemoveAgentAccount,
 		onUpgrade,
 		onUseProvider,
 		providers,
@@ -1193,6 +1216,8 @@ export function UniversalPickerBody({
 		teams,
 		thinkingLevels,
 	} = data;
+	const showAgents = mode !== "models";
+	const showProviders = mode !== "agents";
 
 	// Total rows across all sections — the search box only earns its space once the
 	// list is long enough to need filtering. Counts the FLATTENED search space
@@ -1239,12 +1264,13 @@ export function UniversalPickerBody({
 	];
 
 	const nothingMatches =
+		showAgents &&
 		!(autoVisible || ryuVisible) &&
-		filteredProviders.length === 0 &&
 		filteredInstalled.length === 0 &&
 		filteredCustom.length === 0 &&
 		filteredAvailable.length === 0 &&
-		filteredTeams.length === 0;
+		filteredTeams.length === 0 &&
+		(!showProviders || filteredProviders.length === 0);
 
 	const providerSub = (provider: ProviderEntry) => (
 		<TargetSub
@@ -1271,6 +1297,12 @@ export function UniversalPickerBody({
 				close={close}
 				onConfigure={onConfigureCredentials}
 				onModel={(modelId) => onSelectProviderModel(provider.id, modelId)}
+				onRemoveAccount={(accountId) =>
+					onRemoveProviderAccount(provider.id, accountId)
+				}
+				onSwitchAccount={(account) =>
+					onSwitchProviderAccount(provider.id, account.accountId)
+				}
 				onThinking={(level) => onSelectProviderThinking(provider.id, level)}
 				onUpgrade={onUpgrade}
 				onUse={() => onUseProvider(provider.id)}
@@ -1314,7 +1346,17 @@ export function UniversalPickerBody({
 						agent={agent}
 						agents={agents}
 						isActive={isActive}
+						onRemoveAccount={(accountId) =>
+							onRemoveAgentAccount(agent.id, accountId)
+						}
 						onSelect={() => onSelectAgent(agent.id)}
+						onSwitchAccount={(account) =>
+							onSwitchAgentAccount(
+								agent.id,
+								account.accountId,
+								account.provider
+							)
+						}
 					/>
 				)}
 			</TargetSub>
@@ -1378,7 +1420,7 @@ export function UniversalPickerBody({
 				activeSections.map((section) => (
 					<SettingSub key={section.key} section={section} />
 				))}
-			{providers.length > 0 && (
+			{showProviders && providers.length > 0 && (
 				<>
 					<SectionHeader
 						label="Providers"
@@ -1416,13 +1458,9 @@ export function UniversalPickerBody({
 				)}
 
 				{/* Auto (Plane B — Core picks the agent per-turn) */}
-				{autoVisible && (
+				{showAgents && autoVisible && (
 					<AutoTargetRow
 						isActive={autoActive}
-						onConfigure={() => {
-							onConfigureAuto();
-							close();
-						}}
 						onSelect={() => {
 							onSelectAgent(AUTO_AGENT_ID);
 						}}
@@ -1432,21 +1470,22 @@ export function UniversalPickerBody({
 				{q ? (
 					// ── Search results: flattened so nesting never hides a match ──
 					<>
-						{ryuVisible && ryuSub}
-						{filteredProviders.length > 0 && (
+						{showAgents && ryuVisible && ryuSub}
+						{showProviders && filteredProviders.length > 0 && (
 							<>
 								<SectionHeader label="Providers" />
 								{filteredProviders.map(providerSub)}
 							</>
 						)}
-						{(filteredInstalled.length > 0 || filteredCustom.length > 0) && (
-							<>
-								<SectionHeader label="Agents" />
-								{filteredInstalled.map(externalSub)}
-								{filteredCustom.map(customAgentRow)}
-							</>
-						)}
-						{filteredAvailable.length > 0 && (
+						{showAgents &&
+							(filteredInstalled.length > 0 || filteredCustom.length > 0) && (
+								<>
+									<SectionHeader label="Agents" />
+									{filteredInstalled.map(externalSub)}
+									{filteredCustom.map(customAgentRow)}
+								</>
+							)}
+						{showAgents && filteredAvailable.length > 0 && (
 							<>
 								<SectionHeader label="Not installed" />
 								{filteredAvailable.map((entry) => (
@@ -1463,9 +1502,10 @@ export function UniversalPickerBody({
 				) : (
 					// ── Compact root: one row per target ──
 					<>
-						{ryuSub}
-						{filteredInstalled.map(externalSub)}
-						{filteredCustom.map(customAgentRow)}
+						{showAgents && ryuSub}
+						{showAgents && filteredInstalled.map(externalSub)}
+						{showAgents && filteredCustom.map(customAgentRow)}
+						{showProviders && !q && providers.map(providerSub)}
 						{/* One row out to the marketplace, not a second catalog nested
 						    inside this one. The submenu that used to live here re-listed
 						    every not-yet-installed agent with its own Install buttons —
@@ -1473,28 +1513,30 @@ export function UniversalPickerBody({
 						    that made a picker-for-choosing-a-target double as a store.
 						    Searching still surfaces installable agents inline (the
 						    "Not installed" branch above), so nothing became unreachable. */}
-						{openAgentsCatalog && availableExternal.length > 0 && (
-							<DropdownMenuItem
-								className="gap-2"
-								onClick={() => {
-									openAgentsCatalog();
-									close();
-								}}
-							>
-								<HugeiconsIcon
-									className="shrink-0 text-muted-foreground"
-									icon={Store01Icon}
-									size={16}
-									strokeWidth={2}
-								/>
-								<span className="flex-1 truncate">Add more agents</span>
-							</DropdownMenuItem>
-						)}
+						{showAgents &&
+							openAgentsCatalog &&
+							availableExternal.length > 0 && (
+								<DropdownMenuItem
+									className="gap-2"
+									onClick={() => {
+										openAgentsCatalog();
+										close();
+									}}
+								>
+									<HugeiconsIcon
+										className="shrink-0 text-muted-foreground"
+										icon={Store01Icon}
+										size={16}
+										strokeWidth={2}
+									/>
+									<span className="flex-1 truncate">Add more agents</span>
+								</DropdownMenuItem>
+							)}
 					</>
 				)}
 
 				{/* Teams (preserved from the legacy picker when present) */}
-				{filteredTeams.length > 0 && onSelectTeam && (
+				{showAgents && filteredTeams.length > 0 && onSelectTeam && (
 					<>
 						<SectionHeader label="Teams" />
 						{filteredTeams.map((team) => (
@@ -1528,7 +1570,7 @@ export function UniversalPickerBody({
 				{/* Create new agent — a plus, because this row AUTHORS an agent. It
 				    used to wear the download glyph, which read as "fetch one from
 				    somewhere" and collided with the row above it. */}
-				{onCreateAgent && !q && (
+				{showAgents && onCreateAgent && !q && (
 					<DropdownMenuItem
 						className="gap-2"
 						onClick={() => {

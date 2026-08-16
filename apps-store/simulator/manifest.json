@@ -2,6 +2,7 @@
   "id": "@ryu/simulator",
   "name": "Simulators",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Drive iOS Simulators (macOS + Xcode) and Android Emulators from a workspace tab. Ryu runs the device-control toolchain (`simctl`, `adb`) as a local sidecar and exposes the grant-gated `simulator.control` capability: list/boot devices, install & launch apps, open deep links, screenshot, and (Android) tap/swipe/type. The desktop Simulator panel shows whichever platform the connected node supports.",
   "keywords": ["ios", "android", "simulator", "emulator", "mobile"],
   "icon": "smart-phone-01",

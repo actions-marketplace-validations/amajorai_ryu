@@ -91,7 +91,7 @@ export function DevMetricsPanel() {
 			caption="Recorded in memory only, capped at 500 samples each, and never sent anywhere. They are also included in the diagnostics bundle above."
 			headerAction={
 				<div className="flex items-center gap-2">
-					<Button onClick={handleCopy} size="sm" variant="outline">
+					<Button onClick={handleCopy} size="sm" variant="ghost">
 						Copy
 					</Button>
 					<Button onClick={clearDevMetrics} size="sm" variant="ghost">

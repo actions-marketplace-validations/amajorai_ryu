@@ -774,3 +774,59 @@ describe("contributes.lsp_servers", () => {
 		expect(parsed.data.contributes?.lsp_servers).toEqual({});
 	});
 });
+
+describe("mcp_servers OAuth", () => {
+	const manifest = {
+		id: "com.example.mail",
+		mcp_servers: {
+			mail: {
+				auth: { client_id: "public-client", type: "oauth" },
+				type: "streamable-http",
+				url: "https://mcp.example.com/mcp",
+			},
+		},
+		name: "Mail",
+		permission_grants: ["mcp:server", "identity.read"],
+		runnables: [],
+		version: "1.0.0",
+	};
+
+	it("preserves the public OAuth declaration through the pack-path parse", () => {
+		const parsed = PluginManifestSchema.parse(manifest);
+		expect(parsed.mcp_servers?.mail.auth).toEqual({
+			client_id: "public-client",
+			type: "oauth",
+		});
+	});
+
+	it("rejects secret auth fields and non-loopback plaintext URLs", () => {
+		expect(
+			PluginManifestSchema.safeParse({
+				...manifest,
+				mcp_servers: {
+					mail: {
+						...manifest.mcp_servers.mail,
+						auth: { client_secret: "nope", type: "oauth" },
+					},
+				},
+			}).success
+		).toBe(false);
+		expect(
+			PluginManifestSchema.safeParse({
+				...manifest,
+				mcp_servers: {
+					mail: { auth: { type: "oauth" }, url: "http://mcp.example.com" },
+				},
+			}).success
+		).toBe(false);
+	});
+
+	it("requires both MCP and identity grants", () => {
+		expect(
+			PluginManifestSchema.safeParse({
+				...manifest,
+				permission_grants: ["mcp:server"],
+			}).success
+		).toBe(false);
+	});
+});

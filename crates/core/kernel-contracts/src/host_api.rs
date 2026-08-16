@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.0.0";
+pub const HOST_API_VERSION: &str = "1.2.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -122,6 +122,10 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     ),
     m("widget.setState", "widget.state", None, false, true),
     m("widget.getGlobals", "widget.state", None, false, true),
+    // Generic companion → own-sidecar HTTP. The trusted host derives the target
+    // from the owning plugin id and Core's ext-proxy still enforces the manifest
+    // route allowlist, so the frame supplies only a relative path/method/body.
+    m("app.request", "app.http", Some("app:http"), false, true),
     m("ui.requestDisplayMode", "ui.displayMode", None, false, true),
     m("ui.requestModal", "ui.displayMode", None, false, true),
     m("ui.notifyHeight", "ui.displayMode", None, false, true),
@@ -189,6 +193,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
+    m(
+        "agent.runFanout",
+        "agent.run",
+        Some("hook:run-agent"),
+        false,
+        false,
+    ),
     m("storage.get", "storage.kv", Some("storage:kv"), false, true),
     m("storage.set", "storage.kv", Some("storage:kv"), false, true),
     m(
@@ -223,8 +234,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     // owns is not new authority, so `storage.set { secure: true }` needs only
     // `storage:kv`. `crypto:seal` gates sealing/opening ARBITRARY blobs the plugin
     // stores outside Core (its own sidecar files, a remote it syncs to).
-    m("crypto.seal", "crypto.seal", Some("crypto:seal"), false, true),
-    m("crypto.open", "crypto.seal", Some("crypto:seal"), false, true),
+    m(
+        "crypto.seal",
+        "crypto.seal",
+        Some("crypto:seal"),
+        false,
+        true,
+    ),
+    m(
+        "crypto.open",
+        "crypto.seal",
+        Some("crypto:seal"),
+        false,
+        true,
+    ),
     // Non-secret custody description (`ryu_crypto::key_custody`) so an app can
     // tell the user WHICH guarantee is live before it stores anything — a file
     // fallback key sits next to the data it protects and is materially weaker
@@ -257,6 +280,16 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         false,
     ),
+    // Read a normalized, credential-free subscription usage snapshot for an
+    // agent. Rust-bridge-only: it is consumed by turn-policy plugins before a
+    // model session is opened, not by sandboxed companion UIs.
+    m(
+        "usage.snapshot",
+        "usage.read",
+        Some("usage:read"),
+        false,
+        false,
+    ),
     // Record a thumbs vote on an assistant turn — the `message_actions` seam's
     // dispatch verb for the Learning app's rating toggle. Wraps Core's
     // `apply_message_feedback` (learning reward + RAG-memory sinks). Rust-bridge-only.
@@ -282,7 +315,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
     // without this an app whose whole behaviour lives in a hook had no way to be
     // triggered by the user at all. Scoped to the caller's own hooks by the bridge,
     // which takes the plugin id from the path, never the body. Rust-bridge-only.
-    m("hooks.run", "hooks.run", Some("hook:run-self"), false, false),
+    m(
+        "hooks.run",
+        "hooks.run",
+        Some("hook:run-self"),
+        false,
+        false,
+    ),
     m(
         "agent.run.stream",
         "agent.run",
@@ -793,8 +832,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
-    m("quests.use", "quests.crud", Some("quests:crud"), false, true),
-    m("quests.pin", "quests.crud", Some("quests:crud"), false, true),
+    m(
+        "quests.use",
+        "quests.crud",
+        Some("quests:crud"),
+        false,
+        true,
+    ),
+    m(
+        "quests.pin",
+        "quests.crud",
+        Some("quests:crud"),
+        false,
+        true,
+    ),
     m(
         "quests.scratchpad",
         "quests.crud",
@@ -1108,7 +1159,13 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         false,
         true,
     ),
-    m("social.open", "social.crud", Some("social:crud"), false, true),
+    m(
+        "social.open",
+        "social.crud",
+        Some("social:crud"),
+        false,
+        true,
+    ),
     m(
         "social.openList",
         "social.crud",
@@ -1378,6 +1435,7 @@ mod tests {
     fn grant_for_reads_the_table() {
         assert_eq!(grant_for("model.complete"), Some("hook:side-model"));
         assert_eq!(grant_for("agent.run"), Some("hook:run-agent"));
+        assert_eq!(grant_for("agent.runFanout"), Some("hook:run-agent"));
         assert_eq!(grant_for("storage.get"), Some("storage:kv"));
         assert_eq!(grant_for("crypto.seal"), Some("crypto:seal"));
         assert_eq!(grant_for("crypto.open"), Some("crypto:seal"));

@@ -301,7 +301,7 @@ export function CustomizeSidebarDialog({
 						a row.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto py-2">
+				<div className="scroll-fade flex max-h-[60vh] flex-col gap-3 overflow-y-auto py-2">
 					<div className="flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-2 py-1.5">
 						<p className="font-medium text-sm">Entire sidebar</p>
 						<BulkVisibilityActions

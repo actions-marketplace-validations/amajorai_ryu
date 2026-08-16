@@ -34,6 +34,24 @@ describe("hydrateHistoryMessage", () => {
 		expect(out.parts).toEqual([{ type: "text", text: "hello" }]);
 	});
 
+	it("preserves Core-owned widget provenance for a reload", () => {
+		const out = hydrateHistoryMessage(
+			{
+				content: "Open the selected row",
+				id: "widget-follow-up",
+				originServer: "com.ryu.example",
+				role: "user",
+				source: "widget",
+				timestamp: JUST_NOW,
+				widgetInstanceId: "instance-1",
+			},
+			NOW
+		);
+		expect(out.source).toBe("widget");
+		expect(out.originServer).toBe("com.ryu.example");
+		expect(out.widgetInstanceId).toBe("instance-1");
+	});
+
 	it("flags a truncated reply without touching the text that survived", () => {
 		const out = hydrateHistoryMessage(
 			{

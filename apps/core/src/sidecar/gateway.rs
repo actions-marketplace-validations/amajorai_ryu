@@ -42,6 +42,10 @@ const ENV_MANAGED_FLEET_TOKEN: &str = "RYU_MANAGED_GATEWAY_TOKEN";
 /// LOCAL node to managed inference without an env edit + restart.
 pub const MANAGED_FLEET_URL_PREF_KEY: &str = "managed-gateway-url";
 pub const MANAGED_FLEET_TOKEN_PREF_KEY: &str = "managed-gateway-token";
+/// JSON preference carrying the node's per-request managed-routing preferences.
+/// The value is encoded once into `x-ryu-node-routing` for gateway-forwarded
+/// requests; it is never sent to a direct provider.
+pub const NODE_ROUTING_PREF_KEY: &str = "node-routing-prefs";
 
 /// Pref-seeded half of the managed-fleet coordinates.
 ///
@@ -95,7 +99,7 @@ pub fn managed_fleet() -> Option<(String, String)> {
 /// This node's own routing PREFERENCES, as the encoded `x-ryu-node-routing`
 /// value (`v1.<base64url-nopad(JSON)>`), or `None` when the node has stated none.
 ///
-/// # Why this exists and why it is empty today
+/// # Why this exists
 ///
 /// On a remote data plane there is no local gateway, so `gateway.toml` is not the
 /// source for anything — the node's opinions have to travel per request or not at
@@ -104,20 +108,11 @@ pub fn managed_fleet() -> Option<(String, String)> {
 /// The two that had nowhere to go are the node's preferred FALLBACK ORDER and its
 /// own EXTRA firewall rules — this is their carrier.
 ///
-/// Enumerated rather than assumed: nothing on a remote node holds either today.
-/// `gateway_spawn_env`'s `GATEWAY_*` block only forwards `gateway_policy::
-/// firewall_enabled()` / `routing_enabled()`, which are process-global BOOLEANS
-/// ("force the feature on"), not a chain or a rule set — and that block is not
-/// even built in remote mode, since `start()` never spawns a local gateway there.
-/// So a node prefs STORE (plus the desktop settings that would write it) is real
-/// work that belongs to its own lane, and inventing one here would be a settings
-/// surface nobody asked for.
-///
-/// What ships instead is the seam: nothing sets the slot, so this returns `None`,
-/// so the header is omitted entirely and an untouched install is byte-identical
-/// on the wire. The receiving side is complete and independently tested. When the
-/// prefs store lands, it calls [`set_node_routing_prefs`] at boot and on change,
-/// and the channel is live with no further plumbing.
+/// The value is stored in the node preference store under
+/// [`NODE_ROUTING_PREF_KEY`]. Core loads it at boot and refreshes it when the
+/// preference changes, so a managed-routing setting takes effect without a
+/// restart. An absent or malformed value clears the carrier rather than leaving
+/// stale routing active.
 ///
 /// Sync and allocation-light (one `String` clone per turn) because it is called
 /// per request from a sync path, following [`MANAGED_FLEET_PREF`]: the
@@ -141,7 +136,6 @@ static NODE_ROUTING_PREF: std::sync::RwLock<Option<String>> = std::sync::RwLock:
 /// widen. `firewall` is a `FirewallOverlay`-shaped object applied as the narrowest
 /// scope and only ever additively (it can tighten a dial or append a pattern; it
 /// cannot loosen one). Both empty ⇒ the header is omitted entirely.
-#[allow(dead_code)] // The prefs store that calls this is a separate lane; see `node_routing_header`.
 pub fn set_node_routing_prefs(fallback: Vec<String>, firewall: Option<serde_json::Value>) {
     use base64::Engine as _;
 
@@ -174,6 +168,30 @@ pub fn set_node_routing_prefs(fallback: Vec<String>, firewall: Option<serde_json
     if let Ok(mut slot) = NODE_ROUTING_PREF.write() {
         *slot = encoded;
     }
+}
+
+/// Refresh the encoded request carrier from the raw preference-store value.
+///
+/// The preference is deliberately a small JSON envelope instead of a second
+/// set of KV keys: fallback order and the additive firewall overlay must update
+/// atomically. Unknown fields are ignored for forward compatibility, while a
+/// malformed value clears the old carrier so an invalid edit cannot continue to
+/// affect requests.
+pub fn set_node_routing_prefs_from_json(raw: &str) {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct NodeRoutingPreference {
+        fallback: Vec<String>,
+        firewall: Option<serde_json::Value>,
+    }
+
+    let Ok(value) = serde_json::from_str::<NodeRoutingPreference>(raw) else {
+        set_node_routing_prefs(Vec::new(), None);
+        return;
+    };
+
+    let firewall = value.firewall.filter(|value| !value.is_null());
+    set_node_routing_prefs(value.fallback, firewall);
 }
 /// Env var overriding the gateway binary path (otherwise resolved on PATH).
 const ENV_GATEWAY_BIN: &str = "RYU_GATEWAY_BIN";
@@ -1928,6 +1946,81 @@ pub enum ExecBudgetOutcome {
 ///
 /// `api_key` is the bearer token Core uses to talk to the gateway.
 pub async fn check_exec_budget(backend: &str, command: &str) -> ExecBudgetOutcome {
+    check_exec_budget_request(serde_json::json!({
+        "backend": backend,
+        "command": command,
+    }))
+    .await
+}
+
+/// Check the Gateway-owned per-instance follow-up budget before a widget prompt
+/// enters model context. The Gateway remains the policy owner; Core only carries
+/// the provenance envelope and refuses the follow-up on any denied response.
+pub async fn check_widget_followup(instance_id: &str, origin_server: &str) -> ExecBudgetOutcome {
+    check_widget_budget_request(serde_json::json!({
+        "backend": "widget-followup",
+        "command": "follow_up",
+        "feature": "widget-followup",
+        "widget": {
+            "instance_id": instance_id,
+            "origin_server": origin_server,
+        },
+    }))
+    .await
+}
+
+/// Widget governance is always fail-closed. The general execution fallback
+/// must never turn a missing or malformed Gateway verdict into permission to
+/// inject a prompt into model context.
+async fn check_widget_budget_request(payload: serde_json::Value) -> ExecBudgetOutcome {
+    let endpoint = format!(
+        "{}/v1/exec/budget/check",
+        gateway_url().trim_end_matches('/')
+    );
+    let mut req = reqwest::Client::new()
+        .post(&endpoint)
+        .timeout(std::time::Duration::from_secs(5))
+        .json(&payload);
+    if let Some(tok) = gateway_token() {
+        req = req.bearer_auth(tok);
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => parse_widget_budget_response(body),
+            Err(e) => {
+                tracing::warn!("widget budget check: could not parse gateway response: {e}");
+                ExecBudgetOutcome::Deny("widget budget response parse error".to_owned())
+            }
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("widget budget check: gateway returned {status}");
+            ExecBudgetOutcome::Deny(format!("widget budget gateway returned HTTP {status}"))
+        }
+        Err(e) => {
+            tracing::warn!("widget budget check: gateway unreachable: {e}");
+            ExecBudgetOutcome::Deny(format!("widget budget gateway unreachable: {e}"))
+        }
+    }
+}
+
+fn parse_widget_budget_response(body: serde_json::Value) -> ExecBudgetOutcome {
+    match body.get("allowed").and_then(serde_json::Value::as_bool) {
+        Some(true) => ExecBudgetOutcome::Allow,
+        Some(false) => ExecBudgetOutcome::Deny(
+            body.get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("widget budget denied")
+                .to_owned(),
+        ),
+        None => ExecBudgetOutcome::Deny(
+            "widget budget response missing boolean allowed verdict".to_owned(),
+        ),
+    }
+}
+
+async fn check_exec_budget_request(payload: serde_json::Value) -> ExecBudgetOutcome {
     let base = gateway_url();
     let endpoint = format!("{}/v1/exec/budget/check", base.trim_end_matches('/'));
     let token = gateway_token();
@@ -1936,10 +2029,7 @@ pub async fn check_exec_budget(backend: &str, command: &str) -> ExecBudgetOutcom
     let mut req = client
         .post(&endpoint)
         .timeout(std::time::Duration::from_secs(5))
-        .json(&serde_json::json!({
-            "backend": backend,
-            "command": command,
-        }));
+        .json(&payload);
     if let Some(tok) = token {
         req = req.bearer_auth(tok);
     }
@@ -2075,8 +2165,11 @@ pub async fn check_exec_scan(
     session_id: Option<&str>,
     agent: Option<&str>,
 ) -> ExecScanOutcome {
-    // Opt-in: with the gate off, never touch the network and always allow.
-    if !exec_approval_enabled() {
+    let (organization_id, project_id, managed_rules) = crate::fleet::command_scan_context();
+    // The local off switch disables only the built-in risk scanner. Managed
+    // rules remain enforceable, including after an LKG snapshot expires (when
+    // the fleet cache returns denies only).
+    if !exec_approval_enabled() && managed_rules.is_empty() {
         return ExecScanOutcome::Allow;
     }
 
@@ -2091,6 +2184,9 @@ pub async fn check_exec_scan(
         .json(&serde_json::json!({
             "backend": backend,
             "command": command,
+            "managed_rules": managed_rules,
+            "organization_id": organization_id,
+            "project_id": project_id,
             "session_id": session_id,
             "agent": agent,
         }));
@@ -2478,6 +2574,16 @@ mod tests {
             serde_json::from_slice(&decoded).expect("the payload is compact JSON");
         assert_eq!(doc["fallback"], serde_json::json!(["anthropic", "groq"]));
         assert_eq!(doc["firewall"]["redact_pii"], serde_json::json!(true));
+
+        // The preference-store reader feeds the same carrier and clears a
+        // previous value when an edit is malformed rather than leaving stale
+        // routing active.
+        set_node_routing_prefs_from_json(
+            r#"{"fallback":["groq"],"firewall":{"custom_patterns":[]}}"#,
+        );
+        assert!(node_routing_header().is_some());
+        set_node_routing_prefs_from_json("not-json");
+        assert_eq!(node_routing_header(), None);
 
         // Clearing is reachable, so a node that retracts its preferences stops
         // sending the header rather than pinning the last value forever.
@@ -3424,6 +3530,37 @@ mod tests {
         std::env::set_var(ENV_ALLOW_GATEWAY_FALLBACK, "1");
         let allowed = check_exec_scan("deno", "echo hi", None, None).await;
         assert_eq!(allowed, ExecScanOutcome::Allow);
+    }
+
+    #[test]
+    fn widget_budget_response_requires_a_boolean_allowed_verdict() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "allowed": null }),
+            serde_json::json!({ "allowed": "true" }),
+        ] {
+            assert!(matches!(
+                parse_widget_budget_response(body),
+                ExecBudgetOutcome::Deny(_)
+            ));
+        }
+        assert_eq!(
+            parse_widget_budget_response(serde_json::json!({ "allowed": true })),
+            ExecBudgetOutcome::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn widget_budget_ignores_gateway_fallback_on_unreachable_gateway() {
+        let _lock = lock_gateway_env();
+        let _env = EnvGuard::capture(&[ENV_GATEWAY_URL, ENV_ALLOW_GATEWAY_FALLBACK]);
+        std::env::set_var(ENV_GATEWAY_URL, "http://127.0.0.1:1");
+        std::env::set_var(ENV_ALLOW_GATEWAY_FALLBACK, "1");
+
+        assert!(matches!(
+            check_widget_followup("widget-instance", "com.example.widget").await,
+            ExecBudgetOutcome::Deny(_)
+        ));
     }
 
     /// The config-push transport must PUT `/v1/config` and forward the gateway

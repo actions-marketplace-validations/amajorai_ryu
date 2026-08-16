@@ -2,6 +2,7 @@
   "id": "@ryu/ruby-lsp",
   "name": "Ruby LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Ruby language server (ruby-lsp) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install ruby-lsp; the plugin ships config.",
   "tagline": "Ruby code intelligence via ruby-lsp",

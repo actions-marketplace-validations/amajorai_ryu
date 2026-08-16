@@ -512,8 +512,12 @@ async fn write_ryu_json(
 
 async fn write_tool(args: Value) -> Result<Value> {
     let id = args["id"].as_str().ok_or_else(|| anyhow!("missing 'id'"))?;
-    let slug = args["slug"].as_str().ok_or_else(|| anyhow!("missing 'slug'"))?;
-    let body = args["body"].as_str().ok_or_else(|| anyhow!("missing 'body'"))?;
+    let slug = args["slug"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing 'slug'"))?;
+    let body = args["body"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing 'body'"))?;
     let description = args["description"]
         .as_str()
         .ok_or_else(|| anyhow!("missing 'description'"))?;
@@ -542,7 +546,9 @@ async fn write_tool(args: Value) -> Result<Value> {
         return Err(anyhow!("'body' must not be empty"));
     }
     if description.trim().is_empty() || description.trim_start().starts_with("TODO") {
-        return Err(anyhow!("'description' must be a real one-liner, not a TODO"));
+        return Err(anyhow!(
+            "'description' must be a real one-liner, not a TODO"
+        ));
     }
 
     // Authorization before any write.
@@ -552,19 +558,18 @@ async fn write_tool(args: Value) -> Result<Value> {
     let app_dir = validate_write_target(id)?;
 
     // Build + validate the sealed manifest exactly as Core will load it.
-    let manifest_json = crate::runnable::tool_build::tool_manifest_json(
-        id,
-        slug,
-        description,
-        input_schema,
-        body,
-    );
+    let manifest_json =
+        crate::runnable::tool_build::tool_manifest_json(id, slug, description, input_schema, body);
     crate::runnable::tool_build::validate_tool_config(&manifest_json["runnables"][0]["config"])
         .map_err(|e| anyhow!("{e}"))?;
     let manifest: PluginManifest = serde_json::from_value(manifest_json)
         .with_context(|| "manifest is not a valid PluginManifest")?;
-    semver::Version::parse(&manifest.version)
-        .with_context(|| format!("manifest.version '{}' is not valid semver", manifest.version))?;
+    semver::Version::parse(&manifest.version).with_context(|| {
+        format!(
+            "manifest.version '{}' is not valid semver",
+            manifest.version
+        )
+    })?;
 
     // Write the three files. NO hot-reload: nothing is callable until install_tool
     // passes the gate.

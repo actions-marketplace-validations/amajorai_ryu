@@ -46,8 +46,8 @@ use super::ServerState;
 use crate::plugin_host::PluginHookBridge;
 use crate::tool_exec::{InvokeOutcome, SandboxBridge};
 
-/// Max concurrent `agent.run` spawns per plugin (a spawn-DoS guard; the sub-agent's
-/// model egress is separately Gateway-governed by budgets).
+/// Max concurrent agent/fan-out spawns per plugin (a spawn-DoS guard; each
+/// delegate's model egress is separately Gateway-governed by budgets).
 const MAX_CONCURRENT_RUN_AGENT_PER_PLUGIN: usize = 2;
 
 /// Map a desktop-facing method to the closed `host.<path>` string the bridge matches
@@ -57,6 +57,7 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
     match method {
         "model.complete" => Some("host.sideModel"),
         "agent.run" => Some("host.runAgent"),
+        "agent.runFanout" => Some("host.runFanout"),
         "storage.get" => Some("host.storage_get"),
         "storage.set" => Some("host.storage_set"),
         "storage.delete" => Some("host.storage_delete"),
@@ -215,8 +216,8 @@ pub async fn plugin_bridge_dispatch(
         );
     };
 
-    // Bound the heavy sub-agent path per plugin. Held for the whole call.
-    let _permit = if body.method == "agent.run" {
+    // Bound the heavy sub-agent paths per plugin. Held for the whole call.
+    let _permit = if matches!(body.method.as_str(), "agent.run" | "agent.runFanout") {
         match run_agent_gate(&plugin_id).try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
@@ -510,6 +511,7 @@ mod tests {
     fn method_allowlist_is_closed() {
         assert_eq!(bridge_path_for("model.complete"), Some("host.sideModel"));
         assert_eq!(bridge_path_for("agent.run"), Some("host.runAgent"));
+        assert_eq!(bridge_path_for("agent.runFanout"), Some("host.runFanout"));
         assert_eq!(bridge_path_for("storage.get"), Some("host.storage_get"));
         assert_eq!(bridge_path_for("storage.set"), Some("host.storage_set"));
         assert_eq!(
@@ -611,6 +613,7 @@ mod tests {
         for method in [
             "model.complete",
             "agent.run",
+            "agent.runFanout",
             "storage.get",
             "storage.set",
             "storage.delete",

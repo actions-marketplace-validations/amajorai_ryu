@@ -20,17 +20,26 @@ import { PuzzleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
+	type ActivityRecord,
+	type ApprovalRecord,
+	type CalendarAgentRecord,
+	type CalendarJobRecord,
+	type CalendarWorkflowRecord,
 	type Capability,
+	type CryptoStatus,
 	capabilitiesFromGrants,
 	type HostServices,
 	isShellSafeRoute,
-	type CryptoStatus,
 	type MailInbox,
 	type MailMessage,
+	type MeetingRecord,
 	type MonitorRecord,
+	type NotificationRecord,
+	type ProactiveSuggestionRecord,
 	type QuestRecord,
 	type UploadFileResult,
 	validatePluginRoute,
+	type WarmupDetectionRecord,
 } from "@ryu/app-host/rpc";
 import {
 	htmlCompanionSrcdoc,
@@ -46,10 +55,12 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { asGlyphValue } from "@ryu/ui/components/glyph.ts";
+import { iconToUrl } from "@ryu/ui/components/icon";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getActiveUserId, useSession } from "@/lib/auth-client.ts";
+import { openExternal } from "@/lib/tauri-bridge.ts";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import {
 	useCurrentTabId,
@@ -64,13 +75,15 @@ import { useActiveNode } from "@/src/hooks/useActiveNode.ts";
 import { subscribeFriendlyMode } from "@/src/hooks/useFriendlyMode.ts";
 import { listActivity } from "@/src/lib/api/activity.ts";
 import { fetchAgents } from "@/src/lib/api/agents.ts";
+import { ownAppRequest } from "@/src/lib/api/app-request.ts";
 import {
 	approveApproval,
 	listApprovals,
 	rejectApproval,
 } from "@/src/lib/api/approvals.ts";
 import { searchGifs } from "@/src/lib/api/assets.ts";
-import { toTarget } from "@/src/lib/api/client.ts";
+import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
+import { type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import {
 	fetchComposioConnections,
 	fetchComposioStatus,
@@ -115,10 +128,13 @@ import {
 	runMonitor,
 	updateMonitor,
 } from "@/src/lib/api/monitors.ts";
+import { newsRequest } from "@/src/lib/api/news.ts";
 import {
 	ackNotification,
+	archiveNotification,
 	listNotifications,
 	markNotificationRead,
+	unarchiveNotification,
 } from "@/src/lib/api/notifications.ts";
 import {
 	fetchApps,
@@ -146,12 +162,14 @@ import {
 	updateQuest,
 	useQuest,
 } from "@/src/lib/api/quests.ts";
+import { reasoningRequest } from "@/src/lib/api/reasoning.ts";
 import {
 	getRecordingStatus,
 	listRecipes,
 	startRecording,
 	stopRecording,
 } from "@/src/lib/api/recipes.ts";
+import { rlmRequest } from "@/src/lib/api/rlm.ts";
 import { fetchJobs } from "@/src/lib/api/schedules.ts";
 import {
 	frameUrl,
@@ -170,13 +188,9 @@ import {
 	snapshotSkill,
 	updateSkill,
 } from "@/src/lib/api/skills.ts";
-import { blueprintRequest } from "@/src/lib/api/blueprint.ts";
-import { newsRequest } from "@/src/lib/api/news.ts";
-import { reasoningRequest } from "@/src/lib/api/reasoning.ts";
-import { rlmRequest } from "@/src/lib/api/rlm.ts";
-import { tuitionRequest } from "@/src/lib/api/tuition.ts";
 import { socialRequest } from "@/src/lib/api/social.ts";
 import { subtitlesRequest } from "@/src/lib/api/subtitles.ts";
+import { tuitionRequest } from "@/src/lib/api/tuition.ts";
 import { fileToDataUrl, uploadUserFile } from "@/src/lib/api/uploads.ts";
 import { generateVideo as apiGenerateVideo } from "@/src/lib/api/video.ts";
 import {
@@ -361,6 +375,60 @@ async function inlineToDataUrl(url: string): Promise<string> {
 	return await blobToDataUrl(await resp.blob());
 }
 
+/** Module-level cache of resolved app icon tiles (`appId` → `{ name, glyph,
+ *  background }`), so the notifications bridge never re-fetches the catalog or
+ *  re-inlines the same icon on every row render. Keyed by `nodeUrl|appId` so two
+ *  nodes with different catalogs cannot cross-pollute. */
+const appIconTileCache = new Map<string, AppIconTile>();
+
+interface AppIconTile {
+	background: string | null;
+	glyph: string;
+	name: string;
+}
+
+/**
+ * Resolve an app's notification tile (name + monochrome glyph as a `data:` URL +
+ * flat plate background) for the CSP-locked companion frame. Falls back to a
+ * neutral glyph for unknown / legacy producers (rows with no `source_app_id`),
+ * so every notification row can render SOMETHING specific to its sender.
+ */
+async function resolveAppIconTile(
+	target: ApiTarget,
+	appId: string
+): Promise<AppIconTile> {
+	const cacheKey = `${target.url}|${appId}`;
+	const cached = appIconTileCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+	let tile: AppIconTile;
+	try {
+		const apps = await fetchApps(target);
+		const app = apps.find((a) => a.id === appId);
+		if (app) {
+			const rasterUrl =
+				app.iconUrl ??
+				iconToUrl(app.icon, {
+					size: 28,
+					// Muted-foreground zinc-500: reads on the neutral plate in both themes.
+					color: "#71717b",
+				});
+			tile = {
+				background: app.iconBackground ?? null,
+				glyph: rasterUrl ? await inlineToDataUrl(rasterUrl) : "",
+				name: app.name,
+			};
+		} else {
+			tile = { background: null, glyph: "", name: appId };
+		}
+	} catch {
+		tile = { background: null, glyph: "", name: appId };
+	}
+	appIconTileCache.set(cacheKey, tile);
+	return tile;
+}
+
 /** Decode a `data:` URL back to a Blob (for STT upload). `fetch` on a data URL is
  *  synchronous-ish and stays in the trusted context. */
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
@@ -497,7 +565,7 @@ function PanelPlaceholder({
 							disabled={retryDisabledFor > 0}
 							onClick={onRetry}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							{retryDisabledFor > 0 ? `Retry in ${retryDisabledFor}s` : "Retry"}
 						</Button>
@@ -671,6 +739,7 @@ export function PluginHostPanel({
 	// path (anti-phishing), rejecting system/other-plugin paths.
 	const services = useMemo<HostServices>(
 		() => ({
+			openExternal: ({ href }) => openExternal(href),
 			// ── Assistant bridge ───────────────────────────────────────────────────
 			// The app tells the ONE global "Ask Ryu" surface what its page is showing,
 			// and (optionally) lends it this page's own instructions while the page is
@@ -1231,7 +1300,7 @@ export function PluginHostPanel({
 			// snake_case items verbatim over the bridge (activity:read).
 			activityList: ({ limit }) =>
 				listActivity(toTarget(node), { limit }) as unknown as Promise<
-					Record<string, unknown>[]
+					ActivityRecord[]
 				>,
 			// Shell navigation: open the chat tab for an item's session. Not a Core call —
 			// the extracted page opened it via `useTabsContext().openTab` (same call here).
@@ -1298,16 +1367,14 @@ export function PluginHostPanel({
 			// the SAME `createScheduledAgentWorkflow` composite the desktop dialog ran, so
 			// Core's validation error (bad cron/interval) propagates as the thrown message.
 			calendarJobs: () =>
-				fetchJobs(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+				fetchJobs(toTarget(node)) as unknown as Promise<CalendarJobRecord[]>,
 			calendarWorkflows: () =>
 				fetchWorkflows(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
+					CalendarWorkflowRecord[]
 				>,
 			calendarAgents: () =>
 				fetchAgents(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
+					CalendarAgentRecord[]
 				>,
 			calendarCreateAutomation: (args) =>
 				createScheduledAgentWorkflow(toTarget(node), args),
@@ -1320,12 +1387,12 @@ export function PluginHostPanel({
 			// reach an automation another app or Core owns.
 			warmupDetect: () =>
 				detectWarmupAgents(toTarget(node)) as unknown as Promise<{
-					agents: Record<string, unknown>[];
-					tz: string;
+					agents: WarmupDetectionRecord["agents"];
+					tz: WarmupDetectionRecord["tz"];
 				}>,
 			warmupList: () =>
 				listWarmupJobs(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
+					CalendarJobRecord[]
 				>,
 			warmupApply: (jobs) => applyWarmupJobs(toTarget(node), jobs),
 			warmupRunNow: ({ jobId }) => runWarmupJobNow(toTarget(node), jobId),
@@ -1357,28 +1424,40 @@ export function PluginHostPanel({
 			// task check-off reuses the `quests*` services above (the app also holds
 			// quests:crud). `suggestionsOpenInChat` is a shell-navigation verb.
 			approvalsList: () =>
-				listApprovals(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+				listApprovals(toTarget(node)) as unknown as Promise<ApprovalRecord[]>,
 			approvalsApprove: ({ id, note }) =>
-				approveApproval(toTarget(node), id, note) as unknown as Promise<
-					Record<string, unknown>
-				>,
+				approveApproval(
+					toTarget(node),
+					id,
+					note
+				) as unknown as Promise<ApprovalRecord>,
 			approvalsReject: ({ id, note }) =>
-				rejectApproval(toTarget(node), id, note) as unknown as Promise<
-					Record<string, unknown>
-				>,
-			notificationsList: () =>
+				rejectApproval(
+					toTarget(node),
+					id,
+					note
+				) as unknown as Promise<ApprovalRecord>,
+			notificationsList: ({ archived }: { archived?: boolean } = {}) =>
 				(meId
-					? listNotifications(toTarget(node), meId)
-					: Promise.resolve([])) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+					? listNotifications(toTarget(node), meId, undefined, archived)
+					: Promise.resolve([])) as unknown as Promise<NotificationRecord[]>,
 			notificationsMarkRead: ({ id }) =>
 				markNotificationRead(toTarget(node), id),
 			notificationsAck: ({ id }) => ackNotification(toTarget(node), id),
+			notificationsArchive: ({ id }) => archiveNotification(toTarget(node), id),
+			notificationsUnarchive: ({ id }) =>
+				unarchiveNotification(toTarget(node), id),
+			notificationsAppIcons: async ({ appIds }: { appIds: string[] }) => {
+				const tiles = await Promise.all(
+					appIds.map(
+						async (appId) =>
+							[appId, await resolveAppIconTile(toTarget(node), appId)] as const
+					)
+				);
+				return Object.fromEntries(tiles);
+			},
 			suggestionsList: () =>
-				getProactiveInbox() as unknown as Promise<Record<string, unknown>[]>,
+				getProactiveInbox() as unknown as Promise<ProactiveSuggestionRecord[]>,
 			suggestionsFeedback: ({ kind, suggestion_type }) =>
 				postFeedback({ kind, suggestion_type }),
 			suggestionsOpenInChat: ({ prompt }) =>
@@ -1397,9 +1476,7 @@ export function PluginHostPanel({
 			// `null` on cancel. `open`/`openNotes`/`openList` are shell-navigation verbs
 			// mirroring the extracted page's `useTabsContext().openTab`.
 			meetingsList: () =>
-				listMeetings(toTarget(node)) as unknown as Promise<
-					Record<string, unknown>[]
-				>,
+				listMeetings(toTarget(node)) as unknown as Promise<MeetingRecord[]>,
 			meetingsTranscript: ({ id }) =>
 				getTranscript(toTarget(node), id) as unknown as Promise<
 					Record<string, unknown>
@@ -1409,18 +1486,21 @@ export function PluginHostPanel({
 					source: input.source as "manual" | "auto" | undefined,
 					app: input.app,
 					title: input.title,
-				}) as unknown as Promise<Record<string, unknown>>,
+				}) as unknown as Promise<MeetingRecord>,
 			meetingsFinalize: ({ id }) =>
-				finalizeMeeting(toTarget(node), id) as unknown as Promise<
-					Record<string, unknown>
-				>,
+				finalizeMeeting(
+					toTarget(node),
+					id
+				) as unknown as Promise<MeetingRecord>,
 			meetingsDelete: async ({ id }) => {
 				await deleteMeeting(toTarget(node), id);
 			},
 			meetingsRename: ({ id, title }) =>
-				renameMeeting(toTarget(node), id, title) as unknown as Promise<
-					Record<string, unknown>
-				>,
+				renameMeeting(
+					toTarget(node),
+					id,
+					title
+				) as unknown as Promise<MeetingRecord>,
 			meetingsSetIcon: async ({ id, icon }) => {
 				const updated = await setMeetingIcon(toTarget(node), id, icon);
 				const glyph = asGlyphValue(icon) ?? null;
@@ -1430,7 +1510,7 @@ export function PluginHostPanel({
 						t.path.startsWith(`/meetings/${id}?`),
 					glyph
 				);
-				return updated as unknown as Record<string, unknown>;
+				return updated as unknown as MeetingRecord;
 			},
 			meetingsImport: async () => {
 				const file = await pickAudioFile();
@@ -1439,7 +1519,7 @@ export function PluginHostPanel({
 				}
 				return importMeeting(toTarget(node), file, {
 					title: file.name,
-				}) as unknown as Record<string, unknown>;
+				}) as unknown as MeetingRecord;
 			},
 			meetingsOpen: ({ id, title }) =>
 				openTab(`/meetings/${id}`, { title: title ?? "Meeting" }),
@@ -1521,6 +1601,10 @@ export function PluginHostPanel({
 			// earlier are both load-bearing. No `open` verb: the review surface is the
 			// companion, so it never navigates the shell.
 			blueprintRequest: (input) => blueprintRequest(toTarget(node), input),
+			// Generic companion → OWN sidecar forwarder. The plugin id is host-owned;
+			// the frame can choose only the relative path/method/body.
+			appRequest: (input) =>
+				ownAppRequest(toTarget(node), companion.pluginId, input),
 			socialOpen: ({ postId, title }) =>
 				openTab(postId ? `/social/${postId}` : "/social", {
 					title: title ?? "Outpost",

@@ -660,7 +660,7 @@ export default function SpaceDatabaseEditorPage({
 						setReloadNonce((n) => n + 1);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Try again
 				</Button>
@@ -714,7 +714,7 @@ export default function SpaceDatabaseEditorPage({
 						disabled={readOnly}
 						onClick={() => setColumnEditor({ mode: "create" })}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						<Plus className="size-3.5" />
 						Add column

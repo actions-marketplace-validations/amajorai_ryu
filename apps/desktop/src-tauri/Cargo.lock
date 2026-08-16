@@ -909,9 +909,10 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cocoa",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
@@ -1675,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "ghost-permissions"
-version = "0.1.14"
+version = "0.1.15"
 
 [[package]]
 name = "gio"

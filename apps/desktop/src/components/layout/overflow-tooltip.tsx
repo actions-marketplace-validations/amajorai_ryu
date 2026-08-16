@@ -7,6 +7,7 @@ import {
 } from "@ryu/ui/components/tooltip";
 import {
 	type CSSProperties,
+	type ReactElement,
 	type ReactNode,
 	useCallback,
 	useEffect,
@@ -41,6 +42,28 @@ const INNER_CLASS = "inline-block max-w-none align-bottom";
 // instead of fighting.
 const SHIMMER_CLASS =
 	"an-text-shimmer an-text-shimmer--active [animation-duration:2s]";
+// Keep the title's crawl at the same deliberately gentle pace as the Node
+// selector's overflowing labels. The small overrun lets the final glyph clear
+// the edge before it reverses.
+const SCROLL_MS_PER_PIXEL = 26;
+const MIN_SCROLL_TRAVEL_MS = 1600;
+const SCROLL_EDGE_PADDING_PX = 6;
+
+/** Adds the desktop tooltip treatment without adding a layout wrapper. */
+export function TitleTooltip({
+	children,
+	content,
+}: {
+	children: ReactElement;
+	content: ReactNode;
+}) {
+	return (
+		<Tooltip>
+			<TooltipTrigger render={children} />
+			<TooltipContent>{content}</TooltipContent>
+		</Tooltip>
+	);
+}
 
 /** A clipped line is one whose content is wider than the box showing it. Both
  *  widths must come from the right pair of elements: the CONTENT width off the
@@ -104,15 +127,57 @@ function useEdgeFade(text: string, track: boolean) {
  * the mask are owned here.
  */
 export function FadeLabel({
+	autoScroll = false,
 	className,
 	shimmer = false,
 	text,
 }: {
+	/** Start a gentle ping-pong scroll while the caller's row is hovered. */
+	autoScroll?: boolean;
 	className?: string;
 	shimmer?: boolean;
 	text: string;
 }) {
 	const { clipRef, clipped, innerRef } = useEdgeFade(text, true);
+
+	useEffect(() => {
+		const clip = clipRef.current;
+		const inner = innerRef.current;
+		if (
+			!(
+				autoScroll &&
+				clipped &&
+				clip &&
+				inner &&
+				!window.matchMedia("(prefers-reduced-motion: reduce)").matches
+			)
+		) {
+			return;
+		}
+
+		const distance =
+			inner.scrollWidth - clip.clientWidth + SCROLL_EDGE_PADDING_PX;
+		const animation = inner.animate(
+			[
+				{ transform: "translateX(0)", offset: 0 },
+				{ transform: "translateX(0)", offset: 0.2 },
+				{ transform: `translateX(-${distance}px)`, offset: 0.8 },
+				{ transform: `translateX(-${distance}px)`, offset: 1 },
+			],
+			{
+				duration: Math.max(
+					MIN_SCROLL_TRAVEL_MS,
+					Math.round(distance * SCROLL_MS_PER_PIXEL)
+				),
+				iterations: Number.POSITIVE_INFINITY,
+				direction: "alternate",
+				easing: "ease-in-out",
+			}
+		);
+
+		return () => animation.cancel();
+	}, [autoScroll, clipped, clipRef, innerRef]);
+
 	return (
 		<span
 			className={cn(CLIP_CLASS, className)}

@@ -23,8 +23,8 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use super::{
     default_http_client, host, AutoTuner, ConcurrencyMode, DownloadEvent, DownloadKind,
-    DownloadRole, DownloadSettings, DownloadSettingsView, DownloadSpec, DownloadState, DownloadTask,
-    ThroughputSample, DEFAULT_SLOTS, MAX_SLOTS, MIN_SLOTS,
+    DownloadRole, DownloadSettings, DownloadSettingsView, DownloadSpec, DownloadState,
+    DownloadTask, ThroughputSample, DEFAULT_SLOTS, MAX_SLOTS, MIN_SLOTS,
 };
 
 /// Max HTTP attempts per active streaming pass before a task is marked
@@ -1553,7 +1553,10 @@ mod tests {
             "cancel must still reach the registration that owns the id"
         );
         let outcome = second.await.expect("task joined");
-        assert!(outcome.is_err(), "a cancelled registration returns an error");
+        assert!(
+            outcome.is_err(),
+            "a cancelled registration returns an error"
+        );
     }
 
     /// A download waiting on the concurrency gate must report `Queued`, not

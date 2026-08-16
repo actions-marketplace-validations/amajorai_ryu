@@ -154,8 +154,8 @@ pub fn query_git_state(cwd: &str) -> GitState {
     // `--untracked-files=all` lists new files individually rather than collapsing
     // a new directory into a single row, so `changed_files_count` counts the same
     // files the insertion total below is summed over.
-    let porcelain = run_git(cwd, &["status", "--porcelain", "--untracked-files=all"])
-        .unwrap_or_default();
+    let porcelain =
+        run_git(cwd, &["status", "--porcelain", "--untracked-files=all"]).unwrap_or_default();
     let changed: Vec<&str> = porcelain.lines().filter(|l| !l.is_empty()).collect();
     let dirty = !changed.is_empty();
 
@@ -218,7 +218,11 @@ pub fn list_branches(cwd: &str) -> GitBranches {
     // branches actually in play, not the ones that happen to start with "a".
     let raw = run_git(
         cwd,
-        &["branch", "--sort=-committerdate", "--format=%(refname:short)"],
+        &[
+            "branch",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+        ],
     )
     .unwrap_or_default();
     let branches: Vec<String> = raw

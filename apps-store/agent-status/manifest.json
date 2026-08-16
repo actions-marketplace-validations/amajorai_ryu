@@ -2,6 +2,7 @@
   "id": "@ryu/agent-status",
   "name": "Agent Status",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Splits your agent runs across three sidebar sections — Working, Needs input and Done — each row showing the project it belongs to.",
   "tagline": "See which agents are working, stuck, or done",
   "category": "Productivity",

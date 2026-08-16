@@ -437,9 +437,10 @@ struct PublicMountPlugin(String);
 /// the owning plugin id via [`PublicMountPlugin`].
 ///
 /// Build-time registration is deliberate: axum routers are immutable after serve, so a
-/// custom public prefix is only expressible for a **built-in** manifest known at
-/// startup — a runtime-installed third-party app still uses `/api/ext/<id>/*`. Nothing
-/// is hardcoded per-app: this iterates whatever built-ins declare a `public_mount`.
+/// custom public prefix is expressible for manifests known in the startup snapshot.
+/// Runtime-installed apps that arrive after serving still use `/api/ext/<id>/*`.
+/// Nothing is hardcoded per-app: this iterates whatever startup manifest declares a
+/// `public_mount`.
 pub fn public_mount_routes(
     manifests: &[crate::plugin_manifest::PluginManifest],
     auth_token: Option<String>,
@@ -1054,15 +1055,12 @@ async fn ext_ws_tunnel(
     // (loopback dev) ⇒ allow.
     if auth == RouteAuth::Protected {
         if let Some(expected) = expected_node_token.as_deref() {
-            let provided = query
-                .get(WS_TOKEN_PARAM)
-                .map(String::as_str)
-                .or_else(|| {
-                    headers
-                        .get("authorization")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                });
+            let provided = query.get(WS_TOKEN_PARAM).map(String::as_str).or_else(|| {
+                headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+            });
             if provided != Some(expected) {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
@@ -1126,9 +1124,7 @@ async fn ext_ws_tunnel(
     let upstream_path = ws_upstream_path(&mount, sub_path);
     let hop_token = ext_token(node_token().as_deref(), plugin_id);
 
-    ws.on_upgrade(move |socket| {
-        bridge_ws_to_sidecar(socket, port, upstream_path, hop_token)
-    })
+    ws.on_upgrade(move |socket| bridge_ws_to_sidecar(socket, port, upstream_path, hop_token))
 }
 
 /// Bridge one accepted client socket to the sidecar's loopback WS endpoint, pumping
@@ -1217,12 +1213,12 @@ fn axum_to_tungstenite(msg: WsMessage) -> TsMessage {
         WsMessage::Binary(b) => TsMessage::binary(b),
         WsMessage::Ping(p) => TsMessage::Ping(p.into()),
         WsMessage::Pong(p) => TsMessage::Pong(p.into()),
-        WsMessage::Close(Some(frame)) => TsMessage::Close(Some(
-            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+        WsMessage::Close(Some(frame)) => {
+            TsMessage::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: frame.code.into(),
                 reason: frame.reason.into(),
-            },
-        )),
+            }))
+        }
         WsMessage::Close(None) => TsMessage::Close(None),
     }
 }
@@ -1540,6 +1536,19 @@ const KERNEL_CAPABILITIES: &[KernelCapability] = &[
         cap: "notify.fanout",
         grant: None,
     },
+    // Deliver a user-targeted notification into the app-inbox feed on behalf of
+    // the calling app. Body `{ title, body?, level?, target_user_id? }`. Unlike
+    // `notify.fanout` (monitors' EXTERNAL channel fan-out), this writes the row
+    // the desktop's Inbox renders, so the app's icon/name shows there. The
+    // `source_app_id` stamped on the row is the AUTHENTICATED caller, never a body
+    // field. `grant: None` for the same reason as `notify.fanout`: the Gateway
+    // vocabulary has no reviewed "raise a notification" scope, and writing to the
+    // user's own inbox is the seam's entire purpose — the gate is the minted token
+    // + the enabled-app check, exactly as `events.emit` (which is also `None`).
+    KernelCapability {
+        cap: "notify.deliver",
+        grant: None,
+    },
     // File a notes document into a Core-owned system Space under the background
     // owner. Core owns the `SpaceStore` + its tenancy, so a sidecar cannot do this
     // itself. Body `{ title, markdown }` → `{ space_id, doc_id }`.
@@ -1638,6 +1647,26 @@ pub(crate) struct EventEmitBody {
     /// key its own per-conversation state the same way a turn hook does.
     #[serde(default)]
     conversation_id: Option<String>,
+    /// OPTIONAL user-facing notification to raise alongside the fan-out
+    /// (`{ title, body?, level?, target_user_id? }`). Delivered into the app-inbox
+    /// feed with `source_app_id` = the calling plugin (the desktop Inbox then shows
+    /// the app's icon on the row) — the same delivery [`notify.deliver`] performs,
+    /// so "emit an event AND ping the user" is one governed call. Best-effort: a
+    /// delivery failure never fails the emit.
+    #[serde(default)]
+    notify: Option<EventEmitNotify>,
+}
+
+/// The `notify` hint carried on an `events.emit` request.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct EventEmitNotify {
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    target_user_id: Option<String>,
 }
 
 /// `events.emit` — fan an app event out to its subscribers.
@@ -1706,6 +1735,25 @@ async fn host_events_emit(
 
     let workflows =
         crate::workflow::triggers::fire_event_workflows(&body.event, &body.payload).await;
+
+    // Optional user-facing notification raised alongside the fan-out. Delivered
+    // best-effort through the same kernel path `notify.deliver` uses, so the row
+    // is stamped with the AUTHENTICATED caller — an event's notify hint can never
+    // be attributed to a different app.
+    if let Some(notify) = &body.notify {
+        let title = notify.title.trim();
+        if !title.is_empty() {
+            let _ = crate::server::app_notify::deliver_for_app(
+                &state.client,
+                &plugin_id,
+                notify.target_user_id.as_deref(),
+                title,
+                notify.body.as_deref().unwrap_or(""),
+                notify.level.as_deref(),
+            )
+            .await;
+        }
+    }
 
     tracing::info!(
         event = %body.event,
@@ -1829,6 +1877,14 @@ async fn dispatch_kernel_capability(
                 State(state),
                 headers,
                 body!(crate::monitors_client::AlertFanoutBody),
+            )
+            .await
+        }
+        "notify.deliver" => {
+            crate::server::app_notify::host_notify_deliver(
+                State(state),
+                headers,
+                body!(crate::server::app_notify::DeliverBody),
             )
             .await
         }
@@ -2283,7 +2339,11 @@ mod tests {
     #[test]
     fn an_unannotated_route_imposes_no_permission() {
         assert_eq!(
-            required_permission_for(&route("/tabs/:id", None, None), "/tabs/t-42", "com.acme.app"),
+            required_permission_for(
+                &route("/tabs/:id", None, None),
+                "/tabs/t-42",
+                "com.acme.app"
+            ),
             None
         );
     }
@@ -2352,7 +2412,10 @@ mod tests {
     /// to exist, it is just scoped to the app rather than to a caller-chosen id.
     #[test]
     fn a_param_after_a_wildcard_captures_nothing_rather_than_the_wrong_segment() {
-        assert_eq!(captured_param("/a/*rest/:id", "/a/one/two/three", "id"), None);
+        assert_eq!(
+            captured_param("/a/*rest/:id", "/a/one/two/three", "id"),
+            None
+        );
         assert_eq!(
             required_permission_for(
                 &route("/a/*rest/:id", Some("x.edit"), Some("id")),
@@ -2734,6 +2797,32 @@ mod tests {
         let _router: Router<ServerState> = public_mount_routes(&[a, b], Some("tok".to_owned()));
     }
 
+    #[test]
+    fn public_mount_routes_include_bootstrap_apps() {
+        let installed = crate::plugin_manifest::PluginManifestLoader::load_builtins()
+            .into_iter()
+            .filter(|manifest| manifest.id == "@ryu/mail")
+            .collect::<Vec<_>>();
+        let bootstrap = crate::plugin_manifest::PluginManifestLoader::load_bootstrap();
+        let manifests =
+            crate::plugin_manifest::PluginManifestLoader::for_router(&installed, &bootstrap);
+
+        assert!(
+            manifests.iter().any(|manifest| manifest.id == "@ryu/mail"),
+            "installed Mail manifest must be available when the router is built"
+        );
+        for id in ["@ryu/meetings", "@ryu/teams", "@ryu/dashboards"] {
+            assert!(
+                manifests.iter().any(|manifest| manifest.id == id),
+                "bootstrap manifest {id} must be available when the router is built"
+            );
+        }
+
+        // Build the actual public-mount router: these manifests must reach route
+        // construction even when production BUILTIN_MANIFESTS is system-only.
+        let _router: Router<ServerState> = public_mount_routes(&manifests, Some("tok".to_owned()));
+    }
+
     /// The declared "/" route must forward to the BARE mount, never `{mount}/` —
     /// sidecars nest at the bare mount and axum does no trailing-slash redirect.
     #[test]
@@ -3091,6 +3180,7 @@ mod tests {
             vec![
                 "mcp.callTool",
                 "notify.fanout",
+                "notify.deliver",
                 "spaces.fileNotes",
                 "chat.startTurn",
                 "node.readings",
@@ -3299,7 +3389,9 @@ mod tests {
             reason: "bye".into(),
         }));
         let ts = axum_to_tungstenite(close.clone());
-        assert!(matches!(&ts, TsMessage::Close(Some(c)) if u16::from(c.code) == 1000 && c.reason.as_ref() == "bye"));
+        assert!(
+            matches!(&ts, TsMessage::Close(Some(c)) if u16::from(c.code) == 1000 && c.reason.as_ref() == "bye")
+        );
         let back = tungstenite_to_axum(ts);
         assert!(matches!(&back, WsMessage::Close(Some(c)) if c.code == 1000 && c.reason == "bye"));
 
@@ -3310,7 +3402,8 @@ mod tests {
         ));
         // A `Frame` variant (only reachable via raw streams) degrades to Ping, never
         // invents bytes.
-        let frame = TsMessage::Frame(tokio_tungstenite::tungstenite::protocol::frame::Frame::ping(vec![]));
+        let frame =
+            TsMessage::Frame(tokio_tungstenite::tungstenite::protocol::frame::Frame::ping(vec![]));
         assert!(matches!(tungstenite_to_axum(frame), WsMessage::Ping(_)));
     }
 }

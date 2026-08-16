@@ -417,10 +417,10 @@ export function IntegrationsTab() {
 						</li>
 					</ol>
 					<div className="flex flex-wrap gap-2 pt-1">
-						<Button onClick={handleOpenGatewayKeys} size="sm" variant="outline">
+						<Button onClick={handleOpenGatewayKeys} size="sm" variant="ghost">
 							Open Gateway keys
 						</Button>
-						<Button onClick={handleOpenMarketplace} size="sm" variant="outline">
+						<Button onClick={handleOpenMarketplace} size="sm" variant="ghost">
 							Open Marketplace
 						</Button>
 					</div>

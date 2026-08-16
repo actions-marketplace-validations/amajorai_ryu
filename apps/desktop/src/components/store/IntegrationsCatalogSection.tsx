@@ -289,7 +289,7 @@ function IntegrationDetailPanel({
 							<a href={domainHref} rel="noopener noreferrer" target="_blank" />
 						}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
 						{brand.domain}
@@ -475,7 +475,7 @@ function ConnectionRow({
 			<Button
 				render={<a href={docsHref} rel="noopener noreferrer" target="_blank" />}
 				size="sm"
-				variant="outline"
+				variant="ghost"
 			>
 				<HugeiconsIcon className="size-4" icon={LinkSquare01Icon} />
 				Setup docs

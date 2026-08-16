@@ -216,7 +216,7 @@ export function MeetingsSettings() {
 				<Button
 					onClick={() => setReloadKey((k) => k + 1)}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					Retry
 				</Button>

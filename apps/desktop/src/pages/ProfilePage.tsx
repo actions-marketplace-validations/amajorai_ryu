@@ -24,7 +24,7 @@ export default function ProfilePage() {
 					</TabsList>
 				</Tabs>
 			</div>
-			<div className="min-h-0 flex-1 overflow-y-auto pr-2">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto pr-2">
 				{section === "profile" ? <ProfileTab /> : <StatsTab />}
 			</div>
 		</div>

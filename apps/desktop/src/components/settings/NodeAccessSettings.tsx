@@ -347,7 +347,7 @@ export function NodeAccessSettings() {
 							disabled={!token}
 							onClick={() => setRevealed((v) => !v)}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							{revealed ? "Hide" : "Show"}
 						</Button>
@@ -355,7 +355,7 @@ export function NodeAccessSettings() {
 							disabled={!token}
 							onClick={() => void copyToken()}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							Copy
 						</Button>
@@ -373,7 +373,7 @@ export function NodeAccessSettings() {
 								disabled={busy || source === "none"}
 								onClick={() => void rotate()}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Rotate token
 							</Button>

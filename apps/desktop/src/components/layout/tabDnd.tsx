@@ -10,6 +10,8 @@ import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 /** Marker dataTransfer type so drop targets can tell a tab drag from an
     external drag (files, text) without reading the payload mid-drag. */
 export const TAB_DRAG_MIME = "application/x-ryu-tab";
+/** A chat tab's durable identity, copied into another chat as an @ reference. */
+export const CHAT_REFERENCE_DRAG_MIME = "application/x-ryu-chat-reference";
 
 // Drag state for a tab chip/row, shared by the title-bar strip, the vertical
 // sidebar list, and the content-area split drop zones. `draggingId` is the tab
@@ -107,6 +109,7 @@ export function TabDndProvider({ children }: { children: ReactNode }) {
     before/after side: "x" for the horizontal strip, "y" for vertical rows. */
 export function useTabDragProps(tabId: string, axis: "x" | "y" = "x") {
 	const dnd = useTabDnd();
+	const { tabs } = useTabsContext();
 	const isDragging = dnd.draggingId === tabId;
 	const isOver = dnd.overId === tabId && dnd.draggingId !== tabId;
 	return {
@@ -116,9 +119,16 @@ export function useTabDragProps(tabId: string, axis: "x" | "y" = "x") {
 		dragHandlers: {
 			draggable: true,
 			onDragStart: (e: DragEvent) => {
-				e.dataTransfer.effectAllowed = "move";
+				e.dataTransfer.effectAllowed = "copyMove";
 				e.dataTransfer.setData("text/plain", tabId);
 				e.dataTransfer.setData(TAB_DRAG_MIME, tabId);
+				const tab = tabs.find((candidate) => candidate.id === tabId);
+				if (tab?.conversationId) {
+					e.dataTransfer.setData(
+						CHAT_REFERENCE_DRAG_MIME,
+						JSON.stringify({ id: tab.conversationId, label: tab.title })
+					);
+				}
 				dnd.onStart(tabId);
 			},
 			onDragEnd: () => dnd.onEnd(),

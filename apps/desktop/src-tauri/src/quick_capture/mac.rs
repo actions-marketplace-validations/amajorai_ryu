@@ -32,13 +32,13 @@ use std::sync::mpsc::Sender;
 
 use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-use objc::{class, msg_send, sel, sel_impl};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
-	CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-	CGEventType, EventField,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventType, EventField,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use objc::{class, msg_send, sel, sel_impl};
 
 use super::gesture::{Detector, Input, Side, Trigger};
 use super::CaptureContext;
@@ -71,18 +71,18 @@ static SYNTHESIZING: AtomicBool = AtomicBool::new(false);
 static LISTENING: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-	/// The tap's own `CFMachPortRef`, so the callback can re-enable itself after a
-	/// `TapDisabled*`. Thread-local because the callback only ever runs on the
-	/// thread that created the tap, and a `CFMachPort` may not leave it.
-	static TAP_PORT: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+    /// The tap's own `CFMachPortRef`, so the callback can re-enable itself after a
+    /// `TapDisabled*`. Thread-local because the callback only ever runs on the
+    /// thread that created the tap, and a `CFMachPort` may not leave it.
+    static TAP_PORT: std::cell::Cell<*mut c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
 pub fn set_listening(on: bool) {
-	LISTENING.store(on, Ordering::SeqCst);
+    LISTENING.store(on, Ordering::SeqCst);
 }
 
 pub fn is_listening() -> bool {
-	LISTENING.load(Ordering::SeqCst)
+    LISTENING.load(Ordering::SeqCst)
 }
 
 /// Create the event tap on its own thread and stream triggers to `tx`.
@@ -91,9 +91,9 @@ pub fn is_listening() -> bool {
 /// Monitoring grant surfaces as an error to the caller instead of a thread that
 /// quietly does nothing. The thread then owns a CFRunLoop for the process's life.
 pub fn spawn_listener(tx: Sender<Trigger>) -> Result<(), String> {
-	let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
-	std::thread::Builder::new()
+    std::thread::Builder::new()
 		.name("ryu-quick-capture".into())
 		.spawn(move || {
 			// The detector lives on this thread and is only ever touched by the
@@ -154,94 +154,94 @@ pub fn spawn_listener(tx: Sender<Trigger>) -> Result<(), String> {
 		})
 		.map_err(|e| format!("couldn't start the Quick Capture listener thread: {e}"))?;
 
-	ready_rx
-		.recv()
-		.map_err(|_| "the Quick Capture listener stopped before it started".to_string())?
+    ready_rx
+        .recv()
+        .map_err(|_| "the Quick Capture listener stopped before it started".to_string())?
 }
 
 /// Handle one tapped event. Kept tiny — see the module docs on tap timeouts.
 fn on_event(
-	detector: &std::cell::RefCell<Detector>,
-	tx: &Sender<Trigger>,
-	event_type: CGEventType,
-	event: &CGEvent,
+    detector: &std::cell::RefCell<Detector>,
+    tx: &Sender<Trigger>,
+    event_type: CGEventType,
+    event: &CGEvent,
 ) {
-	// The system disabled us (a slow callback, or the user's security settings).
-	// Re-enabling is the only way back; the detector is reset because events were
-	// missed and half a gesture may be stale. Handled BEFORE the `LISTENING` check
-	// so a tap that is momentarily off still recovers.
-	if matches!(
-		event_type,
-		CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-	) {
-		detector.borrow_mut().reset();
-		// Re-enable, or the gesture is dead for the rest of the session.
-		TAP_PORT.with(|port| {
-			let port = port.get();
-			if !port.is_null() {
-				unsafe { CGEventTapEnable(port, true) };
-			}
-		});
-		return;
-	}
+    // The system disabled us (a slow callback, or the user's security settings).
+    // Re-enabling is the only way back; the detector is reset because events were
+    // missed and half a gesture may be stale. Handled BEFORE the `LISTENING` check
+    // so a tap that is momentarily off still recovers.
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        detector.borrow_mut().reset();
+        // Re-enable, or the gesture is dead for the rest of the session.
+        TAP_PORT.with(|port| {
+            let port = port.get();
+            if !port.is_null() {
+                unsafe { CGEventTapEnable(port, true) };
+            }
+        });
+        return;
+    }
 
-	if !is_listening() || SYNTHESIZING.load(Ordering::SeqCst) {
-		return;
-	}
+    if !is_listening() || SYNTHESIZING.load(Ordering::SeqCst) {
+        return;
+    }
 
-	let now_ms = now_millis();
-	let flags = event.get_flags();
-	let input = match event_type {
-		// Any real key press. Modifier presses arrive as FlagsChanged, never here,
-		// so this is unambiguously "a character was typed".
-		CGEventType::KeyDown => Some(Input::KeyDown),
-		CGEventType::FlagsChanged => {
-			let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-			match Side::from_keycode(keycode) {
-				Some(side) => {
-					// FlagsChanged does not say "up" or "down" — the Shift bit in the
-					// post-change flags does. Set = this event pressed it.
-					if flags.contains(CGEventFlags::CGEventFlagShift) {
-						Some(Input::ShiftDown {
-							side,
-							other_modifiers: has_other_modifiers(flags),
-						})
-					} else {
-						Some(Input::ShiftUp { side })
-					}
-				}
-				// Command/Option/Control/Fn/CapsLock moving is what breaks a chord
-				// out of being a capture.
-				None => Some(Input::OtherModifier),
-			}
-		}
-		_ => None,
-	};
+    let now_ms = now_millis();
+    let flags = event.get_flags();
+    let input = match event_type {
+        // Any real key press. Modifier presses arrive as FlagsChanged, never here,
+        // so this is unambiguously "a character was typed".
+        CGEventType::KeyDown => Some(Input::KeyDown),
+        CGEventType::FlagsChanged => {
+            let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+            match Side::from_keycode(keycode) {
+                Some(side) => {
+                    // FlagsChanged does not say "up" or "down" — the Shift bit in the
+                    // post-change flags does. Set = this event pressed it.
+                    if flags.contains(CGEventFlags::CGEventFlagShift) {
+                        Some(Input::ShiftDown {
+                            side,
+                            other_modifiers: has_other_modifiers(flags),
+                        })
+                    } else {
+                        Some(Input::ShiftUp { side })
+                    }
+                }
+                // Command/Option/Control/Fn/CapsLock moving is what breaks a chord
+                // out of being a capture.
+                None => Some(Input::OtherModifier),
+            }
+        }
+        _ => None,
+    };
 
-	let Some(input) = input else {
-		return;
-	};
-	if let Some(trigger) = detector.borrow_mut().feed(now_ms, input) {
-		// A full channel means the worker is still busy with the previous capture;
-		// dropping is correct (the user gets one capture, not a queue of them).
-		let _ = tx.send(trigger);
-	}
+    let Some(input) = input else {
+        return;
+    };
+    if let Some(trigger) = detector.borrow_mut().feed(now_ms, input) {
+        // A full channel means the worker is still busy with the previous capture;
+        // dropping is correct (the user gets one capture, not a queue of them).
+        let _ = tx.send(trigger);
+    }
 }
 
 fn has_other_modifiers(flags: CGEventFlags) -> bool {
-	flags.intersects(
-		CGEventFlags::CGEventFlagCommand
-			| CGEventFlags::CGEventFlagControl
-			| CGEventFlags::CGEventFlagAlternate
-			| CGEventFlags::CGEventFlagSecondaryFn,
-	)
+    flags.intersects(
+        CGEventFlags::CGEventFlagCommand
+            | CGEventFlags::CGEventFlagControl
+            | CGEventFlags::CGEventFlagAlternate
+            | CGEventFlags::CGEventFlagSecondaryFn,
+    )
 }
 
 fn now_millis() -> u64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.map(|d| d.as_millis() as u64)
-		.unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ── selection + context ─────────────────────────────────────────────────────
@@ -253,85 +253,85 @@ fn now_millis() -> u64 {
 /// UIs frequently do not publish it), so the fallback synthesizes ⌘C and watches
 /// the pasteboard, restoring the previous clipboard afterwards.
 pub fn read_selection() -> Option<String> {
-	if let Some(text) = ax_selected_text() {
-		let trimmed = text.trim();
-		if !trimmed.is_empty() {
-			return Some(trimmed.to_string());
-		}
-	}
-	copy_selection_via_clipboard()
+    if let Some(text) = ax_selected_text() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    copy_selection_via_clipboard()
 }
 
 /// Where the capture came from: the frontmost app, its focused window title, and
 /// the document URL when the app publishes one (browsers do).
 pub fn capture_context() -> CaptureContext {
-	CaptureContext {
-		app: frontmost_app_name(),
-		title: ax_focused_window_string("AXTitle"),
-		url: ax_focused_window_string("AXDocument").filter(|u| u.starts_with("http")),
-	}
+    CaptureContext {
+        app: frontmost_app_name(),
+        title: ax_focused_window_string("AXTitle"),
+        url: ax_focused_window_string("AXDocument").filter(|u| u.starts_with("http")),
+    }
 }
 
 fn ax_selected_text() -> Option<String> {
-	unsafe {
-		let system = AXUIElementCreateSystemWide();
-		if system.is_null() {
-			return None;
-		}
-		let focused = ax_copy_element(system, "AXFocusedUIElement");
-		CFRelease(system as CFTypeRef);
-		let focused = focused?;
-		let text = ax_copy_string(focused, "AXSelectedText");
-		CFRelease(focused as CFTypeRef);
-		text
-	}
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let focused = ax_copy_element(system, "AXFocusedUIElement");
+        CFRelease(system as CFTypeRef);
+        let focused = focused?;
+        let text = ax_copy_string(focused, "AXSelectedText");
+        CFRelease(focused as CFTypeRef);
+        text
+    }
 }
 
 fn ax_focused_window_string(attribute: &str) -> Option<String> {
-	unsafe {
-		let system = AXUIElementCreateSystemWide();
-		if system.is_null() {
-			return None;
-		}
-		let app = ax_copy_element(system, "AXFocusedApplication");
-		CFRelease(system as CFTypeRef);
-		let app = app?;
-		let window = ax_copy_element(app, "AXFocusedWindow");
-		CFRelease(app as CFTypeRef);
-		let window = window?;
-		let value = ax_copy_string(window, attribute);
-		CFRelease(window as CFTypeRef);
-		value
-	}
+    unsafe {
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let app = ax_copy_element(system, "AXFocusedApplication");
+        CFRelease(system as CFTypeRef);
+        let app = app?;
+        let window = ax_copy_element(app, "AXFocusedWindow");
+        CFRelease(app as CFTypeRef);
+        let window = window?;
+        let value = ax_copy_string(window, attribute);
+        CFRelease(window as CFTypeRef);
+        value
+    }
 }
 
 /// Copy an AX attribute that is itself an element (returns a +1 reference the
 /// caller must `CFRelease`).
 unsafe fn ax_copy_element(element: AXUIElementRef, attribute: &str) -> Option<AXUIElementRef> {
-	let key = CFString::new(attribute);
-	let mut value: CFTypeRef = std::ptr::null();
-	let err = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
-	if err != 0 || value.is_null() {
-		return None;
-	}
-	Some(value as AXUIElementRef)
+    let key = CFString::new(attribute);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
+    if err != 0 || value.is_null() {
+        return None;
+    }
+    Some(value as AXUIElementRef)
 }
 
 /// Copy an AX attribute that is a string. Returns `None` (rather than a garbled
 /// value) when the attribute exists but is not a CFString.
 unsafe fn ax_copy_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
-	let key = CFString::new(attribute);
-	let mut value: CFTypeRef = std::ptr::null();
-	let err = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
-	if err != 0 || value.is_null() {
-		return None;
-	}
-	if CFGetTypeID(value) != CFStringGetTypeID() {
-		CFRelease(value);
-		return None;
-	}
-	let s = CFString::wrap_under_create_rule(value as CFStringRef).to_string();
-	Some(s)
+    let key = CFString::new(attribute);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, key.as_concrete_TypeRef(), &mut value);
+    if err != 0 || value.is_null() {
+        return None;
+    }
+    if CFGetTypeID(value) != CFStringGetTypeID() {
+        CFRelease(value);
+        return None;
+    }
+    let s = CFString::wrap_under_create_rule(value as CFStringRef).to_string();
+    Some(s)
 }
 
 /// The ⌘C fallback: remember the pasteboard, synthesize the copy, wait for the
@@ -340,142 +340,140 @@ unsafe fn ax_copy_string(element: AXUIElementRef, attribute: &str) -> Option<Str
 /// Restoring matters — Quick Capture must not eat whatever the user had on their
 /// clipboard just because they tapped Shift twice.
 fn copy_selection_via_clipboard() -> Option<String> {
-	let previous = pasteboard_string();
-	let before = pasteboard_change_count();
+    let previous = pasteboard_string();
+    let before = pasteboard_change_count();
 
-	SYNTHESIZING.store(true, Ordering::SeqCst);
-	let posted = post_command_c();
-	// Released only after the wait, so the tap ignores the whole synthetic burst.
-	let copied = if posted {
-		wait_for_pasteboard_change(before)
-	} else {
-		None
-	};
-	SYNTHESIZING.store(false, Ordering::SeqCst);
+    SYNTHESIZING.store(true, Ordering::SeqCst);
+    let posted = post_command_c();
+    // Released only after the wait, so the tap ignores the whole synthetic burst.
+    let copied = if posted {
+        wait_for_pasteboard_change(before)
+    } else {
+        None
+    };
+    SYNTHESIZING.store(false, Ordering::SeqCst);
 
-	// Put the user's clipboard back regardless of whether the copy produced
-	// anything — a failed capture must still be invisible.
-	if let Some(previous) = previous {
-		set_pasteboard_string(&previous);
-	}
+    // Put the user's clipboard back regardless of whether the copy produced
+    // anything — a failed capture must still be invisible.
+    if let Some(previous) = previous {
+        set_pasteboard_string(&previous);
+    }
 
-	copied.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    copied
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn post_command_c() -> bool {
-	// A fresh source per event: `CGEventSource` is cheap and this avoids depending
-	// on whether the binding exposes a retaining `Clone`.
-	let Ok(down_source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-		return false;
-	};
-	let Ok(down) = CGEvent::new_keyboard_event(down_source, KEYCODE_C, true) else {
-		return false;
-	};
-	down.set_flags(CGEventFlags::CGEventFlagCommand);
-	down.post(CGEventTapLocation::HID);
+    // A fresh source per event: `CGEventSource` is cheap and this avoids depending
+    // on whether the binding exposes a retaining `Clone`.
+    let Ok(down_source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return false;
+    };
+    let Ok(down) = CGEvent::new_keyboard_event(down_source, KEYCODE_C, true) else {
+        return false;
+    };
+    down.set_flags(CGEventFlags::CGEventFlagCommand);
+    down.post(CGEventTapLocation::HID);
 
-	let Ok(up_source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-		return false;
-	};
-	let Ok(up) = CGEvent::new_keyboard_event(up_source, KEYCODE_C, false) else {
-		return false;
-	};
-	up.set_flags(CGEventFlags::CGEventFlagCommand);
-	up.post(CGEventTapLocation::HID);
-	true
+    let Ok(up_source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        return false;
+    };
+    let Ok(up) = CGEvent::new_keyboard_event(up_source, KEYCODE_C, false) else {
+        return false;
+    };
+    up.set_flags(CGEventFlags::CGEventFlagCommand);
+    up.post(CGEventTapLocation::HID);
+    true
 }
 
 fn wait_for_pasteboard_change(before: i64) -> Option<String> {
-	let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COPY_WAIT_MS);
-	while std::time::Instant::now() < deadline {
-		std::thread::sleep(std::time::Duration::from_millis(COPY_POLL_MS));
-		if pasteboard_change_count() != before {
-			return pasteboard_string();
-		}
-	}
-	None
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(COPY_WAIT_MS);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(COPY_POLL_MS));
+        if pasteboard_change_count() != before {
+            return pasteboard_string();
+        }
+    }
+    None
 }
 
 fn frontmost_app_name() -> Option<String> {
-	unsafe {
-		let workspace: *mut objc::runtime::Object =
-			msg_send![class!(NSWorkspace), sharedWorkspace];
-		if workspace.is_null() {
-			return None;
-		}
-		let app: *mut objc::runtime::Object = msg_send![workspace, frontmostApplication];
-		if app.is_null() {
-			return None;
-		}
-		let name: *mut objc::runtime::Object = msg_send![app, localizedName];
-		ns_string_to_rust(name)
-	}
+    unsafe {
+        let workspace: *mut objc::runtime::Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut objc::runtime::Object = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let name: *mut objc::runtime::Object = msg_send![app, localizedName];
+        ns_string_to_rust(name)
+    }
 }
 
 fn pasteboard_change_count() -> i64 {
-	unsafe {
-		let pb: *mut objc::runtime::Object =
-			msg_send![class!(NSPasteboard), generalPasteboard];
-		if pb.is_null() {
-			return 0;
-		}
-		msg_send![pb, changeCount]
-	}
+    unsafe {
+        let pb: *mut objc::runtime::Object = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb.is_null() {
+            return 0;
+        }
+        msg_send![pb, changeCount]
+    }
 }
 
 fn pasteboard_string() -> Option<String> {
-	unsafe {
-		let pb: *mut objc::runtime::Object =
-			msg_send![class!(NSPasteboard), generalPasteboard];
-		if pb.is_null() {
-			return None;
-		}
-		let ty = ns_string("public.utf8-plain-text");
-		let s: *mut objc::runtime::Object = msg_send![pb, stringForType: ty];
-		ns_string_to_rust(s)
-	}
+    unsafe {
+        let pb: *mut objc::runtime::Object = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb.is_null() {
+            return None;
+        }
+        let ty = ns_string("public.utf8-plain-text");
+        let s: *mut objc::runtime::Object = msg_send![pb, stringForType: ty];
+        ns_string_to_rust(s)
+    }
 }
 
 fn set_pasteboard_string(text: &str) {
-	unsafe {
-		let pb: *mut objc::runtime::Object =
-			msg_send![class!(NSPasteboard), generalPasteboard];
-		if pb.is_null() {
-			return;
-		}
-		let _: i64 = msg_send![pb, clearContents];
-		let value = ns_string(text);
-		let ty = ns_string("public.utf8-plain-text");
-		let _: bool = msg_send![pb, setString: value forType: ty];
-	}
+    unsafe {
+        let pb: *mut objc::runtime::Object = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb.is_null() {
+            return;
+        }
+        let _: i64 = msg_send![pb, clearContents];
+        let value = ns_string(text);
+        let ty = ns_string("public.utf8-plain-text");
+        let _: bool = msg_send![pb, setString: value forType: ty];
+    }
 }
 
 unsafe fn ns_string(s: &str) -> *mut objc::runtime::Object {
-	let cls = class!(NSString);
-	let alloc: *mut objc::runtime::Object = msg_send![cls, alloc];
-	let bytes = s.as_ptr() as *const c_void;
-	// 4 == NSUTF8StringEncoding.
-	let obj: *mut objc::runtime::Object = msg_send![
-		alloc,
-		initWithBytes: bytes
-		length: s.len()
-		encoding: 4usize
-	];
-	obj
+    let cls = class!(NSString);
+    let alloc: *mut objc::runtime::Object = msg_send![cls, alloc];
+    let bytes = s.as_ptr() as *const c_void;
+    // 4 == NSUTF8StringEncoding.
+    let obj: *mut objc::runtime::Object = msg_send![
+        alloc,
+        initWithBytes: bytes
+        length: s.len()
+        encoding: 4usize
+    ];
+    obj
 }
 
 unsafe fn ns_string_to_rust(s: *mut objc::runtime::Object) -> Option<String> {
-	if s.is_null() {
-		return None;
-	}
-	let bytes: *const std::os::raw::c_char = msg_send![s, UTF8String];
-	if bytes.is_null() {
-		return None;
-	}
-	std::ffi::CStr::from_ptr(bytes)
-		.to_str()
-		.ok()
-		.map(str::to_string)
+    if s.is_null() {
+        return None;
+    }
+    let bytes: *const std::os::raw::c_char = msg_send![s, UTF8String];
+    if bytes.is_null() {
+        return None;
+    }
+    std::ffi::CStr::from_ptr(bytes)
+        .to_str()
+        .ok()
+        .map(str::to_string)
 }
 
 // ── raw framework bindings ──────────────────────────────────────────────────
@@ -487,83 +485,83 @@ type AXUIElementRef = *const c_void;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-	fn AXUIElementCreateSystemWide() -> AXUIElementRef;
-	fn AXUIElementCopyAttributeValue(
-		element: AXUIElementRef,
-		attribute: CFStringRef,
-		value: *mut CFTypeRef,
-	) -> i32;
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-	fn CFGetTypeID(cf: CFTypeRef) -> usize;
-	fn CFStringGetTypeID() -> usize;
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFStringGetTypeID() -> usize;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-	/// Re-arm a tap the system disabled. Takes the tap's `CFMachPortRef`.
-	fn CGEventTapEnable(tap: *mut c_void, enable: bool);
+    /// Re-arm a tap the system disabled. Takes the tap's `CFMachPortRef`.
+    fn CGEventTapEnable(tap: *mut c_void, enable: bool);
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	/// The one thing about this module that cannot be unit-tested in CI: whether
-	/// the OS actually hands us a keyboard event tap. It depends on a TCC grant
-	/// (Input Monitoring) held by the *running binary*, which a `cargo test`
-	/// harness does not have — so this is `#[ignore]`d rather than asserted.
-	///
-	/// Run it deliberately, after granting Input Monitoring to your terminal:
-	///
-	/// ```text
-	/// cargo test -p desktop --lib -- --ignored tap_can_be_created
-	/// ```
-	///
-	/// A pass means `CGEventTapCreate` returned non-null and the mask/placement
-	/// arguments are accepted — the failure mode the gesture is most prone to and
-	/// the one that otherwise looks identical to a broken detector.
-	#[test]
-	#[ignore = "requires the Input Monitoring TCC grant for the test binary"]
-	fn tap_can_be_created() {
-		let tap = CGEventTap::new(
-			CGEventTapLocation::HID,
-			CGEventTapPlacement::HeadInsertEventTap,
-			CGEventTapOptions::ListenOnly,
-			vec![CGEventType::KeyDown, CGEventType::FlagsChanged],
-			|_proxy, _etype, _event| None,
-		);
-		assert!(
-			tap.is_ok(),
-			"CGEventTapCreate returned null — grant Input Monitoring to the process \
+    /// The one thing about this module that cannot be unit-tested in CI: whether
+    /// the OS actually hands us a keyboard event tap. It depends on a TCC grant
+    /// (Input Monitoring) held by the *running binary*, which a `cargo test`
+    /// harness does not have — so this is `#[ignore]`d rather than asserted.
+    ///
+    /// Run it deliberately, after granting Input Monitoring to your terminal:
+    ///
+    /// ```text
+    /// cargo test -p desktop --lib -- --ignored tap_can_be_created
+    /// ```
+    ///
+    /// A pass means `CGEventTapCreate` returned non-null and the mask/placement
+    /// arguments are accepted — the failure mode the gesture is most prone to and
+    /// the one that otherwise looks identical to a broken detector.
+    #[test]
+    #[ignore = "requires the Input Monitoring TCC grant for the test binary"]
+    fn tap_can_be_created() {
+        let tap = CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![CGEventType::KeyDown, CGEventType::FlagsChanged],
+            |_proxy, _etype, _event| None,
+        );
+        assert!(
+            tap.is_ok(),
+            "CGEventTapCreate returned null — grant Input Monitoring to the process \
 			 running this test in System Settings › Privacy & Security"
-		);
-	}
+        );
+    }
 
-	/// The pasteboard round-trip the ⌘C fallback depends on. Needs no permission:
-	/// reading and writing the general pasteboard is ungated.
-	#[test]
-	fn pasteboard_round_trips_and_bumps_its_change_count() {
-		let original = pasteboard_string();
-		let before = pasteboard_change_count();
+    /// The pasteboard round-trip the ⌘C fallback depends on. Needs no permission:
+    /// reading and writing the general pasteboard is ungated.
+    #[test]
+    fn pasteboard_round_trips_and_bumps_its_change_count() {
+        let original = pasteboard_string();
+        let before = pasteboard_change_count();
 
-		set_pasteboard_string("ryu-quick-capture-test");
-		assert_eq!(
-			pasteboard_string().as_deref(),
-			Some("ryu-quick-capture-test")
-		);
-		assert_ne!(
-			pasteboard_change_count(),
-			before,
-			"changeCount must move — the ⌘C fallback polls exactly this to know a copy landed"
-		);
+        set_pasteboard_string("ryu-quick-capture-test");
+        assert_eq!(
+            pasteboard_string().as_deref(),
+            Some("ryu-quick-capture-test")
+        );
+        assert_ne!(
+            pasteboard_change_count(),
+            before,
+            "changeCount must move — the ⌘C fallback polls exactly this to know a copy landed"
+        );
 
-		// Leave the developer's clipboard as we found it, the same contract
-		// `copy_selection_via_clipboard` owes the user.
-		if let Some(original) = original {
-			set_pasteboard_string(&original);
-		}
-	}
+        // Leave the developer's clipboard as we found it, the same contract
+        // `copy_selection_via_clipboard` owes the user.
+        if let Some(original) = original {
+            set_pasteboard_string(&original);
+        }
+    }
 }

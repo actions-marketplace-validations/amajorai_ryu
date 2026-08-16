@@ -10,6 +10,7 @@ import { cn } from "@ryu/ui/lib/utils";
 import { useReducedMotion } from "motion/react";
 import {
 	type ComponentPropsWithRef,
+	type ReactNode,
 	type Ref,
 	useCallback,
 	useEffect,
@@ -90,6 +91,15 @@ export interface MessageScrollerProps extends ComponentPropsWithRef<"div"> {
 	busy?: boolean;
 	/** Adds a compact rail for navigating between rendered Message rows. */
 	navigation?: "rail";
+	/**
+	 * Rich rail items supplied by the consumer instead of the auto-derived
+	 * message previews. Each item's `id` is matched to a rendered row carrying
+	 * `data-message-id={item.id}` for scroll targeting. When provided, the
+	 * default text-preview derivation is skipped.
+	 */
+	railItems?: PreviewRailItem[];
+	/** Custom preview card for the rail. Receives the item being hovered. */
+	renderPreview?: (item: PreviewRailItem) => ReactNode;
 	/** Accessible label for the optional message navigation rail. */
 	navigationLabel?: string;
 	viewportClassName?: string;
@@ -114,6 +124,8 @@ export function MessageScroller({
 	label = "Conversation",
 	busy,
 	navigation,
+	railItems: externalRailItems,
+	renderPreview,
 	navigationLabel = "Message navigation",
 	viewportClassName,
 	contentClassName,
@@ -222,6 +234,38 @@ export function MessageScroller({
 			return;
 		}
 
+		// Consumer-supplied rail: use the items verbatim and resolve each row's
+		// scroll target by its `data-message-id`. The rich preview (files, agent,
+		// description) is the caller's business; this only needs the DOM anchor.
+		if (externalRailItems) {
+			const targets = new Map<string, HTMLElement>();
+			for (const item of externalRailItems) {
+				const el = content.querySelector<HTMLElement>(
+					`[data-message-id="${CSS.escape(item.id)}"]`
+				);
+				if (el) {
+					targets.set(item.id, el);
+				}
+			}
+			railTargetsRef.current = targets;
+			setRailItems((current) => {
+				const unchanged =
+					current.length === externalRailItems.length &&
+					current.every(
+						(item, index) =>
+							item.id === externalRailItems[index]?.id &&
+							item.label === externalRailItems[index]?.label &&
+							item.description === externalRailItems[index]?.description
+					);
+				return unchanged ? current : externalRailItems;
+			});
+			setRailOverflowing(
+				viewport.scrollHeight > viewport.clientHeight + 1 &&
+					externalRailItems.length > 1
+			);
+			return;
+		}
+
 		const messages = Array.from(
 			content.querySelectorAll<HTMLElement>('[data-slot="message"]')
 		);
@@ -267,7 +311,7 @@ export function MessageScroller({
 		setRailOverflowing(
 			viewport.scrollHeight > viewport.clientHeight + 1 && messages.length > 1
 		);
-	}, [navigation]);
+	}, [externalRailItems, navigation]);
 
 	const scheduleRailSync = useCallback(() => {
 		if (navigation !== "rail") {
@@ -449,7 +493,7 @@ export function MessageScroller({
 		<section
 			aria-label={label}
 			className={cn(
-				"h-full overflow-y-auto overscroll-contain outline-none [overflow-anchor:none] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+				"scroll-fade h-full overflow-y-auto overscroll-contain outline-none [overflow-anchor:none] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
 				navigation === "rail"
 					? "[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 					: "[scrollbar-gutter:stable]",
@@ -506,7 +550,11 @@ export function MessageScroller({
 					items={railOverflowing ? railItems : []}
 					label={navigationLabel}
 					onItemSelect={scrollToRailItem}
-					previewClassName="mr-1 w-64 max-w-full [&_[data-slot=preview-rail-card]]:h-20 [&_[data-slot=preview-rail-card]]:overflow-hidden [&_[data-slot=preview-rail-card]]:p-3 [&_[data-slot=preview-rail-title]]:line-clamp-1 [&_[data-slot=preview-rail-title]]:text-xs [&_[data-slot=preview-rail-title]]:leading-4 [&_[data-slot=preview-rail-description]]:line-clamp-2 [&_[data-slot=preview-rail-description]]:text-xs [&_[data-slot=preview-rail-description]]:leading-4"
+					previewClassName={
+						renderPreview
+							? "mr-1 w-72 max-w-full"
+							: "mr-1 w-64 max-w-full [&_[data-slot=preview-rail-card]]:h-20 [&_[data-slot=preview-rail-card]]:overflow-hidden [&_[data-slot=preview-rail-card]]:p-3 [&_[data-slot=preview-rail-title]]:line-clamp-1 [&_[data-slot=preview-rail-title]]:text-xs [&_[data-slot=preview-rail-title]]:leading-4 [&_[data-slot=preview-rail-description]]:line-clamp-2 [&_[data-slot=preview-rail-description]]:text-xs [&_[data-slot=preview-rail-description]]:leading-4"
+					}
 					previewContainerClassName="right-8 left-3"
 					previewSide="before"
 					railClassName={cn(
@@ -516,6 +564,7 @@ export function MessageScroller({
 							: "pointer-events-none opacity-0",
 						railClassName
 					)}
+					renderPreview={renderPreview}
 				>
 					{viewport}
 				</PreviewRail>

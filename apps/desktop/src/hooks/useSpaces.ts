@@ -20,6 +20,7 @@ import {
 	fetchSpaces,
 	type RetrievalMode,
 	type RetrievalModeChange,
+	type RetrievalModeProgress,
 	type Space,
 	type SpaceDocument,
 	type SpaceDocumentContent,
@@ -99,7 +100,11 @@ export interface UseSpacesResult {
 	 */
 	setRetrievalMode: (
 		id: string,
-		mode: RetrievalMode
+		mode: RetrievalMode,
+		options?: {
+			onProgress?: (progress: RetrievalModeProgress) => void;
+			signal?: AbortSignal;
+		}
 	) => Promise<RetrievalModeChange>;
 	/** Set or clear a Space glyph. */
 	setSpaceIcon: (id: string, icon: GlyphValue) => Promise<void>;
@@ -293,8 +298,13 @@ export function useSpaces(): UseSpacesResult {
 	);
 
 	const setRetrievalMode = useCallback(
-		async (id: string, mode: RetrievalMode) => {
-			const change = await apiSetSpaceRetrievalMode({ url, token }, id, mode);
+		async (id: string, mode: RetrievalMode, options = {}) => {
+			const change = await apiSetSpaceRetrievalMode(
+				{ url, token },
+				id,
+				mode,
+				options
+			);
 			// Patch in place rather than `reload()`: the switch changes no document
 			// counts, and a full refetch would blank the detail pane mid-interaction.
 			// `change.mode` (Core's echo), never the requested `mode` — the list must

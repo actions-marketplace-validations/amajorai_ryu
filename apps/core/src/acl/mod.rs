@@ -874,7 +874,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod enforcement_tests {
     use super::*;

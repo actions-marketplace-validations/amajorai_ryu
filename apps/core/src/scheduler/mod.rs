@@ -589,7 +589,8 @@ async fn apply_due_update(now: DateTime<Utc>) {
         &ryu_downloads::DownloadCenter::new(reqwest::Client::new()),
         &pending.asset,
     )
-    .await {
+    .await
+    {
         Ok(_) => tracing::info!("deferred update: applied"),
         Err(e) => tracing::error!("deferred update: apply failed: {e}"),
     }

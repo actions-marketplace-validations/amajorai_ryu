@@ -10,7 +10,7 @@ use crate::{error::ProviderError, quota::ProviderQuotas};
 
 use super::{
     chat_completions_url, check_response_status, check_stream_status, discover_openai_models,
-    models_from_response, Provider,
+    embeddings_url, models_from_response, rerank_url, Provider,
 };
 
 /// Server-side options ryu injects into every OpenRouter request. These map to
@@ -257,6 +257,66 @@ impl Provider for OpenRouterProvider {
                 retry_after: None,
                 reset_at: None,
             }))
+        })
+    }
+
+    fn embed<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let attempts = self.keys.len().max(1);
+            let mut last_err = None;
+            for _ in 0..attempts {
+                let key = self.next_key();
+                let resp = self
+                    .client
+                    .post(embeddings_url(&self.base_url))
+                    .bearer_auth(&key)
+                    .header("HTTP-Referer", &self.site_url)
+                    .header("X-Title", &self.site_name)
+                    .json(&payload)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        ProviderError::Provider(format!("openrouter request failed: {e}"))
+                    })?;
+                match check_response_status(resp, "openrouter", Some(&self.quota)).await {
+                    Err(e @ ProviderError::RateLimited { .. }) if attempts > 1 => {
+                        last_err = Some(e);
+                    }
+                    result => return result,
+                }
+            }
+            Err(last_err.unwrap_or_else(|| {
+                ProviderError::Provider("openrouter embeddings request was rate limited".to_owned())
+            }))
+        })
+    }
+
+    fn rerank<'a>(
+        &'a self,
+        model: &'a str,
+        body: &'a Value,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut payload = body.clone();
+            payload["model"] = Value::String(model.to_owned());
+            let key = self.next_key();
+            let resp = self
+                .client
+                .post(rerank_url(&self.base_url))
+                .bearer_auth(&key)
+                .header("HTTP-Referer", &self.site_url)
+                .header("X-Title", &self.site_name)
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| ProviderError::Provider(format!("openrouter request failed: {e}")))?;
+            check_response_status(resp, "openrouter", Some(&self.quota)).await
         })
     }
 

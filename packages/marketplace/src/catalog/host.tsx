@@ -37,6 +37,7 @@ import type {
 	VersionSnapshot,
 } from "./types.ts";
 import { evaluateCompatibility } from "./types.ts";
+import type { SkillPacksState } from "./pack-types.ts";
 
 /** Which realm an affordance target belongs to (drives the web deep-link page). */
 export type CatalogRealm = "app" | "model" | "skill";
@@ -285,6 +286,14 @@ export interface CatalogHost {
 	usePluginSettingsOpener?: () => PluginSettingsOpener;
 	/** The surface's Skills catalog hook (called at component top level). */
 	useSkillsCatalog: (initialQuery: string) => SkillsCatalogState;
+	/** The surface's Skill **packs** hook (called at component top level).
+	 *
+	 *  Optional, and its absence is meaningful rather than cosmetic: a surface
+	 *  with no pack feed (a read-only web host before packs federate) omits it and
+	 *  the Packs shelf never renders — an empty shelf would be a control that
+	 *  does nothing. A surface that CAN resolve packs returns one; desktop backs
+	 *  it with Core's `/api/skills/packs`, web with the federated mirror. */
+	useSkillPacks?: () => SkillPacksState;
 }
 
 const CatalogHostContext = createContext<CatalogHost | null>(null);

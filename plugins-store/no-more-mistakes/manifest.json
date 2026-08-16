@@ -2,6 +2,7 @@
   "id": "@ryu/no-more-mistakes",
   "name": "No More Mistakes",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Notices when you correct the agent, writes the lesson down as a one-line rule in a Space, and hands every later session that rule list before the first word is generated — so a mistake you have already fixed once stops coming back. Each rule is an ordinary Space document you can read, edit or delete, and `/mistakes` lists, adds and forgets them from the chat.",
   "tagline": "Correct it once, not every week",
   "keywords": ["memory", "learning", "mistakes", "rules", "quality"],

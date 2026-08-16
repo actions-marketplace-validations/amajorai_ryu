@@ -28,16 +28,22 @@ export interface HistoryRow {
 	/** Server-stamped: Core's boot reconciliation found this turn's run had never
 	 * finished, so its text/parts are only what had been flushed. */
 	interrupted?: boolean;
+	originServer?: string;
 	parts?: unknown[];
 	role: "assistant" | "user";
+	source?: string;
 	timestamp?: number;
+	widgetInstanceId?: string;
 }
 
 export interface HydratedMessage {
 	_interrupted?: boolean;
 	id: string;
+	originServer?: string;
 	parts: unknown[];
 	role: "assistant" | "user";
+	source?: string;
+	widgetInstanceId?: string;
 }
 
 /**
@@ -76,15 +82,25 @@ export function hydrateHistoryMessage(
 		? (m.parts as unknown[])
 		: [{ type: "text" as const, text: m.content }];
 	if (!interrupted) {
-		return { id: m.id, role: m.role, parts: body };
+		return {
+			id: m.id,
+			originServer: m.originServer,
+			parts: body,
+			role: m.role,
+			source: m.source,
+			widgetInstanceId: m.widgetInstanceId,
+		};
 	}
 	// An empty bubble above the marker reads as a rendering bug, so a turn that
 	// saved nothing at all keeps no parts and shows the marker alone.
 	const kept = blankBody && !hasParts ? [] : body;
 	return {
 		id: m.id,
+		originServer: m.originServer,
 		role: m.role,
 		parts: kept,
+		source: m.source,
+		widgetInstanceId: m.widgetInstanceId,
 		// READ by the transcript: message-list.tsx draws a `Marker` at the end of
 		// any turn carrying this, which is why the parts above are left exactly as
 		// the node saved them.

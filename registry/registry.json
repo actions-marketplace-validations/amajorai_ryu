@@ -80,7 +80,8 @@
         "direction": "down"
       },
       "tagline": "Crawl and extract web pages for agents",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/exa",
@@ -109,7 +110,8 @@
         "direction": "down"
       },
       "tagline": "Neural web search for agents",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/tavily",
@@ -138,7 +140,8 @@
       },
       "icon_padding": "md",
       "tagline": "Agent-tuned web search and extraction",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/brave",
@@ -166,7 +169,8 @@
       },
       "icon_padding": "md",
       "tagline": "Search an index nobody else syndicates",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/headroom",
@@ -191,7 +195,8 @@
         "direction": "down"
       },
       "tagline": "Compress noisy context down to a fraction of its tokens",
-      "category": "Developer Tools"
+      "category": "Developer Tools",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/firecrawl",
@@ -222,7 +227,8 @@
       },
       "icon_padding": "md",
       "tagline": "Search and scrape the web for agents",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/serper",
@@ -252,7 +258,8 @@
         "direction": "down"
       },
       "tagline": "Google's real results, as JSON, in a second",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/mem0",
@@ -281,7 +288,8 @@
         "direction": "down"
       },
       "tagline": "Recall and record in an existing Mem0 project inside Ryu",
-      "category": "Knowledge & Memory"
+      "category": "Knowledge & Memory",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/spidercloud",
@@ -310,7 +318,8 @@
       },
       "icon_padding": "md",
       "tagline": "Hosted site crawling, no local binary",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/scrapling",
@@ -340,7 +349,8 @@
       },
       "icon_padding": "md",
       "tagline": "Anti-bot page extraction, no API key",
-      "category": "Search"
+      "category": "Search",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/honcho",
@@ -371,7 +381,8 @@
         "direction": "down"
       },
       "tagline": "A standing synthesis of the user, not a list of facts",
-      "category": "Knowledge & Memory"
+      "category": "Knowledge & Memory",
+      "stability": "experimental"
     },
     {
       "id": "@ryu/bytebot",
@@ -400,7 +411,8 @@
         "direction": "down"
       },
       "tagline": "Swap computer control onto a Bytebot desktop",
-      "category": "Automation"
+      "category": "Automation",
+      "stability": "experimental"
     }
   ]
 }

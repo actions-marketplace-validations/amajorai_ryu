@@ -23,7 +23,9 @@ const target: ApiTarget = { url: "http://127.0.0.1:7980", token: "t" };
 
 function stub(bodyText: string, status = 200): void {
 	globalThis.fetch = (() =>
-		Promise.resolve(new Response(bodyText, { status }))) as typeof fetch;
+		Promise.resolve(
+			new Response(bodyText, { status })
+		)) as unknown as typeof fetch;
 }
 
 describe("workflow error envelope", () => {
@@ -93,6 +95,10 @@ describe("wire → camel mapping", () => {
 			})
 		);
 		const [wf] = await fetchWorkflows(target);
+		expect(wf).toBeDefined();
+		if (!wf) {
+			return;
+		}
 		expect(wf.createdAt).toBe("2026-01-01");
 		expect(wf.updatedAt).toBe("2026-01-02");
 		expect(wf.nodes).toEqual([{ id: "n1", type: "prompt" }]);

@@ -61,7 +61,7 @@ export function DownloadCenter() {
 	// Available updates (newer versions of installed agents/engines/tools/plugins)
 	// feed the badge too, so the count shows even when nothing is actively
 	// downloading — matching the "Updates" section in the panel body.
-	const { updates } = useAvailableUpdates();
+	const { refresh, updates } = useAvailableUpdates();
 	const [friendly] = useFriendlyMode();
 	const { openTab } = useTabsContext();
 	const [open, setOpen] = useState(false);
@@ -174,7 +174,7 @@ export function DownloadCenter() {
 					title="Nothing downloading"
 				/>
 			) : (
-				<TrayScroll>
+				<TrayScroll onRefresh={refresh}>
 					<AvailableUpdates compact />
 					{active.length > 0 && (
 						<>

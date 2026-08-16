@@ -74,7 +74,7 @@ export interface AppToolSpec {
 	invoked?: string;
 	/** Status label shown while a render tool runs (e.g. `"Plotting chart…"`). */
 	invoking?: string;
-	/** Tool name (unqualified). The wire id is `<server>__<name>`. */
+	/** Tool name (unqualified). The wire id is `<server>.<name>`. */
 	name: string;
 }
 
@@ -141,7 +141,7 @@ export interface DefineAppOptions {
 
 /** Build a fully-qualified tool id from a server namespace and tool name. */
 export function appToolId(server: string, name: string): string {
-	return `${server}__${name}`;
+	return `${server}.${name}`;
 }
 
 /**

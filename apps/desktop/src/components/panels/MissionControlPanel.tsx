@@ -376,7 +376,7 @@ export function MissionControlPanel({
 				<StatRow label="Commands" value={digest.totals.commands} />
 				<StatRow label="Errors" value={digest.totals.failures} />
 			</div>
-			<div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-2.5">
+			<div className="scroll-fade min-h-0 flex-1 space-y-2 overflow-y-auto p-2.5">
 				<TodoSection todos={digest.openTodos} />
 				{ordered.map((turn) => (
 					<TurnCard key={turn.id} turn={turn} />

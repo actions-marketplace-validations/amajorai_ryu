@@ -23,6 +23,7 @@ import {
 import { openExternal } from "@/lib/tauri-bridge.ts";
 import {
 	fetchWaitlistMe,
+	openWaitlistStream,
 	releaseWaitlistUsername,
 	type WaitlistMe,
 } from "@/src/lib/api/waitlist.ts";
@@ -35,6 +36,22 @@ const FALLBACK_SHARE_HOST = "ryuhq.com";
 const TRAILING_SLASH_RE = /\/$/;
 /** The web app, without a trailing slash — `${origin}/pass?…` must not double it. */
 const SHARE_ORIGIN = FRONTEND_URL.replace(TRAILING_SLASH_RE, "");
+const STREAM_INITIAL_BACKOFF_MS = 500;
+const STREAM_MAX_BACKOFF_MS = 10_000;
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		signal.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				resolve();
+			},
+			{ once: true }
+		);
+	});
+}
 
 // The desktop activation gate a pending account sees instead of the app.
 //
@@ -102,6 +119,38 @@ export default function WaitlistPage({
 	useEffect(() => {
 		loadMe();
 	}, [loadMe]);
+
+	// Approval is a server-side transition, so polling alone leaves a queued
+	// desktop account stuck until its next refresh. The API replays an approval
+	// snapshot on connect, making this safe across missed events and reconnects.
+	useEffect(() => {
+		const controller = new AbortController();
+		const watch = async () => {
+			let backoff = STREAM_INITIAL_BACKOFF_MS;
+			while (!controller.signal.aborted) {
+				try {
+					for await (const message of openWaitlistStream(controller.signal)) {
+						if (message.data.status === "approved") {
+							window.location.reload();
+							return;
+						}
+						backoff = STREAM_INITIAL_BACKOFF_MS;
+					}
+				} catch {
+					// Sign-out, network loss, and restarts reconnect below.
+				}
+				if (controller.signal.aborted) {
+					break;
+				}
+				await delay(backoff, controller.signal);
+				backoff = Math.min(backoff * 2, STREAM_MAX_BACKOFF_MS);
+			}
+		};
+		watch().catch(() => {
+			// The loop owns expected connection failures; teardown is the other exit.
+		});
+		return () => controller.abort();
+	}, []);
 
 	// The application form is completed in the browser (Apply for early access
 	// opens FRONTEND_URL externally). When the user returns to the desktop window,
@@ -283,7 +332,10 @@ export default function WaitlistPage({
 
 	return (
 		// biome-ignore lint/a11y/noAriaHiddenOnFocusable: top area used as drag region
-		<div className="size-full overflow-y-auto" data-tauri-drag-region="true">
+		<div
+			className="scroll-fade size-full overflow-y-auto"
+			data-tauri-drag-region="true"
+		>
 			<WaitlistQueue
 				avatarSeed={avatarSeed}
 				avatarUrl={avatarUrl}

@@ -22,6 +22,7 @@ import {
 	type SettingsTint,
 } from "@ryu/blocks/desktop/settings-nav.tsx";
 import { AuthorizedAppsTab, ReferralsTab } from "@ryu/settings";
+import { Button } from "@ryu/ui/components/button.tsx";
 import { Dialog, DialogContent } from "@ryu/ui/components/dialog.tsx";
 import { Input } from "@ryu/ui/components/input.tsx";
 import {
@@ -69,6 +70,7 @@ import { ServicesOrgSwitcher } from "./ServicesOrgSwitcher.tsx";
 import { SessionsTab } from "./SessionsTab.tsx";
 import { SettingsSearchResults } from "./SettingsSearchResults.tsx";
 import { SettingsSyncTab } from "./SettingsSyncTab.tsx";
+import { SettingsCard, SettingsSection } from "./shared/settings-items.tsx";
 import { TeamsBillingTab } from "./TeamsBillingTab.tsx";
 import { TtsEngineSettings } from "./TtsEngineSettings.tsx";
 import { VoiceInputSettings } from "./VoiceInputSettings.tsx";
@@ -82,6 +84,11 @@ const queryClient = new QueryClient();
 // component. Per-app/plugin tabs are dynamic (`app:<id>` / `plugin:<id>`) and are
 // NOT part of this union — they are matched by prefix at render time.
 type SectionValue = SettingsSectionValue;
+
+const KEYBOARD_SHORTCUT_CONTEXT: Partial<Record<SectionValue, string>> = {
+	general: "Customize shortcuts for app controls, tabs, and navigation.",
+	voice: "Customize shortcuts for voice mode and other voice actions.",
+};
 
 interface NavItem {
 	/**
@@ -246,6 +253,30 @@ function ReferralsSection() {
 			metalTheme={resolvedTheme === "dark" ? "dark" : "light"}
 			onOpenExternal={openExternal}
 		/>
+	);
+}
+
+function KeyboardShortcutsLink({
+	description,
+	onOpen,
+}: {
+	description: string;
+	onOpen: () => void;
+}) {
+	return (
+		<SettingsSection title="Keyboard shortcuts">
+			<SettingsCard className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between">
+				<p className="text-muted-foreground text-sm">{description}</p>
+				<Button
+					className="shrink-0"
+					onClick={onOpen}
+					size="sm"
+					variant="secondary"
+				>
+					Open Keyboard Shortcuts
+				</Button>
+			</SettingsCard>
+		</SettingsSection>
 	);
 }
 
@@ -421,6 +452,8 @@ export function SettingsDialog({
 	const activeLabel =
 		allItems.find((i) => i.value === activeSection)?.label ?? "";
 	const activeEntity = entityById.get(activeSection);
+	const keyboardShortcutDescription =
+		KEYBOARD_SHORTCUT_CONTEXT[activeSection as SectionValue];
 
 	return (
 		<QueryClientProvider client={queryClient}>
@@ -437,7 +470,15 @@ export function SettingsDialog({
 								{activeEntity ? (
 									<EntitySettings entity={activeEntity} target={target} />
 								) : (
-									<SectionContent value={activeSection as SectionValue} />
+									<div className="space-y-6">
+										<SectionContent value={activeSection as SectionValue} />
+										{keyboardShortcutDescription ? (
+											<KeyboardShortcutsLink
+												description={keyboardShortcutDescription}
+												onOpen={() => setActiveSection("keyboard")}
+											/>
+										) : null}
+									</div>
 								)}
 							</div>
 						}

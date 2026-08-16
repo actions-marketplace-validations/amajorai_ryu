@@ -47,6 +47,7 @@ import { useModelCatalog } from "@/src/hooks/useModelCatalog.ts";
 import { usePersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { usePluginSettingsOpener } from "@/src/hooks/usePluginSettingsOpener.ts";
 import { useSkillsCatalog } from "@/src/hooks/useSkillsCatalog.ts";
+import { useSkillPacks } from "@/src/hooks/useSkillPacks.ts";
 import type { DownloadKind } from "@/src/lib/api/downloads.ts";
 import { estimateLlmfit, listInstalledModels } from "@/src/lib/api/models.ts";
 import {
@@ -204,6 +205,7 @@ export function DesktopCatalogHost({ children }: { children: ReactNode }) {
 			useAppsCatalog,
 			useSkillsCatalog,
 			useModelCatalog,
+			useSkillPacks,
 			useActiveNode: useCatalogNode,
 			// A module-level hook, like `usePersistedToggle` beside it — so it adds no
 			// memo dependency and the host object stays stable across renders, which

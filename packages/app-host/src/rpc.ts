@@ -115,6 +115,7 @@ export interface WidgetGlobalsPatch {
 export type Capability =
 	| "core.listAgents"
 	| "ui.render"
+	| "app.http"
 	// Widget host capabilities (Ryu Apps). `tool.call`/`ui.sendMessage` are
 	// Gateway-sourced (they map from approved grants below); `widget.state` and
 	// `ui.displayMode` are LOCAL host caps always granted to a mounted widget and
@@ -574,6 +575,15 @@ export interface NotificationRecord {
 	[key: string]: unknown;
 }
 
+/** An app's resolved notification icon tile, inlined by the host for the CSP-
+ *  locked frame: `glyph` is a `data:` URL (empty when the app has no art), and
+ *  `background` is a flat CSS color (null → the frame's neutral plate). */
+export interface AppIconTile {
+	background: string | null;
+	glyph: string;
+	name: string;
+}
+
 /** A Shadow proactive suggestion as the host forwards it (`GET /proactive`, the
  *  `getProactiveInbox` shape; opaque here — the app owns the full type). */
 export interface ProactiveSuggestionRecord {
@@ -632,6 +642,14 @@ export interface MeetingStartPayload {
 export interface SocialRequestPayload {
 	body?: unknown;
 	method?: "DELETE" | "GET" | "PATCH" | "POST";
+	path: string;
+}
+
+/** One forwarded call onto the calling companion's OWN manifest sidecar. The host
+ * derives the plugin id; the frame controls only a normalized relative path. */
+export interface AppRequestPayload {
+	body?: unknown;
+	method?: "DELETE" | "GET" | "PATCH" | "POST" | "PUT";
 	path: string;
 }
 
@@ -759,6 +777,8 @@ export interface HostServices {
 	 *  Core call); fire-and-forget from the frame's view (mirrors the desktop page's
 	 *  clickable row). */
 	activityOpenSession?(input: { session_id: string }): void;
+	/** Forward a call to `/api/ext/<owning-plugin-id><path>`. */
+	appRequest?(input: AppRequestPayload): Promise<unknown>;
 	/** Approve a pending request (`POST /api/approvals/:id/approve`). */
 	approvalsApprove?(input: ApprovalDecidePayload): Promise<ApprovalRecord>;
 
@@ -1047,11 +1067,23 @@ export interface HostServices {
 	/** Acknowledge a HITL notify gate (`POST /api/notifications/:id/ack`); resolves to
 	 *  whether the ack resumed the suspended workflow run. */
 	notificationsAck?(input: { id: string }): Promise<boolean>;
+	/** Resolve per-app icon tiles for the notification feed: `appId` → `{ name,
+	 *  glyph (a CSP-safe `data:` URL), background }`, inlined by the host so the
+	 *  sandboxed frame can render the SENDING app's icon on each row. */
+	notificationsAppIcons?(input: {
+		appIds: string[];
+	}): Promise<Record<string, AppIconTile>>;
+	/** Archive a notification (`POST /api/notifications/:id/archive`); also marks
+	 *  it read. Idempotent. */
+	notificationsArchive?(input: { id: string }): Promise<void>;
 	/** List the signed-in user's inbox rows (`GET /api/notifications`; the host
-	 *  resolves the user id). */
-	notificationsList?(): Promise<NotificationRecord[]>;
+	 *  resolves the user id). `archived: true` returns the archive instead of the
+	 *  live inbox. */
+	notificationsList?(input?: { archived?: boolean }): Promise<NotificationRecord[]>;
 	/** Mark a notification read (`POST /api/notifications/:id/read`). */
 	notificationsMarkRead?(input: { id: string }): Promise<void>;
+	/** Restore an archived notification (`POST /api/notifications/:id/unarchive`). */
+	notificationsUnarchive?(input: { id: string }): Promise<void>;
 	/** Report the widget's intrinsic content height so the host can size the frame
 	 *  (capped by `maxHeight`). Fire-and-forget. */
 	notifyHeight?(px: number): void;
@@ -1662,6 +1694,7 @@ export const GRANT_CAPABILITY: Record<string, Capability> = grantCapability;
  *  greenfield app host-bridge methods opt in; the legacy paths keep string errors so
  *  their existing readers are unaffected. */
 const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+	"app.http",
 	"model.complete",
 	"agent.run",
 	"storage.kv",
@@ -3515,7 +3548,7 @@ export async function dispatchRpc(
 					"notifications.list is not available"
 				);
 			}
-			return await services.notificationsList();
+			return await services.notificationsList(args[0] as { archived?: boolean });
 		case "notifications.markRead": {
 			const input = asQuestIdArg(args[0]);
 			if (!input) {
@@ -3531,6 +3564,55 @@ export async function dispatchRpc(
 				);
 			}
 			await services.notificationsMarkRead(input);
+			return null;
+		}
+		case "notifications.appIcons": {
+			const input = args[0] as { appIds?: unknown };
+			const appIds = Array.isArray(input?.appIds)
+				? input.appIds.filter(
+						(id): id is string => typeof id === "string" && id.length > 0
+					)
+				: [];
+			if (!services.notificationsAppIcons) {
+				throw new CodedRpcError(
+					"server_error",
+					"notifications.appIcons is not available"
+				);
+			}
+			return await services.notificationsAppIcons({ appIds });
+		}
+		case "notifications.archive": {
+			const input = asQuestIdArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"notifications.archive requires a { id: string }"
+				);
+			}
+			if (!services.notificationsArchive) {
+				throw new CodedRpcError(
+					"server_error",
+					"notifications.archive is not available"
+				);
+			}
+			await services.notificationsArchive(input);
+			return null;
+		}
+		case "notifications.unarchive": {
+			const input = asQuestIdArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"notifications.unarchive requires a { id: string }"
+				);
+			}
+			if (!services.notificationsUnarchive) {
+				throw new CodedRpcError(
+					"server_error",
+					"notifications.unarchive is not available"
+				);
+			}
+			await services.notificationsUnarchive(input);
 			return null;
 		}
 		case "notifications.ack": {
@@ -3755,6 +3837,19 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.socialRequest(input);
+		}
+		case "app.request": {
+			const input = asAppRequestArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"app.request requires a relative { path, method?, body? } request"
+				);
+			}
+			if (!services.appRequest) {
+				throw new CodedRpcError("server_error", "app.request is not available");
+			}
+			return await services.appRequest(input);
 		}
 		case "social.open": {
 			const input = asSocialOpenArg(args[0]);
@@ -5081,6 +5176,7 @@ export function asMeetingStartArg(data: unknown): MeetingStartPayload {
 /** Methods `social.request` will forward. A closed set, so the frame cannot reach the
  *  sidecar with a verb its router does not serve (PUT, HEAD, or an arbitrary string). */
 const SOCIAL_METHODS = new Set(["GET", "POST", "PATCH", "DELETE"]);
+const APP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
 /** The mount Core serves the `ryu-social` sidecar on. Mirrors `SOCIAL_MOUNT` in
  *  `apps/desktop/src/lib/api/social.ts`, which is the layer that actually builds the
@@ -5121,6 +5217,37 @@ function resolveMountedRequestPath(mount: string, path: string): string | null {
 
 function resolveSocialRequestPath(path: string): string | null {
 	return resolveMountedRequestPath(SOCIAL_MOUNT, path);
+}
+
+/** Validate the relative half of an own-app request. A synthetic fixed mount lets
+ * the same WHATWG containment check catch encoded dot segments before the trusted
+ * host attaches credentials and the real owning plugin id. */
+export function asAppRequestArg(data: unknown): AppRequestPayload | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const value = data as Record<string, unknown>;
+	if (
+		typeof value.path !== "string" ||
+		!value.path.startsWith("/") ||
+		value.path.startsWith("//") ||
+		value.path.includes("\\")
+	) {
+		return null;
+	}
+	const path = resolveMountedRequestPath("/api/ext/app", value.path);
+	if (!path) {
+		return null;
+	}
+	const method = value.method ?? "GET";
+	if (typeof method !== "string" || !APP_METHODS.has(method)) {
+		return null;
+	}
+	return {
+		path,
+		method: method as AppRequestPayload["method"],
+		...(value.body === undefined ? {} : { body: value.body }),
+	};
 }
 
 /**

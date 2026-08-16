@@ -14,10 +14,17 @@
 
 import type { ChatStatus } from "ai";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { QueuedMessage } from "@/components/agent-elements/queue/queue-bar.tsx";
+import type {
+	QueuedAttachment,
+	QueuedMessage,
+} from "@/components/agent-elements/queue/queue-bar.tsx";
 import { useQueueDrainMode } from "@/src/hooks/useQueueDrainMode.ts";
 
-type SendFn = (message: { role: "user"; content: string }) => void;
+type SendFn = (message: {
+	attachments?: QueuedAttachment[];
+	content: string;
+	role: "user";
+}) => void;
 
 export interface UseMessageQueueOptions {
 	/** When true (Core/Gateway unreachable), draining is suspended. */
@@ -36,10 +43,12 @@ export interface MessageQueue {
 	/** Replace the content of a queued message. */
 	edit: (id: string, content: string) => void;
 	/** Stash a message to send when the current run finishes. */
-	enqueue: (content: string) => void;
+	enqueue: (content: string, attachments?: QueuedAttachment[]) => void;
 	queue: QueuedMessage[];
 	/** Drop a queued message without sending it. */
 	remove: (id: string) => void;
+	/** Move a message to a new queue position. */
+	reorder: (id: string, toIndex: number) => void;
 	/** Combine every queued message into one turn and send it now. */
 	sendAll: () => void;
 	/** Jump a queued message to the front and send it now (interrupts a run). */
@@ -116,6 +125,10 @@ function combine(items: QueuedMessage[]): string {
 	return items.map((m) => m.content).join("\n\n");
 }
 
+function combineAttachments(items: QueuedMessage[]): QueuedAttachment[] {
+	return items.flatMap((item) => item.attachments ?? []);
+}
+
 export function useMessageQueue({
 	status,
 	send,
@@ -152,12 +165,15 @@ export function useMessageQueue({
 	const prevStatusRef = useRef<ChatStatus>(status);
 	const prevQueueLenRef = useRef(0);
 
-	const enqueue = useCallback((content: string) => {
+	const enqueue = useCallback((content: string, attachments?: QueuedAttachment[]) => {
 		const trimmed = content.trim();
-		if (!trimmed) {
+		if (!trimmed && (!attachments || attachments.length === 0)) {
 			return;
 		}
-		setQueue((prev) => [...prev, { id: makeId(), content: trimmed }]);
+		setQueue((prev) => [
+			...prev,
+			{ id: makeId(), content: trimmed, attachments: attachments ?? [] },
+		]);
 	}, []);
 
 	const remove = useCallback((id: string) => {
@@ -178,10 +194,23 @@ export function useMessageQueue({
 		setQueue([]);
 	}, []);
 
+	const reorder = useCallback((id: string, toIndex: number) => {
+		setQueue((prev) => {
+			const fromIndex = prev.findIndex((item) => item.id === id);
+			if (fromIndex < 0) return prev;
+			const nextIndex = Math.max(0, Math.min(toIndex, prev.length - 1));
+			if (fromIndex === nextIndex) return prev;
+			const next = [...prev];
+			const [item] = next.splice(fromIndex, 1);
+			next.splice(nextIndex, 0, item);
+			return next;
+		});
+	}, []);
+
 	// Drain one "turn" from the queue, honoring the drain-order preference:
 	//  - oldest-first: send the head (FIFO), the classic one-per-turn drain.
 	//  - latest-first: send the tail (LIFO), so a late correction goes next.
-	//  - send-all: collapse every queued message into a single combined turn.
+	//  - send-all / auto: collapse every queued message into a single combined turn.
 	const dispatchFront = useCallback(() => {
 		const items = queueRef.current;
 		if (items.length === 0) {
@@ -194,12 +223,12 @@ export function useMessageQueue({
 			const forced = items.find((m) => m.id === forcedId);
 			if (forced) {
 				setQueue((prev) => prev.filter((m) => m.id !== forced.id));
-				send({ role: "user", content: forced.content });
+				send({ role: "user", content: forced.content, attachments: forced.attachments });
 				return;
 			}
 		}
 		const mode = drainModeRef.current;
-		if (mode === "send-all") {
+		if (mode === "send-all" || mode === "auto") {
 			setQueue([]);
 			send({ role: "user", content: combine(items) });
 			return;
@@ -209,7 +238,7 @@ export function useMessageQueue({
 			return;
 		}
 		setQueue((prev) => prev.filter((m) => m.id !== next.id));
-		send({ role: "user", content: next.content });
+		send({ role: "user", content: next.content, attachments: next.attachments });
 	}, [send]);
 
 	useEffect(() => {
@@ -242,7 +271,7 @@ export function useMessageQueue({
 				// bare `=== "ready"`: `stop()` has nothing to interrupt there, so the
 				// button below would do nothing at all.
 				setQueue((prev) => prev.filter((m) => m.id !== id));
-				send({ role: "user", content: item.content });
+				send({ role: "user", content: item.content, attachments: item.attachments });
 				return;
 			}
 			// Busy: mark it as the forced next dispatch and move it to the front,
@@ -262,16 +291,17 @@ export function useMessageQueue({
 			return;
 		}
 		const merged = combine(items);
+		const attachments = combineAttachments(items);
 		if (isTerminalChatStatus(status) && !blocked) {
 			setQueue([]);
-			send({ role: "user", content: merged });
+			send({ role: "user", content: merged, attachments });
 			return;
 		}
 		// Busy: collapse the queue to a single combined turn at the front, then
 		// interrupt so the drain effect sends it next.
-		setQueue([{ id: makeId(), content: merged }]);
+		setQueue([{ id: makeId(), content: merged, attachments }]);
 		stop();
 	}, [status, blocked, send, stop]);
 
-	return { queue, enqueue, edit, remove, clear, sendNow, sendAll };
+	return { queue, enqueue, edit, remove, reorder, clear, sendNow, sendAll };
 }

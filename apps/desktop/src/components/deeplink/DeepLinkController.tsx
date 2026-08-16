@@ -105,6 +105,8 @@ export function DeepLinkController() {
 					openTab("/models");
 				} else if (intent.kind === "skill") {
 					openTab("/skills");
+				} else if (intent.kind === "app") {
+					openTab("/apps");
 				}
 				request(intent);
 			}

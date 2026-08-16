@@ -4,6 +4,7 @@ use std::thread;
 use dashmap::DashMap;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 
 // ─── Audit config (moved verbatim from gateway `config.rs`) ──────────────────
@@ -210,6 +211,39 @@ const DEFAULT_QUERY_LIMIT: u32 = 100;
 /// Hard ceiling on rows returned by a single query, to keep responses bounded.
 const MAX_QUERY_LIMIT: u32 = 1_000;
 
+/// Keep sentinel identities readable because they are not credentials. Every
+/// other API key is represented on disk by a deterministic SHA-256 lookup key;
+/// the raw value remains available only in the request process.
+fn api_key_storage_key(key: &str) -> String {
+    if key == "anonymous" || key == "master" {
+        return key.to_owned();
+    }
+    let mut digest = Sha256::new();
+    digest.update(key.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+/// Migrate pre-hash audit rows in place. The display prefix preserves the UI's
+/// existing redacted view while the original credential is removed from disk.
+fn migrate_api_key_storage(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, api_key FROM audit_log
+         WHERE api_key_prefix IS NULL OR api_key_prefix = ''",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    for (id, raw_key) in rows {
+        conn.execute(
+            "UPDATE audit_log SET api_key = ?1, api_key_prefix = ?2 WHERE id = ?3",
+            params![api_key_storage_key(&raw_key), redact_key(&raw_key), id],
+        )?;
+    }
+    Ok(())
+}
+
 /// SQLite-backed audit logger.
 ///
 /// Writes are dispatched to a background OS thread via a bounded channel so
@@ -245,6 +279,7 @@ impl AuditLogger {
                  timestamp     TEXT    NOT NULL DEFAULT (datetime('now')),
                  request_id    TEXT    NOT NULL,
                  api_key       TEXT    NOT NULL,
+                 api_key_prefix TEXT,
                  user_name     TEXT,
                  org_id        TEXT,
                  team_id       TEXT,
@@ -266,6 +301,14 @@ impl AuditLogger {
              -- ALTER TABLE that is swallowed if the column already exists.
              ",
         )?;
+        // Older versions stored the raw API key and only redacted it on read.
+        // Add a non-secret display prefix, then replace every legacy value with
+        // its SHA-256 lookup key before this logger accepts new records.
+        let _ = conn.execute_batch("ALTER TABLE audit_log ADD COLUMN api_key_prefix TEXT;");
+        migrate_api_key_storage(&conn)?;
+        let _ = conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_audit_api_key_prefix ON audit_log(api_key_prefix);",
+        );
         // Add skill_ids column for existing audit_log tables that predate M3.
         // SQLite does not support ADD COLUMN IF NOT EXISTS; we catch the
         // "duplicate column name" error and treat it as a no-op.
@@ -334,16 +377,17 @@ impl AuditLogger {
             for record in receiver {
                 if let Err(e) = conn.execute(
                     "INSERT INTO audit_log (
-                         request_id, api_key, user_name, org_id, team_id, project_id,
+                         request_id, api_key, api_key_prefix, user_name, org_id, team_id, project_id,
                          provider, model, input_tokens, output_tokens,
                          cache_hit, latency_ms, eval_score, error, skill_ids, session_id,
                          event_type, backend, command, duration_ms, exit_code,
                          user_id, agent_id, feature, widget_instance_id
-                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,
-                               ?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
+                               ?18,?19,?20,?21,?22,?23,?24,?25,?26)",
                     params![
                         record.request_id,
-                        record.api_key,
+                        api_key_storage_key(&record.api_key),
+                        redact_key(&record.api_key),
                         record.user_name,
                         record.org_id,
                         record.team_id,
@@ -590,12 +634,18 @@ impl AuditLogger {
 
     /// Return the total lifetime tokens used by `api_key`.
     pub fn token_usage(&self, api_key: &str) -> u64 {
-        self.token_totals.get(api_key).map(|v| *v).unwrap_or(0)
+        self.token_totals
+            .get(&api_key_storage_key(api_key))
+            .map(|v| *v)
+            .unwrap_or(0)
     }
 
     /// Increment the in-memory token total for `api_key`.
     pub fn add_tokens(&self, api_key: &str, n: u64) {
-        *self.token_totals.entry(api_key.to_string()).or_insert(0) += n;
+        *self
+            .token_totals
+            .entry(api_key_storage_key(api_key))
+            .or_insert(0) += n;
     }
 
     /// Whether the audit store is enabled (persisting and queryable).
@@ -613,13 +663,16 @@ impl AuditLogger {
         // Build a parameterised WHERE clause so filters can never inject SQL.
         let mut clauses: Vec<&str> = Vec::new();
         let mut binds: Vec<String> = Vec::new();
+        if let Some(api_key) = &query.api_key {
+            clauses.push("api_key = ?");
+            binds.push(api_key_storage_key(api_key));
+        }
         let mut push = |col: &'static str, val: &Option<String>| {
             if let Some(v) = val {
                 clauses.push(col);
                 binds.push(v.clone());
             }
         };
-        push("api_key = ?", &query.api_key);
         push("org_id = ?", &query.org_id);
         push("team_id = ?", &query.team_id);
         push("project_id = ?", &query.project_id);
@@ -644,7 +697,7 @@ impl AuditLogger {
             .clamp(1, MAX_QUERY_LIMIT);
 
         let sql = format!(
-            "SELECT id, timestamp, request_id, api_key, user_name, org_id, team_id, \
+            "SELECT id, timestamp, request_id, api_key, api_key_prefix, user_name, org_id, team_id, \
              project_id, provider, model, input_tokens, output_tokens, cache_hit, \
              latency_ms, eval_score, error, skill_ids, session_id, \
              event_type, backend, command, duration_ms, exit_code, \
@@ -662,36 +715,38 @@ impl AuditLogger {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
                 request_id: row.get(2)?,
-                api_key: redact_key(&row.get::<_, String>(3)?),
-                user_name: row.get(4)?,
-                org_id: row.get(5)?,
-                team_id: row.get(6)?,
-                project_id: row.get(7)?,
-                provider: row.get(8)?,
-                model: row.get(9)?,
-                input_tokens: row.get::<_, i64>(10)? as u64,
-                output_tokens: row.get::<_, i64>(11)? as u64,
-                cache_hit: row.get::<_, i64>(12)? != 0,
-                latency_ms: row.get::<_, i64>(13)? as u64,
-                eval_score: row.get(14)?,
-                error: row.get(15)?,
-                skill_ids: row.get(16).unwrap_or(None),
-                session_id: row.get(17).unwrap_or(None),
+                api_key: row
+                    .get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| "unknown…".to_owned()),
+                user_name: row.get(5)?,
+                org_id: row.get(6)?,
+                team_id: row.get(7)?,
+                project_id: row.get(8)?,
+                provider: row.get(9)?,
+                model: row.get(10)?,
+                input_tokens: row.get::<_, i64>(11)? as u64,
+                output_tokens: row.get::<_, i64>(12)? as u64,
+                cache_hit: row.get::<_, i64>(13)? != 0,
+                latency_ms: row.get::<_, i64>(14)? as u64,
+                eval_score: row.get(15)?,
+                error: row.get(16)?,
+                skill_ids: row.get(17).unwrap_or(None),
+                session_id: row.get(18).unwrap_or(None),
                 event_type: row
-                    .get::<_, Option<String>>(18)
+                    .get::<_, Option<String>>(19)
                     .unwrap_or(None)
                     .unwrap_or_else(|| "model_call".to_owned()),
-                backend: row.get(19).unwrap_or(None),
-                command: row.get(20).unwrap_or(None),
+                backend: row.get(20).unwrap_or(None),
+                command: row.get(21).unwrap_or(None),
                 duration_ms: row
-                    .get::<_, Option<i64>>(21)
+                    .get::<_, Option<i64>>(22)
                     .unwrap_or(None)
                     .map(|v| v as u64),
-                exit_code: row.get(22).unwrap_or(None),
-                user_id: row.get(23).unwrap_or(None),
-                agent_id: row.get(24).unwrap_or(None),
-                feature: row.get(25).unwrap_or(None),
-                widget_instance_id: row.get(26).unwrap_or(None),
+                exit_code: row.get(23).unwrap_or(None),
+                user_id: row.get(24).unwrap_or(None),
+                agent_id: row.get(25).unwrap_or(None),
+                feature: row.get(26).unwrap_or(None),
+                widget_instance_id: row.get(27).unwrap_or(None),
             })
         })?;
 
@@ -946,6 +1001,100 @@ mod tests {
         assert_eq!(redact_key("sk-secret-1234567890"), "sk-sec…");
         assert_eq!(redact_key("master"), "master");
         assert_eq!(redact_key("anonymous"), "anonymous");
+    }
+
+    #[test]
+    fn stores_only_api_key_hash_and_supports_raw_key_filtering() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-hash-{}", unique_suffix()));
+        let db_path = dir.join("audit.db");
+        let config = AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_owned(),
+        };
+        let logger = AuditLogger::new(&config).expect("logger");
+        let raw_key = "sk-secret-1234567890";
+        logger.log(sample_record("req-hash", None));
+        wait_for_rows(&logger, &AuditQuery::default(), 1);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let (stored_key, prefix): (String, String) = conn
+            .query_row(
+                "SELECT api_key, api_key_prefix FROM audit_log WHERE request_id = 'req-hash'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(stored_key, raw_key);
+        assert_eq!(stored_key, api_key_storage_key(raw_key));
+        assert_eq!(prefix, "sk-sec…");
+        assert!(!stored_key.contains("secret"));
+
+        let filtered = logger
+            .query(&AuditQuery {
+                api_key: Some(raw_key.to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].api_key, "sk-sec…");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrates_legacy_raw_api_keys_before_serving_queries() {
+        let dir = std::env::temp_dir().join(format!("ryu-audit-migrate-{}", unique_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("audit.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                request_id TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                user_name TEXT,
+                org_id TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit INTEGER NOT NULL DEFAULT 0,
+                latency_ms INTEGER NOT NULL DEFAULT 0,
+                eval_score REAL,
+                error TEXT
+            );
+            INSERT INTO audit_log (request_id, api_key, provider, model)
+            VALUES ('legacy-req', 'sk-legacy-secret', 'openai', 'gpt-4o');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let logger = AuditLogger::new(&AuditConfig {
+            enabled: true,
+            db_path: db_path.to_str().unwrap().to_owned(),
+        })
+        .unwrap();
+        let rows = logger
+            .query(&AuditQuery {
+                api_key: Some("sk-legacy-secret".to_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].api_key, "sk-leg…");
+
+        let conn = Connection::open(&db_path).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT api_key FROM audit_log WHERE request_id = 'legacy-req'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, "sk-legacy-secret");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

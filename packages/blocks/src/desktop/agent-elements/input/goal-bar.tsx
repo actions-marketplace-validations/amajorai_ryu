@@ -4,7 +4,9 @@ import {
 	Cancel01Icon,
 	CheckmarkCircle02Icon,
 	Clock01Icon,
+	PauseIcon,
 	PencilEdit01Icon,
+	PlayIcon,
 	Target01Icon,
 	Tick02Icon,
 } from "@hugeicons/core-free-icons";
@@ -26,8 +28,14 @@ export interface GoalBarProps {
 	onCancelDraft?: () => void;
 	/** Clear the goal entirely (the bar's close button). */
 	onClear: () => void;
+	/** Persistently pause the goal loop. */
+	onPause?: () => void;
+	/** Persistently resume the goal loop. */
+	onResume?: () => void;
 	/** Persist a new / edited goal. Called with the trimmed text. */
 	onSubmit: (text: string) => void;
+	/** True when the persisted goal loop is paused. */
+	paused?: boolean;
 	/** The judge's most recent reason for its verdict. */
 	reason?: string;
 	/** Unix milliseconds when the goal was set; drives the live elapsed timer. */
@@ -67,9 +75,12 @@ export function GoalBar({
 	turns,
 	judging,
 	achieved,
+	paused,
 	startInEdit,
 	onSubmit,
 	onClear,
+	onPause,
+	onResume,
 	onCancelDraft,
 }: GoalBarProps) {
 	const [editing, setEditing] = useState(Boolean(startInEdit));
@@ -79,7 +90,7 @@ export function GoalBar({
 	// Live elapsed timer: re-render every second while the goal is active.
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
-		if (achieved || !startedAt) {
+		if (achieved || paused || !startedAt) {
 			return;
 		}
 		const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -162,7 +173,7 @@ export function GoalBar({
 						type="button"
 					>
 						<span className="font-medium">
-							{achieved ? "Goal achieved" : "Goal"}
+							{achieved ? "Goal achieved" : paused ? "Goal paused" : "Goal"}
 						</span>
 						<span className="ml-1.5 text-muted-foreground">{text}</span>
 					</button>
@@ -205,6 +216,21 @@ export function GoalBar({
 						</>
 					) : (
 						<>
+							{!achieved && (paused ? onResume : onPause) && (
+								<Button
+									aria-label={paused ? "Resume goal" : "Pause goal"}
+									className="size-6 text-muted-foreground/70 hover:text-foreground"
+									onClick={paused ? onResume : onPause}
+									size="icon"
+									type="button"
+									variant="ghost"
+								>
+									<HugeiconsIcon
+										className="size-3.5"
+										icon={paused ? PlayIcon : PauseIcon}
+									/>
+								</Button>
+							)}
 							<Button
 								aria-label="Edit goal"
 								className="size-6 text-muted-foreground/70 hover:text-foreground"

@@ -205,7 +205,7 @@ export function CapabilityProvidersSettings() {
 						<Button
 							onClick={() => openGateway("routing")}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							Edit capability routing
 						</Button>
@@ -251,11 +251,7 @@ export function CapabilityProvidersSettings() {
 					/>
 				</SettingsGroup>
 				<div className="pt-1">
-					<Button
-						onClick={() => openGateway("keys")}
-						size="sm"
-						variant="outline"
-					>
+					<Button onClick={() => openGateway("keys")} size="sm" variant="ghost">
 						Manage media keys
 					</Button>
 					<p className="pt-1.5 text-muted-foreground text-xs">

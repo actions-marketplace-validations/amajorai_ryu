@@ -61,6 +61,7 @@ export function CompanionPanel() {
 			setActive(CHAT_TAB);
 		}
 	}, [active, uiCompanions, renderableViews]);
+	useEffect(() => window.island.plugins.onShortcut(setActive), []);
 
 	// No companion apps and no declarative views: render the chat exactly as before
 	// (no tab chrome), so the default island UX is unchanged.

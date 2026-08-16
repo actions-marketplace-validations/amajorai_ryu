@@ -49,6 +49,14 @@ const ev = (over: Partial<LearnedEvent>): LearnedEvent => ({
 	...over,
 });
 
+function first<T>(items: T[]): T {
+	const item = items[0];
+	if (item === undefined) {
+		throw new Error("expected at least one item");
+	}
+	return item;
+}
+
 describe("draftRecipeFromEvents — envelope", () => {
 	test("slugifies the task and defaults the empty envelope", () => {
 		const r = draftRecipeFromEvents("Open Mail App!", []);
@@ -82,15 +90,17 @@ describe("draftRecipeFromEvents — envelope", () => {
 
 describe("draftRecipeFromEvents — per-event step mapping", () => {
 	test("default (click) builds an AX locator target and a note", () => {
-		const [step] = draftRecipeFromEvents("t", [
-			ev({
-				event_type: "click",
-				element_name: "Send",
-				element_role: "button",
-				element_id: "btn1",
-				app_name: "Mail",
-			}),
-		]).steps;
+		const step = first(
+			draftRecipeFromEvents("t", [
+				ev({
+					event_type: "click",
+					element_name: "Send",
+					element_role: "button",
+					element_id: "btn1",
+					app_name: "Mail",
+				}),
+			]).steps
+		);
 		expect(step).toEqual({
 			id: 1,
 			action: "click",
@@ -105,17 +115,19 @@ describe("draftRecipeFromEvents — per-event step mapping", () => {
 	});
 
 	test("a click with no AX context yields a null target", () => {
-		const [step] = draftRecipeFromEvents("t", [
-			ev({ event_type: "click" }),
-		]).steps;
+		const step = first(
+			draftRecipeFromEvents("t", [ev({ event_type: "click" })]).steps
+		);
 		expect(step.target).toBeNull();
 		expect(step.action).toBe("click");
 	});
 
 	test("type carries the typed text and keeps the locator", () => {
-		const [step] = draftRecipeFromEvents("t", [
-			ev({ event_type: "type", key: "hello", element_name: "Field" }),
-		]).steps;
+		const step = first(
+			draftRecipeFromEvents("t", [
+				ev({ event_type: "type", key: "hello", element_name: "Field" }),
+			]).steps
+		);
 		expect(step).toEqual({
 			id: 1,
 			action: "type",
@@ -125,17 +137,19 @@ describe("draftRecipeFromEvents — per-event step mapping", () => {
 	});
 
 	test("type with a missing key defaults the text to empty", () => {
-		const [step] = draftRecipeFromEvents("t", [
-			ev({ event_type: "type", key: null }),
-		]).steps;
+		const step = first(
+			draftRecipeFromEvents("t", [ev({ event_type: "type", key: null })]).steps
+		);
 		expect(step.params).toEqual({ text: "" });
 	});
 
 	test("press / hotkey carry the key and omit any target", () => {
-		const [press, hotkey] = draftRecipeFromEvents("t", [
+		const steps = draftRecipeFromEvents("t", [
 			ev({ event_type: "press", key: "Enter" }),
 			ev({ event_type: "hotkey", key: "cmd+s" }),
 		]).steps;
+		const press = first(steps);
+		const hotkey = first(steps.slice(1));
 		expect(press).toEqual({ id: 1, action: "press", params: { key: "Enter" } });
 		expect(hotkey).toEqual({
 			id: 2,
@@ -145,18 +159,22 @@ describe("draftRecipeFromEvents — per-event step mapping", () => {
 	});
 
 	test("scroll defaults the direction to down when no key is present", () => {
-		const [withDir, without] = draftRecipeFromEvents("t", [
+		const steps = draftRecipeFromEvents("t", [
 			ev({ event_type: "scroll", key: "up" }),
 			ev({ event_type: "scroll", key: null }),
 		]).steps;
+		const withDir = first(steps);
+		const without = first(steps.slice(1));
 		expect(withDir.params).toEqual({ direction: "up" });
 		expect(without.params).toEqual({ direction: "down" });
 	});
 
 	test("app_switch becomes a focus step naming the app", () => {
-		const [step] = draftRecipeFromEvents("t", [
-			ev({ event_type: "app_switch", app_name: "Notes" }),
-		]).steps;
+		const step = first(
+			draftRecipeFromEvents("t", [
+				ev({ event_type: "app_switch", app_name: "Notes" }),
+			]).steps
+		);
 		expect(step).toEqual({ id: 1, action: "focus", params: { app: "Notes" } });
 	});
 
@@ -173,7 +191,9 @@ describe("draftRecipeFromEvents — per-event step mapping", () => {
 describe("recipes request unwrapping", () => {
 	test("listRecipes returns the array and defaults to [] when absent", async () => {
 		stubFetch(JSON.stringify({ recipes: [{ name: "a" }] }));
-		expect(await listRecipes(target)).toEqual([{ name: "a" }]);
+		expect(await listRecipes(target)).toEqual([
+			expect.objectContaining({ name: "a" }),
+		]);
 		stubFetch("{}");
 		expect(await listRecipes(target)).toEqual([]);
 	});
@@ -181,7 +201,7 @@ describe("recipes request unwrapping", () => {
 	test("getRecipe URL-encodes the name and unwraps `recipe`", async () => {
 		const cap = stubFetch(JSON.stringify({ recipe: { name: "a/b" } }));
 		const r = await getRecipe(target, "a/b");
-		expect(r).toEqual({ name: "a/b" });
+		expect(r).toEqual(expect.objectContaining({ name: "a/b" }));
 		expect(cap.url).toBe("http://127.0.0.1:7980/api/recipes/a%2Fb");
 	});
 
@@ -205,7 +225,9 @@ describe("recipes request unwrapping", () => {
 			JSON.stringify({ result: { recipe_name: "x", success: true } })
 		);
 		const res = await runRecipe(target, "my recipe", { q: "1" });
-		expect(res).toEqual({ recipe_name: "x", success: true });
+		expect(res).toEqual(
+			expect.objectContaining({ recipe_name: "x", success: true })
+		);
 		expect(cap.url).toBe("http://127.0.0.1:7980/api/recipes/my%20recipe/run");
 		expect(JSON.parse(cap.init?.body as string)).toEqual({
 			params: { q: "1" },

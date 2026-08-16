@@ -65,6 +65,7 @@ export interface Tab {
 	/** Live run in progress for this tab (streaming chat, etc.). Runtime-only —
 	    drives the tab-strip spinner + title shimmer; never persisted. */
 	busy?: boolean;
+	busySpeed?: "slow" | "normal" | "fast";
 	conversationId?: string;
 	/** Membership in a TabGroup (see `groups`); pinned tabs are never grouped. */
 	groupId?: string;
@@ -357,7 +358,11 @@ interface TabsContextValue {
 	/** Dissolve the entire split that `tabId` belongs to. */
 	unsplit: (tabId: string) => void;
 	/** Toggle the runtime-only busy flag (spinner + shimmer on the tab chip). */
-	updateTabBusy: (id: string, busy: boolean) => void;
+	updateTabBusy: (
+		id: string,
+		busy: boolean,
+		speed?: "slow" | "normal" | "fast"
+	) => void;
 	/** Set or clear a tab's leading glyph (title bar + vertical tabs). */
 	updateTabIcon: (id: string, icon: GlyphValue) => void;
 	/**
@@ -1641,15 +1646,22 @@ export function TabsProvider({
 		[]
 	);
 
-	const updateTabBusy = useCallback((id: string, busy: boolean) => {
-		setTabs((prev) => {
-			const target = prev.find((t) => t.id === id);
-			if (!target || target.busy === busy) {
-				return prev;
-			}
-			return prev.map((t) => (t.id === id ? { ...t, busy } : t));
-		});
-	}, []);
+	const updateTabBusy = useCallback(
+		(id: string, busy: boolean, speed?: "slow" | "normal" | "fast") => {
+			setTabs((prev) => {
+				const target = prev.find((t) => t.id === id);
+				const busySpeed = busy ? (speed ?? "normal") : undefined;
+				if (
+					!target ||
+					(target.busy === busy && target.busySpeed === busySpeed)
+				) {
+					return prev;
+				}
+				return prev.map((t) => (t.id === id ? { ...t, busy, busySpeed } : t));
+			});
+		},
+		[]
+	);
 
 	const requestScrollToMessage = useCallback(
 		(conversationId: string, messageId: string) => {

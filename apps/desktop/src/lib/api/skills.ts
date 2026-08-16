@@ -355,6 +355,145 @@ export async function addMarketplaceSource(
 	}
 }
 
+// ── Skill packs (#packs) ────────────────────────────────────────────────────
+//
+// A pack is a named collection of skills — a repo whose `SKILL.md` dirs are the
+// members, or a custom manifest of skills.sh ids + repo URLs. All logic lives in
+// Core (`/api/skills/packs*`); this module shapes requests and parses responses.
+
+/** One pack row in the Packs shelf. */
+export interface SkillPackCard {
+	builtin: boolean;
+	description: string;
+	id: string;
+	memberCount: number;
+	name: string;
+}
+
+/** One resolved member skill of a pack. */
+export interface SkillPackMember {
+	description?: string | null;
+	id: string;
+	installed: boolean;
+	name: string;
+}
+
+/** A pack with its resolved members (the "open the pack" detail view). */
+export interface SkillPackDetail extends SkillPackCard {
+	members: SkillPackMember[];
+}
+
+interface PackCardWire {
+	builtin?: boolean;
+	description?: string;
+	id: string;
+	member_count?: number;
+	name?: string;
+}
+
+function toPackCard(w: PackCardWire): SkillPackCard {
+	return {
+		id: w.id,
+		name: w.name ?? w.id,
+		description: w.description ?? "",
+		builtin: w.builtin ?? false,
+		memberCount: w.member_count ?? 0,
+	};
+}
+
+/** List every skill pack (built-in + user-defined). */
+export async function fetchSkillPacks(
+	target: ApiTarget
+): Promise<SkillPackCard[]> {
+	const json = await request<{ packs?: PackCardWire[] }>(
+		target,
+		"/api/skills/packs"
+	);
+	return (json.packs ?? []).map(toPackCard);
+}
+
+/** Resolve one pack's members (open the pack). */
+export async function fetchSkillPackDetail(
+	target: ApiTarget,
+	id: string
+): Promise<SkillPackDetail> {
+	const json = await request<{
+		builtin?: boolean;
+		description?: string;
+		id: string;
+		members?: {
+			description?: string | null;
+			id: string;
+			installed?: boolean;
+			name?: string;
+		}[];
+		name?: string;
+	}>(target, `/api/skills/packs/detail?id=${encodeURIComponent(id)}`);
+	return {
+		id: json.id,
+		name: json.name ?? json.id,
+		description: json.description ?? "",
+		builtin: json.builtin ?? false,
+		memberCount: json.members?.length ?? 0,
+		members: (json.members ?? []).map((m) => ({
+			id: m.id,
+			name: m.name ?? m.id,
+			description: m.description ?? null,
+			installed: m.installed ?? false,
+		})),
+	};
+}
+
+/** Install every member of a pack. Returns the slugs that landed on disk. */
+export async function installSkillPack(
+	target: ApiTarget,
+	id: string
+): Promise<string[]> {
+	const json = await request<{
+		error?: string;
+		installed?: string[];
+		success?: boolean;
+	}>(target, "/api/skills/packs/install", {
+		method: "POST",
+		body: { id },
+	});
+	if (json.success === false) {
+		throw new Error(json.error ?? `Failed to install pack ${id}`);
+	}
+	return json.installed ?? [];
+}
+
+/** Add a user-defined pack (repo reference or custom manifest). */
+export async function addSkillPack(
+	target: ApiTarget,
+	params: {
+		description: string;
+		id: string;
+		name: string;
+		source: string;
+	}
+): Promise<void> {
+	const json = await request<{ error?: string; success?: boolean }>(
+		target,
+		"/api/skills/packs",
+		{ method: "POST", body: params }
+	);
+	if (json.success === false) {
+		throw new Error(json.error ?? "Failed to add pack");
+	}
+}
+
+/** Remove a user-defined pack (built-ins cannot be removed). */
+export async function removeSkillPack(
+	target: ApiTarget,
+	id: string
+): Promise<void> {
+	await request<unknown>(target, "/api/skills/packs/remove", {
+		method: "POST",
+		body: { id },
+	});
+}
+
 // ── Authoring + version history (desktop SKILL.md editor) ─────────────────────
 //
 // The catalog installs read-only skills from skills.sh; these endpoints let a

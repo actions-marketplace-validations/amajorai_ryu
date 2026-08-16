@@ -520,528 +520,535 @@ impl SetupManager {
         // first-come-first-served, so the chat model — the one thing that unblocks
         // actually using the app — still claims the first slot.
         let chat_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 2 — GGUF weight file. Only attempted if binary installed.
-        // If the binary failed, downloading the model is pointless — skip and warn.
-        let gguf_installed = if llamacpp_installed {
-            let model_id = registry.local_chat_model.id.clone();
-            match downloads
-                .download_blocking(crate::model_catalog::gguf_download_spec(
-                    &registry.local_chat_model.id,
-                    &registry.local_chat_model.weight_url,
-                    &registry.local_chat_model.sha256,
-                    &format!("{model_id} (chat model)"),
-                    crate::downloads::DownloadRole::ChatModel,
-                ))
-                .await
-            {
-                Ok(path) => {
-                    self.mark_installed(&format!("gguf:{model_id}")).await;
-                    // Auto-install the matching vision adapter for the default
-                    // model, bound to its stem, so a multimodal default (e.g.
-                    // Gemma) accepts images out of the box. Best-effort: a failure
-                    // (or a text-only default) leaves the model chatting as text.
-                    let mmproj = {
-                        let endpoint = crate::model_catalog::HfEndpoint::huggingface();
-                        let client = reqwest::Client::new();
-                        match crate::model_catalog::repo_from_hf_url(
-                            &registry.local_chat_model.weight_url,
-                        ) {
-                            Some(repo) => match crate::model_catalog::install_companion_mmproj(
-                                &client, &endpoint, &repo, &model_id, downloads,
-                            )
-                            .await
-                            {
-                                Ok(Some(name)) => {
-                                    tracing::info!(
+            let mut warnings = Vec::<String>::new();
+            // Step 2 — GGUF weight file. Only attempted if binary installed.
+            // If the binary failed, downloading the model is pointless — skip and warn.
+            let gguf_installed = if llamacpp_installed {
+                let model_id = registry.local_chat_model.id.clone();
+                match downloads
+                    .download_blocking(crate::model_catalog::gguf_download_spec(
+                        &registry.local_chat_model.id,
+                        &registry.local_chat_model.weight_url,
+                        &registry.local_chat_model.sha256,
+                        &format!("{model_id} (chat model)"),
+                        crate::downloads::DownloadRole::ChatModel,
+                    ))
+                    .await
+                {
+                    Ok(path) => {
+                        self.mark_installed(&format!("gguf:{model_id}")).await;
+                        // Auto-install the matching vision adapter for the default
+                        // model, bound to its stem, so a multimodal default (e.g.
+                        // Gemma) accepts images out of the box. Best-effort: a failure
+                        // (or a text-only default) leaves the model chatting as text.
+                        let mmproj = {
+                            let endpoint = crate::model_catalog::HfEndpoint::huggingface();
+                            let client = reqwest::Client::new();
+                            match crate::model_catalog::repo_from_hf_url(
+                                &registry.local_chat_model.weight_url,
+                            ) {
+                                Some(repo) => match crate::model_catalog::install_companion_mmproj(
+                                    &client, &endpoint, &repo, &model_id, downloads,
+                                )
+                                .await
+                                {
+                                    Ok(Some(name)) => {
+                                        tracing::info!(
                                         "onboarding: vision adapter {name} installed for {model_id}"
                                     );
-                                    Some(name)
-                                }
-                                Ok(None) => None,
-                                Err(e) => {
-                                    tracing::warn!(
+                                        Some(name)
+                                    }
+                                    Ok(None) => None,
+                                    Err(e) => {
+                                        tracing::warn!(
                                         "onboarding: vision adapter install failed for {model_id} \
                                          (chat works as text-only): {e:#}"
                                     );
-                                    None
-                                }
-                            },
-                            None => None,
+                                        None
+                                    }
+                                },
+                                None => None,
+                            }
+                        };
+                        // Record catalog provenance so the model-catalog "Installed"
+                        // view resolves this default to its real Hugging Face repo,
+                        // name, and quantization (not an origin-less `local:` card).
+                        if let Err(e) = crate::model_catalog::record_default_download(
+                            &model_id,
+                            &registry.local_chat_model.weight_url,
+                            None,
+                            mmproj,
+                        ) {
+                            tracing::warn!("recording chat model provenance failed: {e:#}");
                         }
-                    };
-                    // Record catalog provenance so the model-catalog "Installed"
-                    // view resolves this default to its real Hugging Face repo,
-                    // name, and quantization (not an origin-less `local:` card).
-                    if let Err(e) = crate::model_catalog::record_default_download(
-                        &model_id,
-                        &registry.local_chat_model.weight_url,
-                        None,
-                        mmproj,
-                    ) {
-                        tracing::warn!("recording chat model provenance failed: {e:#}");
+                        tracing::info!(
+                            "onboarding: GGUF {} installed at {}",
+                            model_id,
+                            path.display()
+                        );
+                        true
                     }
-                    tracing::info!(
-                        "onboarding: GGUF {} installed at {}",
-                        model_id,
-                        path.display()
-                    );
-                    true
+                    Err(e) => {
+                        let msg = format!(
+                            "GGUF model {model_id} download failed (chat will fall back): {e:#}"
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
                 }
-                Err(e) => {
-                    let msg = format!(
-                        "GGUF model {model_id} download failed (chat will fall back): {e:#}"
-                    );
-                    tracing::warn!("{}", msg);
-                    warnings.push(msg);
-                    false
-                }
-            }
-        } else {
-            warnings.push(
-                "GGUF download skipped because llama.cpp binary was not installed".to_owned(),
-            );
-            false
-        };
-        (gguf_installed, warnings)
+            } else {
+                warnings.push(
+                    "GGUF download skipped because llama.cpp binary was not installed".to_owned(),
+                );
+                false
+            };
+            (gguf_installed, warnings)
         };
 
         let embed_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 3 — nomic embedding GGUF (downloaded here, like the chat model).
-        //
-        // Onboarding is the *single owner* of every default model download — the
-        // same pattern as the Gemma chat model above. The `llamacpp-embed` engine
-        // only *serves* this file (it never downloads), so there is no concurrent
-        // double-download race against its auto-start. Non-fatal: a failure
-        // degrades RAG to the local hashing embedder and never blocks chat.
-        let embed_gguf_installed = if llamacpp_installed {
-            let id = registry.local_embed_model.id.clone();
-            match downloads
-                .download_blocking(crate::model_catalog::gguf_download_spec(
-                    &registry.local_embed_model.id,
-                    &registry.local_embed_model.weight_url,
-                    &registry.local_embed_model.sha256,
-                    &format!("{id} (embedding model)"),
-                    crate::downloads::DownloadRole::EmbeddingModel,
-                ))
-                .await
-            {
-                Ok(path) => {
-                    self.mark_installed(&format!("gguf:{id}")).await;
-                    // Record catalog provenance so the embedding default resolves
-                    // to its real Hugging Face repo in the installed-only view.
-                    if let Err(e) = crate::model_catalog::record_default_download(
-                        &id,
+            let mut warnings = Vec::<String>::new();
+            // Step 3 — nomic embedding GGUF (downloaded here, like the chat model).
+            //
+            // Onboarding is the *single owner* of every default model download — the
+            // same pattern as the Gemma chat model above. The `llamacpp-embed` engine
+            // only *serves* this file (it never downloads), so there is no concurrent
+            // double-download race against its auto-start. Non-fatal: a failure
+            // degrades RAG to the local hashing embedder and never blocks chat.
+            let embed_gguf_installed = if llamacpp_installed {
+                let id = registry.local_embed_model.id.clone();
+                match downloads
+                    .download_blocking(crate::model_catalog::gguf_download_spec(
+                        &registry.local_embed_model.id,
                         &registry.local_embed_model.weight_url,
-                        None,
-                        None,
-                    ) {
-                        tracing::warn!("recording embed model provenance failed: {e:#}");
+                        &registry.local_embed_model.sha256,
+                        &format!("{id} (embedding model)"),
+                        crate::downloads::DownloadRole::EmbeddingModel,
+                    ))
+                    .await
+                {
+                    Ok(path) => {
+                        self.mark_installed(&format!("gguf:{id}")).await;
+                        // Record catalog provenance so the embedding default resolves
+                        // to its real Hugging Face repo in the installed-only view.
+                        if let Err(e) = crate::model_catalog::record_default_download(
+                            &id,
+                            &registry.local_embed_model.weight_url,
+                            None,
+                            None,
+                        ) {
+                            tracing::warn!("recording embed model provenance failed: {e:#}");
+                        }
+                        tracing::info!(
+                            "onboarding: embedding GGUF {} installed at {}",
+                            id,
+                            path.display()
+                        );
+                        true
                     }
-                    tracing::info!(
-                        "onboarding: embedding GGUF {} installed at {}",
-                        id,
-                        path.display()
-                    );
-                    true
-                }
-                Err(e) => {
-                    let msg = format!(
+                    Err(e) => {
+                        let msg = format!(
                         "embedding GGUF {id} download failed (RAG will use local hashing): {e:#}"
                     );
-                    tracing::warn!("{}", msg);
-                    warnings.push(msg);
-                    false
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
                 }
-            }
-        } else {
-            warnings.push(
-                "embedding GGUF download skipped because llama.cpp binary was not installed"
-                    .to_owned(),
-            );
-            false
-        };
-        (embed_gguf_installed, warnings)
+            } else {
+                warnings.push(
+                    "embedding GGUF download skipped because llama.cpp binary was not installed"
+                        .to_owned(),
+                );
+                false
+            };
+            (embed_gguf_installed, warnings)
         };
 
         let reranker_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 3.5 — bge reranker GGUF (downloaded here, like the embedding model).
-        //
-        // Auto-downloaded so Spaces RAG can neural-rerank with zero setup. The
-        // `llamacpp-rerank` server only *serves* this file (it never downloads),
-        // and stays off by default (not in `startup_order`) — the Spaces search
-        // path lazily starts it on first use. Non-fatal: a failure degrades Spaces
-        // reranking to the vector order (fail-open) and never blocks chat or RAG.
-        let reranker_gguf_installed = if llamacpp_installed {
-            let id = registry.local_reranker_model.id.clone();
-            match downloads
-                .download_blocking(crate::model_catalog::gguf_download_spec(
-                    &registry.local_reranker_model.id,
-                    &registry.local_reranker_model.weight_url,
-                    &registry.local_reranker_model.sha256,
-                    &format!("{id} (reranker model)"),
-                    crate::downloads::DownloadRole::RerankerModel,
-                ))
-                .await
-            {
-                Ok(path) => {
-                    self.mark_installed(&format!("gguf:{id}")).await;
-                    if let Err(e) = crate::model_catalog::record_default_download(
-                        &id,
+            let mut warnings = Vec::<String>::new();
+            // Step 3.5 — bge reranker GGUF (downloaded here, like the embedding model).
+            //
+            // Auto-downloaded so Spaces RAG can neural-rerank with zero setup. The
+            // `llamacpp-rerank` server only *serves* this file (it never downloads),
+            // and stays off by default (not in `startup_order`) — the Spaces search
+            // path lazily starts it on first use. Non-fatal: a failure degrades Spaces
+            // reranking to the vector order (fail-open) and never blocks chat or RAG.
+            let reranker_gguf_installed = if llamacpp_installed {
+                let id = registry.local_reranker_model.id.clone();
+                match downloads
+                    .download_blocking(crate::model_catalog::gguf_download_spec(
+                        &registry.local_reranker_model.id,
                         &registry.local_reranker_model.weight_url,
-                        None,
-                        None,
-                    ) {
-                        tracing::warn!("recording reranker model provenance failed: {e:#}");
+                        &registry.local_reranker_model.sha256,
+                        &format!("{id} (reranker model)"),
+                        crate::downloads::DownloadRole::RerankerModel,
+                    ))
+                    .await
+                {
+                    Ok(path) => {
+                        self.mark_installed(&format!("gguf:{id}")).await;
+                        if let Err(e) = crate::model_catalog::record_default_download(
+                            &id,
+                            &registry.local_reranker_model.weight_url,
+                            None,
+                            None,
+                        ) {
+                            tracing::warn!("recording reranker model provenance failed: {e:#}");
+                        }
+                        tracing::info!(
+                            "onboarding: reranker GGUF {} installed at {}",
+                            id,
+                            path.display()
+                        );
+                        true
                     }
-                    tracing::info!(
-                        "onboarding: reranker GGUF {} installed at {}",
-                        id,
-                        path.display()
-                    );
-                    true
-                }
-                Err(e) => {
-                    let msg = format!(
+                    Err(e) => {
+                        let msg = format!(
                         "reranker GGUF {id} download failed (Spaces RAG will skip reranking): {e:#}"
                     );
-                    tracing::warn!("{}", msg);
-                    warnings.push(msg);
-                    false
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
                 }
-            }
-        } else {
-            warnings.push(
-                "reranker GGUF download skipped because llama.cpp binary was not installed"
-                    .to_owned(),
-            );
-            false
-        };
-        (reranker_gguf_installed, warnings)
+            } else {
+                warnings.push(
+                    "reranker GGUF download skipped because llama.cpp binary was not installed"
+                        .to_owned(),
+                );
+                false
+            };
+            (reranker_gguf_installed, warnings)
         };
 
         let classifier_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 3.6 — 270M classifier GGUF (downloaded here, like the reranker).
-        //
-        // Same posture as every other bundled default: unconditional, sequential,
-        // non-fatal. `install_local_stack` runs on a background task, so nothing
-        // here blocks Core's HTTP API or the desktop; and at ~241 MB this step adds
-        // roughly half of what the reranker (~438 MB) directly before it already
-        // costs, after every chat-critical download has completed. The
-        // `llamacpp-classify` server only *serves* this file (it never downloads),
-        // and stays off by default — Core's gateway config-push path lazily starts
-        // it when a pushed config selects the classify tier.
-        //
-        // Non-fatal, but be precise about WHAT degrades — the earlier claim that a
-        // failure leaves the inspector "resolving to the gateway's default model,
-        // which is the behaviour that existed before this tier" is no longer true.
-        // The gateway now defaults `inspector.model` to the classify id
-        // (`de_inspector_model`) and routes that id to the `classify` provider, so
-        // without this file the guardrail's model has nowhere to run: the sidecar
-        // cannot start, the provider call is refused, and the inspector /
-        // smart-routing classifier / LLM-judge evaluators FAIL OPEN — traffic is
-        // allowed unscanned. Degraded, never broken, and never blocking chat, but the
-        // degradation is "no guardrail verdict", not "a different model".
-        let classifier_gguf_installed = if llamacpp_installed {
-            let id = registry.local_classifier_model.id.clone();
-            match downloads
-                .download_blocking(crate::model_catalog::gguf_download_spec(
-                    &registry.local_classifier_model.id,
-                    &registry.local_classifier_model.weight_url,
-                    &registry.local_classifier_model.sha256,
-                    &format!("{id} (classifier model)"),
-                    crate::downloads::DownloadRole::ClassifierModel,
-                ))
-                .await
-            {
-                Ok(path) => {
-                    self.mark_installed(&format!("gguf:{id}")).await;
-                    if let Err(e) = crate::model_catalog::record_default_download(
-                        &id,
+            let mut warnings = Vec::<String>::new();
+            // Step 3.6 — 270M classifier GGUF (downloaded here, like the reranker).
+            //
+            // Same posture as every other bundled default: unconditional, sequential,
+            // non-fatal. `install_local_stack` runs on a background task, so nothing
+            // here blocks Core's HTTP API or the desktop; and at ~241 MB this step adds
+            // roughly half of what the reranker (~438 MB) directly before it already
+            // costs, after every chat-critical download has completed. The
+            // `llamacpp-classify` server only *serves* this file (it never downloads),
+            // and stays off by default — Core's gateway config-push path lazily starts
+            // it when a pushed config selects the classify tier.
+            //
+            // Non-fatal, but be precise about WHAT degrades — the earlier claim that a
+            // failure leaves the inspector "resolving to the gateway's default model,
+            // which is the behaviour that existed before this tier" is no longer true.
+            // The gateway now defaults `inspector.model` to the classify id
+            // (`de_inspector_model`) and routes that id to the `classify` provider, so
+            // without this file the guardrail's model has nowhere to run: the sidecar
+            // cannot start, the provider call is refused, and the inspector /
+            // smart-routing classifier / LLM-judge evaluators FAIL OPEN — traffic is
+            // allowed unscanned. Degraded, never broken, and never blocking chat, but the
+            // degradation is "no guardrail verdict", not "a different model".
+            let classifier_gguf_installed = if llamacpp_installed {
+                let id = registry.local_classifier_model.id.clone();
+                match downloads
+                    .download_blocking(crate::model_catalog::gguf_download_spec(
+                        &registry.local_classifier_model.id,
                         &registry.local_classifier_model.weight_url,
-                        None,
-                        None,
-                    ) {
-                        tracing::warn!("recording classifier model provenance failed: {e:#}");
+                        &registry.local_classifier_model.sha256,
+                        &format!("{id} (classifier model)"),
+                        crate::downloads::DownloadRole::ClassifierModel,
+                    ))
+                    .await
+                {
+                    Ok(path) => {
+                        self.mark_installed(&format!("gguf:{id}")).await;
+                        if let Err(e) = crate::model_catalog::record_default_download(
+                            &id,
+                            &registry.local_classifier_model.weight_url,
+                            None,
+                            None,
+                        ) {
+                            tracing::warn!("recording classifier model provenance failed: {e:#}");
+                        }
+                        tracing::info!(
+                            "onboarding: classifier GGUF {} installed at {}",
+                            id,
+                            path.display()
+                        );
+                        true
                     }
-                    tracing::info!(
-                        "onboarding: classifier GGUF {} installed at {}",
-                        id,
-                        path.display()
-                    );
-                    true
-                }
-                Err(e) => {
-                    // Surfaced to the user in `warnings`, so it has to say what
-                    // actually happens: the guardrail does not run at all (it fails
-                    // OPEN and traffic is allowed), rather than running on some other
-                    // model. `inspector.model` IS this id and routes to the `classify`
-                    // provider the missing weights would have served.
-                    let msg = format!(
-                        "classifier GGUF {id} download failed — the firewall inspector, \
+                    Err(e) => {
+                        // Surfaced to the user in `warnings`, so it has to say what
+                        // actually happens: the guardrail does not run at all (it fails
+                        // OPEN and traffic is allowed), rather than running on some other
+                        // model. `inspector.model` IS this id and routes to the `classify`
+                        // provider the missing weights would have served.
+                        let msg = format!(
+                            "classifier GGUF {id} download failed — the firewall inspector, \
                          smart-routing classifier and LLM-judge evaluators cannot run and \
                          will fail open (traffic allowed unscanned) until it is \
                          downloaded: {e:#}"
-                    );
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
+                }
+            } else {
+                warnings.push(
+                    "classifier GGUF download skipped because llama.cpp binary was not installed"
+                        .to_owned(),
+                );
+                false
+            };
+            (classifier_gguf_installed, warnings)
+        };
+
+        let whisper_step = async {
+            let mut warnings = Vec::<String>::new();
+            // Step 4 — whisper.cpp voice (STT) engine + default GGML model.
+            //
+            // Bundled-by-default extra: a fresh install can transcribe audio with no
+            // setup, mirroring the zero-setup chat stack. This is independent of chat
+            // readiness — a failure here (e.g. no prebuilt whisper server on
+            // non-Windows) is surfaced as a warning and never blocks `is_ready`.
+            // `ensure_installed` fetches both the server binary and the default
+            // `ggml-base.en.bin` model in one call. The engine stays opt-in to *run*
+            // (not in `startup_order`); installing it only makes it ready to start.
+            let whisper_installed = match WhisperCppDownloader::new()
+                .ensure_installed(downloads)
+                .await
+            {
+                Ok(version) => {
+                    self.mark_installed("whispercpp").await;
+                    tracing::info!("onboarding: whisper.cpp voice engine {version} installed");
+                    true
+                }
+                Err(e) => {
+                    let msg =
+                        format!("whisper.cpp install failed (voice will be unavailable): {e:#}");
                     tracing::warn!("{}", msg);
                     warnings.push(msg);
                     false
                 }
-            }
-        } else {
-            warnings.push(
-                "classifier GGUF download skipped because llama.cpp binary was not installed"
-                    .to_owned(),
-            );
-            false
-        };
-        (classifier_gguf_installed, warnings)
-        };
-
-        let whisper_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 4 — whisper.cpp voice (STT) engine + default GGML model.
-        //
-        // Bundled-by-default extra: a fresh install can transcribe audio with no
-        // setup, mirroring the zero-setup chat stack. This is independent of chat
-        // readiness — a failure here (e.g. no prebuilt whisper server on
-        // non-Windows) is surfaced as a warning and never blocks `is_ready`.
-        // `ensure_installed` fetches both the server binary and the default
-        // `ggml-base.en.bin` model in one call. The engine stays opt-in to *run*
-        // (not in `startup_order`); installing it only makes it ready to start.
-        let whisper_installed = match WhisperCppDownloader::new()
-            .ensure_installed(downloads)
-            .await
-        {
-            Ok(version) => {
-                self.mark_installed("whispercpp").await;
-                tracing::info!("onboarding: whisper.cpp voice engine {version} installed");
-                true
-            }
-            Err(e) => {
-                let msg = format!("whisper.cpp install failed (voice will be unavailable): {e:#}");
-                tracing::warn!("{}", msg);
-                warnings.push(msg);
-                false
-            }
-        };
-        (whisper_installed, warnings)
+            };
+            (whisper_installed, warnings)
         };
 
         let parakeet_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 5 — parakeet v3 ONNX speech model (downloaded here by default).
-        //
-        // Like whisper, the model is bundled up front so the parakeet speech
-        // engine has it ready; the engine only serves it. Non-fatal — a failure
-        // (e.g. offline) warns and never blocks chat. Note: parakeet *inference*
-        // is gated behind the `voice-parakeet` build feature; the model download
-        // is independent so the bits are in place when a feature build runs.
-        let parakeet_installed =
-            match crate::sidecar::providers::parakeet::ParakeetDownloader::new()
-                .ensure_model(downloads)
+            let mut warnings = Vec::<String>::new();
+            // Step 5 — parakeet v3 ONNX speech model (downloaded here by default).
+            //
+            // Like whisper, the model is bundled up front so the parakeet speech
+            // engine has it ready; the engine only serves it. Non-fatal — a failure
+            // (e.g. offline) warns and never blocks chat. Note: parakeet *inference*
+            // is gated behind the `voice-parakeet` build feature; the model download
+            // is independent so the bits are in place when a feature build runs.
+            let parakeet_installed =
+                match crate::sidecar::providers::parakeet::ParakeetDownloader::new()
+                    .ensure_model(downloads)
+                    .await
+                {
+                    Ok(dir) => {
+                        self.mark_installed("parakeet").await;
+                        // Persist under the SIDECAR name, not just the model's own
+                        // `parakeet-model:v3-int8` store key. `seed_installed_from_disk`
+                        // looks up `versions.json` by sidecar name, so without this row
+                        // the in-memory `mark_installed` above died at process exit and
+                        // `start_all` skipped parakeet as "not installed" on every
+                        // subsequent boot — the engine then never loaded, and the Voice
+                        // settings row reported "Not running" forever. Same reason
+                        // `ryutts` records one below.
+                        if let Err(e) =
+                            crate::sidecar::download_manager::VersionStore::record_persisted(
+                                "parakeet",
+                                crate::sidecar::providers::parakeet::MODEL_DIR_NAME,
+                                "v3-int8",
+                            )
+                        {
+                            tracing::warn!("recording parakeet install failed: {e:#}");
+                        }
+                        tracing::info!(
+                            "onboarding: parakeet speech model installed at {}",
+                            dir.display()
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "parakeet model download failed (parakeet STT unavailable): {e:#}"
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
+                };
+            (parakeet_installed, warnings)
+        };
+
+        let vad_step = async {
+            let mut warnings = Vec::<String>::new();
+            // Step 5.5 — Silero VAD ONNX model (downloaded here by default).
+            //
+            // Bundled up front so voice mode's noise-robust neural endpointing works
+            // with zero setup. Like parakeet, VAD *inference* is gated behind the
+            // `voice-vad` build feature; this model download is independent so the
+            // bits are in place when a feature build runs. Tiny (~1.8 MB) and non-fatal
+            // — a failure degrades voice mode to the always-compiled energy VAD.
+            let vad_installed = match downloads
+                .download_blocking(crate::voice::vad::silero_download_spec())
                 .await
             {
-                Ok(dir) => {
-                    self.mark_installed("parakeet").await;
-                    // Persist under the SIDECAR name, not just the model's own
-                    // `parakeet-model:v3-int8` store key. `seed_installed_from_disk`
-                    // looks up `versions.json` by sidecar name, so without this row
-                    // the in-memory `mark_installed` above died at process exit and
-                    // `start_all` skipped parakeet as "not installed" on every
-                    // subsequent boot — the engine then never loaded, and the Voice
-                    // settings row reported "Not running" forever. Same reason
-                    // `ryutts` records one below.
-                    if let Err(e) = crate::sidecar::download_manager::VersionStore::record_persisted(
-                        "parakeet",
-                        crate::sidecar::providers::parakeet::MODEL_DIR_NAME,
-                        "v3-int8",
-                    ) {
-                        tracing::warn!("recording parakeet install failed: {e:#}");
-                    }
+                Ok(path) => {
+                    self.mark_installed("vad-model:silero-v4").await;
                     tracing::info!(
-                        "onboarding: parakeet speech model installed at {}",
-                        dir.display()
+                        "onboarding: Silero VAD model installed at {}",
+                        path.display()
                     );
                     true
                 }
                 Err(e) => {
                     let msg =
-                        format!("parakeet model download failed (parakeet STT unavailable): {e:#}");
+                        format!("Silero VAD model download failed (voice uses energy VAD): {e:#}");
                     tracing::warn!("{}", msg);
                     warnings.push(msg);
                     false
                 }
             };
-        (parakeet_installed, warnings)
-        };
-
-        let vad_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 5.5 — Silero VAD ONNX model (downloaded here by default).
-        //
-        // Bundled up front so voice mode's noise-robust neural endpointing works
-        // with zero setup. Like parakeet, VAD *inference* is gated behind the
-        // `voice-vad` build feature; this model download is independent so the
-        // bits are in place when a feature build runs. Tiny (~1.8 MB) and non-fatal
-        // — a failure degrades voice mode to the always-compiled energy VAD.
-        let vad_installed = match downloads
-            .download_blocking(crate::voice::vad::silero_download_spec())
-            .await
-        {
-            Ok(path) => {
-                self.mark_installed("vad-model:silero-v4").await;
-                tracing::info!(
-                    "onboarding: Silero VAD model installed at {}",
-                    path.display()
-                );
-                true
-            }
-            Err(e) => {
-                let msg =
-                    format!("Silero VAD model download failed (voice uses energy VAD): {e:#}");
-                tracing::warn!("{}", msg);
-                warnings.push(msg);
-                false
-            }
-        };
-        (vad_installed, warnings)
+            (vad_installed, warnings)
         };
 
         let outetts_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 6 — OuteTTS (text-to-speech) binary + GGUF models.
-        //
-        // Bundled-by-default extra so a fresh install can *speak* with no setup
-        // (the island companion speaks replies aloud by default). `ensure_installed`
-        // fetches the `llama-tts` binary (from the llama.cpp release) plus the
-        // OuteTTS + WavTokenizer GGUFs in one call. Non-fatal and independent of
-        // chat readiness — a failure warns and never blocks chat. Stays opt-in to
-        // *run* (not in `startup_order`); the `/api/voice/speak` data path renders
-        // on demand once the bits are present.
-        let outetts_installed = match OuteTtsDownloader::new().ensure_installed(downloads).await {
-            Ok(_version) => {
-                self.mark_installed("outetts").await;
-                tracing::info!("onboarding: OuteTTS text-to-speech engine installed");
-                true
-            }
-            Err(e) => {
-                let msg = format!("OuteTTS install failed (spoken replies unavailable): {e:#}");
-                tracing::warn!("{}", msg);
-                warnings.push(msg);
-                false
-            }
-        };
-        (outetts_installed, warnings)
-        };
-
-        let kokoro_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 7 — Kokoro 82M (the cross-surface default TTS engine): runtime, then
-        // model artifacts.
-        //
-        // Kokoro is the default TTS engine id everywhere (`DEFAULT_TTS_ENGINE`), and
-        // the Python TTS sidecar's `kokoro-onnx` backend is the only thing that can
-        // serve it — the ONNX weights + voice pack are inert without it. So the
-        // runtime is provisioned FIRST and the ~330 MB of weights are fetched only
-        // once something can actually play them.
-        //
-        // That ordering is the fix for a real waste: the weights used to download
-        // unconditionally while `ensure_kokoro_runtime` bailed on literally every
-        // install (nothing ever created `~/.ryu/tts-sidecar` — see the WHY on that
-        // function). Every user paid for a model that was never once served. A node
-        // with no usable Python still pays nothing now, and still speaks: the
-        // built-in OuteTTS engine from Step 6 is the runtime fallback, and
-        // `POST /api/voice/speak` falls back to it per-request.
-        //
-        // Non-fatal throughout — chat readiness never depends on any of this.
-        let runtime_ready = match crate::sidecar::providers::ryutts::ensure_kokoro_runtime().await {
-            Ok(ready) => ready,
-            Err(e) => {
-                let msg =
-                    format!("Kokoro TTS runtime provisioning failed (TTS uses OuteTTS): {e:#}");
-                tracing::warn!("{}", msg);
-                warnings.push(msg);
-                false
-            }
-        };
-        let kokoro_installed = if runtime_ready {
-            match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
-                .ensure_installed(downloads)
-                .await
-            {
-                Ok(_) => {
-                    self.mark_installed("ryutts").await;
-                    // Persist so a restart re-seeds `ryutts` as installed and
-                    // `start_all` brings the default TTS engine up automatically.
-                    if let Err(e) =
-                        crate::sidecar::download_manager::VersionStore::record_persisted(
-                            "ryutts",
-                            "kokoro-82m-v1.0",
-                            "installed",
-                        )
-                    {
-                        tracing::warn!("recording ryutts install failed: {e:#}");
-                    }
-                    tracing::info!(
-                        "onboarding: Kokoro 82M default TTS installed + sidecar provisioned"
-                    );
-                    true
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "Kokoro 82M model download failed (TTS falls back to OuteTTS): {e:#}"
-                    );
-                    tracing::warn!("{}", msg);
-                    warnings.push(msg);
-                    false
-                }
-            }
-        } else {
-            tracing::info!(
-                "onboarding: Kokoro TTS sidecar not provisionable on this node — skipping the \
-                 Kokoro model download. Spoken output uses the built-in OuteTTS engine."
-            );
-            false
-        };
-        (kokoro_installed, warnings)
-        };
-
-        let sdcpp_step = async {
-        let mut warnings = Vec::<String>::new();
-        // Step 8 — stable-diffusion.cpp image engine (server binary + default model).
-        //
-        // Bundled-by-default so text-to-image works zero-setup, mirroring the STT/
-        // TTS engines. `ensure_installed` fetches the prebuilt sd-server binary for
-        // the platform (Windows x64 / macOS arm64 / Linux x86_64) plus the default
-        // SDXL base model — the Q8_0 UNet GGUF with its CLIP-L / CLIP-G text
-        // encoders and VAE (~4.6 GB total). The video default (Wan2.1) is not part
-        // of onboarding; it is downloaded lazily on first use. Non-fatal and
-        // independent of everything else — on a platform with no prebuilt server
-        // (Intel mac, arm Linux) it warns and never blocks. The engine stays opt-in
-        // to *run* (not in `startup_order`); the `/api/images/generate` route
-        // lazily starts it.
-        let sdcpp_installed =
-            match crate::sidecar::providers::sdcpp::StableDiffusionDownloader::new()
-                .ensure_installed(downloads)
-                .await
+            let mut warnings = Vec::<String>::new();
+            // Step 6 — OuteTTS (text-to-speech) binary + GGUF models.
+            //
+            // Bundled-by-default extra so a fresh install can *speak* with no setup
+            // (the island companion speaks replies aloud by default). `ensure_installed`
+            // fetches the `llama-tts` binary (from the llama.cpp release) plus the
+            // OuteTTS + WavTokenizer GGUFs in one call. Non-fatal and independent of
+            // chat readiness — a failure warns and never blocks chat. Stays opt-in to
+            // *run* (not in `startup_order`); the `/api/voice/speak` data path renders
+            // on demand once the bits are present.
+            let outetts_installed = match OuteTtsDownloader::new().ensure_installed(downloads).await
             {
                 Ok(_version) => {
-                    self.mark_installed("sdcpp").await;
-                    tracing::info!("onboarding: stable-diffusion.cpp image engine installed");
+                    self.mark_installed("outetts").await;
+                    tracing::info!("onboarding: OuteTTS text-to-speech engine installed");
                     true
                 }
                 Err(e) => {
-                    let msg = format!("image engine (sdcpp) install skipped/failed: {e:#}");
+                    let msg = format!("OuteTTS install failed (spoken replies unavailable): {e:#}");
                     tracing::warn!("{}", msg);
                     warnings.push(msg);
                     false
                 }
             };
-        (sdcpp_installed, warnings)
+            (outetts_installed, warnings)
+        };
+
+        let kokoro_step = async {
+            let mut warnings = Vec::<String>::new();
+            // Step 7 — Kokoro 82M (the cross-surface default TTS engine): runtime, then
+            // model artifacts.
+            //
+            // Kokoro is the default TTS engine id everywhere (`DEFAULT_TTS_ENGINE`), and
+            // the Python TTS sidecar's `kokoro-onnx` backend is the only thing that can
+            // serve it — the ONNX weights + voice pack are inert without it. So the
+            // runtime is provisioned FIRST and the ~330 MB of weights are fetched only
+            // once something can actually play them.
+            //
+            // That ordering is the fix for a real waste: the weights used to download
+            // unconditionally while `ensure_kokoro_runtime` bailed on literally every
+            // install (nothing ever created `~/.ryu/tts-sidecar` — see the WHY on that
+            // function). Every user paid for a model that was never once served. A node
+            // with no usable Python still pays nothing now, and still speaks: the
+            // built-in OuteTTS engine from Step 6 is the runtime fallback, and
+            // `POST /api/voice/speak` falls back to it per-request.
+            //
+            // Non-fatal throughout — chat readiness never depends on any of this.
+            let runtime_ready = match crate::sidecar::providers::ryutts::ensure_kokoro_runtime()
+                .await
+            {
+                Ok(ready) => ready,
+                Err(e) => {
+                    let msg =
+                        format!("Kokoro TTS runtime provisioning failed (TTS uses OuteTTS): {e:#}");
+                    tracing::warn!("{}", msg);
+                    warnings.push(msg);
+                    false
+                }
+            };
+            let kokoro_installed = if runtime_ready {
+                match crate::sidecar::providers::ryutts::kokoro::KokoroDownloader::new()
+                    .ensure_installed(downloads)
+                    .await
+                {
+                    Ok(_) => {
+                        self.mark_installed("ryutts").await;
+                        // Persist so a restart re-seeds `ryutts` as installed and
+                        // `start_all` brings the default TTS engine up automatically.
+                        if let Err(e) =
+                            crate::sidecar::download_manager::VersionStore::record_persisted(
+                                "ryutts",
+                                "kokoro-82m-v1.0",
+                                "installed",
+                            )
+                        {
+                            tracing::warn!("recording ryutts install failed: {e:#}");
+                        }
+                        tracing::info!(
+                            "onboarding: Kokoro 82M default TTS installed + sidecar provisioned"
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        let msg = format!(
+                            "Kokoro 82M model download failed (TTS falls back to OuteTTS): {e:#}"
+                        );
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "onboarding: Kokoro TTS sidecar not provisionable on this node — skipping the \
+                 Kokoro model download. Spoken output uses the built-in OuteTTS engine."
+                );
+                false
+            };
+            (kokoro_installed, warnings)
+        };
+
+        let sdcpp_step = async {
+            let mut warnings = Vec::<String>::new();
+            // Step 8 — stable-diffusion.cpp image engine (server binary + default model).
+            //
+            // Bundled-by-default so text-to-image works zero-setup, mirroring the STT/
+            // TTS engines. `ensure_installed` fetches the prebuilt sd-server binary for
+            // the platform (Windows x64 / macOS arm64 / Linux x86_64) plus the default
+            // SDXL base model — the Q8_0 UNet GGUF with its CLIP-L / CLIP-G text
+            // encoders and VAE (~4.6 GB total). The video default (Wan2.1) is not part
+            // of onboarding; it is downloaded lazily on first use. Non-fatal and
+            // independent of everything else — on a platform with no prebuilt server
+            // (Intel mac, arm Linux) it warns and never blocks. The engine stays opt-in
+            // to *run* (not in `startup_order`); the `/api/images/generate` route
+            // lazily starts it.
+            let sdcpp_installed =
+                match crate::sidecar::providers::sdcpp::StableDiffusionDownloader::new()
+                    .ensure_installed(downloads)
+                    .await
+                {
+                    Ok(_version) => {
+                        self.mark_installed("sdcpp").await;
+                        tracing::info!("onboarding: stable-diffusion.cpp image engine installed");
+                        true
+                    }
+                    Err(e) => {
+                        let msg = format!("image engine (sdcpp) install skipped/failed: {e:#}");
+                        tracing::warn!("{}", msg);
+                        warnings.push(msg);
+                        false
+                    }
+                };
+            (sdcpp_installed, warnings)
         };
 
         let (
@@ -1070,16 +1077,8 @@ impl SetupManager {
         // Merged in step order, so the warning list a user reads stays stable even
         // though the steps themselves no longer finish in that order.
         for w in [
-            w_chat,
-            w_embed,
-            w_rerank,
-            w_classify,
-            w_whisper,
-            w_parakeet,
-            w_vad,
-            w_outetts,
-            w_kokoro,
-            w_sdcpp,
+            w_chat, w_embed, w_rerank, w_classify, w_whisper, w_parakeet, w_vad, w_outetts,
+            w_kokoro, w_sdcpp,
         ] {
             warnings.extend(w);
         }
@@ -1315,7 +1314,8 @@ mod onboarding_tests {
     #[tokio::test]
     async fn seed_installed_from_disk_never_marks_tailscale() {
         let mgr = SetupManager::new();
-        mgr.seed_installed_from_disk(&["tailscale".to_string()]).await;
+        mgr.seed_installed_from_disk(&["tailscale".to_string()])
+            .await;
         assert!(!mgr.is_installed("tailscale").await);
     }
 

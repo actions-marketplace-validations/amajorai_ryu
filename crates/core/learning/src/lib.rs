@@ -37,11 +37,11 @@ pub(crate) mod test_support;
 
 pub use api::{openapi, routes};
 pub use engine::{
-    build_jsonl, build_skill_md, mark_cycle_ran, parse_reward, resolve_base_model, resolve_config,
-    resolve_enabled, resolve_excluded, resolve_feedback_down_negative,
-    resolve_feedback_memory_enabled, resolve_in_sleep_window, resolve_min_reward,
-    resolve_require_approval, resolve_skill_generation, resolve_skills_enabled, run_cycle,
-    run_skills_pass, scheduled_cycle_due, score_buffer, slugify, sweep_into_buffer,
+    build_jsonl, build_skill_md, mark_cycle_ran, merge_cycle_output, parse_reward,
+    resolve_base_model, resolve_config, resolve_enabled, resolve_excluded,
+    resolve_feedback_down_negative, resolve_feedback_memory_enabled, resolve_in_sleep_window,
+    resolve_min_reward, resolve_require_approval, resolve_skill_generation, resolve_skills_enabled,
+    run_cycle, run_skills_pass, scheduled_cycle_due, score_buffer, slugify, sweep_into_buffer,
     synthesize_skill, write_synthesized_skill, CyclePlan, LearningConfig, LearningCtx, SftMessage,
     SftSample, SkillProvenance, SynthOutcome, FEEDBACK_DOWN_NEGATIVE_PREF,
     FEEDBACK_MEMORY_ENABLED_PREF, LEARNING_BASE_MODEL_PREF, LEARNING_ENABLED_PREF,

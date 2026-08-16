@@ -2,12 +2,24 @@
 
 import { Button } from "@ryu/ui/components/button";
 import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@ryu/ui/components/dropdown-menu";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
 } from "@ryu/ui/components/tooltip";
 import { cn } from "@ryu/ui/lib/utils";
-import { IconArrowUp, IconCheck, IconEdit, IconX } from "@tabler/icons-react";
+import {
+	IconArrowUp,
+	IconCheck,
+	IconGripVertical,
+	IconPaperclip,
+	IconX,
+} from "@tabler/icons-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { CSSProperties } from "react";
 import { useRef, useState } from "react";
@@ -33,8 +45,18 @@ const STACK_DEPTH = 4;
 const COLLAPSED_OVERLAP = -(CARD_HEIGHT - PEEK);
 
 export interface QueuedMessage {
+	attachments?: QueuedAttachment[];
 	content: string;
 	id: string;
+}
+
+/** A staged image travels with its queued turn rather than the live composer. */
+export interface QueuedAttachment {
+	filename: string;
+	id: string;
+	mimeType?: string;
+	size?: number;
+	url: string;
 }
 
 export interface QueueBarProps {
@@ -44,14 +66,18 @@ export interface QueueBarProps {
 	onClear: () => void;
 	/** Replace the content of a queued message. */
 	onEdit: (id: string, content: string) => void;
+	onQueueModeChange?: (mode: "auto" | "off") => void;
 	/** Drop a queued message without sending it. */
 	onRemove: (id: string) => void;
+	/** Move a queued message to a new dispatch position. */
+	onReorder: (id: string, toIndex: number) => void;
 	/** Combine every queued message into one turn and send it now. */
 	onSendAll: () => void;
 	/** Jump a queued message to the front and send it now (interrupts a run). */
 	onSendNow: (id: string) => void;
 	/** Disable queueing from the composer controls. */
 	onTurnOffQueueing?: () => void;
+	queueMode?: "auto" | "off";
 	/**
 	 * Rounds the top corners when the queue bar is the topmost element of the
 	 * composer stack (i.e. no info bar sits above it).
@@ -68,6 +94,7 @@ function QueueItem({
 	onSendNow,
 	onRemove,
 	onEdit,
+	onReorder,
 }: {
 	item: QueuedMessage;
 	index: number;
@@ -77,6 +104,7 @@ function QueueItem({
 	onSendNow: (id: string) => void;
 	onRemove: (id: string) => void;
 	onEdit: (id: string, content: string) => void;
+	onReorder: (id: string, toIndex: number) => void;
 }) {
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(item.content);
@@ -153,6 +181,27 @@ function QueueItem({
 				)}
 				onDoubleClick={editing ? undefined : startEdit}
 			>
+				<button
+					aria-label={`Reorder queued message ${index + 1}`}
+					className="cursor-grab touch-none text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
+					draggable
+					onDragStart={(event) => {
+						event.dataTransfer.setData("text/plain", item.id);
+						event.dataTransfer.effectAllowed = "move";
+					}}
+					onKeyDown={(event) => {
+						if (
+							!(event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key))
+						) {
+							return;
+						}
+						event.preventDefault();
+						onReorder(item.id, index + (event.key === "ArrowUp" ? -1 : 1));
+					}}
+					type="button"
+				>
+					<IconGripVertical className="h-3.5 w-3.5" />
+				</button>
 				<span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-md bg-muted px-1 text-center font-medium text-[10px] text-muted-foreground tabular-nums">
 					{index + 1}
 				</span>
@@ -214,18 +263,31 @@ function QueueItem({
 								{item.content}
 							</TooltipContent>
 						</Tooltip>
-						<div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/qcard:opacity-100">
-							<Button
-								aria-label="Edit message"
-								className="size-5 shrink-0 rounded-sm text-muted-foreground/70 hover:text-foreground"
-								onClick={startEdit}
-								size="icon"
-								title="Edit"
-								type="button"
-								variant="ghost"
+						{item.attachments && item.attachments.length > 0 && (
+							<div
+								className="flex shrink-0 items-center gap-1 text-muted-foreground"
+								title={item.attachments
+									.map((attachment) => attachment.filename)
+									.join(", ")}
 							>
-								<IconEdit className="h-3.5 w-3.5" />
-							</Button>
+								{item.attachments.slice(0, 3).map((attachment) => (
+									<img
+										alt=""
+										className="size-5 rounded object-cover"
+										key={attachment.id}
+										src={attachment.url}
+									/>
+								))}
+								{item.attachments.length > 3 ? (
+									<span className="text-[10px]">
+										+{item.attachments.length - 3}
+									</span>
+								) : (
+									<IconPaperclip className="h-3 w-3" />
+								)}
+							</div>
+						)}
+						<div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/qcard:opacity-100">
 							<Button
 								aria-label="Send now"
 								className="size-5 shrink-0 rounded-sm text-muted-foreground/70 hover:text-foreground"
@@ -237,17 +299,23 @@ function QueueItem({
 							>
 								<IconArrowUp className="h-3.5 w-3.5" />
 							</Button>
-							<Button
-								aria-label="Remove from queue"
-								className="size-5 shrink-0 rounded-sm text-muted-foreground/70 hover:text-foreground"
-								onClick={() => onRemove(item.id)}
-								size="icon"
-								title="Remove"
-								type="button"
-								variant="ghost"
-							>
-								<IconX className="h-3.5 w-3.5" />
-							</Button>
+							<DropdownMenu>
+								<DropdownMenuTrigger
+									aria-label="Message options"
+									className="size-5 rounded-sm text-base text-muted-foreground/70 hover:bg-muted hover:text-foreground"
+									type="button"
+								>
+									⋯
+								</DropdownMenuTrigger>
+								<DropdownMenuContent align="end">
+									<DropdownMenuItem onClick={startEdit}>
+										Edit message
+									</DropdownMenuItem>
+									<DropdownMenuItem onClick={() => onRemove(item.id)}>
+										Delete message
+									</DropdownMenuItem>
+								</DropdownMenuContent>
+							</DropdownMenu>
 						</div>
 					</>
 				)}
@@ -270,7 +338,10 @@ export function QueueBar({
 	onEdit,
 	onSendAll,
 	onClear,
+	onReorder,
 	onTurnOffQueueing,
+	onQueueModeChange,
+	queueMode = "auto",
 	roundTop = true,
 }: QueueBarProps) {
 	const [expanded, setExpanded] = useState(false);
@@ -307,33 +378,31 @@ export function QueueBar({
 							Send all
 						</Button>
 					)}
-					{onTurnOffQueueing && (
-						<Button
-							className="h-5 rounded-sm px-1.5 text-muted-foreground hover:text-foreground"
-							onClick={onTurnOffQueueing}
-							size="sm"
+					<DropdownMenu>
+						<DropdownMenuTrigger
+							aria-label="Queue options"
+							className="size-6 rounded-sm text-lg text-muted-foreground hover:bg-muted hover:text-foreground"
 							type="button"
-							variant="ghost"
 						>
-							Turn off
-						</Button>
-					)}
-					<Button
-						className="h-5 rounded-sm px-1.5 text-muted-foreground hover:text-foreground"
-						onClick={onClear}
-						size="sm"
-						type="button"
-						variant="ghost"
-					>
-						Clear
-					</Button>
+							⋯
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end">
+							<DropdownMenuItem onClick={() => onQueueModeChange?.("auto")}>
+								{queueMode === "auto" ? "✓ " : ""}Auto queue messages
+							</DropdownMenuItem>
+							<DropdownMenuItem onClick={() => onQueueModeChange?.("off")}>
+								{queueMode === "off" ? "✓ " : ""}Turn off queueing
+							</DropdownMenuItem>
+							<DropdownMenuItem onClick={onClear}>Clear queue</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
 				</div>
 			</div>
 			{/* The deck. Collapsed it fans into a stack; hover / focus-within opens
 			    it. Vertical padding + max-height give the expanded list room to
 			    scroll while keeping the collapsed stack compact. */}
 			<motion.div
-				className="max-h-[220px] overflow-y-auto px-2 py-2"
+				className="scroll-fade max-h-[220px] overflow-y-auto px-2 py-2"
 				layout
 				onBlur={(e) => {
 					if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
@@ -347,17 +416,30 @@ export function QueueBar({
 			>
 				<AnimatePresence initial={false}>
 					{items.map((item, index) => (
-						<QueueItem
-							expanded={expanded}
-							index={index}
-							item={item}
+						<div
+							data-queue-index={index}
 							key={item.id}
-							onEdit={onEdit}
-							onRemove={onRemove}
-							onSendNow={onSendNow}
-							reduceMotion={reduceMotion}
-							total={count}
-						/>
+							onDragOver={(event) => event.preventDefault()}
+							onDrop={(event) => {
+								event.preventDefault();
+								const id = event.dataTransfer.getData("text/plain");
+								if (id) {
+									onReorder(id, index);
+								}
+							}}
+						>
+							<QueueItem
+								expanded={expanded}
+								index={index}
+								item={item}
+								onEdit={onEdit}
+								onRemove={onRemove}
+								onReorder={onReorder}
+								onSendNow={onSendNow}
+								reduceMotion={reduceMotion}
+								total={count}
+							/>
+						</div>
 					))}
 				</AnimatePresence>
 			</motion.div>

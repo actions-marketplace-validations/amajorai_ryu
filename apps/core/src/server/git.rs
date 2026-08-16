@@ -246,7 +246,9 @@ pub async fn git_checkout(JsonBody(body): JsonBody<GitCheckoutBody>) -> axum::re
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn git_create_branch(JsonBody(body): JsonBody<GitCheckoutBody>) -> axum::response::Response {
+pub async fn git_create_branch(
+    JsonBody(body): JsonBody<GitCheckoutBody>,
+) -> axum::response::Response {
     if body.cwd.is_empty() || body.branch.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -299,7 +301,9 @@ pub async fn git_create_branch(JsonBody(body): JsonBody<GitCheckoutBody>) -> axu
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn git_commit_push(JsonBody(body): JsonBody<GitCommitPushBody>) -> axum::response::Response {
+pub async fn git_commit_push(
+    JsonBody(body): JsonBody<GitCommitPushBody>,
+) -> axum::response::Response {
     if body.cwd.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -383,7 +387,9 @@ pub struct NewFolderBody {
     request_body = serde_json::Value,
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn create_project_folder(JsonBody(body): JsonBody<NewFolderBody>) -> axum::response::Response {
+pub async fn create_project_folder(
+    JsonBody(body): JsonBody<NewFolderBody>,
+) -> axum::response::Response {
     let name = body.name.trim().to_string();
     if let Err(msg) = validate_folder_name(&name) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response();
@@ -853,7 +859,10 @@ mod tests {
     // that the two rejection shapes a client can trigger — wrong content type and
     // an undeserializable body — still come back as `{success:false,error:"…"}`.
 
-    async fn reject_body(content_type: &str, body: &'static str) -> (StatusCode, serde_json::Value) {
+    async fn reject_body(
+        content_type: &str,
+        body: &'static str,
+    ) -> (StatusCode, serde_json::Value) {
         let req = Request::builder()
             .method("POST")
             .uri("/api/git/commit-push")

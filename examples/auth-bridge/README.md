@@ -106,12 +106,10 @@ curl http://127.0.0.1:7997/status
 
 These are real and worth understanding before building on this.
 
-- **No incremental streaming.** The extension-host bootstrap buffers a handler's
-  response (`res.end`), so it cannot emit tokens progressively. A `stream: true`
-  request is answered with a protocol-valid SSE body delivered in one shot: clients
-  parse it correctly, but text arrives all at once rather than token by token.
-  Fixing this properly means teaching the bootstrap to accept a stream from the
-  handler, which is a Core change.
+- **Streaming is incremental.** The extension-host bootstrap accepts an async
+  iterable or `ReadableStream` and writes each chunk with backpressure. This bridge
+  forwards Responses API text deltas as OpenAI-compatible SSE chunks. Provider-specific
+  event types beyond text deltas are still intentionally outside this reference.
 - **Translation is minimal.** Seam 3 handles text in and text out. Tool calls,
   images, and structured output are not mapped.
 

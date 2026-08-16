@@ -3,6 +3,7 @@ pub mod budget;
 pub mod chat;
 pub mod compat;
 pub mod config;
+pub mod embeddings;
 pub mod evals;
 pub mod evaluators;
 pub mod firewall;
@@ -43,6 +44,8 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         // OpenAI-compatible chat endpoint
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/v1/embeddings", post(embeddings::embeddings))
+        .route("/v1/rerank", post(embeddings::rerank))
         // Anthropic Messages inbound (protocol-compat): lets Claude Code and other
         // Anthropic-dialect clients point their base_url here and get the governed
         // pipeline. Also reachable at /v1/messages with any client.
@@ -221,7 +224,11 @@ mod route_tests {
             "POST /v1beta/models/:spec must route to the Gemini handler"
         );
         assert!(
-            route_accepts_post(&app, "/v1beta/models/gemini-2.0-flash:streamGenerateContent").await,
+            route_accepts_post(
+                &app,
+                "/v1beta/models/gemini-2.0-flash:streamGenerateContent"
+            )
+            .await,
             "POST streamGenerateContent must route to the Gemini streaming handler"
         );
         // Live traffic SSE.

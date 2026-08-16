@@ -70,6 +70,14 @@ const MESSAGES = [
 							title: "Gamut mapping explained",
 							url: "https://evilmartians.com/gamut-mapping",
 						},
+						{
+							title: "Perceptual colour spaces",
+							url: "https://example.com/perceptual-colour",
+						},
+						{
+							title: "OKLCH browser support",
+							url: "https://example.com/oklch-support",
+						},
 					],
 				},
 			},
@@ -87,6 +95,7 @@ function Story() {
 	return (
 		<div className="h-screen w-[420px] bg-background text-foreground">
 			<CoworkContextPanel
+				maxItemsPerSection={5}
 				messages={MESSAGES}
 				runId={null}
 				target={{ url: "http://localhost:0", token: null }}

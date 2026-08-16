@@ -78,13 +78,13 @@ pub struct SeedSpec {
 /// same table, so a row is all it takes for a companion — default-on or opt-in — to
 /// receive its bundle. Adding a 16th companion to a second list is what caused the
 /// bug that function's docs describe; there is no second list.
-fn seed_overrides() -> [SeedSpec; 25] {
+fn seed_overrides() -> [SeedSpec; 26] {
     use crate::plugin_manifest::{
         ACTIVITY_UI_HTML, APPROVALS_UI_HTML, BLUEPRINT_UI_HTML, CALENDAR_UI_HTML, CANVAS_PLUGIN_ID,
         CANVAS_UI_HTML, FINETUNE_PLUGIN_ID, FINETUNE_UI_HTML, LEARNING_UI_HTML, MAIL_UI_HTML,
-        MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, QUESTS_UI_HTML, REASONING_PLUGIN_ID,
-        REASONING_UI_HTML, RLM_UI_HTML, SUBTITLES_UI_HTML, TUITION_UI_HTML,
-        SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML, TIMELINE_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
+        MEETINGS_UI_HTML, MONITORS_UI_HTML, NEWS_UI_HTML, PULL_REQUESTS_UI_HTML, QUESTS_UI_HTML,
+        REASONING_PLUGIN_ID, REASONING_UI_HTML, RLM_UI_HTML, SKILL_EDITOR_UI_HTML, SOCIAL_UI_HTML,
+        SUBTITLES_UI_HTML, TIMELINE_UI_HTML, TUITION_UI_HTML, WARMUP_UI_HTML, WEBHOOKS_UI_HTML,
         WHITEBOARD_PLUGIN_ID, WHITEBOARD_UI_HTML, WORKFLOWS_UI_HTML,
     };
     [
@@ -361,7 +361,12 @@ fn seed_overrides() -> [SeedSpec; 25] {
             // HTTP and cannot reach the sidecar, so it queues candidates in Core's KV
             // and the sidecar drains them. `mcp:tuition` registers the app's own MCP
             // server so `tuition__quiz` and friends exist for agents and workflows.
-            grants: &["tuition:crud", "hook:side-model", "storage:kv", "mcp:tuition"],
+            grants: &[
+                "tuition:crud",
+                "hook:side-model",
+                "storage:kv",
+                "mcp:tuition",
+            ],
             ui_code: Some(TUITION_UI_HTML),
         },
         SeedSpec {
@@ -446,6 +451,14 @@ fn seed_overrides() -> [SeedSpec; 25] {
             // manifest's `permission_grants`, so a promotion is correct by construction.
             grants: &["blueprint:review", "mcp:blueprint"],
             ui_code: Some(BLUEPRINT_UI_HTML),
+        },
+        SeedSpec {
+            id: "@ryu/pull-requests",
+            // Opt-in. `app:http` unlocks only the generic own-sidecar forwarder;
+            // `shell:integrate` supplies live theme updates. The enable path persists
+            // the Gateway-approved set, while this row carries the compiled UI.
+            grants: &["app:http", "shell:integrate"],
+            ui_code: Some(PULL_REQUESTS_UI_HTML),
         },
         SeedSpec {
             id: crate::plugins::builtins::RECIPES_PLUGIN_ID,
@@ -593,6 +606,18 @@ pub fn seed_order(
 /// the loop below cannot reach: the opt-in companions (no default-on record at all)
 /// and any existing record whose `ui_code` is missing.
 pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) {
+    seed_default_on_with_materialized(store, manifests, &std::collections::HashSet::new()).await;
+}
+
+/// Seed default-on plugins, treating the ids in `newly_materialized` as a first
+/// install even when the catalog materializer has already created their lifecycle
+/// rows. Existing rows are still authoritative unless the row was created by this
+/// startup's materialization pass.
+pub async fn seed_default_on_with_materialized(
+    store: &PluginStore,
+    manifests: &[PluginManifest],
+    newly_materialized: &std::collections::HashSet<String>,
+) {
     let specs = default_on_specs();
     let (ordered, skipped) = seed_order(&specs, manifests);
 
@@ -612,8 +637,13 @@ pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) 
         };
 
         match store.get(id).await {
-            // A record exists (enabled or disabled) — the user's choice wins.
-            Ok(Some(_)) => continue,
+            // A record exists (enabled or disabled) — the user's choice wins,
+            // except for a row created by this boot's first materialization.
+            Ok(Some(record)) => {
+                if !newly_materialized.contains(id) || record.enabled {
+                    continue;
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!("default-on seed: lookup '{id}' failed: {e}");
@@ -629,9 +659,11 @@ pub async fn seed_default_on(store: &PluginStore, manifests: &[PluginManifest]) 
             continue;
         };
 
-        if let Err(e) = store.insert(id, &version).await {
-            tracing::warn!("default-on seed: insert '{id}' failed: {e}");
-            continue;
+        if store.get_record(id).await.ok().flatten().is_none() {
+            if let Err(e) = store.insert(id, &version).await {
+                tracing::warn!("default-on seed: insert '{id}' failed: {e}");
+                continue;
+            }
         }
         if let Some(ui_code) = spec.ui_code {
             if let Err(e) = store.set_ui_code(id, Some(ui_code)).await {
@@ -1281,7 +1313,7 @@ async fn backfill_host_api_grants(store: &PluginStore, manifests: &[PluginManife
 /// # Scope
 ///
 /// Exactly one id, looked up through [`default_on_specs`], which is derived from
-/// [`CORE_DEFAULT_ON`] ⊂ `CORE_PLUGINS` ⊂ compiled-in built-ins — a tighter scope than
+/// [`CORE_DEFAULT_ON`] ⊂ `CORE_PLUGINS` ⊂ the official package catalog — a tighter scope than
 /// the v1 step's `is_compiled_in_manifest` guard, and self-limiting: if Learning ever
 /// leaves the default-on set again, this step stops asserting anything. No other app
 /// is touched, and a record that is already enabled (or absent — an install that never
@@ -1715,12 +1747,7 @@ mod migration_tests {
 
         assert!(store.get(LEARNING).await.unwrap().unwrap().enabled);
         assert!(
-            !store
-                .get(still_default_on)
-                .await
-                .unwrap()
-                .unwrap()
-                .enabled,
+            !store.get(still_default_on).await.unwrap().unwrap().enabled,
             "another default-on app the user disabled must stay disabled"
         );
         assert!(
@@ -1911,7 +1938,11 @@ mod migration_tests {
         run_one_time_migrations(&store, &manifests).await;
 
         assert!(
-            store.get(whiteboard).await.unwrap().is_some_and(|r| r.enabled),
+            store
+                .get(whiteboard)
+                .await
+                .unwrap()
+                .is_some_and(|r| r.enabled),
             "an ENABLED whiteboard record is a deliberate user act — only the seed ever \
              enabled the v5 ids, so v5 must not generalize its removal to v3's"
         );
@@ -2235,7 +2266,10 @@ mod tests {
         super::backfill_declared_grants(&store).await;
 
         let record = store.get(id).await.unwrap().unwrap();
-        assert!(record.approved_grants.iter().any(|g| g == "something:extra"));
+        assert!(record
+            .approved_grants
+            .iter()
+            .any(|g| g == "something:extra"));
         assert!(record.approved_grants.iter().any(|g| g == "quests:capture"));
     }
 
@@ -2307,6 +2341,34 @@ mod tests {
         }
         assert!(store.get("@ryu/engines").await.unwrap().unwrap().enabled);
         assert!(!store.get("@ryu/durable").await.unwrap().unwrap().enabled);
+    }
+
+    /// A catalog materializer creates the lifecycle row before the default-on
+    /// pass runs. Only rows it created on this boot may be enabled; an older
+    /// disabled row remains the user's choice.
+    #[tokio::test]
+    async fn newly_materialized_default_on_is_enabled_without_resurrecting_disabled_state() {
+        let store = PluginStore::open_in_memory().unwrap();
+        let manifests = crate::plugin_manifest::PluginManifestLoader::load_builtins();
+        let user_disabled = "@ryu/goal";
+        let newly_materialized = "@ryu/proof";
+
+        store.insert(user_disabled, "1.0.0").await.unwrap();
+        store.set_disabled(user_disabled).await.unwrap();
+        store.insert(newly_materialized, "1.0.0").await.unwrap();
+
+        let materialized = std::collections::HashSet::from([newly_materialized.to_owned()]);
+        seed_default_on_with_materialized(&store, &manifests, &materialized).await;
+
+        assert!(!store.get(user_disabled).await.unwrap().unwrap().enabled);
+        assert!(
+            store
+                .get(newly_materialized)
+                .await
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
     }
 
     /// The W7 Mail-companion extraction used to rest on mail being PRE-SEEDED: it was
@@ -2616,12 +2678,9 @@ mod tests {
             "the fill must not drop a grant the record already had"
         );
         assert!(
-            record
-                .approved_grants
+            record.approved_grants.iter().all(|g| seed_overrides()
                 .iter()
-                .all(|g| seed_overrides()
-                    .iter()
-                    .any(|spec| spec.id == id && spec.grants.contains(&g.as_str()))),
+                .any(|spec| spec.id == id && spec.grants.contains(&g.as_str()))),
             "the pass must only ever add grants the build itself declares"
         );
         assert_eq!(

@@ -1,10 +1,10 @@
 // apps/desktop/src/components/panels/PinnedSummaryPanel.tsx
 //
-// The "Pinned summary" panel: a chromeless accordion sidebar shown once a
-// conversation has a thread. It has no card background and no header — just the
-// accordion whose rows each carry their own card surface. The first row is
+// The "Pinned summary" panel: a connected accordion rail shown once a
+// conversation has a thread. The rail owns one rounded surface and uses subtle
+// dividers between its sections instead of stacking unrelated cards. The first row is
 // "Environment" (project ▸ branch ▸ worktree + live git +added/−removed line
-// counts + a one-click "Commit & push"); the rest (Progress / Artifacts /
+// counts + a commit/push chooser); the rest (Progress / Artifacts /
 // Changes / Sources / Side chats) come from the shared CoworkContextPanel and
 // only appear when they have something to show.
 //
@@ -20,13 +20,24 @@
 
 import {
 	ArrowUpRight01Icon,
+	CloudUploadIcon,
 	FolderLibraryIcon,
+	GitCommitIcon,
 	Loading01Icon,
 	SentIcon,
 	Tick02Icon,
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { Button } from "@ryu/ui/components/button.tsx";
+import { Checkbox } from "@ryu/ui/components/checkbox.tsx";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogHeader,
+	DialogTitle,
+} from "@ryu/ui/components/dialog.tsx";
 import { cn } from "@ryu/ui/lib/utils";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -38,7 +49,11 @@ import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.t
 import type { BouncyAccordionItem } from "@/src/components/ui/bouncy-accordion.tsx";
 import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
-import { commitPush, type GitStatus } from "@/src/lib/api/git.ts";
+import {
+	commitPush,
+	type GitCommitAction,
+	type GitStatus,
+} from "@/src/lib/api/git.ts";
 
 interface PinnedSummaryPanelProps {
 	conversationId?: string | null;
@@ -64,7 +79,7 @@ type CommitState =
 	| { status: "done"; label: string }
 	| { status: "error"; message: string };
 
-/** The Environment row body: pickers + git line-stats + commit & push. */
+/** The Environment row body: pickers + git line-stats + commit/push dialog. */
 function EnvironmentDescription({
 	conversationId,
 	target,
@@ -72,14 +87,14 @@ function EnvironmentDescription({
 	git,
 	commit,
 	hasWork,
-	onCommitPush,
+	onOpenCommit,
 }: {
 	commit: CommitState;
 	conversationId?: string | null;
 	folder: string | null;
 	git: GitStatus | null;
 	hasWork: boolean;
-	onCommitPush: () => void;
+	onOpenCommit: () => void;
 	target: ApiTarget;
 }) {
 	const insertions = git?.insertions ?? 0;
@@ -153,7 +168,7 @@ function EnvironmentDescription({
 				<button
 					className="flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2 py-1.5 font-medium text-primary-foreground text-xs transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
 					disabled={commit.status === "loading" || !hasWork}
-					onClick={onCommitPush}
+					onClick={onOpenCommit}
 					type="button"
 				>
 					<HugeiconsIcon
@@ -164,7 +179,7 @@ function EnvironmentDescription({
 						)}
 						icon={commit.status === "loading" ? Loading01Icon : SentIcon}
 					/>
-					{commit.status === "loading" ? "Pushing…" : "Commit & push"}
+					{commit.status === "loading" ? "Working…" : "Commit or push"}
 				</button>
 			)}
 
@@ -181,6 +196,32 @@ function EnvironmentDescription({
 	);
 }
 
+const COMMIT_ACTIONS: {
+	action: GitCommitAction;
+	description: string;
+	icon: typeof GitCommitIcon;
+	label: string;
+}[] = [
+	{
+		action: "commit",
+		label: "Commit",
+		description: "Save changes locally",
+		icon: GitCommitIcon,
+	},
+	{
+		action: "commit-push",
+		label: "Commit and push",
+		description: "Save changes and update the remote",
+		icon: CloudUploadIcon,
+	},
+	{
+		action: "push",
+		label: "Push",
+		description: "Send existing commits to the remote",
+		icon: SentIcon,
+	},
+];
+
 export function PinnedSummaryPanel({
 	conversationId,
 	folder,
@@ -189,6 +230,9 @@ export function PinnedSummaryPanel({
 	onDismiss,
 }: PinnedSummaryPanelProps) {
 	const [commit, setCommit] = useState<CommitState>({ status: "idle" });
+	const [commitDialogOpen, setCommitDialogOpen] = useState(false);
+	const [commitMessage, setCommitMessage] = useState("");
+	const [includeUnstaged, setIncludeUnstaged] = useState(true);
 
 	// In floating-overlay mode (onDismiss set) the panel overlaps the message
 	// column, so it behaves like a dismissible popover: a pointer press anywhere
@@ -242,17 +286,29 @@ export function PinnedSummaryPanel({
 		}
 	}, [chatStatus, folder]);
 
-	const handleCommitPush = async () => {
+	const handleCommitPush = async (action: GitCommitAction) => {
 		if (!folder || commit.status === "loading") {
 			return;
 		}
 		setCommit({ status: "loading" });
-		const result = await commitPush(targetRef.current, folder);
+		const result = await commitPush(
+			targetRef.current,
+			folder,
+			commitMessage.trim() || undefined,
+			undefined,
+			action,
+			includeUnstaged
+		);
 		if (result.success) {
-			const label = result.committed
-				? `Pushed ${result.commit ?? "commit"}`
-				: "Pushed (nothing to commit)";
+			const label =
+				action === "commit"
+					? `Committed ${result.commit ?? "changes"}`
+					: result.committed
+						? `Pushed ${result.commit ?? "commit"}`
+						: "Push complete";
 			setCommit({ status: "done", label });
+			setCommitDialogOpen(false);
+			setCommitMessage("");
 			// Everything on screen just changed, not only this panel.
 			invalidateGitStatus(folder);
 		} else {
@@ -291,7 +347,7 @@ export function PinnedSummaryPanel({
 				folder={folder}
 				git={git}
 				hasWork={hasWork}
-				onCommitPush={handleCommitPush}
+				onOpenCommit={() => setCommitDialogOpen(true)}
 				target={target}
 			/>
 		),
@@ -307,7 +363,84 @@ export function PinnedSummaryPanel({
 			)}
 			ref={panelRef}
 		>
-			<CoworkContextPanel {...cowork} leadingItems={[environmentItem]} />
+			<CoworkContextPanel
+				{...cowork}
+				leadingItems={[environmentItem]}
+				maxItemsPerSection={5}
+				variant="summary"
+			/>
+			<Dialog onOpenChange={setCommitDialogOpen} open={commitDialogOpen}>
+				<DialogContent
+					className="gap-0 overflow-hidden border border-border/70 bg-popover/95 p-0 shadow-2xl sm:max-w-xl"
+					showCloseButton={false}
+				>
+					<DialogHeader className="border-border/60 border-b px-6 pt-5 pb-4">
+						<DialogTitle className="flex items-center gap-2 text-lg">
+							<HugeiconsIcon className="size-5" icon={WorkflowCircle06Icon} />
+							{git?.branch ?? "Repository"}
+						</DialogTitle>
+						<DialogDescription>
+							Choose what to do with the current changes.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="flex flex-col gap-4 px-6 py-5">
+						<label className="flex flex-col gap-2">
+							<span className="font-medium text-xs">Commit message</span>
+							<textarea
+								className="min-h-24 w-full resize-none rounded-xl border border-input bg-background/60 px-3 py-2.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/20"
+								disabled={commit.status === "loading"}
+								onChange={(event) => setCommitMessage(event.target.value)}
+								placeholder="Leave blank to generate a commit message…"
+								value={commitMessage}
+							/>
+						</label>
+						<label className="flex cursor-pointer items-center gap-3 rounded-lg px-1 py-1 text-sm">
+							<Checkbox
+								checked={includeUnstaged}
+								disabled={commit.status === "loading"}
+								onCheckedChange={(checked) =>
+									setIncludeUnstaged(checked === true)
+								}
+							/>
+							<span className="min-w-0 flex-1">Include unstaged changes</span>
+							<DiffStat stat={{ insertions, deletions }} />
+						</label>
+						{commit.status === "error" && (
+							<p className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive text-xs">
+								{commit.message}
+							</p>
+						)}
+					</div>
+					<div className="border-border/60 border-t p-2">
+						{COMMIT_ACTIONS.map((item) => (
+							<Button
+								className="h-auto w-full justify-start gap-3 rounded-xl px-3 py-2.5 text-left hover:bg-muted/60"
+								disabled={commit.status === "loading"}
+								key={item.action}
+								onClick={() => handleCommitPush(item.action)}
+								type="button"
+								variant="ghost"
+							>
+								<span className="grid size-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">
+									<HugeiconsIcon
+										className={cn(
+											"size-4",
+											commit.status === "loading" && "animate-pulse"
+										)}
+										icon={item.icon}
+									/>
+								</span>
+								<span className="flex min-w-0 flex-col">
+									<span className="font-medium text-sm">{item.label}</span>
+									<span className="font-normal text-muted-foreground text-xs">
+										{item.description}
+									</span>
+								</span>
+							</Button>
+						))}
+					</div>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }

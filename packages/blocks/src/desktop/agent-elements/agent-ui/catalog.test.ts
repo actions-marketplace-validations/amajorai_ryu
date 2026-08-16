@@ -27,6 +27,10 @@ const EXPECTED_COMPONENTS = [
 	"Checkbox",
 	"Switch",
 	"Select",
+	"OptionList",
+	"Slider",
+	"ApprovalCard",
+	"LinkPreview",
 ];
 
 describe("agentUiCatalog", () => {
@@ -36,8 +40,11 @@ describe("agentUiCatalog", () => {
 		);
 	});
 
-	it("declares no custom actions (state is mutated via built-ins)", () => {
-		expect([...agentUiCatalog.actionNames]).toEqual([]);
+	it("declares the host-facing submit action", () => {
+		expect([...agentUiCatalog.actionNames]).toEqual(["submit"]);
+		expect(agentUiCatalog.prompt()).toContain(
+			"Submit a user's answer or selection"
+		);
 	});
 
 	it("produces a non-empty system prompt naming every component", () => {

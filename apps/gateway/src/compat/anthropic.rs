@@ -118,9 +118,7 @@ fn messages_to_openai(body: &Value) -> Vec<Value> {
         let content = m.get("content");
         match role {
             "user" => {
-                if let Some(tool_results) =
-                    content.and_then(|c| tool_results_to_openai(c))
-                {
+                if let Some(tool_results) = content.and_then(|c| tool_results_to_openai(c)) {
                     // One `tool` message per result; each keys on its
                     // `tool_use_id`. The OpenAI shape requires a separate message
                     // per tool result.
@@ -159,10 +157,7 @@ fn tool_results_to_openai(content: &Value) -> Option<Vec<Value>> {
             return None;
         }
         let id = b["tool_use_id"].as_str().unwrap_or_default().to_string();
-        let text = b
-            .get("content")
-            .and_then(content_text)
-            .unwrap_or_default();
+        let text = b.get("content").and_then(content_text).unwrap_or_default();
         out.push(json!({ "role": "tool", "tool_call_id": id, "content": text }));
     }
     if out.is_empty() {
@@ -214,11 +209,7 @@ fn tool_to_openai(tool: &Value) -> Value {
 
 /// Project the pipeline's unified OpenAI chat response to an Anthropic Messages
 /// response. The client asked for Anthropic format, so we must speak it back.
-pub fn response_to_anthropic(
-    response: &Value,
-    requested_model: &str,
-    request_id: &str,
-) -> Value {
+pub fn response_to_anthropic(response: &Value, requested_model: &str, request_id: &str) -> Value {
     let choice = &response["choices"][0];
     let message = &choice["message"];
 
@@ -263,7 +254,7 @@ pub fn response_to_anthropic(
 }
 
 /// Map an OpenAI finish reason to Anthropic's stop-reason vocabulary.
-fn stop_reason_to_anthropic(reason: Option<&str>) -> &'static str {
+pub(crate) fn stop_reason_to_anthropic(reason: Option<&str>) -> &'static str {
     match reason {
         Some("tool_calls") => "tool_use",
         Some("length") => "max_tokens",
@@ -286,12 +277,7 @@ fn parse_json_arguments(arguments: &Value) -> Value {
 }
 
 /// Copy a field from the Anthropic request to the OpenAI body when present.
-fn copy_if_present(
-    from: &Value,
-    to: &mut Value,
-    from_key: &str,
-    to_key: &str,
-) {
+fn copy_if_present(from: &Value, to: &mut Value, from_key: &str, to_key: &str) {
     if let Some(v) = from.get(from_key) {
         to[to_key] = v.clone();
     }
@@ -329,7 +315,10 @@ mod tests {
         });
         let out = request_to_openai(&body);
         assert_eq!(out["messages"][0]["role"], "system");
-        assert_eq!(out["messages"][0]["content"], "You are a helpful assistant.");
+        assert_eq!(
+            out["messages"][0]["content"],
+            "You are a helpful assistant."
+        );
         assert_eq!(out["messages"][1]["role"], "user");
     }
 
@@ -375,7 +364,10 @@ mod tests {
             }],
         });
         let out = request_to_openai(&body);
-        assert_eq!(out["messages"][0]["content"], "What is 2+2? Please compute.");
+        assert_eq!(
+            out["messages"][0]["content"],
+            "What is 2+2? Please compute."
+        );
     }
 
     #[test]
@@ -404,7 +396,10 @@ mod tests {
         });
         let out = request_to_openai(&body);
         assert_eq!(out["messages"][0]["role"], "assistant");
-        assert_eq!(out["messages"][0]["tool_calls"][0]["function"]["name"], "add");
+        assert_eq!(
+            out["messages"][0]["tool_calls"][0]["function"]["name"],
+            "add"
+        );
         assert_eq!(out["messages"][1]["role"], "tool");
         assert_eq!(out["messages"][1]["tool_call_id"], "toolu_1");
         assert_eq!(out["messages"][1]["content"], "3");

@@ -72,7 +72,7 @@ export function BtwOverlay({ state, onClose }: BtwOverlayProps) {
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="max-h-[50vh] overflow-y-auto">
+				<div className="scroll-fade max-h-[50vh] overflow-y-auto">
 					{state?.loading && (
 						<TextShimmer className="text-muted-foreground text-sm">
 							Thinking…

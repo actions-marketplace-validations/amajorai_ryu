@@ -250,7 +250,7 @@ const SEARCH_MAX_LIMIT: usize = 25;
 /// **taken** so an agent cannot pre-claim an `app__<id>` a plugin has not registered
 /// yet — see the `taken` computation there for why the registry snapshot alone
 /// cannot see that case.
-const APP_SKILL_PREFIX: &str = "app__";
+const APP_SKILL_PREFIX: &str = "app.";
 
 /// Env flag that opts a node into autonomous skill self-authoring.
 ///

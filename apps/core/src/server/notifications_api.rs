@@ -34,6 +34,10 @@ pub struct ListQuery {
     pub user_id: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Filter by archive state: `true` = archived rows only, `false` (default) =
+    /// the live inbox, absent = every row.
+    #[serde(default)]
+    pub archived: Option<bool>,
 }
 
 /// Resolve the effective viewer for a member-scoped read.
@@ -100,7 +104,10 @@ pub async fn list_notifications(
         );
     };
     let _ = &state;
-    match store.list_notifications_for_user(&viewer, limit).await {
+    match store
+        .list_notifications_for_user(&viewer, limit, q.archived)
+        .await
+    {
         Ok(items) => (StatusCode::OK, Json(json!({ "notifications": items }))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -149,6 +156,96 @@ pub async fn read_notification(
     }
 
     match store.mark_notification_read(&id).await {
+        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// `POST /api/notifications/:id/archive` — move a notification into the archive.
+///
+/// Only the notification's own recipient may archive it (same recipient check as
+/// [`read_notification`]): the row is fetched and the verified caller is
+/// authorized against `row.user_id` BEFORE any mutation. Archiving also marks the
+/// row read.
+#[utoipa::path(
+    post,
+    path = "/api/notifications/{id}/archive",
+    tag = "Notifications",
+    summary = "archive a notification.",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn archive_notification(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(store) = crate::notify::global_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "notify store not ready" })),
+        );
+    };
+    let _ = &state;
+    let Ok(Some(row)) = store.get_notification(&id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "notification not found" })),
+        );
+    };
+
+    if let Err(code) = resolve_viewer(caller, row.user_id.as_deref()) {
+        return (code, Json(json!({ "error": "unauthorized" })));
+    }
+
+    match store.mark_notification_archived(&id).await {
+        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// `POST /api/notifications/:id/unarchive` — restore an archived notification to
+/// the live inbox. Recipient-gated exactly like [`archive_notification`].
+#[utoipa::path(
+    post,
+    path = "/api/notifications/{id}/unarchive",
+    tag = "Notifications",
+    summary = "unarchive a notification.",
+    params(("id" = String, Path)),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+pub async fn unarchive_notification(
+    State(state): State<ServerState>,
+    Extension(caller): Extension<Option<VerifiedCaller>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(store) = crate::notify::global_store() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "notify store not ready" })),
+        );
+    };
+    let _ = &state;
+    let Ok(Some(row)) = store.get_notification(&id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "notification not found" })),
+        );
+    };
+
+    if let Err(code) = resolve_viewer(caller, row.user_id.as_deref()) {
+        return (code, Json(json!({ "error": "unauthorized" })));
+    }
+
+    match store.mark_notification_unarchived(&id).await {
         Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -306,6 +403,8 @@ pub struct PushTokenBody {
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 pub async fn register_push_token(
+    State(_state): State<ServerState>,
+    Extension(caller): Extension<Option<VerifiedCaller>>,
     Json(body): Json<PushTokenBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let Some(store) = crate::notify::global_store() else {
@@ -314,15 +413,19 @@ pub async fn register_push_token(
             Json(json!({ "error": "notify store not ready" })),
         );
     };
+    let user_id = match resolve_push_token_owner(caller, body.user_id.as_deref()) {
+        Ok(user_id) => user_id,
+        Err(code) => return (code, Json(json!({ "error": "unauthorized" }))),
+    };
     match store
-        .register_push_token(
-            &body.token,
-            body.platform.as_deref(),
-            body.user_id.as_deref(),
-        )
+        .register_push_token(&body.token, body.platform.as_deref(), user_id.as_deref())
         .await
     {
-        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Ok(true) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "push token belongs to another member" })),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
@@ -339,19 +442,63 @@ pub async fn register_push_token(
     params(("token" = String, Path)),
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
-pub async fn remove_push_token(Path(token): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn remove_push_token(
+    State(_state): State<ServerState>,
+    Extension(caller): Extension<Option<VerifiedCaller>>,
+    Path(token): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let Some(store) = crate::notify::global_store() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "notify store not ready" })),
         );
     };
-    match store.remove_push_token(&token).await {
-        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
+    let result = if let Some(caller) = caller {
+        match resolve_viewer(Some(caller), None) {
+            Ok(user_id) => store.remove_push_token_for_user(&token, &user_id).await,
+            Err(code) => return (code, Json(json!({ "error": "unauthorized" }))),
+        }
+    } else if crate::sidecar::control_plane::registered_org().is_some() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "verified caller required" })),
+        );
+    } else {
+        // An unbound node is the legacy single-user/local flow. There is no
+        // second member whose token could be deleted there, so retain the
+        // node-level operation for anonymous local clients.
+        store.remove_push_token(&token).await
+    };
+    match result {
+        Ok(true) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "token not found" })),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e.to_string() })),
         ),
+    }
+}
+
+/// Resolve the owner stamped on a push-token row. On an org-bound node this
+/// always uses the verified caller and rejects a body-supplied other member;
+/// on an unbound local node, anonymous registration may retain its legacy
+/// node-wide (`NULL`) owner.
+fn resolve_push_token_owner(
+    caller: Option<VerifiedCaller>,
+    requested: Option<&str>,
+) -> Result<Option<String>, StatusCode> {
+    match resolve_viewer(caller, requested) {
+        Ok(user_id) => Ok(Some(user_id)),
+        Err(StatusCode::BAD_REQUEST)
+            if crate::sidecar::control_plane::registered_org().is_none()
+                && requested.map(str::trim).unwrap_or("").is_empty() =>
+        {
+            Ok(None)
+        }
+        Err(code) => Err(code),
     }
 }
 
@@ -398,6 +545,18 @@ mod tests {
         // Bob presents a valid JWT but asks for Alice's feed → 403, no data leak.
         assert_eq!(
             resolve_viewer(Some(caller("bob")), Some("alice")),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn push_token_owner_uses_verified_caller_not_requested_member() {
+        assert_eq!(
+            resolve_push_token_owner(Some(caller("alice")), Some("alice")),
+            Ok(Some("alice".to_owned()))
+        );
+        assert_eq!(
+            resolve_push_token_owner(Some(caller("alice")), Some("bob")),
             Err(StatusCode::FORBIDDEN)
         );
     }

@@ -177,7 +177,7 @@ function recordable(value) {
  */
 function buildHost(spec, calls) {
 	const queues = new Map();
-	for (const key of ["sideModel", "runAgent"]) {
+	for (const key of ["sideModel", "runAgent", "runFanout"]) {
 		const value = spec?.[key];
 		queues.set(key, Array.isArray(value) ? [...value] : []);
 	}
@@ -208,6 +208,10 @@ function buildHost(spec, calls) {
 		runAgent: async (args = {}) => {
 			record("host.runAgent", args);
 			return dequeue("runAgent", args);
+		},
+		runFanout: async (args = {}) => {
+			record("host.runFanout", args);
+			return dequeue("runFanout", args);
 		},
 		storage: {
 			get: async (key, namespace) => {

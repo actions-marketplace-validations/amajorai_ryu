@@ -49,6 +49,11 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Default per-delegate wall-time limit (seconds) when a request omits one.
 pub const DEFAULT_WALL_TIME_SECS: u64 = 120;
 
+/// Hard upper bound for one delegate's model output budget. This is enforced at
+/// the delegation engine boundary so callers cannot bypass the cap by invoking
+/// `host.runFanout` directly instead of going through a plugin's input schema.
+pub const MAX_DELEGATION_TOKENS: u32 = 32_768;
+
 /// A named permission preset attached to a delegate. The four presets are the
 /// complete, closed set (see issue "Out of scope: no new presets"). Each maps
 /// to the concrete capabilities Core advertises to the delegate; the Gateway
@@ -187,6 +192,12 @@ impl DelegationCaps {
     /// Effective concurrency: never exceed the hard cap and never zero.
     pub fn effective_concurrency(&self) -> usize {
         self.max_concurrent.clamp(1, MAX_CONCURRENT_DELEGATES)
+    }
+
+    /// Effective per-delegate output budget: never zero and never above the
+    /// process-wide hard ceiling.
+    pub fn effective_max_tokens(&self) -> u32 {
+        self.max_tokens.clamp(1, MAX_DELEGATION_TOKENS)
     }
 }
 
@@ -429,6 +440,8 @@ pub async fn run_fanout_with_checkpoint(
         return Err(DelegationError::DepthExceeded { depth });
     }
 
+    let mut caps = caps;
+    caps.max_tokens = caps.effective_max_tokens();
     let semaphore = Arc::new(Semaphore::new(caps.effective_concurrency()));
     let caps = Arc::new(caps);
     let mut handles: Vec<(String, tokio::task::JoinHandle<DelegateResult>)> =
@@ -612,10 +625,11 @@ async fn call_sub_agent(
             if let Some(runner) = crate::sidecar::agent_runner::global_agent_runner() {
                 let conversation_id = format!("delegate-{}", uuid::Uuid::new_v4().simple());
                 let text = runner
-                    .run(
+                    .run_with_max_tokens(
                         Some(id.to_string()),
                         conversation_id.clone(),
                         spec.task.clone(),
+                        max_tokens,
                     )
                     .await
                     .map_err(|e| {
@@ -822,6 +836,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(zero.effective_concurrency(), 1);
+    }
+
+    #[test]
+    fn caps_clamp_token_budget() {
+        let caps = DelegationCaps {
+            max_tokens: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(caps.effective_max_tokens(), MAX_DELEGATION_TOKENS);
+
+        let caps = DelegationCaps {
+            max_tokens: 0,
+            ..Default::default()
+        };
+        assert_eq!(caps.effective_max_tokens(), 1);
     }
 
     #[tokio::test]

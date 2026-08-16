@@ -459,8 +459,8 @@ impl GithubMarketplaceEntry {
                 .and_then(|s| scrub_text(s, max))
         };
         let name = text("name", MAX_NAME_CHARS)?;
-        let display_name = text("displayName", MAX_NAME_CHARS)
-            .or_else(|| text("display_name", MAX_NAME_CHARS));
+        let display_name =
+            text("displayName", MAX_NAME_CHARS).or_else(|| text("display_name", MAX_NAME_CHARS));
         let out = Self {
             name,
             display_name,
@@ -651,8 +651,7 @@ pub(crate) fn scrub_icon_dither(value: &Value) -> Option<Value> {
 const BANNER_STYLES: [&str; 5] = ["gradient", "animated-gradient", "dither", "flat", "image"];
 /// The six named looks the animated gradient ships. Anything else falls back to
 /// the default on the client, so an unknown preset costs a look, not a banner.
-const BANNER_GRADIENT_PRESETS: [&str; 6] =
-    ["lava", "prism", "plasma", "pulse", "vortex", "mist"];
+const BANNER_GRADIENT_PRESETS: [&str; 6] = ["lava", "prism", "plasma", "pulse", "vortex", "mist"];
 /// The base patterns the gradient warps over.
 const BANNER_GRADIENT_SHAPES: [&str; 3] = ["checks", "stripes", "edge"];
 /// A ramp is a handful of stops; a manifest declaring hundreds is not a banner.
@@ -694,7 +693,11 @@ fn scrub_banner_gradient(value: &Value) -> Option<Value> {
         out.insert("shape".to_string(), shape);
     }
     for key in ["color1", "color2", "color3"] {
-        if let Some(color) = obj.get(key).and_then(|v| v.as_str()).and_then(scrub_css_color) {
+        if let Some(color) = obj
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(scrub_css_color)
+        {
             out.insert(key.to_string(), Value::String(color));
         }
     }
@@ -1304,7 +1307,10 @@ impl GithubTopicSource {
     }
 
     /// Best-effort `marketplace.json` enrichment for a `ryu-marketplace` repo.
-    async fn fetch_repo_marketplace(&self, record: &GithubTopicRecord) -> Option<GithubMarketplace> {
+    async fn fetch_repo_marketplace(
+        &self,
+        record: &GithubTopicRecord,
+    ) -> Option<GithubMarketplace> {
         for path in REPO_MARKETPLACE_PATHS {
             let url = format!(
                 "https://raw.githubusercontent.com/{}/{}/HEAD/{}",
@@ -1330,9 +1336,7 @@ impl GithubTopicSource {
 /// detail path (which probes the entry's OWN plugin repo).
 async fn fetch_repo_manifest_for(owner: &str, repo: &str) -> Option<(Value, String)> {
     for path in REPO_MANIFEST_PATHS {
-        let url = format!(
-            "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
-        );
+        let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}");
         let Ok(bytes) = crate::server::guarded_get_bytes(&url).await else {
             continue;
         };
@@ -1700,9 +1704,8 @@ pub(crate) fn record_to_item(record: &GithubTopicRecord) -> Value {
         topics.push("fork".to_string());
     }
     let manifest = record.manifest.as_ref();
-    let manifest_str = |pick: fn(&RepoManifestDisplay) -> Option<&String>| {
-        manifest.and_then(pick).cloned()
-    };
+    let manifest_str =
+        |pick: fn(&RepoManifestDisplay) -> Option<&String>| manifest.and_then(pick).cloned();
     let name = manifest_str(|m| m.name.as_ref()).unwrap_or_else(|| record.repo.clone());
     let description = manifest_str(|m| m.description.as_ref())
         .or_else(|| record.description.clone())
@@ -1894,24 +1897,25 @@ impl CatalogSource for GithubTopicSource {
                     }
                     let hay = [
                         item.get("name").and_then(Value::as_str).unwrap_or(""),
-                        item.get("description").and_then(Value::as_str).unwrap_or(""),
+                        item.get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
                         item.get("id").and_then(Value::as_str).unwrap_or(""),
                     ];
-                    if hay
-                        .iter()
-                        .any(|s| s.to_ascii_lowercase().contains(&needle))
-                    {
+                    if hay.iter().any(|s| s.to_ascii_lowercase().contains(&needle)) {
                         return true;
                     }
                     // Topics were matched before the filter moved to the item level
                     // (a repo tagged `ryu-plugin` + `ai` used to answer a search for
                     // "ai"); keep that so the move is not a search regression.
-                    item.get("topics").and_then(Value::as_array).is_some_and(|topics| {
-                        topics.iter().any(|t| {
-                            t.as_str()
-                                .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                    item.get("topics")
+                        .and_then(Value::as_array)
+                        .is_some_and(|topics| {
+                            topics.iter().any(|t| {
+                                t.as_str()
+                                    .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                            })
                         })
-                    })
                 };
                 let filtered: Vec<Value> = expanded
                     .into_iter()
@@ -2055,7 +2059,9 @@ impl CatalogSource for GithubTopicSource {
                 .records
                 .iter()
                 .find(|r| r.owner == owner && r.repo == repo)
-                .ok_or_else(|| anyhow::anyhow!("community marketplace `{owner}/{repo}` not found"))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("community marketplace `{owner}/{repo}` not found")
+                })?;
             let marketplace = record.marketplace.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("community marketplace `{owner}/{repo}` has no listings")
             })?;
@@ -2127,9 +2133,10 @@ async fn detail_marketplace_entry(
         .iter()
         .find(|r| r.owner == owner && r.repo == repo)
         .ok_or_else(|| anyhow::anyhow!("community marketplace `{owner}/{repo}` not found"))?;
-    let marketplace = record.marketplace.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("community marketplace `{owner}/{repo}` has no listings")
-    })?;
+    let marketplace = record
+        .marketplace
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("community marketplace `{owner}/{repo}` has no listings"))?;
     let entry = marketplace
         .entries
         .iter()
@@ -2205,7 +2212,9 @@ async fn detail_marketplace_entry(
                 if let Some(obj) = detail.as_object_mut() {
                     obj.insert(
                         "enrichmentError".to_string(),
-                        Value::String("No plugin manifest found at the repository root.".to_string()),
+                        Value::String(
+                            "No plugin manifest found at the repository root.".to_string(),
+                        ),
                     );
                 }
             }
@@ -2410,14 +2419,20 @@ mod tests {
             scrub_css_color("oklch(0.7 0.1 240)"),
             Some("oklch(0.7 0.1 240)".to_string())
         );
-        assert_eq!(scrub_css_color("rebeccapurple"), Some("rebeccapurple".into()));
+        assert_eq!(
+            scrub_css_color("rebeccapurple"),
+            Some("rebeccapurple".into())
+        );
         assert!(scrub_css_color("url(https://evil.example/x.png)").is_none());
         assert!(scrub_css_color("red; position:fixed; inset:0").is_none());
         assert!(scrub_css_color("rgb(0,0,0) /* */; background:url(x)").is_none());
         assert!(scrub_css_color("#12345").is_none());
 
         // The dither is rebuilt field by field, never passed through.
-        assert!(scrub_icon_dither(&serde_json::json!({ "to": 12 })).is_none(), "`from` is required");
+        assert!(
+            scrub_icon_dither(&serde_json::json!({ "to": 12 })).is_none(),
+            "`from` is required"
+        );
         assert_eq!(
             scrub_icon_dither(&serde_json::json!({
                 "from": 10, "to": 900, "direction": "diagonal", "extra": "dropped"
@@ -2487,24 +2502,18 @@ mod tests {
 
         // A background that would make the browser fetch turns every viewer of the
         // listing into a beacon hit. Colours in, declarations and `url(…)` out.
-        assert!(
-            scrub_banner(&serde_json::json!({
-                "background": "url(https://tracker.example/pixel.png)"
-            }))
-            .is_none()
-        );
-        assert!(
-            scrub_banner(&serde_json::json!({ "imageUrl": "javascript:alert(1)" })).is_none()
-        );
+        assert!(scrub_banner(&serde_json::json!({
+            "background": "url(https://tracker.example/pixel.png)"
+        }))
+        .is_none());
+        assert!(scrub_banner(&serde_json::json!({ "imageUrl": "javascript:alert(1)" })).is_none());
 
         // One bad stop drops the WHOLE ramp — the stops are joined into a single
         // gradient downstream, so the survivors would paint something unwritten.
-        assert!(
-            scrub_banner(&serde_json::json!({
-                "colors": ["#111111", "url(https://tracker.example/p.png)"]
-            }))
-            .is_none()
-        );
+        assert!(scrub_banner(&serde_json::json!({
+            "colors": ["#111111", "url(https://tracker.example/p.png)"]
+        }))
+        .is_none());
 
         // The DoS surface: these become shader uniforms, and an unbounded loop
         // count is a frozen tab rather than an ugly banner.
@@ -3024,8 +3033,7 @@ mod tests {
         let item = marketplace_entry_to_item(&record, marketplace, entry);
 
         assert_eq!(
-            item["id"],
-            "ghmp:acme/bazaar:thing-tool",
+            item["id"], "ghmp:acme/bazaar:thing-tool",
             "the id is namespaced so it can never collide with a single-listing id"
         );
         assert_eq!(item["name"], "Thing Tool", "displayName wins over name");
@@ -3136,7 +3144,10 @@ mod tests {
 
         // The probe (a HIT here) carries over on a case-insensitive full_name match.
         let mut target = repo_item_to_marketplace_record(&repo("ACME/Bazaar", 9)).unwrap();
-        carry_manifests(std::slice::from_mut(&mut target), Some(&[marketplace.clone()]));
+        carry_manifests(
+            std::slice::from_mut(&mut target),
+            Some(&[marketplace.clone()]),
+        );
         assert!(target.marketplace.is_some());
         assert_eq!(
             target.marketplace.as_ref().unwrap().name,
@@ -3179,21 +3190,22 @@ mod tests {
                     }
                     let hay = [
                         item.get("name").and_then(Value::as_str).unwrap_or(""),
-                        item.get("description").and_then(Value::as_str).unwrap_or(""),
+                        item.get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
                         item.get("id").and_then(Value::as_str).unwrap_or(""),
                     ];
-                    if hay
-                        .iter()
-                        .any(|s| s.to_ascii_lowercase().contains(&needle))
-                    {
+                    if hay.iter().any(|s| s.to_ascii_lowercase().contains(&needle)) {
                         return true;
                     }
-                    item.get("topics").and_then(Value::as_array).is_some_and(|topics| {
-                        topics.iter().any(|t| {
-                            t.as_str()
-                                .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                    item.get("topics")
+                        .and_then(Value::as_array)
+                        .is_some_and(|topics| {
+                            topics.iter().any(|t| {
+                                t.as_str()
+                                    .is_some_and(|t| t.to_ascii_lowercase().contains(&needle))
+                            })
                         })
-                    })
                 })
                 .cloned()
                 .collect()

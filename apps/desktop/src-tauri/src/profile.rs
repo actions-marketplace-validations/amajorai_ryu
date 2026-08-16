@@ -48,19 +48,19 @@ pub const DEV_PORT_OFFSET: u16 = 1000;
 /// here, so a row that disagrees with Core's table means the desktop adopts a
 /// port nothing is listening on.
 pub const PROFILE_PORT_OFFSETS: &[(&str, u16)] = &[
-	("release", 0),
-	("dev", DEV_PORT_OFFSET),
-	("canary", 2000),
-	("nightly", 3000),
-	("beta", 4000),
+    ("release", 0),
+    ("dev", DEV_PORT_OFFSET),
+    ("canary", 2000),
+    ("nightly", 3000),
+    ("beta", 4000),
 ];
 
 /// The port offset for `profile`, or `None` when it is not a known profile.
 pub fn offset_of(profile: &str) -> Option<u16> {
-	PROFILE_PORT_OFFSETS
-		.iter()
-		.find(|(name, _)| *name == profile)
-		.map(|(_, offset)| *offset)
+    PROFILE_PORT_OFFSETS
+        .iter()
+        .find(|(name, _)| *name == profile)
+        .map(|(_, offset)| *offset)
 }
 
 /// The base Core HTTP port (release). `port()` shifts it per profile.
@@ -101,16 +101,16 @@ const VERSION_ACTIVATED_PROFILES: &[&str] = &["canary", "nightly"];
 /// `"stable"` spelling — here "no prerelease" is `None`, so the caller cannot
 /// confuse it with a channel name.
 fn channel_of_version(version: &str) -> Option<&str> {
-	// Build metadata (`0.1.4+ci.42`) is NOT a prerelease and must never be read
-	// as one, or a `+canary.1` build stamp would activate the canary profile.
-	let core = version.split('+').next().unwrap_or(version);
-	let (_, pre) = core.split_once('-')?;
-	let ident = pre.split('.').next().unwrap_or(pre).trim();
-	if ident.is_empty() {
-		None
-	} else {
-		Some(ident)
-	}
+    // Build metadata (`0.1.4+ci.42`) is NOT a prerelease and must never be read
+    // as one, or a `+canary.1` build stamp would activate the canary profile.
+    let core = version.split('+').next().unwrap_or(version);
+    let (_, pre) = core.split_once('-')?;
+    let ident = pre.split('.').next().unwrap_or(pre).trim();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(ident)
+    }
 }
 
 /// The profile a build carrying `version` runs under, or `None` when the version
@@ -121,45 +121,45 @@ fn channel_of_version(version: &str) -> Option<&str> {
 /// as `RYU_PROFILE`, and Core rejects anything not in its own table, so it must
 /// come from ours rather than from the parsed version text.
 pub fn profile_for_version(version: &str) -> Option<&'static str> {
-	let channel = channel_of_version(version)?;
-	VERSION_ACTIVATED_PROFILES
-		.iter()
-		.copied()
-		.find(|known| *known == channel)
+    let channel = channel_of_version(version)?;
+    VERSION_ACTIVATED_PROFILES
+        .iter()
+        .copied()
+        .find(|known| *known == channel)
 }
 
 /// The profile this bundle's own version activates, if any.
 pub fn build_channel_profile() -> Option<&'static str> {
-	profile_for_version(env!("CARGO_PKG_VERSION"))
+    profile_for_version(env!("CARGO_PKG_VERSION"))
 }
 
 /// The active profile name, lowercased. The `RYU_PROFILE` value when set;
 /// otherwise `"dev"` when built as the dev variant; otherwise the profile this
 /// build's own version names (`canary`/`nightly`); otherwise `"release"`.
 pub fn name() -> String {
-	if let Ok(raw) = std::env::var(RYU_PROFILE_ENV) {
-		let trimmed = raw.trim().to_ascii_lowercase();
-		if !trimmed.is_empty() {
-			return trimmed;
-		}
-	}
-	if cfg!(feature = "dev-variant") {
-		return "dev".to_string();
-	}
-	if let Some(from_version) = build_channel_profile() {
-		return from_version.to_string();
-	}
-	"release".to_string()
+    if let Ok(raw) = std::env::var(RYU_PROFILE_ENV) {
+        let trimmed = raw.trim().to_ascii_lowercase();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    if cfg!(feature = "dev-variant") {
+        return "dev".to_string();
+    }
+    if let Some(from_version) = build_channel_profile() {
+        return from_version.to_string();
+    }
+    "release".to_string()
 }
 
 /// True for the default release profile (zero offset, no data-dir suffix).
 pub fn is_release() -> bool {
-	name() == "release"
+    name() == "release"
 }
 
 /// True for any non-release (dev) profile.
 pub fn is_dev() -> bool {
-	!is_release()
+    !is_release()
 }
 
 /// `base + offset`, saturating. release ⇒ `base`; dev ⇒ `base + 1000`; every
@@ -171,47 +171,47 @@ pub fn is_dev() -> bool {
 /// *different, running* stack instead. Failing to connect beats connecting to
 /// the wrong stack.
 pub fn port(base: u16) -> u16 {
-	base.saturating_add(offset_of(&name()).unwrap_or(0))
+    base.saturating_add(offset_of(&name()).unwrap_or(0))
 }
 
 /// The Core HTTP port for this profile: 7980 release, 8980 dev.
 pub fn core_port() -> u16 {
-	port(CORE_BASE_PORT)
+    port(CORE_BASE_PORT)
 }
 
 /// `http://127.0.0.1:<core_port>` — the loopback base for health/control calls.
 pub fn core_base_url() -> String {
-	format!("http://127.0.0.1:{}", core_port())
+    format!("http://127.0.0.1:{}", core_port())
 }
 
 /// `http://localhost:<core_port>` — the URL handed to the webview (matches the
 /// historical spelling of `get_ryu_core_url`).
 pub fn core_localhost_url() -> String {
-	format!("http://localhost:{}", core_port())
+    format!("http://localhost:{}", core_port())
 }
 
 /// The island loopback control port for this profile: 7989 release, 8989 dev.
 /// An explicit `ISLAND_CONTROL_PORT` env var wins (so `bun run dev` can override
 /// both sides at once); otherwise it is derived from the profile.
 pub fn island_control_port() -> u16 {
-	if let Ok(raw) = std::env::var("ISLAND_CONTROL_PORT") {
-		if let Ok(parsed) = raw.trim().parse::<u16>() {
-			return parsed;
-		}
-	}
-	port(ISLAND_CONTROL_BASE_PORT)
+    if let Ok(raw) = std::env::var("ISLAND_CONTROL_PORT") {
+        if let Ok(parsed) = raw.trim().parse::<u16>() {
+            return parsed;
+        }
+    }
+    port(ISLAND_CONTROL_BASE_PORT)
 }
 
 /// The MCP bridge loopback port for this profile: 8400 release, 9400 dev. An
 /// explicit `RYU_MCP_BRIDGE_PORT` wins, mirroring `island_control_port`, so a
 /// second checkout can be debugged without colliding with the packaged app.
 pub fn mcp_bridge_port() -> u16 {
-	if let Ok(raw) = std::env::var("RYU_MCP_BRIDGE_PORT") {
-		if let Ok(parsed) = raw.trim().parse::<u16>() {
-			return parsed;
-		}
-	}
-	port(MCP_BRIDGE_BASE_PORT)
+    if let Ok(raw) = std::env::var("RYU_MCP_BRIDGE_PORT") {
+        if let Ok(parsed) = raw.trim().parse::<u16>() {
+            return parsed;
+        }
+    }
+    port(MCP_BRIDGE_BASE_PORT)
 }
 
 /// Data-dir suffix for an arbitrary profile name: `""` for release
@@ -219,25 +219,25 @@ pub fn mcp_bridge_port() -> u16 {
 /// `profile::suffix_for`. Pure, so the version → profile → data-root chain can be
 /// asserted without the process actually running under that profile.
 pub fn suffix_of(profile: &str) -> String {
-	if profile == "release" {
-		String::new()
-	} else {
-		format!("-{profile}")
-	}
+    if profile == "release" {
+        String::new()
+    } else {
+        format!("-{profile}")
+    }
 }
 
 /// Data-dir suffix for the ACTIVE profile: `""` for release (byte-identical
 /// `~/.ryu`), `-<profile>` otherwise (e.g. `~/.ryu-dev`). Matches Core's
 /// `profile::suffix`.
 pub fn suffix() -> String {
-	suffix_of(&name())
+    suffix_of(&name())
 }
 
 /// The Ryu data/home dir for this profile: `~/.ryu` release, `~/.ryu-dev` dev.
 pub fn ryu_home_dir() -> PathBuf {
-	dirs::home_dir()
-		.unwrap_or_else(|| PathBuf::from("."))
-		.join(format!(".ryu{}", suffix()))
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(format!(".ryu{}", suffix()))
 }
 
 /// True when `candidate` is `<home>/.ryu<suffix>/bin/<exe>` for a Ryu profile home
@@ -254,131 +254,134 @@ pub fn ryu_home_dir() -> PathBuf {
 /// hit, the installed-check would still count it as present, skip the download, and
 /// leave the profile with no binary at all.
 pub fn is_foreign_profile_bin(candidate: &std::path::Path) -> bool {
-	// <profile home>/bin/<exe> → the profile home is two levels up.
-	let Some(home) = candidate.parent().and_then(std::path::Path::parent) else {
-		return false;
-	};
-	if home == ryu_home_dir() {
-		return false;
-	}
-	home.file_name()
-		.and_then(|n| n.to_str())
-		.is_some_and(|n| n == ".ryu" || n.starts_with(".ryu-"))
+    // <profile home>/bin/<exe> → the profile home is two levels up.
+    let Some(home) = candidate.parent().and_then(std::path::Path::parent) else {
+        return false;
+    };
+    if home == ryu_home_dir() {
+        return false;
+    }
+    home.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == ".ryu" || n.starts_with(".ryu-"))
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	/// The three `PROFILE_PORT_OFFSETS` mirrors (Core, Gateway, desktop) MUST
-	/// stay identical: the desktop spawns Core and Core spawns the Gateway, all
-	/// with the same `RYU_PROFILE`, so one table drifting means a spawner dials a
-	/// port its child never bound. Each crate asserts the SAME literal rows, so
-	/// editing one mirror without the others fails here.
-	#[test]
-	fn the_profile_table_matches_its_mirrors() {
-		assert_eq!(
-			PROFILE_PORT_OFFSETS,
-			&[
-				("release", 0u16),
-				("dev", 1000),
-				("canary", 2000),
-				("nightly", 3000),
-				("beta", 4000),
-			][..]
-		);
-	}
+    /// The three `PROFILE_PORT_OFFSETS` mirrors (Core, Gateway, desktop) MUST
+    /// stay identical: the desktop spawns Core and Core spawns the Gateway, all
+    /// with the same `RYU_PROFILE`, so one table drifting means a spawner dials a
+    /// port its child never bound. Each crate asserts the SAME literal rows, so
+    /// editing one mirror without the others fails here.
+    #[test]
+    fn the_profile_table_matches_its_mirrors() {
+        assert_eq!(
+            PROFILE_PORT_OFFSETS,
+            &[
+                ("release", 0u16),
+                ("dev", 1000),
+                ("canary", 2000),
+                ("nightly", 3000),
+                ("beta", 4000),
+            ][..]
+        );
+    }
 
-	/// The activation this module exists for: a canary/nightly BUNDLE must report
-	/// its own profile, because that is what sends `RYU_PROFILE` to the Core child
-	/// and moves the whole stack off `~/.ryu`.
-	#[test]
-	fn a_prerelease_version_activates_its_own_profile() {
-		// The exact shape `scripts/release/bump-version.sh` stamps.
-		assert_eq!(
-			profile_for_version("0.1.12-canary.20260813.36"),
-			Some("canary")
-		);
-		assert_eq!(
-			profile_for_version("0.1.12-nightly.20260813.36"),
-			Some("nightly")
-		);
-		// Prerelease + build metadata still reads the prerelease.
-		assert_eq!(profile_for_version("0.1.12-canary.4+f1a68ac"), Some("canary"));
-	}
+    /// The activation this module exists for: a canary/nightly BUNDLE must report
+    /// its own profile, because that is what sends `RYU_PROFILE` to the Core child
+    /// and moves the whole stack off `~/.ryu`.
+    #[test]
+    fn a_prerelease_version_activates_its_own_profile() {
+        // The exact shape `scripts/release/bump-version.sh` stamps.
+        assert_eq!(
+            profile_for_version("0.1.12-canary.20260813.36"),
+            Some("canary")
+        );
+        assert_eq!(
+            profile_for_version("0.1.12-nightly.20260813.36"),
+            Some("nightly")
+        );
+        // Prerelease + build metadata still reads the prerelease.
+        assert_eq!(
+            profile_for_version("0.1.12-canary.4+f1a68ac"),
+            Some("canary")
+        );
+    }
 
-	#[test]
-	fn a_stable_version_stays_on_the_release_profile() {
-		// The regression that matters most: a stable build must keep resolving
-		// `~/.ryu` with zero offset, byte-identical to before this existed.
-		assert_eq!(profile_for_version("0.1.12"), None);
-		assert_eq!(profile_for_version("0.1.12+ci.42"), None);
-		// Build metadata is not a prerelease — `+canary.1` must NOT activate it.
-		assert_eq!(profile_for_version("0.1.12+canary.1"), None);
-		// Junk never invents a profile.
-		assert_eq!(profile_for_version(""), None);
-		assert_eq!(profile_for_version("garbage"), None);
-		assert_eq!(profile_for_version("0.1.12-"), None);
-	}
+    #[test]
+    fn a_stable_version_stays_on_the_release_profile() {
+        // The regression that matters most: a stable build must keep resolving
+        // `~/.ryu` with zero offset, byte-identical to before this existed.
+        assert_eq!(profile_for_version("0.1.12"), None);
+        assert_eq!(profile_for_version("0.1.12+ci.42"), None);
+        // Build metadata is not a prerelease — `+canary.1` must NOT activate it.
+        assert_eq!(profile_for_version("0.1.12+canary.1"), None);
+        // Junk never invents a profile.
+        assert_eq!(profile_for_version(""), None);
+        assert_eq!(profile_for_version("garbage"), None);
+        assert_eq!(profile_for_version("0.1.12-"), None);
+    }
 
-	#[test]
-	fn beta_and_unknown_channels_are_not_activated_by_version() {
-		// beta has a PROFILE_PORT_OFFSETS row but is deliberately not activated
-		// (task #102 owns that call); an unseen prerelease id must not either.
-		assert_eq!(profile_for_version("0.1.12-beta.1"), None);
-		assert_eq!(profile_for_version("0.1.12-rc.1"), None);
-		assert_eq!(profile_for_version("0.1.12-experiment.7"), None);
-	}
+    #[test]
+    fn beta_and_unknown_channels_are_not_activated_by_version() {
+        // beta has a PROFILE_PORT_OFFSETS row but is deliberately not activated
+        // (task #102 owns that call); an unseen prerelease id must not either.
+        assert_eq!(profile_for_version("0.1.12-beta.1"), None);
+        assert_eq!(profile_for_version("0.1.12-rc.1"), None);
+        assert_eq!(profile_for_version("0.1.12-experiment.7"), None);
+    }
 
-	/// The whole chain, end to end: the version a canary bundle carries resolves
-	/// to a data root that is NEITHER the release default (`~/.ryu`) nor the dev
-	/// one (`~/.ryu-dev`), and to a Core port nothing else binds. This is the
-	/// property the midnight wipe is allowed to delete against.
-	#[test]
-	fn a_prerelease_bundle_resolves_a_root_that_is_not_release_or_dev() {
-		for (version, profile, suffix, port) in [
-			("0.1.12-canary.20260813.36", "canary", "-canary", 9980u16),
-			("0.1.12-nightly.20260813.36", "nightly", "-nightly", 10_980),
-		] {
-			let resolved = profile_for_version(version).expect("activates a profile");
-			assert_eq!(resolved, profile);
-			assert_eq!(suffix_of(resolved), suffix);
-			assert_ne!(suffix_of(resolved), suffix_of("release"));
-			assert_ne!(suffix_of(resolved), suffix_of("dev"));
-			assert_eq!(
-				CORE_BASE_PORT + offset_of(resolved).expect("known profile"),
-				port
-			);
-		}
-		// And the untouched baseline: a stable bundle keeps `~/.ryu` and :7980.
-		assert_eq!(suffix_of("release"), "");
-		assert_eq!(offset_of("release"), Some(0));
-	}
+    /// The whole chain, end to end: the version a canary bundle carries resolves
+    /// to a data root that is NEITHER the release default (`~/.ryu`) nor the dev
+    /// one (`~/.ryu-dev`), and to a Core port nothing else binds. This is the
+    /// property the midnight wipe is allowed to delete against.
+    #[test]
+    fn a_prerelease_bundle_resolves_a_root_that_is_not_release_or_dev() {
+        for (version, profile, suffix, port) in [
+            ("0.1.12-canary.20260813.36", "canary", "-canary", 9980u16),
+            ("0.1.12-nightly.20260813.36", "nightly", "-nightly", 10_980),
+        ] {
+            let resolved = profile_for_version(version).expect("activates a profile");
+            assert_eq!(resolved, profile);
+            assert_eq!(suffix_of(resolved), suffix);
+            assert_ne!(suffix_of(resolved), suffix_of("release"));
+            assert_ne!(suffix_of(resolved), suffix_of("dev"));
+            assert_eq!(
+                CORE_BASE_PORT + offset_of(resolved).expect("known profile"),
+                port
+            );
+        }
+        // And the untouched baseline: a stable bundle keeps `~/.ryu` and :7980.
+        assert_eq!(suffix_of("release"), "");
+        assert_eq!(offset_of("release"), Some(0));
+    }
 
-	/// Core `exit(1)`s on a `RYU_PROFILE` outside its table, so anything this
-	/// module can hand it must be a known row — and must not be `release` (no
-	/// isolation) or `dev` (a DIFFERENT, possibly running stack's ports and data).
-	#[test]
-	fn channel_profiles_are_known_profiles() {
-		for profile in VERSION_ACTIVATED_PROFILES {
-			assert!(
-				offset_of(profile).is_some(),
-				"'{profile}' is not in PROFILE_PORT_OFFSETS — Core would exit(1)"
-			);
-			assert_ne!(*profile, "release");
-			assert_ne!(*profile, "dev");
-		}
-	}
+    /// Core `exit(1)`s on a `RYU_PROFILE` outside its table, so anything this
+    /// module can hand it must be a known row — and must not be `release` (no
+    /// isolation) or `dev` (a DIFFERENT, possibly running stack's ports and data).
+    #[test]
+    fn channel_profiles_are_known_profiles() {
+        for profile in VERSION_ACTIVATED_PROFILES {
+            assert!(
+                offset_of(profile).is_some(),
+                "'{profile}' is not in PROFILE_PORT_OFFSETS — Core would exit(1)"
+            );
+            assert_ne!(*profile, "release");
+            assert_ne!(*profile, "dev");
+        }
+    }
 
-	#[test]
-	fn canary_no_longer_shares_devs_ports() {
-		// Was: every non-release profile got +1000, so a canary desktop dialled
-		// the dev stack's Core.
-		assert_eq!(offset_of("dev"), Some(1000));
-		assert_eq!(offset_of("canary"), Some(2000));
-		assert_ne!(offset_of("canary"), offset_of("dev"));
-		// An unknown name resolves to release's offset, never dev's — failing to
-		// connect beats connecting to a different, running stack.
-		assert_eq!(offset_of("typo"), None);
-	}
+    #[test]
+    fn canary_no_longer_shares_devs_ports() {
+        // Was: every non-release profile got +1000, so a canary desktop dialled
+        // the dev stack's Core.
+        assert_eq!(offset_of("dev"), Some(1000));
+        assert_eq!(offset_of("canary"), Some(2000));
+        assert_ne!(offset_of("canary"), offset_of("dev"));
+        // An unknown name resolves to release's offset, never dev's — failing to
+        // connect beats connecting to a different, running stack.
+        assert_eq!(offset_of("typo"), None);
+    }
 }

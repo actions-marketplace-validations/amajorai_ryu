@@ -4,8 +4,14 @@ import { cn } from "@ryu/ui/lib/utils";
 import { createCodePlugin } from "@streamdown/code";
 import { type Components, Streamdown } from "streamdown";
 import "streamdown/styles.css";
+import { IconAt } from "@tabler/icons-react";
 import { useChatDisplayPrefs } from "./chat-display-prefs.tsx";
+import { FileTypeIcon } from "./file-type-icon.tsx";
 import { type Citation, CitationMarkLink } from "./inline-citation.tsx";
+import { LinkPreview, type LinkPreviewResolvers } from "./link-preview.tsx";
+import { decodeMentionHref, linkifyAtMentions } from "./linkify-mentions.ts";
+import { formatMentionContent } from "./mention-format.ts";
+import type { MentionItem } from "./types.ts";
 import { linkifyCitationMarkers } from "./utils/citations.ts";
 
 // Fixed streaming-animation treatment (Streamdown's animate plugin). Word-by-word
@@ -68,7 +74,10 @@ export interface MarkdownProps {
 	 * (past messages, other surfaces, motion disabled). Default: false.
 	 */
 	isAnimating?: boolean;
+	mentionItems?: MentionItem[];
 	onOpenFile?: (path: string) => void;
+	onOpenLink?: (url: string) => void;
+	previewResolvers?: LinkPreviewResolvers;
 	textContrast?: "normal" | "high";
 }
 
@@ -135,13 +144,24 @@ function enrichInlineFileReferences(
 		.join("");
 }
 
+function decodeMentionLabel(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
+	}
+}
+
 export function Markdown({
+	mentionItems,
 	citations,
 	content,
 	className,
 	fileReferences,
 	isAnimating = false,
 	onOpenFile,
+	onOpenLink,
+	previewResolvers,
 }: MarkdownProps) {
 	// Code blocks obey the same "Tool detail" level as tool calls: at anything
 	// below Detailed a long block is capped and scrolls in place. The switch is a
@@ -149,10 +169,13 @@ export function Markdown({
 	// block is rendered by `@streamdown/code`, not by a component we own — the
 	// cap lands in CSS against its stable `data-streamdown` parts (agent-ui.css).
 	const { expandCodeBlocks } = useChatDisplayPrefs();
+	const mentionContent = formatMentionContent(content, mentionItems);
 	const safeContent = normalizeCodeFenceLanguages(
 		fixNumberedListBreaks(
 			linkifyCitationMarkers(
-				enrichInlineFileReferences(content, fileReferences),
+				linkifyAtMentions(
+					enrichInlineFileReferences(mentionContent, fileReferences)
+				),
 				citations
 			)
 		)
@@ -226,7 +249,30 @@ export function Markdown({
 				}
 				return <CitationMarkLink citation={citation} />;
 			}
-			if (href.startsWith("#ryu-file-")) {
+			if (href.startsWith("#ryu-mention-")) {
+				const mentionHref = href.slice("#ryu-mention-".length);
+				const separator = mentionHref.indexOf("-");
+				const kind =
+					separator === -1 ? mentionHref : mentionHref.slice(0, separator);
+				const encodedLabel =
+					separator === -1 ? "" : mentionHref.slice(separator + 1);
+				const label = encodedLabel ? decodeMentionLabel(encodedLabel) : "";
+				const item = mentionItems?.find(
+					(candidate) =>
+						candidate.kind === kind &&
+						(candidate.label === label || candidate.id === label)
+				);
+				return (
+					<strong
+						className="inline-flex items-center gap-1 font-semibold text-primary"
+						{...props}
+					>
+						{item?.icon ?? <IconAt className="size-3.5" />}
+						<span>{children}</span>
+					</strong>
+				);
+			}
+			if (/^#ryu-file-\d+$/.test(href)) {
 				const index = Number(href.replace("#ryu-file-", ""));
 				const ref = Number.isFinite(index)
 					? fileReferences?.[index]
@@ -244,21 +290,65 @@ export function Markdown({
 						title={ref.path}
 						type="button"
 					>
+						<FileTypeIcon className="mr-1 size-3.5" path={ref.path} />
 						{children}
 					</button>
 				);
 			}
-			const isExternal = href.startsWith("http") || href.startsWith("mailto:");
-			return (
+			const mentionedFile = decodeMentionHref(href, "#ryu-file-path-");
+			if (mentionedFile) {
+				return (
+					<LinkPreview
+						resolvers={previewResolvers}
+						target={{ kind: "file", value: mentionedFile }}
+					>
+						<button
+							className="an-md-file-link inline-flex items-center rounded px-0.5 text-primary underline-offset-2 hover:underline"
+							onClick={(event) => {
+								event.preventDefault();
+								onOpenFile?.(mentionedFile);
+							}}
+							title={mentionedFile}
+							type="button"
+						>
+							<FileTypeIcon className="mr-1 size-3.5" path={mentionedFile} />
+							{children}
+						</button>
+					</LinkPreview>
+				);
+			}
+			const mentionedWebsite = decodeMentionHref(href, "#ryu-web-url-");
+			const destination = mentionedWebsite ?? href;
+			const isExternal =
+				destination.startsWith("http") || destination.startsWith("mailto:");
+			const link = (
 				<a
 					{...props}
 					className="an-md-link text-primary underline-offset-2 hover:underline"
-					href={href}
+					href={destination}
+					onClick={
+						isExternal && onOpenLink
+							? (event) => {
+									event.preventDefault();
+									onOpenLink(destination);
+								}
+							: undefined
+					}
 					rel={isExternal ? "noopener noreferrer" : undefined}
 					target={isExternal ? "_blank" : undefined}
 				>
 					{children}
 				</a>
+			);
+			return destination.startsWith("http") ? (
+				<LinkPreview
+					resolvers={previewResolvers}
+					target={{ kind: "website", value: destination }}
+				>
+					{link}
+				</LinkPreview>
+			) : (
+				link
 			);
 		},
 		blockquote: ({ children, ...props }) => (
@@ -273,7 +363,7 @@ export function Markdown({
 			<hr className="an-md-hr my-4 border-border" {...props} />
 		),
 		table: ({ children, ...props }) => (
-			<div className="my-3 overflow-x-auto rounded-[var(--radius)]">
+			<div className="scroll-fade-x my-3 overflow-x-auto rounded-[var(--radius)]">
 				<table
 					className="an-md-table w-full text-sm [&>thead>tr>th]:bg-muted [&>thead]:bg-muted"
 					{...props}

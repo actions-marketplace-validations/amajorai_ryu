@@ -18,15 +18,15 @@ import { ArrowRight01Icon, Folder03Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
-	Dialog,
-	DialogClose,
-	DialogContent,
-	DialogDescription,
-	DialogFooter,
-	DialogHeader,
-	DialogTitle,
-} from "@ryu/ui/components/dialog";
-import { Input } from "@ryu/ui/components/input";
+	Command,
+	CommandDialog,
+	CommandEmpty,
+	CommandGroup,
+	CommandInput,
+	CommandItem,
+	CommandList,
+	CommandSeparator,
+} from "@ryu/ui/components/command";
 import { Spinner } from "@ryu/ui/components/spinner";
 import { cn } from "@ryu/ui/lib/utils";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -35,11 +35,11 @@ import type { ApiTarget } from "@/src/lib/api/client.ts";
 import { type DirectoryEntry, listDirectory } from "@/src/lib/api/workspace.ts";
 
 interface NodeFolderBrowserProps {
-	/** Called when the dialog requests to open/close. */
+	/** Called when the command dialog requests to open/close. */
 	onOpenChange: (open: boolean) => void;
 	/** Called with the absolute path of the folder the user confirmed. */
 	onSelect: (path: string) => void;
-	/** Whether the dialog is open (controlled by the parent). */
+	/** Whether the command dialog is open (controlled by the parent). */
 	open: boolean;
 }
 
@@ -73,18 +73,16 @@ function FolderRow({
 	const isLoading = loadingPaths.has(node.path);
 
 	return (
-		<div>
-			<button
-				className={cn(
-					"flex w-full items-center gap-1.5 rounded-md py-1.5 pr-2 text-left text-sm transition-colors hover:bg-foreground/10",
-					isSelected && "bg-foreground/10"
-				)}
-				onClick={() => {
+		<>
+			<CommandItem
+				className={cn("pr-2", isSelected && "bg-accent text-foreground")}
+				data-checked={isSelected}
+				onSelect={() => {
 					onSelect(node.path);
 					onToggle(node.path);
 				}}
 				style={{ paddingLeft: `${depth * 16 + 8}px` }}
-				type="button"
+				value={node.path}
 			>
 				<HugeiconsIcon
 					className={cn(
@@ -100,7 +98,7 @@ function FolderRow({
 				<span className="min-w-0 flex-1 truncate text-foreground/80">
 					{node.name}
 				</span>
-			</button>
+			</CommandItem>
 
 			{isOpen && (
 				<>
@@ -135,13 +133,14 @@ function FolderRow({
 					))}
 				</>
 			)}
-		</div>
+		</>
 	);
 }
 
 /**
- * A dialog that browses the active node's filesystem as a lazy, expandable tree
- * and confirms a folder. Errors from the node (404/403) surface inline.
+ * A command dialog that browses the active node's filesystem as a lazy,
+ * expandable tree and confirms a folder. Errors from the node (404/403) surface
+ * inline.
  */
 export function NodeFolderBrowser({
 	open,
@@ -354,27 +353,26 @@ export function NodeFolderBrowser({
 		}
 	}, [selected, onSelect, onOpenChange]);
 
-	return (
-		<Dialog onOpenChange={onOpenChange} open={open}>
-			<DialogContent className="sm:max-w-lg">
-				<DialogHeader>
-					<DialogTitle>Open a folder</DialogTitle>
-					<DialogDescription>
-						Browse folders on{" "}
-						{activeNode.name === "local"
-							? "this computer"
-							: `the "${activeNode.name}" node`}
-						.
-					</DialogDescription>
-				</DialogHeader>
+	const locationLabel =
+		activeNode.name === "local"
+			? "this computer"
+			: `the "${activeNode.name}" node`;
 
+	return (
+		<CommandDialog
+			className="sm:max-w-lg"
+			description={`Browse folders on ${locationLabel} and add one as a Ryu project.`}
+			onOpenChange={onOpenChange}
+			open={open}
+			title="Add a project folder to Ryu"
+		>
+			<Command shouldFilter={false}>
 				{/* Type a path to jump straight to it, or pick one in the tree below. */}
-				<Input
+				<CommandInput
 					aria-invalid={pathInvalid || undefined}
 					autoCapitalize="off"
 					autoCorrect="off"
 					className="font-mono text-[12px]"
-					onChange={(e) => handlePathInputChange(e.target.value)}
 					onKeyDown={(e) => {
 						if (e.key === "Enter") {
 							e.preventDefault();
@@ -384,13 +382,13 @@ export function NodeFolderBrowser({
 							runPathList(pathInput);
 						}
 					}}
+					onValueChange={handlePathInputChange}
 					placeholder="Type a folder path, or pick one below…"
 					spellCheck={false}
 					value={pathInput}
 				/>
 
-				{/* Expandable folder tree. */}
-				<div className="h-72 overflow-y-auto rounded-lg border border-border p-1">
+				<CommandList className="h-72 max-h-72">
 					{loading && (
 						<div className="flex h-full items-center justify-center">
 							<Spinner />
@@ -399,29 +397,38 @@ export function NodeFolderBrowser({
 					{!loading && error && (
 						<p className="px-3 py-2 text-[12px] text-destructive">{error}</p>
 					)}
-					{!(loading || error) &&
-						roots.map((root) => (
-							<FolderRow
-								childrenByPath={childrenByPath}
-								depth={0}
-								expanded={expanded}
-								key={root.path}
-								loadingPaths={loadingPaths}
-								node={root}
-								onSelect={handleTreeSelect}
-								onToggle={handleToggle}
-								selected={selected}
-							/>
-						))}
-				</div>
+					{!(loading || error) && roots.length === 0 && (
+						<CommandEmpty>No folders found.</CommandEmpty>
+					)}
+					{!(loading || error) && (
+						<CommandGroup heading={`Folders on ${locationLabel}`}>
+							{roots.map((root) => (
+								<FolderRow
+									childrenByPath={childrenByPath}
+									depth={0}
+									expanded={expanded}
+									key={root.path}
+									loadingPaths={loadingPaths}
+									node={root}
+									onSelect={handleTreeSelect}
+									onToggle={handleToggle}
+									selected={selected}
+								/>
+							))}
+						</CommandGroup>
+					)}
+				</CommandList>
 
-				<DialogFooter>
-					<DialogClose render={<Button variant="ghost" />}>Cancel</DialogClose>
-					<Button disabled={!selected} onClick={handleConfirm} type="button">
-						Select this folder
+				<CommandSeparator className="m-0" />
+				<div className="flex justify-end gap-2 p-2">
+					<Button onClick={() => onOpenChange(false)} variant="ghost">
+						Cancel
 					</Button>
-				</DialogFooter>
-			</DialogContent>
-		</Dialog>
+					<Button disabled={!selected} onClick={handleConfirm} type="button">
+						Add folder to Ryu
+					</Button>
+				</div>
+			</Command>
+		</CommandDialog>
 	);
 }

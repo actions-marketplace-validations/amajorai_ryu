@@ -1,12 +1,11 @@
 ﻿import {
-	IconEye as Eye,
-	IconFileCode as FileCode2,
-	IconFilePlus as FilePlus,
+	IconBook2 as BookOpen,
 	IconFolderSearch as FolderSearch,
 	IconGitBranch as GitBranch,
 	IconGlobe as Globe,
 	IconChecklist as ListTodo,
 	IconLogout as LogOut,
+	IconPencil as Pencil,
 	IconSearch as Search,
 	IconSparkles as Sparkles,
 	IconTerminal2 as Terminal,
@@ -175,7 +174,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
 		variant: "simple",
 	},
 	"tool-Read": {
-		icon: Eye,
+		icon: BookOpen,
 		title: (part) => {
 			const isPending =
 				part.state !== "output-available" && part.state !== "output-error";
@@ -192,7 +191,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
 		variant: "simple",
 	},
 	"tool-Edit": {
-		icon: FileCode2,
+		icon: Pencil,
 		title: (part) => {
 			const filePath =
 				part.input?.file_path || part.output?.path || part.result?.path || "";
@@ -224,8 +223,8 @@ export const toolRegistry: Record<string, ToolMeta> = {
 		variant: "simple",
 	},
 	"tool-Write": {
-		icon: FilePlus,
-		title: () => "Create",
+		icon: Pencil,
+		title: () => "Write",
 		subtitle: (part) => {
 			const filePath =
 				part.input?.file_path || part.output?.path || part.result?.path || "";
@@ -277,7 +276,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
 		variant: "simple",
 	},
 	"tool-WebSearch": {
-		icon: Search,
+		icon: Globe,
 		title: (part) => {
 			const isPending =
 				part.state !== "output-available" && part.state !== "output-error";
@@ -348,7 +347,7 @@ export const toolRegistry: Record<string, ToolMeta> = {
 		variant: "simple",
 	},
 	"tool-NotebookEdit": {
-		icon: FileCode2,
+		icon: Pencil,
 		title: (part) => {
 			const isPending =
 				part.state !== "output-available" && part.state !== "output-error";
@@ -447,6 +446,17 @@ export interface McpToolInfo {
 	toolName: string;
 }
 
+/** Human-facing label for a qualified tool id; the id itself remains the call key. */
+export function formatToolDisplayName(toolName: string): string {
+	const separatorIndex = toolName.indexOf("__");
+	const displayName =
+		separatorIndex === -1 ? toolName : toolName.slice(separatorIndex + 2);
+	return displayName
+		.replace(/[_-]+/g, " ")
+		.replace(/\b\w/g, (character) => character.toUpperCase())
+		.trim();
+}
+
 const BUILTIN_MCP_TOOLS: Record<string, McpToolInfo> = {
 	"tool-ListMcpResources": {
 		serverName: "mcp",
@@ -492,10 +502,7 @@ export function parseMcpToolType(partType: string): McpToolInfo | null {
 	return {
 		serverName,
 		toolName,
-		displayName: toolName
-			.replace(/_/g, " ")
-			.replace(/\b\w/g, (c) => c.toUpperCase())
-			.trim(),
+		displayName: formatToolDisplayName(toolName),
 		category: "other",
 	};
 }

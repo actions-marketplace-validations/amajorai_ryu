@@ -2,6 +2,7 @@
   "id": "@ryu/pi-subagent",
   "name": "Subagents",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Automation",
   "description": "Adds the Task tool to the managed Pi agent, so it can delegate a bounded, context-isolated job to a child agent.",
   "tagline": "Let the agent delegate work to child agents",
@@ -20,8 +21,25 @@
   },
   "engines": { "ryu": ">=0.1.0" },
   "runnables": [],
+  "permission_grants": ["preferences:read"],
   "activation_events": ["*"],
   "contributes": {
+    "settings_tabs": [
+      {
+        "id": "pi-subagent.settings",
+        "title": "Subagents",
+        "scope": "node",
+        "fields": [
+          {
+            "type": "model_picker",
+            "pref_key": "pi-subagent-model",
+            "label": "Default subagent model",
+            "description": "Leave unset to let the main agent choose a model for each task. Selecting a model forces every subagent to use it.",
+            "placeholder": "Let the main agent decide"
+          }
+        ]
+      }
+    ],
     "pi_extensions": [
       {
         "id": "subagent",

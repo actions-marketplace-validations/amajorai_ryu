@@ -468,7 +468,10 @@ mod tests {
         let accounts = v.list(&scope).unwrap();
         assert_eq!(accounts.len(), 2);
         // The newest upsert is active; its label carries no credential.
-        let active = accounts.iter().find(|a| a.active).expect("an active account");
+        let active = accounts
+            .iter()
+            .find(|a| a.active)
+            .expect("an active account");
         assert_eq!(active.account_id, "acct-2");
         assert!(
             accounts.iter().all(|a| !a.label.contains("t2")),
@@ -511,11 +514,10 @@ mod tests {
         );
         assert_eq!(v.count(&acp_scope("npx claude-code-acp")).unwrap(), 1);
         // The ACP scope holds an opaque account with no readable credential.
-        assert!(
-            v.active_credential(&acp_scope("npx claude-code-acp"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(v
+            .active_credential(&acp_scope("npx claude-code-acp"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

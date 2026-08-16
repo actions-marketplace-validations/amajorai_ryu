@@ -74,6 +74,7 @@ import { Switch } from "@ryu/ui/components/switch";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { OAuthConnections } from "@/src/components/marketplace/ConnectionsTab.tsx";
 import { PluginSettingsFields } from "@/src/components/settings/PluginSettingsFields.tsx";
 import { useActiveNodeGetter } from "@/src/hooks/useActiveNode.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
@@ -1050,6 +1051,10 @@ function InstalledAppDetail({
 				/>
 			) : null}
 
+			{app.mcpOAuthServers.length > 0 ? (
+				<OAuthConnections apps={[app]} loading={false} />
+			) : null}
+
 			{/* Inline plugin settings — the fields the plugin declared in its manifest. */}
 			{hasSettings ? (
 				<InstalledAppSettings settingsTabs={settingsTabs} target={target} />
@@ -1167,7 +1172,7 @@ function BuiltInAppDetail({
 							disabled={pending !== null}
 							onClick={() => run("stop", stopSidecar)}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							{pending === "stop" ? (
 								<Spinner className="size-4" />

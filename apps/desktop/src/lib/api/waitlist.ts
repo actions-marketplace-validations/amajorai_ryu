@@ -14,6 +14,7 @@
 // cookie auth (`credentials: "include"`, what packages/settings api-client uses)
 // and let the server decide.
 
+import { openSse, type SseMessage } from "@ryuhq/protocol/sse";
 import { BACKEND_URL, TOKEN_KEY } from "@/lib/auth-client.ts";
 
 export interface WaitlistMe {
@@ -34,6 +35,30 @@ export interface WaitlistMe {
 	totalWaiting: number;
 	// Reserved handle (normalized, no leading "@"), or null if unclaimed.
 	username: string | null;
+}
+
+/** The only live waitlist transition currently pushed by the control plane. */
+export interface WaitlistStatusEvent {
+	status: "approved";
+}
+
+function authToken(): string | null {
+	try {
+		return localStorage.getItem(TOKEN_KEY);
+	} catch {
+		return null;
+	}
+}
+
+/** Open the caller's approval stream with bearer and cookie auth support. */
+export function openWaitlistStream(
+	signal: AbortSignal
+): AsyncGenerator<SseMessage<WaitlistStatusEvent>> {
+	return openSse<WaitlistStatusEvent>(`${BACKEND_URL}/api/waitlist/stream`, {
+		credentials: "include",
+		signal,
+		token: authToken(),
+	});
 }
 
 /** The signed-in user's own waitlist state, or null when it can't be resolved. */

@@ -398,7 +398,7 @@ export function StorageSettings() {
 							doSwitch().catch(() => undefined);
 						}}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Start fresh here
 					</Button>
@@ -422,7 +422,7 @@ export function StorageSettings() {
 					pickFolder().catch(() => undefined);
 				}}
 				size="sm"
-				variant="outline"
+				variant="ghost"
 			>
 				Choose folder…
 			</Button>
@@ -441,7 +441,7 @@ export function StorageSettings() {
 							We couldn't load your data folder details. Please check your
 							connection and try again.
 						</p>
-						<Button onClick={() => refresh()} size="sm" variant="outline">
+						<Button onClick={() => refresh()} size="sm" variant="ghost">
 							Retry
 						</Button>
 					</div>
@@ -468,7 +468,7 @@ export function StorageSettings() {
 											doReset().catch(() => undefined);
 										}}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										Reset to default
 									</Button>
@@ -502,7 +502,7 @@ export function StorageSettings() {
 									disabled={busy}
 									onClick={() => setPendingProfileCopy(target)}
 									size="sm"
-									variant="outline"
+									variant="ghost"
 								>
 									Copy
 								</Button>
@@ -528,7 +528,7 @@ export function StorageSettings() {
 									doExport().catch(() => undefined);
 								}}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Export…
 							</Button>
@@ -544,7 +544,7 @@ export function StorageSettings() {
 									doImport().catch(() => undefined);
 								}}
 								size="sm"
-								variant="outline"
+								variant="ghost"
 							>
 								Restore…
 							</Button>

@@ -13,7 +13,8 @@
 //     - doc-sync: BINARY `<1-byte tag><payload>`       (CRDT, document rooms only)
 //
 //   Server -> client:
-//     - join_ack: text `{ type: "join_ack", room_id, member_id, access }`
+//     - join_ack: text `{ type: "join_ack", room_id, member_id, access, presence }`
+//     - ping:     text `{ type: "ping" }` (client replies `{type:"pong"}`)
 //     - events:   text `{ channel: "events",   data }` (e.g. a new chat message)
 //     - presence: text `{ channel: "presence", data }` (awareness deltas / leaves)
 //     - doc-sync: BINARY `<1-byte tag><payload>`
@@ -101,6 +102,8 @@ export interface JoinAck {
 	 * `false`. */
 	maySeed: boolean;
 	memberId: string;
+	/** Current active-room presence roster, included for late joiners. */
+	presence: unknown[];
 	roomId: string;
 }
 
@@ -154,6 +157,10 @@ export function realtimeWsUrl(
  */
 export class RealtimeConnection {
 	private socket: WebSocket | null = null;
+	private hasPresence = false;
+	private lastPresence: unknown;
+	private keepalive: ReturnType<typeof setInterval> | null = null;
+	private presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
 	private readonly url: string;
 	private readonly options: RealtimeOptions;
 
@@ -182,17 +189,34 @@ export class RealtimeConnection {
 				room_id: this.options.roomId,
 				kind: this.options.kind,
 			});
+			this.startKeepalive();
 			handlers?.onOpen?.();
 		};
 		socket.onmessage = (event) => this.dispatch(event);
-		socket.onclose = (event) => handlers?.onClose?.(event);
+		socket.onclose = (event) => {
+			this.clearKeepalive();
+			this.clearPresenceHeartbeat();
+			if (this.socket === socket) {
+				this.socket = null;
+			}
+			handlers?.onClose?.(event);
+		};
 		socket.onerror = (event) => handlers?.onError?.(event);
 	}
 
 	/** Publish this client's awareness payload (cursor/typing/name/etc.). The
 	 * server stamps the member id before broadcasting. */
 	publishPresence(data: unknown): void {
+		this.hasPresence = true;
+		this.lastPresence = data;
 		this.sendText({ type: "presence", data });
+		if (this.presenceHeartbeat === null) {
+			this.presenceHeartbeat = setInterval(() => {
+				if (this.hasPresence) {
+					this.sendText({ type: "presence", data: this.lastPresence });
+				}
+			}, 10_000);
+		}
 	}
 
 	/** Send a DocSync frame (CRDT sync/update) for a document room. */
@@ -207,11 +231,36 @@ export class RealtimeConnection {
 
 	/** Send an explicit `leave` (if still open) and close the socket. */
 	close(): void {
+		this.clearKeepalive();
+		this.clearPresenceHeartbeat();
 		if (this.socket?.readyState === WEBSOCKET_OPEN) {
 			this.sendText({ type: "leave" });
 		}
 		this.socket?.close();
 		this.socket = null;
+	}
+
+	private startKeepalive(): void {
+		if (this.keepalive !== null) {
+			return;
+		}
+		this.keepalive = setInterval(() => {
+			this.ping();
+		}, 10_000);
+	}
+
+	private clearKeepalive(): void {
+		if (this.keepalive !== null) {
+			clearInterval(this.keepalive);
+			this.keepalive = null;
+		}
+	}
+
+	private clearPresenceHeartbeat(): void {
+		if (this.presenceHeartbeat !== null) {
+			clearInterval(this.presenceHeartbeat);
+			this.presenceHeartbeat = null;
+		}
 	}
 
 	private dispatch(event: MessageEvent): void {
@@ -243,11 +292,16 @@ export class RealtimeConnection {
 			return;
 		}
 		const frame = value as Record<string, unknown>;
+		if (frame.type === "ping") {
+			this.sendText({ type: "pong" });
+			return;
+		}
 		if (frame.type === "join_ack") {
 			handlers?.onJoinAck?.({
 				access: frame.access === "write" ? "write" : "read",
 				maySeed: frame.may_seed === true,
 				memberId: String(frame.member_id ?? ""),
+				presence: Array.isArray(frame.presence) ? frame.presence : [],
 				roomId: String(frame.room_id ?? ""),
 			});
 			return;

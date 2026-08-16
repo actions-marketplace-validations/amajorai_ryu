@@ -110,6 +110,7 @@ pub async fn run(
             Some(&run.run_id),
             Some(node_id),
             ack_required,
+            Some("@ryu/workflows"),
         )
         .await
         {

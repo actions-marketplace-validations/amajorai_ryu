@@ -14,7 +14,7 @@
 //! patterns are plain top-level regex literals.
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Approval posture for command execution. Sourced from
 /// `RYU_EXEC_APPROVAL_MODE` at the handler boundary; passed here as a value so
@@ -75,6 +75,39 @@ pub struct ScanVerdict {
     pub decision: Decision,
     pub reason: Option<String>,
     pub findings: Vec<Finding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_rule: Option<ManagedRuleFinding>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedRuleDecision {
+    Allow,
+    Prompt,
+    Deny,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedCommandRule {
+    pub id: String,
+    pub decision: ManagedRuleDecision,
+    pub argv_prefix: Vec<String>,
+    #[serde(default)]
+    pub backends: Vec<String>,
+    #[serde(default)]
+    pub project_ids: Vec<String>,
+    pub justification: String,
+    pub scope: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedRuleFinding {
+    pub id: String,
+    pub scope: String,
+    pub revision: u64,
+    pub justification: String,
+    pub argv: Vec<String>,
 }
 
 /// Scan a command for governance. Pure over `(backend, command, mode)`.
@@ -100,6 +133,7 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
                     category: "hardline".to_string(),
                     severity: Severity::Critical,
                 }],
+                managed_rule: None,
             };
         }
     }
@@ -120,6 +154,7 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
                 category: "hardline".to_string(),
                 severity: Severity::Critical,
             }],
+            managed_rule: None,
         };
     }
 
@@ -129,6 +164,7 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
             decision: Decision::Allow,
             reason: None,
             findings: Vec::new(),
+            managed_rule: None,
         };
     }
 
@@ -148,6 +184,7 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
             decision: Decision::Allow,
             reason: None,
             findings,
+            managed_rule: None,
         };
     }
 
@@ -158,6 +195,7 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
             decision: Decision::ApprovalRequired,
             reason: Some("risk patterns require manual approval".to_string()),
             findings,
+            managed_rule: None,
         },
         ApprovalMode::Smart => {
             let max = findings
@@ -180,9 +218,149 @@ pub fn scan_command(_backend: &str, command: &str, mode: ApprovalMode) -> ScanVe
                 decision,
                 reason,
                 findings,
+                managed_rule: None,
             }
         }
     }
+}
+
+fn split_shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && !single_quote {
+            current.push(character);
+            escaped = true;
+            continue;
+        }
+        match character {
+            '\'' if !double_quote => single_quote = !single_quote,
+            '"' if !single_quote => double_quote = !double_quote,
+            ';' | '|' | '&' | '\n' if !(single_quote || double_quote) => {
+                if !current.trim().is_empty() {
+                    segments.push(shell_words::split(current.trim()).ok()?);
+                }
+                current.clear();
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    if escaped || single_quote || double_quote {
+        return None;
+    }
+    if !current.trim().is_empty() {
+        segments.push(shell_words::split(current.trim()).ok()?);
+    }
+    Some(segments)
+}
+
+fn rule_matches(
+    rule: &ManagedCommandRule,
+    backend: &str,
+    project_id: Option<&str>,
+    argv: &[String],
+) -> bool {
+    (rule.backends.is_empty() || rule.backends.iter().any(|item| item == backend))
+        && (rule.project_ids.is_empty()
+            || project_id.is_some_and(|id| rule.project_ids.iter().any(|item| item == id)))
+        && argv.starts_with(&rule.argv_prefix)
+}
+
+/// Apply authenticated organization rules between the immutable hardline scan
+/// and the built-in risk-pattern scanner.
+pub fn scan_command_with_rules(
+    backend: &str,
+    command: &str,
+    mode: ApprovalMode,
+    rules: &[ManagedCommandRule],
+    project_id: Option<&str>,
+) -> ScanVerdict {
+    let hardline = scan_command(backend, command, ApprovalMode::Off);
+    if hardline.decision == Decision::Deny {
+        return hardline;
+    }
+    if rules.is_empty() {
+        return scan_command(backend, command, mode);
+    }
+    let Some(segments) = split_shell_segments(command) else {
+        return ScanVerdict {
+            decision: Decision::ApprovalRequired,
+            reason: Some("unparseable compound command requires approval".to_string()),
+            findings: Vec::new(),
+            managed_rule: None,
+        };
+    };
+    let mut matches = Vec::new();
+    for argv in &segments {
+        for rule in rules {
+            if rule_matches(rule, backend, project_id, argv) {
+                matches.push((rule, argv));
+            }
+        }
+    }
+    for decision in [ManagedRuleDecision::Deny, ManagedRuleDecision::Prompt] {
+        if let Some((rule, argv)) = matches.iter().find(|(rule, _)| rule.decision == decision) {
+            let verdict = match decision {
+                ManagedRuleDecision::Deny => Decision::Deny,
+                ManagedRuleDecision::Prompt => Decision::ApprovalRequired,
+                ManagedRuleDecision::Allow => unreachable!("allow is evaluated per segment"),
+            };
+            return ScanVerdict {
+                decision: verdict,
+                reason: Some(rule.justification.clone()),
+                findings: Vec::new(),
+                managed_rule: Some(ManagedRuleFinding {
+                    id: rule.id.clone(),
+                    scope: rule.scope.clone(),
+                    revision: rule.revision,
+                    justification: rule.justification.clone(),
+                    argv: (*argv).clone(),
+                }),
+            };
+        }
+    }
+    let first_allow = matches
+        .iter()
+        .find(|(rule, _)| rule.decision == ManagedRuleDecision::Allow);
+    if let Some((allow_rule, allow_argv)) = first_allow {
+        for argv in &segments {
+            let explicitly_allowed = rules.iter().any(|rule| {
+                rule.decision == ManagedRuleDecision::Allow
+                    && rule_matches(rule, backend, project_id, argv)
+            });
+            if explicitly_allowed {
+                continue;
+            }
+            let segment = shell_words::join(argv);
+            let verdict = scan_command(backend, &segment, mode);
+            if verdict.decision != Decision::Allow {
+                return verdict;
+            }
+        }
+        return ScanVerdict {
+            decision: Decision::Allow,
+            reason: Some(allow_rule.justification.clone()),
+            findings: Vec::new(),
+            managed_rule: Some(ManagedRuleFinding {
+                id: allow_rule.id.clone(),
+                scope: allow_rule.scope.clone(),
+                revision: allow_rule.revision,
+                justification: allow_rule.justification.clone(),
+                argv: (*allow_argv).clone(),
+            }),
+        };
+    }
+    scan_command(backend, command, mode)
 }
 
 fn severity_rank(s: Severity) -> u8 {
@@ -875,5 +1053,111 @@ mod tests {
             assert_eq!(v.decision, Decision::Allow, "cmd {cmd:?} got {v:?}");
             assert!(v.findings.is_empty(), "cmd {cmd:?} got {v:?}");
         }
+    }
+
+    fn managed_rule(
+        id: &str,
+        decision: ManagedRuleDecision,
+        prefix: &[&str],
+    ) -> ManagedCommandRule {
+        ManagedCommandRule {
+            id: id.to_string(),
+            decision,
+            argv_prefix: prefix.iter().map(|item| (*item).to_string()).collect(),
+            backends: Vec::new(),
+            project_ids: Vec::new(),
+            justification: format!("rule {id}"),
+            scope: "org".to_string(),
+            revision: 7,
+        }
+    }
+
+    #[test]
+    fn hardline_precedes_managed_allow() {
+        let rules = vec![managed_rule(
+            "allow-rm",
+            ManagedRuleDecision::Allow,
+            &["rm"],
+        )];
+        let verdict = scan_command_with_rules("bash", "rm -rf /", ApprovalMode::Off, &rules, None);
+        assert_eq!(verdict.decision, Decision::Deny);
+        assert!(verdict.managed_rule.is_none());
+    }
+
+    #[test]
+    fn managed_deny_beats_prompt_and_allow() {
+        let rules = vec![
+            managed_rule("allow", ManagedRuleDecision::Allow, &["git"]),
+            managed_rule("prompt", ManagedRuleDecision::Prompt, &["git", "push"]),
+            managed_rule("deny", ManagedRuleDecision::Deny, &["git", "push"]),
+        ];
+        let verdict = scan_command_with_rules(
+            "bash",
+            "git push origin main",
+            ApprovalMode::Off,
+            &rules,
+            None,
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+        assert_eq!(
+            verdict.managed_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("deny")
+        );
+    }
+
+    #[test]
+    fn managed_allow_matches_each_compound_segment() {
+        let rules = vec![managed_rule(
+            "allow-status",
+            ManagedRuleDecision::Allow,
+            &["git", "status"],
+        )];
+        let verdict = scan_command_with_rules(
+            "bash",
+            "echo 'a;b' && git status --short",
+            ApprovalMode::Manual,
+            &rules,
+            None,
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+        assert_eq!(
+            verdict.managed_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("allow-status")
+        );
+    }
+
+    #[test]
+    fn managed_allow_does_not_cover_an_unmatched_risky_segment() {
+        let rules = vec![managed_rule(
+            "allow-echo",
+            ManagedRuleDecision::Allow,
+            &["echo"],
+        )];
+        let verdict = scan_command_with_rules(
+            "bash",
+            "echo ok && rm -rf ./tmp",
+            ApprovalMode::Manual,
+            &rules,
+            None,
+        );
+        assert_eq!(verdict.decision, Decision::ApprovalRequired);
+        assert!(verdict.managed_rule.is_none());
+    }
+
+    #[test]
+    fn malformed_compound_requires_approval_when_managed() {
+        let rules = vec![managed_rule(
+            "allow-echo",
+            ManagedRuleDecision::Allow,
+            &["echo"],
+        )];
+        let verdict = scan_command_with_rules(
+            "bash",
+            "echo 'unterminated",
+            ApprovalMode::Off,
+            &rules,
+            None,
+        );
+        assert_eq!(verdict.decision, Decision::ApprovalRequired);
     }
 }

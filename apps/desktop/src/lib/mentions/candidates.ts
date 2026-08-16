@@ -4,27 +4,21 @@
 // See docs/rfc-mention-composer.md.
 
 import {
+	IconApps,
 	IconDatabase,
 	IconFolder,
 	IconGitBranch,
+	IconMessages,
 	IconPlug,
 	IconRobot,
 	IconSparkles,
 	IconUsers,
 } from "@tabler/icons-react";
-import type {
-	ComposerPlugin,
-	MentionGroup,
-	MentionItem,
-	MentionSources,
-} from "./types.ts";
+import type { MentionGroup, MentionItem, MentionSources } from "./types.ts";
 
 const PATH_SEPARATOR = /[\\/]/;
 /** The in-progress "@word" fragment at the cursor (after start or whitespace). */
 const TRAILING_MENTION = /(?<=(?:^|\s))@\w*$/;
-/** Cap per section so the menu stays scannable; refine with search instead. */
-const MAX_PER_GROUP = 6;
-
 /** Last path segment of a folder path (the folder's display name). */
 function basename(path: string): string {
 	const parts = path.split(PATH_SEPARATOR).filter(Boolean);
@@ -33,7 +27,7 @@ function basename(path: string): string {
 
 /**
  * Group the mention sources into labelled sections, filtered by `query`
- * (case-insensitive substring) and capped per section. Order puts the two
+ * (case-insensitive substring). Order puts the two
  * targeting mentions (agents, teams) first, then plugins, then context refs.
  */
 export function buildMentionGroups(
@@ -51,7 +45,7 @@ export function buildMentionGroups(
 		items: MentionItem[]
 	) => {
 		if (items.length > 0) {
-			groups.push({ kind, label, items: items.slice(0, MAX_PER_GROUP) });
+			groups.push({ kind, label, items });
 		}
 	};
 
@@ -83,17 +77,42 @@ export function buildMentionGroups(
 			}))
 	);
 	add(
+		"chat",
+		"Chats",
+		sources.chats
+			.filter((chat) => matches(chat.name, chat.description ?? ""))
+			.map((chat) => ({
+				kind: "chat",
+				id: chat.id,
+				label: chat.name,
+				description: chat.description,
+				icon: IconMessages,
+			}))
+	);
+	add(
+		"app",
+		"Apps",
+		(sources.apps ?? [])
+			.filter((app) => matches(app.name, app.id, app.description ?? ""))
+			.map((app) => ({
+				kind: "app",
+				id: app.id,
+				label: app.name,
+				description: app.description,
+				icon: IconApps,
+			}))
+	);
+	add(
 		"plugin",
 		"Plugins",
 		sources.plugins
-			.filter((p) => matches(p.name, p.id))
+			.filter((p) => matches(p.name, p.id, p.description ?? ""))
 			.map((p) => ({
 				kind: "plugin",
 				id: p.id,
 				label: p.name,
 				description: p.description,
-				icon: p.icon,
-				plugin: p,
+				icon: IconPlug,
 			}))
 	);
 	add(
@@ -149,25 +168,23 @@ export function flattenGroups(groups: MentionGroup[]): MentionItem[] {
 	return groups.flatMap((g) => g.items);
 }
 
-/** Rewrite the composer to its slash command / canned prompt for a plugin. */
-function applyPlugin(value: string, plugin: ComposerPlugin): string {
-	// Drop the "@fragment" the user typed to pick the plugin; keep the rest.
-	const rest = value.replace(TRAILING_MENTION, "").trim();
-	if (plugin.action.type === "slash") {
-		const cmd = `/${plugin.action.name}`;
-		return rest ? `${cmd} ${rest} ` : `${cmd} `;
-	}
-	return rest ? `${rest} ${plugin.action.text} ` : `${plugin.action.text} `;
-}
-
 /**
- * Apply a chosen mention back into the composer value. Entity mentions replace
- * the trailing "@fragment" with an "@Label " token; plugins rewrite via their
- * action (slash command or canned prompt).
+ * Apply a chosen mention back into the composer value by replacing the trailing
+ * "@fragment" with an "@Label " token.
  */
 export function applyMention(value: string, item: MentionItem): string {
-	if (item.kind === "plugin" && item.plugin) {
-		return applyPlugin(value, item.plugin);
-	}
 	return value.replace(TRAILING_MENTION, `@${item.label} `);
+}
+
+/** Resolve chat tokens at send time so deleting a mention also removes its
+ * context attachment. `selectedIds` disambiguates duplicate conversation titles;
+ * manually typed exact titles still work when no menu/drop selection exists. */
+export function resolveReferencedChatIds(
+	content: string,
+	chats: MentionSources["chats"],
+	selectedIds: ReadonlySet<string>
+): string[] {
+	const mentioned = chats.filter((chat) => content.includes(`@${chat.name}`));
+	const selected = mentioned.filter((chat) => selectedIds.has(chat.id));
+	return (selected.length > 0 ? selected : mentioned).map((chat) => chat.id);
 }

@@ -24,6 +24,7 @@ import {
 	CollapsibleContent,
 	CollapsibleTrigger,
 } from "@ryu/ui/components/collapsible";
+import { CommandItem } from "@ryu/ui/components/command";
 import { Input } from "@ryu/ui/components/input";
 import { Label } from "@ryu/ui/components/label";
 import {
@@ -38,6 +39,7 @@ import { StatusBadge } from "@ryu/ui/components/status-badge";
 import { Switch } from "@ryu/ui/components/switch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sileo } from "sileo";
+import { useProviderCommandNavigation } from "@/components/agent-elements/input/provider-command-dialog.tsx";
 import { useEntitlementContext } from "@/src/contexts/entitlement-context.tsx";
 import { useLlmProviders } from "@/src/hooks/useLlmProviders.ts";
 import type {
@@ -220,7 +222,34 @@ function managedBadgeLabel(needsPlan: boolean, poolBacked: boolean): string {
 	return needsPlan ? "Requires Ryu subscription" : "Included with your plan";
 }
 
-function ProviderCard({
+function ProviderCard(props: ProviderCardProps) {
+	const navigation = useProviderCommandNavigation();
+	if (!navigation) {
+		return <ProviderCardContent {...props} />;
+	}
+	return (
+		<CommandItem
+			className="mx-1 my-0.5 min-h-12 px-3"
+			onSelect={() =>
+				navigation.push({
+					body: <ProviderCardContent {...props} />,
+					title: props.provider.label,
+				})
+			}
+		>
+			<span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+				<span className="font-medium">{props.provider.label}</span>
+				<span className="text-muted-foreground text-xs">
+					{props.provider.configured
+						? "Configure models and credentials"
+						: "Set up provider login"}
+				</span>
+			</span>
+		</CommandItem>
+	);
+}
+
+function ProviderCardContent({
 	activeConfig,
 	check,
 	discover,
@@ -465,6 +494,25 @@ function ProviderCard({
 		}
 	};
 
+	const allModelsEnabled =
+		modelOptions.length > 0 &&
+		modelOptions.every((m) => provider.modelOverrides?.[m.id] !== false);
+	const handleToggleAllModels = async (enabled: boolean) => {
+		setTogglingModel("__all__");
+		try {
+			await Promise.all(
+				modelOptions.map((m) => onToggleModel(provider.id, m.id, enabled))
+			);
+		} catch (e) {
+			sileo.error({
+				title: "Could not update all models",
+				description: errMessage(e, "Core rejected the request."),
+			});
+		} finally {
+			setTogglingModel(null);
+		}
+	};
+
 	return (
 		<SettingsCard className={isActive ? "p-0 ring-1 ring-primary/40" : "p-0"}>
 			<Collapsible onOpenChange={setOpen} open={open}>
@@ -604,7 +652,7 @@ function ProviderCard({
 										disabled={checking}
 										onClick={handleCheck}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										{checking ? "Checking…" : "Check"}
 									</Button>
@@ -614,7 +662,7 @@ function ProviderCard({
 										disabled={removing}
 										onClick={handleRemove}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										{removing ? "Removing…" : "Remove"}
 									</Button>
@@ -652,7 +700,20 @@ function ProviderCard({
 
 					{modelOptions.length > 0 ? (
 						<div className="flex flex-col gap-1.5">
-							<Label>Enabled models</Label>
+							<div className="flex items-center justify-between gap-2">
+								<Label>Enabled models</Label>
+								<div className="flex items-center gap-2">
+									<span className="text-muted-foreground text-xs">
+										{allModelsEnabled ? "All enabled" : "Some disabled"}
+									</span>
+									<Switch
+										aria-label={`Enable all ${provider.label} models`}
+										checked={allModelsEnabled}
+										disabled={togglingModel !== null}
+										onCheckedChange={handleToggleAllModels}
+									/>
+								</div>
+							</div>
 							<div className="flex max-h-48 flex-col gap-0.5 overflow-y-auto rounded-md border border-border/60 p-1.5">
 								{modelOptions.map((m) => {
 									// Absent from the overrides map ⇒ enabled by default.
@@ -709,7 +770,7 @@ function ProviderCard({
 									disabled={discovering}
 									onClick={runDiscovery}
 									size="sm"
-									variant="outline"
+									variant="ghost"
 								>
 									{discovering ? "Loading…" : "Discover models"}
 								</Button>
@@ -896,6 +957,18 @@ export function LlmProvidersSettings() {
 		await configure(input);
 	};
 
+	const handleToggleModel = async (
+		provider: string,
+		model: string,
+		enabled: boolean
+	): Promise<void> => {
+		await toggleModelEnabled(provider, model, enabled);
+	};
+
+	const handleRemove = async (provider: string): Promise<void> => {
+		await remove(provider);
+	};
+
 	const handleCreateCustom = async (input: {
 		api: string;
 		apiKey: string | null;
@@ -921,8 +994,8 @@ export function LlmProvidersSettings() {
 							onActivate={handleActivate}
 							onConfigure={handleConfigure}
 							onReload={reload}
-							onRemove={remove}
-							onToggleModel={toggleModelEnabled}
+							onRemove={handleRemove}
+							onToggleModel={handleToggleModel}
 							provider={provider}
 							thinkingLevels={cat.thinkingLevels}
 						/>
@@ -932,7 +1005,7 @@ export function LlmProvidersSettings() {
 
 			<AgentModelsSettings
 				agentModelOverrides={cat.agentModelOverrides}
-				onToggleModel={toggleModelEnabled}
+				onToggleModel={handleToggleModel}
 			/>
 
 			{/* The rest of the capability surface — image, speech, video, and the

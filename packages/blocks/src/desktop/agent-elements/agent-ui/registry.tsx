@@ -43,6 +43,7 @@ import {
 } from "@ryu/ui/components/select.tsx";
 import { Separator } from "@ryu/ui/components/separator.tsx";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
+import { Slider } from "@ryu/ui/components/slider.tsx";
 import { Switch } from "@ryu/ui/components/switch.tsx";
 import {
 	Table,
@@ -56,6 +57,7 @@ import { Textarea } from "@ryu/ui/components/textarea.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { ReactNode } from "react";
 import { agentUiCatalog } from "./catalog.ts";
+import { useAgentUiSubmissionState } from "./submission-context.tsx";
 
 const GAP_CLASS: Record<string, string> = {
 	none: "gap-0",
@@ -341,16 +343,19 @@ const ButtonRenderer: Render<{
 		| "link";
 	size?: "sm" | "default" | "lg";
 	disabled?: boolean;
-}> = ({ props, emit }) => (
-	<Button
-		disabled={props.disabled}
-		onClick={() => emit("press")}
-		size={props.size ?? "default"}
-		variant={props.variant ?? "default"}
-	>
-		{props.label}
-	</Button>
-);
+}> = ({ props, emit }) => {
+	const { pending, submitted } = useAgentUiSubmissionState();
+	return (
+		<Button
+			disabled={props.disabled || pending || submitted}
+			onClick={() => emit("press")}
+			size={props.size ?? "default"}
+			variant={props.variant ?? "default"}
+		>
+			{props.label}
+		</Button>
+	);
+};
 
 const InputRenderer: Render<{
 	placeholder?: string;
@@ -427,7 +432,7 @@ const SwitchRenderer: Render<{ label?: string; checked?: boolean }> = ({
 const SelectRenderer: Render<{
 	placeholder?: string;
 	value?: string;
-	options: { label: string; value: string }[];
+	options: { label: string; value: string; description?: string }[];
 }> = ({ props, bindings }) => {
 	const [value, setValue] = useBoundProp(props.value, bindings?.value);
 	const options = props.options ?? [];
@@ -451,6 +456,154 @@ const SelectRenderer: Render<{
 	);
 };
 
+const OptionListRenderer: Render<{
+	label?: string;
+	value?: string;
+	options: { label: string; value: string; description?: string }[];
+}> = ({ props, bindings }) => {
+	const [value, setValue] = useBoundProp(props.value, bindings?.value);
+	return (
+		<fieldset className="flex flex-col gap-2">
+			{props.label && (
+				<legend className="font-medium text-sm">{props.label}</legend>
+			)}
+			<div
+				aria-label={props.label}
+				className="flex flex-col gap-1"
+				role="radiogroup"
+			>
+				{props.options.map((option) => {
+					const selected = value === option.value;
+					return (
+						<button
+							aria-checked={selected}
+							className={cn(
+								"rounded-[var(--radius)] border px-3 py-2 text-left transition-colors",
+								selected
+									? "border-primary bg-primary/10"
+									: "border-border hover:bg-muted/60"
+							)}
+							key={option.value}
+							onClick={() => setValue(option.value)}
+							role="radio"
+							type="button"
+						>
+							<span className="block text-sm">{option.label}</span>
+							{option.description && (
+								<span className="mt-0.5 block text-muted-foreground text-xs">
+									{option.description}
+								</span>
+							)}
+						</button>
+					);
+				})}
+			</div>
+		</fieldset>
+	);
+};
+
+const SliderRenderer: Render<{
+	label?: string;
+	value?: number;
+	min?: number;
+	max?: number;
+	step?: number;
+}> = ({ props, bindings }) => {
+	const [value, setValue] = useBoundProp(props.value, bindings?.value);
+	const min = props.min ?? 0;
+	const max = props.max ?? 100;
+	const current = Math.min(max, Math.max(min, value ?? min));
+	return (
+		<div className="flex flex-col gap-2">
+			{props.label && (
+				<div className="flex items-center justify-between gap-2">
+					<Label>{props.label}</Label>
+					<span className="text-muted-foreground text-xs">{current}</span>
+				</div>
+			)}
+			<Slider
+				max={max}
+				min={min}
+				onValueChange={(next) => {
+					const nextValue = Array.isArray(next) ? next[0] : next;
+					setValue(nextValue ?? min);
+				}}
+				step={props.step ?? 1}
+				value={[current]}
+			/>
+		</div>
+	);
+};
+
+const ApprovalCardRenderer: Render<{
+	title: string;
+	description?: string;
+	approveLabel?: string;
+	rejectLabel?: string;
+}> = ({ props, emit }) => {
+	const { pending, submitted } = useAgentUiSubmissionState();
+	const disabled = pending || submitted;
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle>{props.title}</CardTitle>
+				{props.description && (
+					<CardDescription>{props.description}</CardDescription>
+				)}
+			</CardHeader>
+			<CardContent className="flex gap-2">
+				<Button
+					disabled={disabled}
+					onClick={() => emit("approve")}
+					type="button"
+				>
+					{props.approveLabel ?? "Approve"}
+				</Button>
+				<Button
+					disabled={disabled}
+					onClick={() => emit("reject")}
+					type="button"
+					variant="outline"
+				>
+					{props.rejectLabel ?? "Reject"}
+				</Button>
+			</CardContent>
+		</Card>
+	);
+};
+
+const LinkPreviewRenderer: Render<{
+	title: string;
+	href: string;
+	description?: string;
+	imageSrc?: string;
+}> = ({ props }) => (
+	<a
+		className="flex overflow-hidden rounded-[var(--radius)] border border-border bg-card transition-colors hover:bg-muted/40"
+		href={sanitizeUrl(props.href, LINK_SCHEMES)}
+		rel="noopener noreferrer"
+		target="_blank"
+	>
+		{props.imageSrc && (
+			// biome-ignore lint/performance/noImgElement: agent-rendered content, not a Next.js route
+			// biome-ignore lint/correctness/useImageSize: agent-supplied images have no known dimensions
+			<img
+				alt=""
+				className="h-20 w-20 shrink-0 object-cover"
+				src={sanitizeUrl(props.imageSrc, IMAGE_SCHEMES)}
+			/>
+		)}
+		<span className="flex min-w-0 flex-col justify-center gap-1 p-3">
+			<span className="font-medium text-sm">{props.title}</span>
+			{props.description && (
+				<span className="line-clamp-2 text-muted-foreground text-xs">
+					{props.description}
+				</span>
+			)}
+		</span>
+	</a>
+);
+
 const components = {
 	Stack: StackRenderer,
 	Grid: GridRenderer,
@@ -472,6 +625,15 @@ const components = {
 	Checkbox: CheckboxRenderer,
 	Switch: SwitchRenderer,
 	Select: SelectRenderer,
+	OptionList: OptionListRenderer,
+	Slider: SliderRenderer,
+	ApprovalCard: ApprovalCardRenderer,
+	LinkPreview: LinkPreviewRenderer,
 } as unknown as Components<typeof agentUiCatalog>;
 
-export const { registry } = defineRegistry(agentUiCatalog, { components });
+export const { registry } = defineRegistry(agentUiCatalog, {
+	actions: {
+		submit: async () => undefined,
+	},
+	components,
+});

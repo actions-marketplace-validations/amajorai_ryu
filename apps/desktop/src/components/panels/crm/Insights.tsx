@@ -132,7 +132,7 @@ export function Insights({
 				</div>
 			)}
 
-			<div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+			<div className="scroll-fade min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
 				{summary && (
 					<div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
 						<Stat label="Records" value={summary.total_records} />

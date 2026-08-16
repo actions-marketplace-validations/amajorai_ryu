@@ -216,9 +216,16 @@ function HotFilesSection({ files }: { files: MissionHotFile[] }) {
 							className="size-3.5 shrink-0 text-muted-foreground"
 							icon={File01Icon}
 						/>
-						<span className="min-w-0 flex-1 truncate text-xs" title={file.path}>
-							{file.path}
-						</span>
+						<Tooltip>
+							<TooltipTrigger
+								render={
+									<span className="min-w-0 flex-1 truncate text-xs">
+										{file.path}
+									</span>
+								}
+							/>
+							<TooltipContent>{file.path}</TooltipContent>
+						</Tooltip>
 						<span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
 							{file.conversations > 1
 								? `${file.conversations} chats`
@@ -495,7 +502,7 @@ export default function MissionControlPage() {
 						disabled={sync.isFetching}
 						onClick={refresh}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						{sync.isFetching ? (
 							<Spinner className="size-3.5" />
@@ -507,7 +514,7 @@ export default function MissionControlPage() {
 				</div>
 			</header>
 
-			<div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+			<div className="scroll-fade min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
 				{loading && (
 					<div className="flex items-center gap-2 text-muted-foreground text-sm">
 						<Spinner className="size-4" /> Reading your chats…

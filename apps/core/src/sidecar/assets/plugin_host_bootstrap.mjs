@@ -106,8 +106,12 @@ const context = {
 	},
 };
 
+function responseHeaders(headers, fallbackContentType = "application/json") {
+	return headers || { "content-type": fallbackContentType };
+}
+
 function send(res, status, headers, body) {
-	res.writeHead(status, headers || { "content-type": "application/json" });
+	res.writeHead(status, responseHeaders(headers));
 	res.end(body == null ? "" : body);
 }
 
@@ -117,6 +121,42 @@ async function readBody(req) {
 		chunks.push(chunk);
 	}
 	return Buffer.concat(chunks).toString("utf8");
+}
+
+async function* responseChunks(stream) {
+	if (stream && typeof stream[Symbol.asyncIterator] === "function") {
+		yield* stream;
+		return;
+	}
+	if (stream && typeof stream.getReader === "function") {
+		const reader = stream.getReader();
+		try {
+			while (true) {
+				const next = await reader.read();
+				if (next.done) {
+					return;
+				}
+				yield next.value;
+			}
+		} finally {
+			reader.releaseLock();
+		}
+		return;
+	}
+	throw new TypeError("response stream must be async iterable or a ReadableStream");
+}
+
+async function sendStream(res, status, headers, stream) {
+	res.writeHead(status, responseHeaders(headers, "application/octet-stream"));
+	for await (const chunk of responseChunks(stream)) {
+		if (res.destroyed) {
+			return;
+		}
+		if (!res.write(chunk)) {
+			await new Promise((resolve) => res.once("drain", resolve));
+		}
+	}
+	res.end();
 }
 
 async function handle(req, res) {
@@ -166,6 +206,9 @@ async function handle(req, res) {
 			return send(res, 404, undefined, JSON.stringify({ error: "not found" }));
 		}
 		const status = typeof result.status === "number" ? result.status : 200;
+		if (result.stream !== undefined) {
+			return sendStream(res, status, result.headers, result.stream);
+		}
 		if (result.json !== undefined) {
 			return send(
 				res,
@@ -185,6 +228,10 @@ async function handle(req, res) {
 			JSON.stringify(result)
 		);
 	} catch (err) {
+		if (res.headersSent || res.destroyed) {
+			res.destroy(err);
+			return;
+		}
 		return send(
 			res,
 			500,

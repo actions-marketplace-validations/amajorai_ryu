@@ -1,4 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Tab } from "@/src/contexts/TabsContext.tsx";
 import {
 	commitTabRename,
@@ -126,5 +128,32 @@ describe("commitTabRename", () => {
 			}
 		);
 		expect(calls).toBe(0);
+	});
+});
+
+const TITLE_BAR_SOURCE = readFileSync(
+	join(import.meta.dir, "TitleBar.tsx"),
+	"utf8"
+);
+const REGULAR_TAB_SOURCE = TITLE_BAR_SOURCE.slice(
+	TITLE_BAR_SOURCE.indexOf("function RegularTab("),
+	TITLE_BAR_SOURCE.indexOf("function GroupHeaderPill(")
+);
+const EDITING_BRANCH = REGULAR_TAB_SOURCE.slice(
+	REGULAR_TAB_SOURCE.indexOf("{isEditing ? ("),
+	REGULAR_TAB_SOURCE.indexOf(
+		") : (",
+		REGULAR_TAB_SOURCE.indexOf("{isEditing ? (")
+	)
+);
+
+describe("RegularTab inline rename structure", () => {
+	test("keeps the rename input outside the native activation button", () => {
+		expect(REGULAR_TAB_SOURCE).toContain(
+			"editor is a sibling of the activation button"
+		);
+		expect(REGULAR_TAB_SOURCE).toContain("{isEditing ? (");
+		expect(REGULAR_TAB_SOURCE).toContain("<TabRenameInput");
+		expect(EDITING_BRANCH).not.toContain("<button");
 	});
 });

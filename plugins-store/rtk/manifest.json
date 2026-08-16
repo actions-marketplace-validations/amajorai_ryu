@@ -2,6 +2,7 @@
   "id": "@ryu/rtk",
   "name": "RTK (Rust Token Killer)",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Run a dev command through RTK (Rust Token Killer) and get a token-compressed version of its output (60-90% fewer tokens), exposed as a declarative `command` tool that shells out to the locally-installed `rtk` binary. BYO — no API key.",
   "keywords": ["tokens", "cli", "developer", "compression"],
   "icon": "computer-terminal-01",
@@ -91,6 +92,7 @@
             "type": "textarea",
             "pref_key": "rtk-exclude-commands",
             "label": "Commands to never wrap",
+            "description": "One command or command prefix per line. Matching commands are sent to the shell unchanged; use this for commands that do not work with RTK.",
             "placeholder": "curl, playwright"
           }
         ]

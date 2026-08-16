@@ -198,11 +198,42 @@ pub fn canonicalize_root(input: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Resolve the Codex home whose `agents/` and `prompts/` stores are importable
+/// during a scan. Arbitrary project-local directories with those names are
+/// deliberately excluded: Codex only gives those stores meaning under its
+/// configured `CODEX_HOME` (or a visible `.codex` directory).
+fn codex_root_for_scan(root: &Path) -> Option<PathBuf> {
+    let configured = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+        .and_then(|path| fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir());
+
+    if let Some(configured) = configured {
+        if root.starts_with(&configured) || configured.starts_with(root) {
+            return Some(configured);
+        }
+    }
+
+    // A user may explicitly scan a `.codex` tree, including a test or portable
+    // tree that is not their process-global CODEX_HOME.
+    if root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(".codex"))
+    {
+        return Some(root.to_path_buf());
+    }
+    let nested = root.join(".codex");
+    nested.is_dir().then_some(nested)
+}
+
 /// Scan `root` for importable setup. Read-only; bounded; never errors on a
 /// folder with nothing to import.
 pub fn scan_source(root: &Path) -> Result<ScanResult> {
     let mut collector = Collector {
         root: root.to_path_buf(),
+        codex_root: codex_root_for_scan(root),
         entries_seen: 0,
         warnings: Vec::new(),
         instructions: Vec::new(),
@@ -244,6 +275,7 @@ pub fn scan_source(root: &Path) -> Result<ScanResult> {
 /// Accumulates scan results across the walk.
 struct Collector {
     root: PathBuf,
+    codex_root: Option<PathBuf>,
     entries_seen: usize,
     warnings: Vec<String>,
     instructions: Vec<ScanItem>,
@@ -458,7 +490,12 @@ fn walk(root: &Path, dir: &Path, depth: usize, c: &mut Collector) {
     // subagents are listed, so a project's stray `agents/` notes stay silent).
     let dir_name = dir.file_name().and_then(|n| n.to_str());
     if c.agents.len() < MAX_SUBAGENTS
-        && dir_name.map(|n| n.eq_ignore_ascii_case("agents")).unwrap_or(false)
+        && c.codex_root
+            .as_ref()
+            .is_some_and(|codex_root| dir.starts_with(codex_root))
+        && dir_name
+            .map(|n| n.eq_ignore_ascii_case("agents"))
+            .unwrap_or(false)
     {
         let root = c.root.clone();
         collect_codex_subagents(&root, dir, c);
@@ -467,7 +504,12 @@ fn walk(root: &Path, dir: &Path, depth: usize, c: &mut Collector) {
 
     // A Codex slash-command store: `prompts/<name>.md`.
     if c.slash_commands.len() < MAX_SLASH_COMMANDS
-        && dir_name.map(|n| n.eq_ignore_ascii_case("prompts")).unwrap_or(false)
+        && c.codex_root
+            .as_ref()
+            .is_some_and(|codex_root| dir.starts_with(codex_root))
+        && dir_name
+            .map(|n| n.eq_ignore_ascii_case("prompts"))
+            .unwrap_or(false)
     {
         let root = c.root.clone();
         collect_codex_prompts(&root, dir, c);
@@ -575,7 +617,12 @@ fn collect_codex_subagents(root: &Path, dir: &Path, c: &mut Collector) {
         c.agents.push(ScanItem {
             kind: kind::AGENT,
             id: format!("{}/{rel}", kind::AGENT),
-            title: format!("Agent '{}'", path.file_stem().and_then(|s| s.to_str()).unwrap_or("subagent")),
+            title: format!(
+                "Agent '{}'",
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("subagent")
+            ),
             detail: Some(path.to_string_lossy().to_string()),
             already_exists: false,
         });
@@ -806,6 +853,9 @@ pub fn parse_mcp_toml(path: &Path) -> Result<Vec<(String, McpServerConfig)>> {
                     transport: get_str(t, "type"),
                     url: get_str(t, "url"),
                     headers: get_str_map(t, "headers"),
+                    auth: None,
+                    owner_plugin_id: None,
+                    owner_server_name: None,
                     args: get_strs(t, "args"),
                     env: get_str_map(t, "env"),
                     description: get_str(t, "description"),
@@ -978,10 +1028,16 @@ pub fn parse_codex_subagent(path: &Path) -> Option<CodexSubagent> {
     }
     Some(CodexSubagent {
         name,
-        description: fm.description.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()),
+        description: fm
+            .description
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty()),
         system_prompt: body.trim().to_string(),
         tools: fm.tools.unwrap_or_default(),
-        model: fm.model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
+        model: fm
+            .model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty()),
     })
 }
 
@@ -1194,24 +1250,54 @@ pub fn project_instructions(cwd: &str) -> Option<(String, String)> {
     if !dir.is_dir() {
         return None;
     }
-    for name in PROJECT_INSTRUCTION_CANDIDATES {
-        let path = dir.join(name);
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(meta) = fs::metadata(&path) else {
-            continue;
-        };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        if content.trim().is_empty() {
-            continue;
-        }
-        let capped = truncate_prompt_instructions(&content, meta.len());
-        return Some((name.to_string(), capped));
+    let home = dirs::home_dir();
+    let mut roots = Vec::new();
+    let mut current = Some(dir);
+    while let Some(root) = current {
+        roots.push(root);
+        current = root.parent();
     }
-    None
+    roots.reverse();
+    if let Some(home) = home.as_deref() {
+        roots.retain(|root| root.starts_with(home) || *root == dir);
+    }
+    let mut found = Vec::new();
+    for root in roots {
+        for name in PROJECT_INSTRUCTION_CANDIDATES {
+            let path = root.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            found.push((
+                name.to_string(),
+                truncate_prompt_instructions(&content, meta.len()),
+            ));
+            break;
+        }
+    }
+    (!found.is_empty()).then(|| {
+        (
+            found
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            found
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    })
 }
 
 /// Bound an instructions body for the system prompt, appending a one-line note
@@ -1405,16 +1491,29 @@ command = "mcp-git"
         let root = temp_tree();
         write(
             &root,
-            "agents/commit-message.md",
+            ".codex/agents/commit-message.md",
             "---\nname: commit-message\ndescription: Writes good commit messages\nmodel: gpt-5\n---\nWrite a concise commit message.\n",
         );
-        write(&root, "agents/notes.md", "just some notes\n");
         write(
             &root,
-            "prompts/review.md",
+            "agents/project-note.md",
+            "---\nname: project-note\n---\nDo not import me.\n",
+        );
+        write(
+            &root,
+            ".codex/prompts/review.md",
             "---\ndescription: Review a diff\n---\nReview the attached diff for bugs.\n",
         );
-        write(&root, "prompts/empty.md", "---\ndescription: empty\n---\n");
+        write(
+            &root,
+            "prompts/project.md",
+            "---\ndescription: project\n---\nDo not import me.\n",
+        );
+        write(
+            &root,
+            ".codex/prompts/empty.md",
+            "---\ndescription: empty\n---\n",
+        );
 
         let res = scan_source(&root).unwrap();
         let agents: Vec<&ScanItem> = res.items.iter().filter(|i| i.kind == kind::AGENT).collect();
@@ -1423,8 +1522,18 @@ command = "mcp-git"
             .iter()
             .filter(|i| i.kind == kind::SLASH_COMMAND)
             .collect();
-        assert_eq!(agents.len(), 1, "notes.md must not list as a subagent: {res:#?}");
-        assert_eq!(cmds.len(), 1, "empty.md must not list: {res:#?}");
+        assert_eq!(
+            agents.len(),
+            1,
+            "project-local agents/ must not list as a subagent: {res:#?}"
+        );
+        assert_eq!(
+            cmds.len(),
+            1,
+            "empty/project prompts must not list: {res:#?}"
+        );
+        assert!(agents[0].id.contains(".codex/agents/"));
+        assert!(cmds[0].id.contains(".codex/prompts/"));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1454,7 +1563,11 @@ command = "mcp-git"
     fn parse_codex_prompt_uses_stem_as_name() {
         let dir = temp_tree();
         let path = dir.join("review.md");
-        fs::write(&path, "---\ndescription: review it\n---\nReview this diff.\n").unwrap();
+        fs::write(
+            &path,
+            "---\ndescription: review it\n---\nReview this diff.\n",
+        )
+        .unwrap();
         let p = parse_codex_prompt(&path).unwrap();
         assert_eq!(p.name, "review");
         assert_eq!(p.description.as_deref(), Some("review it"));

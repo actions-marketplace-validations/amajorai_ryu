@@ -8,19 +8,32 @@ import { useEffect, useState } from "react";
  *    first-out stack, so a late correction jumps the line.
  *  - `send-all`: collapse the whole queue into a single combined turn on the
  *    next drain instead of trickling one per turn.
+ *  - `auto`: Claude Code-style delivery — keep input pending while the agent
+ *    works, then deliver all pending messages together at the next safe turn
+ *    boundary.
  *
  *  Window-local + reactive across the composer, queue bar, and settings via the
  *  same localStorage + `storage`-event pattern as the other desktop UI prefs
  *  (see `useTabLayout`). Purely client-side — the queue is a desktop-side turn
  *  scheduler, so this never touches Core. */
-export type QueueDrainMode = "oldest-first" | "latest-first" | "send-all";
+export type QueueDrainMode =
+	| "off"
+	| "oldest-first"
+	| "latest-first"
+	| "send-all"
+	| "auto";
 
 const KEY = "ryu_queue_drain_mode";
 const DEFAULT: QueueDrainMode = "oldest-first";
 
 function read(): QueueDrainMode {
 	const value = localStorage.getItem(KEY);
-	if (value === "latest-first" || value === "send-all") {
+	if (
+		value === "off" ||
+		value === "latest-first" ||
+		value === "send-all" ||
+		value === "auto"
+	) {
 		return value;
 	}
 	return DEFAULT;

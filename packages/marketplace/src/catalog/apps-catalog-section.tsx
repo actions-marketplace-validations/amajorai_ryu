@@ -76,10 +76,12 @@ import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
+import StoreCategoryPage from "./chrome/store-category-page.tsx";
 import StoreItemAction, {
 	StoreItemOverflowMenu,
 	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
+import StoreShelf from "./chrome/store-shelf.tsx";
 import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import VerifiedBadge from "./chrome/verified-badge.tsx";
 import {
@@ -126,6 +128,7 @@ import {
 	ALL_PLUGIN_SOURCES_ID,
 	type AppCatalogItem,
 	type CatalogEntry,
+	type CatalogModelProvider,
 	evaluateCompatibility,
 	type PluginCatalogDetail,
 	type PluginCatalogSource,
@@ -880,7 +883,7 @@ function InstallFromUrl({
 				disabled={busy || url.trim().length === 0}
 				onClick={submit}
 				size="sm"
-				variant="outline"
+				variant="ghost"
 			>
 				{busy ? <Spinner className="size-4" /> : "Add from URL"}
 			</Button>
@@ -959,6 +962,7 @@ function AppList({
 	groupBySource?: boolean;
 }) {
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+	const [openCategory, setOpenCategory] = useState<string | null>(null);
 	// Resolved HERE, not inside `card`: `card` is a plain render function, not a
 	// component, so a hook inside it would run a variable number of times per
 	// render. The host's floors are one value for the whole grid anyway.
@@ -977,6 +981,7 @@ function AppList({
 			action={
 				<AppCardAction
 					canInstall={canInstall}
+					downloadCount={it.entry.downloads}
 					item={it}
 					onDisable={() => onDisable(it.entry.id)}
 					onInstall={() => onInstall(it.entry.id)}
@@ -1124,6 +1129,25 @@ function AppList({
 			? []
 			: groupByCategory(items, (it) => it.entry.category);
 	const shelved = sections.length > 1;
+	const category = openCategory
+		? sections.find((section) => section.label === openCategory)
+		: undefined;
+
+	if (category && !searching && !sourceShelved) {
+		return (
+			<div ref={setScrollEl}>
+				<StoreCategoryPage
+					category={category.label}
+					hasMore={hasNextPage}
+					items={category.items}
+					loadingMore={loadingMore}
+					onBack={() => setOpenCategory(null)}
+					onLoadMore={fetchNextPage}
+					renderItem={card}
+				/>
+			</div>
+		);
+	}
 
 	if (sourceShelved) {
 		return (
@@ -1150,12 +1174,14 @@ function AppList({
 			{shelved ? (
 				<div className="flex flex-col gap-6">
 					{sections.map((section) => (
-						<section key={section.label}>
-							<h3 className="mb-2 font-semibold text-base tracking-tight">
-								{section.label}
-							</h3>
-							<StoreCardGrid>{section.items.map(card)}</StoreCardGrid>
-						</section>
+						<StoreShelf
+							description={`${section.items.length} ${section.items.length === 1 ? "listing" : "listings"}`}
+							items={section.items}
+							key={section.label}
+							onOpenCategory={() => setOpenCategory(section.label)}
+							renderItem={card}
+							title={section.label}
+						/>
 					))}
 				</div>
 			) : (
@@ -1246,6 +1272,7 @@ function CommunityShelf({
 				// affordance: there is nothing to install from.
 				<AppCardAction
 					canInstall={Boolean(communityInstallUrl(it))}
+					downloadCount={it.entry.downloads}
 					item={it}
 					onDisable={() => undefined}
 					onInstall={() => onInstallCommunity(it)}
@@ -1435,6 +1462,7 @@ function AppCardAction({
 	item,
 	canInstall,
 	pending,
+	downloadCount,
 	onInstall,
 	onDisable,
 	onOpen,
@@ -1443,6 +1471,7 @@ function AppCardAction({
 	item: AppCatalogItem;
 	canInstall: boolean;
 	pending: boolean;
+	downloadCount?: number | null;
 	onInstall: () => void;
 	onDisable: () => void;
 	onOpen: () => void;
@@ -1480,7 +1509,7 @@ function AppCardAction({
 				<PriceBadge entry={item.entry} />
 				<StoreItemAction
 					affordance={
-						<Button onClick={onOpen} size="sm" variant="outline">
+						<Button onClick={onOpen} size="sm" variant="ghost">
 							Details
 						</Button>
 					}
@@ -1499,6 +1528,7 @@ function AppCardAction({
 			{item.installed ? null : <PriceBadge entry={item.entry} />}
 			<StoreItemAction
 				busy={pending}
+				downloadCount={downloadCount}
 				enabled={item.enabled}
 				incompatible={incompatible}
 				installed={item.installed}
@@ -1604,6 +1634,7 @@ function AppPrimaryAction({
 	lifecyclePending,
 	installLayer,
 	renderAffordance,
+	modelProviders,
 }: {
 	item: AppCatalogItem;
 	install: (
@@ -1618,11 +1649,14 @@ function AppPrimaryAction({
 	lifecyclePending: boolean;
 	installLayer: CatalogInstall | null;
 	renderAffordance: CatalogHost["renderAffordance"];
+	/** Provider-backed sidecars need a stronger disclosure than a raw grant list. */
+	modelProviders?: CatalogModelProvider[] | null;
 }) {
 	const host = useCatalogHost();
 	const node = host.useActiveNode();
 	const [confirmOpen, setConfirmOpen] = useState(false);
 	const { entry, grants, installed, enabled } = item;
+	const providers = modelProviders ?? [];
 
 	// Which train to ADD. Resolved only before install — the post-install "which
 	// train do I follow" question belongs to AppSecondaryActions, and the two are
@@ -1805,6 +1839,9 @@ function AppPrimaryAction({
 									: "Enabling grants this plugin the following permissions. They are validated by the Gateway."}
 							</AlertDialogDescription>
 						</AlertDialogHeader>
+						{providers.length > 0 ? (
+							<AuthBridgeConsent providers={providers} />
+						) : null}
 						{grants.length > 0 && <GrantList grants={grants} />}
 						<AlertDialogFooter>
 							<AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -1816,6 +1853,34 @@ function AppPrimaryAction({
 				</AlertDialog>
 			) : null}
 		</>
+	);
+}
+
+/** Consent copy for a provider-backed sidecar. A grant list alone says nothing
+ * about credential custody or request visibility, which is the material risk of
+ * an auth bridge. */
+export function AuthBridgeConsent({
+	providers,
+}: {
+	providers: CatalogModelProvider[];
+}) {
+	return (
+		<div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+			<p className="font-medium">Handles provider credentials and traffic</p>
+			<p className="mt-1 text-muted-foreground text-xs leading-relaxed">
+				This plugin runs a local process that can handle the listed provider
+				login credentials and read requests and responses routed through it.
+				Enable it only if you trust the publisher.
+			</p>
+			<ul className="mt-2 flex flex-col gap-1 text-xs">
+				{providers.map((provider) => (
+					<li key={provider.id}>
+						{provider.label?.trim() || provider.id}
+						{provider.models?.length ? ` (${provider.models.join(", ")})` : ""}
+					</li>
+				))}
+			</ul>
+		</div>
 	);
 }
 
@@ -1886,7 +1951,7 @@ function AppSecondaryActions({
 				    but it is still where a user who just clicked into the listing looks
 				    for its API key. */}
 				{onOpenSettings ? (
-					<Button onClick={onOpenSettings} size="sm" variant="outline">
+					<Button onClick={onOpenSettings} size="sm" variant="ghost">
 						<HugeiconsIcon className="size-4" icon={Settings01Icon} />
 						Settings
 					</Button>
@@ -2225,6 +2290,7 @@ function AppDetailPanel({
 								installTaskId={pluginDownloadTaskId(entry.id)}
 								item={item}
 								lifecyclePending={lifecyclePending}
+								modelProviders={detail?.apiSurface?.modelProviders}
 								renderAffordance={renderAffordance}
 								setEnabled={setEnabled}
 							/>

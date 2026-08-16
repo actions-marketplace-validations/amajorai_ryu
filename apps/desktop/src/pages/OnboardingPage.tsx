@@ -14,6 +14,8 @@ import {
 import { ColorStep } from "@/src/components/onboarding/ColorStep.tsx";
 import { PreferencesStep } from "@/src/components/onboarding/PreferencesStep.tsx";
 import { PrivacyStep } from "@/src/components/onboarding/PrivacyStep.tsx";
+import { TutorialStep } from "@/src/components/onboarding/TutorialStep.tsx";
+import { useTabsContext } from "@/src/contexts/TabsContext.tsx";
 import { useCreditsWallet } from "@/src/hooks/useCreditsWallet.ts";
 import { AgentCatalogLogo } from "@/src/lib/agent-catalog-logo.tsx";
 import { track } from "@/src/lib/analytics.ts";
@@ -28,6 +30,7 @@ import { ApiError, type ApiTarget, toTarget } from "@/src/lib/api/client.ts";
 import { ensureMicPermission } from "@/src/lib/audio/devices.ts";
 import { setFeatureEnabled, TOGGLEABLE_FEATURES } from "@/src/lib/features.ts";
 import { setOnboardingActive } from "@/src/lib/onboarding-active.ts";
+import { onboardingExtensionsRoute } from "@/src/lib/onboarding-tutorial.ts";
 import { fetchCatalog, installSidecar } from "@/src/lib/services-api.ts";
 import { useAppStore } from "@/src/store/useAppStore.ts";
 import {
@@ -76,6 +79,7 @@ type Phase =
 	| "theme"
 	| "preferences"
 	| "privacy"
+	| "tutorial"
 	| "finishing"
 	| "done";
 
@@ -706,6 +710,7 @@ export default function OnboardingPage() {
 	const navigate = useNavigate();
 	const coreStatus = useAppStore((s) => s.coreStatus);
 	const { getActiveNode, hydrateCloudNodes, setDefault } = useNodeStore();
+	const { openTab } = useTabsContext();
 	// The exact entitlement read NodeSelector's managed surfaces use (WS8): gates
 	// the managed (Ryu Cloud) option on the plan's managed-inference flag.
 	const { entitlement, loading: entitlementLoading } = useCreditsWallet();
@@ -1414,9 +1419,17 @@ export default function OnboardingPage() {
 		setPhase("privacy");
 	}, [submitting]);
 
-	// The privacy step already persisted every consent as it was made, so
-	// finishing is just the agent installs plus the hand-off to chat.
+	// The privacy step already persisted every consent as it was made. Show the
+	// final orientation screen before installing agents and handing off to chat so
+	// first-run users have a discoverable path to the existing Extensions surface.
 	const handleFinishPrivacy = useCallback(() => {
+		if (submitting) {
+			return;
+		}
+		setPhase("tutorial");
+	}, [submitting]);
+
+	const finishOnboarding = useCallback(() => {
 		if (submitting) {
 			return;
 		}
@@ -1424,13 +1437,16 @@ export default function OnboardingPage() {
 		(async () => {
 			// Re-resolve the local node one last time: this is the call that actually
 			// ADDS the agents the user picked, and a tokenless target would 401 every
-			// one of them into `Promise.allSettled`'s silent rejected bucket — the
-			// picker would have been for nothing.
+			// one of them into Promise.allSettled's silent rejected bucket.
 			const active = getActiveNode();
 			const node = isLocalNode(active) ? await refreshLocalNode() : active;
 			await finish(toTarget(node), pendingAgents);
-		})().catch(() => undefined);
+		})().catch(() => setSubmitting(false));
 	}, [submitting, getActiveNode, finish, pendingAgents]);
+
+	const openExtensions = useCallback(() => {
+		openTab(onboardingExtensionsRoute(), { title: "Extensions" });
+	}, [openTab]);
 
 	if (coreFailed) {
 		return (
@@ -1478,6 +1494,17 @@ export default function OnboardingPage() {
 		return (
 			<div className="size-full" data-tauri-drag-region="true">
 				<PrivacyStep busy={submitting} onContinue={handleFinishPrivacy} />
+			</div>
+		);
+	}
+
+	if (phase === "tutorial") {
+		return (
+			<div className="size-full" data-tauri-drag-region="true">
+				<TutorialStep
+					onContinue={finishOnboarding}
+					onOpenExtensions={openExtensions}
+				/>
 			</div>
 		);
 	}

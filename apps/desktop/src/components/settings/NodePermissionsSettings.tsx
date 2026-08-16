@@ -140,7 +140,7 @@ export function NodePermissionsSettings() {
 								<Button
 									onClick={() => setSelected(resource)}
 									size="sm"
-									variant="outline"
+									variant="ghost"
 								>
 									Edit
 								</Button>

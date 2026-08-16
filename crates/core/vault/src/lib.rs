@@ -250,6 +250,51 @@ pub struct Profile {
     pub connections: Vec<ConnectionRecord>,
 }
 
+/// Durable state of a Core-owned OAuth connection for one remote MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOAuthConnectionStatus {
+    Connected,
+    ReauthRequired,
+}
+
+impl McpOAuthConnectionStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "CONNECTED",
+            Self::ReauthRequired => "REAUTH_REQUIRED",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Self {
+        match value {
+            "CONNECTED" => Self::Connected,
+            _ => Self::ReauthRequired,
+        }
+    }
+}
+
+/// Metadata-only OAuth connection record. The sealed token bundle is skipped
+/// structurally, so serializing this type can never return credential material.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpOAuthConnectionRecord {
+    pub id: String,
+    pub owner_user_id: String,
+    pub profile_id: String,
+    pub plugin_id: String,
+    pub server_name: String,
+    pub resource_uri: String,
+    pub issuer: String,
+    pub status: McpOAuthConnectionStatus,
+    pub account_label: Option<String>,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<i64>,
+    #[serde(skip)]
+    pub encrypted_state: Option<SealedState>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 // ── Process-global store (set_global/global, like mcp/monitors) ──────────────
 
 /// Process-global identity store, published once at startup from `main.rs`.

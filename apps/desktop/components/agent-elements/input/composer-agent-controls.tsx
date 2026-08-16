@@ -25,17 +25,27 @@
 // The capability badges + usage meters are derived from `agentId` inside the hook, so
 // every surface that names an agent gets them for free.
 
-import { Add01Icon, SparklesIcon } from "@hugeicons/core-free-icons";
+import { Add01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { ComposerModelSection } from "@ryu/blocks/composer/composer-acp-sections";
 import { acpHarnessSuffix } from "@ryu/blocks/composer/composer-trigger-summary";
-import { type ReactNode, useMemo } from "react";
+import {
+	Command,
+	CommandDialog,
+	CommandInput,
+	CommandList,
+} from "@ryu/ui/components/command";
+import { IconGitBranch } from "@tabler/icons-react";
+import { type ReactNode, useMemo, useState } from "react";
 import { CapabilityBadges } from "@/components/agent-elements/input/capability-badges.tsx";
 import {
 	ComposerSettingsMenu,
 	type ComposerSettingsSection,
 } from "@/components/agent-elements/input/composer-settings-menu.tsx";
-import { ManageModelsButton } from "@/components/agent-elements/input/manage-models-button.tsx";
+import {
+	ConfigureAutoButton,
+	ManageModelsButton,
+} from "@/components/agent-elements/input/manage-models-button.tsx";
 import {
 	ModeMenuContent,
 	type ModeOption,
@@ -76,7 +86,7 @@ export function NewAgentModeIcon({ className }: { className?: string }) {
 
 /** The "Auto" leading icon for the composer trigger when the `auto` sentinel is active. */
 function AutoModeIcon({ className }: { className?: string }) {
-	return <HugeiconsIcon className={className} icon={SparklesIcon} />;
+	return <IconGitBranch className={className} />;
 }
 
 export interface ComposerAgentModesOptions {
@@ -249,6 +259,8 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	 * force — see the note at its construction. It is always in the picker body.
 	 */
 	sections: ComposerSettingsSection[];
+	/** The sections shown in the trigger summary, excluding plugin-only rows. */
+	triggerSections: ComposerSettingsSection[];
 } {
 	const {
 		agents,
@@ -434,7 +446,10 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// where those live at any level. This only decides whether the CHAT BAR
 	// carries them.
 	const interfaceLevel = useInterfaceLevel();
-	const showModelSection = showsModelPicker(interfaceLevel);
+	// Auto selects an agent per turn, not a model. Its placeholder model has the
+	// same label, so surfacing it would make the trigger read "Auto · Auto".
+	const showModelSection =
+		showsModelPicker(interfaceLevel) && agentId !== AUTO_AGENT_ID;
 	const showTuningSections = showsComposerTuning(interfaceLevel);
 	// Output style is NOT gated with the tuning sections, deliberately.
 	//
@@ -512,6 +527,11 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 		activeModelSection: showModelSection ? modelSectionResolved : null,
 		activeExtraSections: bodySections,
 	});
+	const [modelsOpen, setModelsOpen] = useState(false);
+	const activeModelName =
+		modelSectionResolved.items.find(
+			(item) => item.id === modelSectionResolved.value
+		)?.name ?? "Choose model";
 
 	// Leading mark: a custom-agent avatar image wins, else the active mode's engine
 	// logo (agents) or fanned team-stack icon (teams). ActiveIcon is the same stable
@@ -537,18 +557,45 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 	// dropdown. Shared by the dense chat-with-history composer and the narrow-panel
 	// (Ask Ryu) one; both keep the cluster left-aligned in the stacked controls row.
 	const settingsMenu = (
-		<ComposerSettingsMenu
-			compact={compact || compactTrigger}
-			footer={(close) => <ManageModelsButton close={close} />}
-			leading={leading}
-			renderBody={renderBody}
-			sections={triggerSections}
-			trailing={
-				compact || compactTrigger ? (
-					<UsageBar agentId={agentId} className="ml-0.5" compact />
-				) : undefined
-			}
-		/>
+		<>
+			<ComposerSettingsMenu
+				compact={compact || compactTrigger}
+				footer={(close) => (
+					<>
+						<ManageModelsButton close={close} />
+						<ConfigureAutoButton close={close} />
+					</>
+				)}
+				leading={leading}
+				renderBody={(close) => renderBody(close, "agents")}
+				sections={triggerSections.filter((section) => section.key !== "model")}
+				trailing={
+					compact || compactTrigger ? (
+						<UsageBar agentId={agentId} className="ml-0.5" compact />
+					) : undefined
+				}
+			/>
+			<button
+				aria-label="Choose provider and model"
+				className="max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
+				onClick={() => setModelsOpen(true)}
+				type="button"
+			>
+				{activeModelName}
+			</button>
+			<CommandDialog
+				onOpenChange={setModelsOpen}
+				open={modelsOpen}
+				title="Choose provider and model"
+			>
+				<Command>
+					<CommandInput placeholder="Search providers and models…" />
+					<CommandList className="max-h-[min(60vh,480px)]">
+						{renderBody(() => setModelsOpen(false), "models")}
+					</CommandList>
+				</Command>
+			</CommandDialog>
+		</>
 	);
 
 	// ONE cluster, one place: the settings menu, the badges and (full trigger only)

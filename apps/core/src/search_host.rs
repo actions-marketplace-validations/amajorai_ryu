@@ -33,6 +33,11 @@ pub struct CoreSearchEmbedder {
 }
 
 impl CoreSearchEmbedder {
+    /// Wrap an already-resolved RAG embedder for live provider swaps.
+    pub fn from_embedder(inner: Embedder) -> Self {
+        Self { inner }
+    }
+
     /// Build from the environment-configured model registry (the default chat
     /// embedder), resolved through the single RAG resolver. Used by the
     /// process-wide default constructors.

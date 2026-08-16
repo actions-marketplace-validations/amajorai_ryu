@@ -36,7 +36,7 @@ export function ListBody({
 		);
 	}
 	return (
-		<ul className="h-full space-y-0.5 overflow-auto text-sm">
+		<ul className="scroll-fade h-full space-y-0.5 overflow-auto text-sm">
 			{items.map((item, i) => (
 				// List order is the data's natural order; index is a stable key here.
 				<li

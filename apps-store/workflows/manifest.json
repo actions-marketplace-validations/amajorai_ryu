@@ -2,6 +2,7 @@
   "id": "@ryu/workflows",
   "name": "Workflows",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Automation",
   "description": "Workflows: petgraph DAG automation with triggers, durable execution, and a natural-language workflow builder.",
   "tagline": "Automate anything as a durable DAG",

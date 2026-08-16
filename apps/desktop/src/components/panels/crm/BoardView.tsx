@@ -216,7 +216,7 @@ export function BoardView({
 			)}
 			{/* The board scrolls horizontally inside its own container; the panel
 			    body never does. */}
-			<div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
+			<div className="scroll-fade-x flex min-h-0 flex-1 gap-3 overflow-x-auto p-3">
 				{columns.map(({ items, option, total }) => {
 					const colour = "color" in option ? option.color : undefined;
 					return (
@@ -274,7 +274,7 @@ export function BoardView({
 								</div>
 							</header>
 
-							<div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
+							<div className="scroll-fade flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
 								{loading && records.length === 0 ? (
 									<Skeleton className="h-16 w-full" />
 								) : (

@@ -117,7 +117,7 @@ export function QuestsSettings() {
 						load().catch(() => undefined);
 					}}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					{loading ? "Retrying…" : "Retry"}
 				</Button>

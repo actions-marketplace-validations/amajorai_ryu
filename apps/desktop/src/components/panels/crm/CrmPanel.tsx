@@ -213,7 +213,7 @@ export function CrmPanel() {
 		return (
 			<div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
 				<p className="text-muted-foreground text-sm">{error}</p>
-				<Button onClick={() => void loadSchema()} size="sm" variant="outline">
+				<Button onClick={() => void loadSchema()} size="sm" variant="ghost">
 					<HugeiconsIcon icon={RefreshIcon} size={14} />
 					Retry
 				</Button>
@@ -245,7 +245,7 @@ export function CrmPanel() {
 					</div>
 				</div>
 
-				<div className="min-h-0 flex-1 overflow-y-auto p-2">
+				<div className="scroll-fade min-h-0 flex-1 overflow-y-auto p-2">
 					{hits ? (
 						<div>
 							<h2 className="mb-1 px-1 font-medium text-muted-foreground text-xs uppercase tracking-wide">

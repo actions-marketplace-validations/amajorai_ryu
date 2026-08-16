@@ -43,7 +43,14 @@ function stub(bodyText: string, status = 200): Captured {
 	return cap;
 }
 
-const quest = { id: "q1", title: "Ship" };
+const quest = {
+	completion_condition: "merged",
+	created_at: "2026-01-01T00:00:00Z",
+	id: "q1",
+	status: "open" as const,
+	title: "Ship",
+	updated_at: "2026-01-01T00:00:00Z",
+};
 
 describe("listQuests", () => {
 	test("returns the quests array", async () => {

@@ -830,7 +830,7 @@ function TestCaseTable({
 				/>
 			))}
 			<div>
-				<Button onClick={onAddRow} size="sm" variant="outline">
+				<Button onClick={onAddRow} size="sm" variant="ghost">
 					<HugeiconsIcon className="size-3" icon={Add01Icon} />
 					Add test case
 				</Button>
@@ -1105,7 +1105,7 @@ function ModelControls({
 							placeholder="e.g. claude-3-5-haiku"
 							value={newModel}
 						/>
-						<Button onClick={onAddModel} size="icon-sm" variant="outline">
+						<Button onClick={onAddModel} size="icon-sm" variant="ghost">
 							<HugeiconsIcon className="size-3" icon={Add01Icon} />
 						</Button>
 					</div>

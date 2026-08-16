@@ -97,7 +97,7 @@ export default function PluginCompanionPage({
 		: companion.id;
 
 	return (
-		<div className="flex h-full flex-col overflow-y-auto p-6">
+		<div className="scroll-fade flex h-full flex-col overflow-y-auto p-6">
 			<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 				<div className="flex items-center gap-3">
 					<div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">

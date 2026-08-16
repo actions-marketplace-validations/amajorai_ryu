@@ -528,7 +528,7 @@ function SecretField({ field, pluginId, target }: FieldControlProps) {
 						onClick={clear}
 						size="sm"
 						type="button"
-						variant="outline"
+						variant="ghost"
 					>
 						Clear
 					</Button>

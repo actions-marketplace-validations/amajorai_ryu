@@ -12,7 +12,7 @@
 // downloads to ~/.ryu/downloads-history.json); the live store adds this run's
 // just-finished tasks before they land in the log, deduped by id.
 
-import { Download01Icon } from "@hugeicons/core-free-icons";
+import { Download01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Button } from "@ryu/ui/components/button";
 import {
@@ -22,6 +22,9 @@ import {
 	EmptyMedia,
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
+import { IconSwap } from "@ryu/ui/components/icon-swap";
+import { PullToRefresh } from "@ryu/ui/components/pull-to-refresh";
+import { Spinner } from "@ryu/ui/components/spinner";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
@@ -112,108 +115,124 @@ export default function DownloadsPage() {
 		!(loading || historyQuery.isLoading);
 
 	return (
-		<div className="mx-auto flex h-full w-full max-w-2xl flex-col gap-6 overflow-y-auto p-6">
-			<header className="flex items-center justify-between gap-3">
-				<div>
-					<h1 className="font-semibold text-xl">Downloads</h1>
-					<p className="text-muted-foreground text-sm">
-						Updates, active downloads, and everything you've downloaded before.
-					</p>
-				</div>
-				<div className="flex shrink-0 items-center gap-2">
-					{unfinished.length > 0 && (
-						<Button
-							disabled={clearing}
-							onClick={() => {
-								clearUnfinished().catch(() => undefined);
-							}}
-							size="sm"
-							variant="ghost"
-						>
-							Clear unfinished
-						</Button>
-					)}
-					{history.length > 0 && (
-						<Button
-							disabled={clearing}
-							onClick={() => {
-								// Refetch after: History is served by this query, and clearing
-								// the durable log server-side does not invalidate its cache.
-								clearFinished()
-									.then(() => historyQuery.refetch())
-									.catch(() => undefined);
-							}}
-							size="sm"
-							variant="ghost"
-						>
-							Clear finished
-						</Button>
-					)}
-					{/* Refresh reports itself. Both feeds it kicks off resolve in well
+		<PullToRefresh className="scroll-fade h-full" onRefresh={onRefresh}>
+			<div className="mx-auto flex w-full max-w-2xl flex-col gap-6 p-6">
+				<header className="flex items-center justify-between gap-3">
+					<div>
+						<h1 className="font-semibold text-xl">Downloads</h1>
+						<p className="text-muted-foreground text-sm">
+							Updates, active downloads, and everything you've downloaded
+							before.
+						</p>
+					</div>
+					<div className="flex shrink-0 items-center gap-2">
+						{unfinished.length > 0 && (
+							<Button
+								disabled={clearing}
+								onClick={() => {
+									clearUnfinished().catch(() => undefined);
+								}}
+								size="sm"
+								variant="ghost"
+							>
+								Clear unfinished
+							</Button>
+						)}
+						{history.length > 0 && (
+							<Button
+								disabled={clearing}
+								onClick={() => {
+									// Refetch after: History is served by this query, and clearing
+									// the durable log server-side does not invalidate its cache.
+									clearFinished()
+										.then(() => historyQuery.refetch())
+										.catch(() => undefined);
+								}}
+								size="sm"
+								variant="ghost"
+							>
+								Clear finished
+							</Button>
+						)}
+						{/* Refresh reports itself. Both feeds it kicks off resolve in well
 					    under a second on a local node, so without a held state the button
 					    looked inert on every press — the list simply redrew identical
 					    content. The state is driven by the queries' own in-flight flags
 					    plus a floor, so it is never a lie about work that already ended. */}
-					<Button
-						disabled={refreshing}
-						onClick={() => {
-							onRefresh();
-						}}
-						size="sm"
-						variant="outline"
-					>
-						{refreshing ? "Refreshing…" : "Refresh"}
-					</Button>
-				</div>
-			</header>
+						<Button
+							disabled={refreshing}
+							onClick={() => {
+								onRefresh();
+							}}
+							size="sm"
+							variant="ghost"
+						>
+							<IconSwap
+								a={<HugeiconsIcon icon={Refresh01Icon} />}
+								b={<Spinner size="sm" speed="fast" />}
+								state={refreshing ? "b" : "a"}
+							/>
+							{refreshing ? "Refreshing…" : "Refresh"}
+						</Button>
+					</div>
+				</header>
 
-			{nothing ? (
-				<Empty className="py-10">
-					<EmptyHeader>
-						<EmptyMedia variant="icon">
-							<HugeiconsIcon icon={Download01Icon} />
-						</EmptyMedia>
-						<EmptyTitle>Nothing downloading</EmptyTitle>
-						<EmptyDescription>
-							Installs and updates you start will appear here, and everything is
-							up to date.
-						</EmptyDescription>
-					</EmptyHeader>
-				</Empty>
-			) : (
-				<>
-					{updates.length > 0 && (
-						<div className="rounded-2xl bg-card">
-							<AvailableUpdates />
-						</div>
-					)}
-
-					<Section title="Active">
-						{active.length > 0 ? (
-							<div className="flex flex-col rounded-2xl bg-card p-1">
-								{active.map((task) => (
-									<DownloadRow friendly={friendly} key={task.id} task={task} />
-								))}
+				{nothing ? (
+					<Empty className="py-10">
+						<EmptyHeader>
+							<EmptyMedia variant="icon">
+								<HugeiconsIcon icon={Download01Icon} />
+							</EmptyMedia>
+							<EmptyTitle>Nothing downloading</EmptyTitle>
+							<EmptyDescription>
+								Installs and updates you start will appear here, and everything
+								is up to date.
+							</EmptyDescription>
+						</EmptyHeader>
+					</Empty>
+				) : (
+					<>
+						{updates.length > 0 && (
+							<div className="rounded-2xl bg-card">
+								<AvailableUpdates />
 							</div>
-						) : (
-							<p className="px-1 text-muted-foreground text-sm">
-								No active downloads.
-							</p>
 						)}
-					</Section>
 
-					{history.length > 0 && (
-						<Section title="History">
-							<div className="flex flex-col rounded-2xl bg-card p-1">
-								{history.map((task) => (
-									<DownloadRow friendly={friendly} key={task.id} task={task} />
-								))}
-							</div>
+						<Section title="Active">
+							{active.length > 0 ? (
+								<div className="flex flex-col rounded-2xl bg-card p-1">
+									{active.map((task) => (
+										<DownloadRow
+											friendly={friendly}
+											key={task.id}
+											task={task}
+										/>
+									))}
+								</div>
+							) : (
+								<p className="px-1 text-muted-foreground text-sm">
+									No active downloads.
+								</p>
+							)}
 						</Section>
-					)}
-				</>
-			)}
-		</div>
+
+						{history.length > 0 && (
+							<Section title="History">
+								<div className="flex flex-col rounded-2xl bg-card p-1">
+									{history.map((task) => (
+										<DownloadRow
+											friendly={friendly}
+											key={task.id}
+											task={task}
+										/>
+									))}
+								</div>
+							</Section>
+						)}
+					</>
+				)}
+			</div>
+		</PullToRefresh>
 	);
 }
 

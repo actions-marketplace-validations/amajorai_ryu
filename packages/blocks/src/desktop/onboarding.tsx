@@ -192,7 +192,7 @@ function OnboardingShell({
 		// `h-screen overflow-hidden`, so without this a long step (e.g. the agent
 		// picker with many rows) pushed its Continue button off the bottom edge with
 		// no way to scroll to it.
-		<div className="h-full w-full overflow-y-auto">
+		<div className="scroll-fade h-full w-full overflow-y-auto">
 			<div
 				className="flex min-h-full w-full flex-col items-center justify-center gap-8 p-8"
 				data-tauri-drag-region="true"

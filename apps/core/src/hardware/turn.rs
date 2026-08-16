@@ -138,6 +138,7 @@ pub async fn run_chat_turn(
         false,
         // The device runs its bound agent as configured — no per-turn pin.
         None,
+        None,
         Arc::clone(&deps.registry),
         deps.conversations.clone(),
         deps.agent_store.clone(),

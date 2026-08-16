@@ -148,7 +148,7 @@ export function SchemaEditor({
 					disabled={busy}
 					onClick={() => setAddingObject(true)}
 					size="sm"
-					variant="outline"
+					variant="ghost"
 				>
 					<HugeiconsIcon icon={PlusSignIcon} size={14} />
 					New object
@@ -162,7 +162,7 @@ export function SchemaEditor({
 				</div>
 			)}
 
-			<div className="min-h-0 flex-1 overflow-y-auto p-4">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto p-4">
 				{addingObject && (
 					<ObjectForm
 						busy={busy}
@@ -309,7 +309,7 @@ export function SchemaEditor({
 							disabled={busy}
 							onClick={() => setAddingField(true)}
 							size="sm"
-							variant="outline"
+							variant="ghost"
 						>
 							<HugeiconsIcon icon={PlusSignIcon} size={14} />
 							Add field

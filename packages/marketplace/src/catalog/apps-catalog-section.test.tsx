@@ -6,7 +6,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import AppsCatalogSection from "./apps-catalog-section.tsx";
+import AppsCatalogSection, {
+	AuthBridgeConsent,
+} from "./apps-catalog-section.tsx";
 import StoreItemAction, {
 	StoreItemOverflowMenu,
 } from "./chrome/store-item-action.tsx";
@@ -127,6 +129,23 @@ function render(install: CatalogInstall | null): string {
 }
 
 describe("CatalogHost seam — Apps section", () => {
+	test("auth-bridge enable consent discloses credential and traffic custody", () => {
+		const html = renderToStaticMarkup(
+			<AuthBridgeConsent
+				providers={[
+					{
+						id: "chatgpt-bridge",
+						label: "ChatGPT subscription",
+						models: ["gpt-5"],
+					},
+				]}
+			/>
+		);
+		expect(html).toContain("Handles provider credentials and traffic");
+		expect(html).toContain("read requests and responses routed through it");
+		expect(html).toContain("ChatGPT subscription (gpt-5)");
+	});
+
 	test("renders the selected item's name and description from the host hook", () => {
 		const html = render(MOCK_INSTALL);
 		expect(html).toContain("Sample Plugin");

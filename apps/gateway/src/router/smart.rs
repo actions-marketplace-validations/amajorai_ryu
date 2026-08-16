@@ -283,7 +283,9 @@ impl SmartRouter {
                 const PROBE: &str = "hello";
                 let n = descriptions.len();
 
-                let forward = self.probe_choice(descriptions, PROBE, provider, model).await;
+                let forward = self
+                    .probe_choice(descriptions, PROBE, provider, model)
+                    .await;
                 let mut reversed: Vec<String> = descriptions.to_vec();
                 reversed.reverse();
                 let backward = self.probe_choice(&reversed, PROBE, provider, model).await;

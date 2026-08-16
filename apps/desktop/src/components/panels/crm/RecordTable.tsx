@@ -262,7 +262,7 @@ export function RecordTable({
 							Export CSV
 						</Button>
 					)}
-					<Button onClick={onRequestCreate} size="sm" variant="outline">
+					<Button onClick={onRequestCreate} size="sm" variant="ghost">
 						<HugeiconsIcon icon={PlusSignIcon} size={14} />
 						New {subject.object.singular}
 					</Button>

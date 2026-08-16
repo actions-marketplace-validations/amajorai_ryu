@@ -38,7 +38,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
@@ -64,7 +64,7 @@ pub struct MessageHit {
 #[derive(Clone)]
 pub struct MessageIndex {
     conn: Arc<Mutex<Connection>>,
-    embedder: Arc<dyn SearchEmbedder>,
+    embedder: Arc<RwLock<Arc<dyn SearchEmbedder>>>,
     /// Width of the `message_vectors` vec0 table, fixed at creation.
     dims: Arc<AtomicUsize>,
 }
@@ -92,7 +92,7 @@ impl MessageIndex {
         Self::reconcile_dims(&conn, dims)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            embedder,
+            embedder: Arc::new(RwLock::new(embedder)),
             dims: Arc::new(AtomicUsize::new(dims)),
         })
     }
@@ -130,7 +130,7 @@ impl MessageIndex {
         Self::init_schema(&conn, dims)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            embedder,
+            embedder: Arc::new(RwLock::new(embedder)),
             dims: Arc::new(AtomicUsize::new(dims)),
         })
     }
@@ -169,7 +169,44 @@ impl MessageIndex {
     /// Snapshot the embedder (cheap `Arc` clone) so embedding I/O never holds a
     /// lock.
     pub fn embedder(&self) -> Arc<dyn SearchEmbedder> {
-        self.embedder.clone()
+        self.embedder
+            .read()
+            .expect("message embedder lock poisoned")
+            .clone()
+    }
+
+    /// Install a new embedder and reconcile the fixed-width vector table before
+    /// any query can use it. A dimensionality change clears old vectors; a
+    /// same-dimension model change leaves them tagged stale for re-embedding.
+    pub async fn set_embedder(&self, embedder: Arc<dyn SearchEmbedder>) -> Result<()> {
+        let dims = embedder.dims();
+        let conn = self.conn.lock().await;
+        Self::reconcile_dims(&conn, dims)?;
+        self.dims.store(dims, Ordering::SeqCst);
+        *self
+            .embedder
+            .write()
+            .expect("message embedder lock poisoned") = embedder;
+        Ok(())
+    }
+
+    /// Return message ids whose vectors were produced by another model or width.
+    pub async fn stale_ids(
+        &self,
+        model: &str,
+        dims: usize,
+    ) -> Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT message_id FROM message_embeddings
+             WHERE embed_model != ?1 OR embed_dims != ?2",
+        )?;
+        let rows = stmt.query_map(params![model, dims as i64], |row| row.get(0))?;
+        let mut ids = std::collections::HashSet::new();
+        for row in rows {
+            ids.insert(row?);
+        }
+        Ok(ids)
     }
 
     /// Index a single message's embedding. Idempotent on `message_id` (re-indexing
@@ -257,8 +294,9 @@ impl MessageIndex {
         limit: usize,
         conversation_ids: Option<&[String]>,
     ) -> Result<Vec<MessageHit>> {
-        let model_id = self.embedder.model_id().to_string();
-        let query_vec = self.embedder.embed(query).await?;
+        let embedder = self.embedder();
+        let model_id = embedder.model_id().to_string();
+        let query_vec = embedder.embed(query).await?;
         let bytes = encode_embedding(&query_vec);
         let conn = self.conn.lock().await;
         // vec0 KNN must over-fetch when we post-filter by conversation, since the
@@ -409,7 +447,7 @@ mod tests {
         // And the recreated vec0 table accepts inserts at the new width.
         let index = MessageIndex {
             conn: Arc::new(Mutex::new(conn)),
-            embedder: test_embedder(),
+            embedder: Arc::new(RwLock::new(test_embedder())),
             dims: Arc::new(AtomicUsize::new(dims)),
         };
         let emb = index.embedder().embed("hello").await.expect("embed");

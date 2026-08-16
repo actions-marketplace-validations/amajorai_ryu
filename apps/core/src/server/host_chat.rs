@@ -202,8 +202,9 @@ pub async fn host_chat_start_turn(
     // Gate off: run it now, through the SAME executor an approved send uses, so the
     // two paths cannot drift into behaving differently.
     match crate::approvals::execute_app_send_turn(&action).await {
-        Ok(()) => Json(json!({ "status": "sent", "conversation_id": conversation_id }))
-            .into_response(),
+        Ok(()) => {
+            Json(json!({ "status": "sent", "conversation_id": conversation_id })).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": e.to_string() })),
@@ -251,7 +252,11 @@ pub async fn host_node_readings(
         return (status, Json(json!({ "error": msg }))).into_response();
     }
 
-    let running = match state.conversations.list_runs_visible(None, None, false).await {
+    let running = match state
+        .conversations
+        .list_runs_visible(None, None, false)
+        .await
+    {
         Ok(items) => items
             .iter()
             .filter(|r| r.run_status.as_deref() == Some("running"))

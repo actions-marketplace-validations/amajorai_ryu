@@ -1,0 +1,83 @@
+{
+  "id": "@ryu/pull-requests",
+  "name": "Pull Requests",
+  "version": "0.1.14",
+  "stability": "experimental",
+  "category": "Developer Tools",
+  "description": "A focused pull-request inbox for Ryu. Browse review requests and authored work across repositories, inspect summaries, changed files, checks and discussion, then comment, review or merge through the locally authenticated GitHub CLI.",
+  "tagline": "Review and merge GitHub pull requests without leaving Ryu",
+  "keywords": ["github", "git", "pull requests", "code review", "ci"],
+  "icon": "git-pull-request",
+  "iconDither": { "from": 221, "to": "transparent", "direction": "down" },
+  "surfaces": {
+    "gateway": { "support": "none" },
+    "core": { "support": "none" },
+    "desktop": { "support": "full" },
+    "island": { "support": "limited" },
+    "mobile": { "support": "limited" },
+    "extension": { "support": "none" },
+    "web": { "support": "limited" },
+    "cli": { "support": "list" }
+  },
+  "engines": { "ryu": ">=0.1.0" },
+  "runnables": [
+    {
+      "id": "pull-requests-companion",
+      "name": "Pull Requests",
+      "kind": "companion",
+      "config": {
+        "label": "Pull Requests",
+        "ui_entry": "./dist/index.html",
+        "ui_format": "html"
+      }
+    }
+  ],
+  "sidecars": [
+    {
+      "name": "pull-requests",
+      "process": {
+        "kind": "local",
+        "command": "ryu-pull-requests",
+        "command_env": "RYU_PULL_REQUESTS_BIN",
+        "port_env": "RYU_PULL_REQUESTS_PORT"
+      },
+      "port": 8016,
+      "health_path": "/health",
+      "lazy": true,
+      "idle_stop_secs": 300,
+      "http": {
+        "mount": "/api/pull-requests",
+        "public_mount": "/api/pull-requests",
+        "routes": [
+          { "path": "/auth/device" },
+          { "path": "/status" },
+          { "path": "/pulls" },
+          { "path": "/pulls/:owner/:repo/:number" },
+          { "path": "/pulls/:owner/:repo/:number/diff" },
+          { "path": "/pulls/:owner/:repo/:number/comment" },
+          { "path": "/pulls/:owner/:repo/:number/review" },
+          { "path": "/pulls/:owner/:repo/:number/merge" },
+          { "path": "/pulls/:owner/:repo/:number/ready" }
+        ]
+      }
+    }
+  ],
+  "permission_grants": ["app:http", "shell:integrate"],
+  "permission_levels": [
+    {
+      "id": "pull-requests.view",
+      "label": "Can view",
+      "description": "Use your local GitHub CLI login to list pull requests and read their code, checks and discussion."
+    },
+    {
+      "id": "pull-requests.review",
+      "label": "Can review",
+      "description": "Post comments and reviews, mark drafts ready, and merge pull requests using your local GitHub CLI credentials.",
+      "implies": ["pull-requests.view"]
+    }
+  ],
+  "companion": {
+    "label": "Pull Requests",
+    "icon": "git-pull-request"
+  }
+}

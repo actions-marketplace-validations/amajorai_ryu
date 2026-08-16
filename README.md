@@ -304,7 +304,7 @@ _Idle RSS and CPU are sampled only for the Gateway (a stateless proxy with a cle
 
 Ryu's swappable building blocks — memory, RAG, sandboxes, voice, tools,
 gateway stages, automation, and the SDK bindings — are each documented on their own page
-in the docs: **[Primitives → docs.ryuhq.com/docs/primitives](https://docs.ryuhq.com/docs/primitives)**.
+in the docs: **[Primitives → docs.ryuhq.com/docs/reference/primitives](https://docs.ryuhq.com/docs/reference/primitives)**.
 
 ## Contributing
 

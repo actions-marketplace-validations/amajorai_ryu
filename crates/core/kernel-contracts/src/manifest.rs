@@ -1359,6 +1359,7 @@ impl PluginManifest {
         }
         self.validate_capabilities()?;
         self.validate_surface_commands()?;
+        self.validate_mcp_oauth()?;
         self.validate_code_sources()?;
         if let Some(contributes) = &self.contributes {
             contributes
@@ -1383,6 +1384,109 @@ impl PluginManifest {
             .map_err(|e| format!("plugin '{}': {e}", self.id))?;
         validate_route_permissions(&self.sidecars, &self.permission_levels)
             .map_err(|e| format!("plugin '{}': {e}", self.id))?;
+        Ok(())
+    }
+
+    /// Validate the publisher-controlled half of remote MCP OAuth.
+    ///
+    /// OAuth is deliberately narrower than static MCP configuration: only a
+    /// remote HTTPS endpoint (or an explicit loopback development endpoint) may
+    /// request it, static `Authorization` cannot compete with Core's bearer, and
+    /// both the process-registration and credential-read grants must be declared.
+    fn validate_mcp_oauth(&self) -> Result<(), String> {
+        for (server_name, server) in &self.mcp_servers {
+            let Some(auth) = &server.auth else {
+                continue;
+            };
+            let url = server
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "plugin '{}': MCP server '{server_name}' declares OAuth but no remote url",
+                        self.id
+                    )
+                })?;
+            if server
+                .transport
+                .as_deref()
+                .is_some_and(|transport| transport.trim().eq_ignore_ascii_case("stdio"))
+            {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' cannot declare OAuth on a stdio transport",
+                    self.id
+                ));
+            }
+            if server
+                .command
+                .as_deref()
+                .is_some_and(|command| !command.trim().is_empty())
+            {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' cannot combine OAuth with a stdio command",
+                    self.id
+                ));
+            }
+            if server
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+            {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' cannot combine OAuth with a static Authorization header",
+                    self.id
+                ));
+            }
+
+            let parsed = url::Url::parse(url).map_err(|error| {
+                format!(
+                    "plugin '{}': MCP server '{server_name}' has an invalid OAuth resource url: {error}",
+                    self.id
+                )
+            })?;
+            let loopback = parsed.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+            if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' OAuth url must use https (http is allowed only for loopback development)",
+                    self.id
+                ));
+            }
+            if parsed.username() != "" || parsed.password().is_some() || parsed.fragment().is_some()
+            {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' OAuth url must not contain userinfo or a fragment",
+                    self.id
+                ));
+            }
+            if auth
+                .client_id()
+                .is_some_and(|client_id| client_id.trim().is_empty())
+            {
+                return Err(format!(
+                    "plugin '{}': MCP server '{server_name}' OAuth client_id must not be empty",
+                    self.id
+                ));
+            }
+            for grant in ["mcp:server", "identity.read"] {
+                if !self
+                    .permission_grants
+                    .iter()
+                    .any(|declared| declared == grant)
+                {
+                    return Err(format!(
+                        "plugin '{}': MCP server '{server_name}' declares OAuth but is missing required permission grant '{grant}'",
+                        self.id
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1497,9 +1601,9 @@ impl PluginManifest {
 ///
 /// The field names mirror the `mcp.json` dialect users already paste from Cursor
 /// and Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a
-/// hand-written config entry are the same shape. Auth belongs in
-/// [`headers`](McpServerDecl::headers), never in `env` — a remote server has no
-/// process to inherit environment.
+/// hand-written config entry are the same shape. Static API-key auth may live in
+/// [`headers`](McpServerDecl::headers). User-delegated OAuth is declared through
+/// [`auth`](McpServerDecl::auth), and Core owns the resulting token lifecycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct McpServerDecl {
     /// Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).
@@ -1520,6 +1624,12 @@ pub struct McpServerDecl {
     /// Request headers sent with every call to a remote server (auth lives here).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+
+    /// Core-owned OAuth for this remote MCP server. The manifest may name only an
+    /// optional public client id; discovery, PKCE, tokens and redirect URIs are
+    /// intentionally outside the publisher-controlled manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<McpServerAuthDecl>,
 
     /// Optional env var whose value, when set, OVERRIDES [`command`] with an
     /// absolute binary path. Lets a plugin ship a bare `command` that Core repoints
@@ -1562,11 +1672,38 @@ impl Default for McpServerDecl {
             transport: None,
             url: None,
             headers: BTreeMap::new(),
+            auth: None,
             command_env: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
             enabled: default_mcp_server_enabled(),
+        }
+    }
+}
+
+/// Authentication Ryu performs on behalf of the user for a remote MCP server.
+///
+/// `deny_unknown_fields` is a security boundary: a publisher cannot smuggle a
+/// client secret, token endpoint, redirect URI, token or scope list into a signed
+/// manifest and have an older Core silently ignore it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum McpServerAuthDecl {
+    /// OAuth 2.1 authorization code with PKCE. `client_id`, when present, is a
+    /// provider-issued public client id; confidential client secrets are never a
+    /// manifest field.
+    OAuth {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+}
+
+impl McpServerAuthDecl {
+    /// Optional pre-registered public OAuth client id.
+    pub fn client_id(&self) -> Option<&str> {
+        match self {
+            Self::OAuth { client_id } => client_id.as_deref(),
         }
     }
 }
@@ -1600,7 +1737,7 @@ pub struct CompanionSurface {
 /// and reference no runnable at all (`widgets`, `views`, `dock_panels`,
 /// `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
 /// `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
-/// `message_actions`, `context_menu_items`).
+/// `message_actions`, `context_menu_items`, `agent_edit_panels`).
 ///
 /// # Extending
 ///
@@ -1617,7 +1754,8 @@ pub struct CompanionSurface {
 ///    (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed
 ///    struct, because a key Core does not know is by construction a key Core cannot
 ///    act on. If a client shell renders it (`views`, `dock_panels`,
-///    `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque
+///    `sidebar_sections`, `settings_tabs`, `composer_controls`,
+///    `agent_edit_panels`) it stays opaque
 ///    JSON, because deserializing into a struct here would DROP any key this Core
 ///    build does not know about and a newer desktop would lose exactly the fields it
 ///    was shipped to render.
@@ -2000,6 +2138,16 @@ pub struct Contributes {
     #[serde(default)]
     #[schemars(with = "Vec<CreateActionContribution>")]
     pub create_actions: Vec<serde_json::Value>,
+
+    /// Client-rendered panels for the agent edit page. Entries are deliberately
+    /// opaque and self-contained: the desktop owns the panel vocabulary, while
+    /// Core only stores, tags, and forwards the declaration through the plugin
+    /// contributions endpoint. This lets a newer desktop add an agent-edit
+    /// panel type without requiring every Core node to learn that type first.
+    /// These entries name no runnable ids and therefore are intentionally absent
+    /// from [`Contributes::referenced_ids`].
+    #[serde(default)]
+    pub agent_edit_panels: Vec<serde_json::Value>,
 
     /// **Deletable data categories** the app owns — one "Delete all X" row in
     /// Settings → Danger Zone (see [`DataCategoryContribution`]).
@@ -2916,6 +3064,10 @@ pub struct TurnHookContribution {
     pub id: String,
     /// The turn boundary this hook fires on. Today only `"post_assistant_turn"`.
     pub on: String,
+    /// Higher-priority hooks run first within a phase. Ties are resolved by
+    /// plugin id and hook id, which makes first-writer-wins directives stable.
+    #[serde(default)]
+    pub priority: i32,
     /// The JS hook body executed in the sandbox (returns a directive).
     ///
     /// Empty in a **source** manifest that declares [`Self::code_file`] instead;
@@ -3803,7 +3955,10 @@ pub fn validate_create_action(action: &CreateActionContribution) -> Result<(), S
         return Err("create action has an empty 'id'".to_string());
     }
     if action.label.trim().is_empty() {
-        return Err(format!("create action '{}' has an empty 'label'", action.id));
+        return Err(format!(
+            "create action '{}' has an empty 'label'",
+            action.id
+        ));
     }
     let target = action.target.as_deref().unwrap_or("").trim();
     let capability = action.capability.as_deref().unwrap_or("").trim();
@@ -4113,10 +4268,13 @@ impl Contributes {
         // field doc comments) so the contributions endpoint can tag and forward each
         // entry verbatim; this is where they are actually parsed as their typed
         // contracts, exactly like `settings_tabs` above.
-        let mut actions: Vec<MessageActionContribution> = Vec::with_capacity(self.message_actions.len());
+        let mut actions: Vec<MessageActionContribution> =
+            Vec::with_capacity(self.message_actions.len());
         for (index, raw) in self.message_actions.iter().enumerate() {
-            let action: MessageActionContribution = serde_json::from_value(raw.clone())
-                .map_err(|e| format!("message action #{index} is not a valid message action: {e}"))?;
+            let action: MessageActionContribution =
+                serde_json::from_value(raw.clone()).map_err(|e| {
+                    format!("message action #{index} is not a valid message action: {e}")
+                })?;
             validate_message_action(&action)?;
             actions.push(action);
         }
@@ -4130,8 +4288,8 @@ impl Contributes {
         let mut menu_items: Vec<ContextMenuContribution> =
             Vec::with_capacity(self.context_menu_items.len());
         for (index, raw) in self.context_menu_items.iter().enumerate() {
-            let item: ContextMenuContribution = serde_json::from_value(raw.clone())
-                .map_err(|e| {
+            let item: ContextMenuContribution =
+                serde_json::from_value(raw.clone()).map_err(|e| {
                     format!("context menu item #{index} is not a valid context menu item: {e}")
                 })?;
             validate_context_menu_item(&item)?;
@@ -4148,9 +4306,7 @@ impl Contributes {
             Vec::with_capacity(self.create_actions.len());
         for (index, raw) in self.create_actions.iter().enumerate() {
             let action: CreateActionContribution = serde_json::from_value(raw.clone())
-                .map_err(|e| {
-                    format!("create action #{index} is not a valid create action: {e}")
-                })?;
+                .map_err(|e| format!("create action #{index} is not a valid create action: {e}"))?;
             validate_create_action(&action)?;
             create_actions.push(action);
         }
@@ -4575,11 +4731,8 @@ impl HostVersions {
                 // incompatible with every plugin. Compare on the release triple so a
                 // channel suffix never decides compatibility.
                 Some(present) => {
-                    let release_only = semver::Version::new(
-                        present.major,
-                        present.minor,
-                        present.patch,
-                    );
+                    let release_only =
+                        semver::Version::new(present.major, present.minor, present.patch);
                     if !req.matches(&release_only) {
                         unmet.push(UnmetRequirement::TooOld {
                             surface,
@@ -6044,6 +6197,7 @@ mod tests {
             turn_hooks: vec![TurnHookContribution {
                 id: "on-meeting-end".to_owned(),
                 on: "com.not.installed#meeting.ended".to_owned(),
+                priority: 0,
                 code: "return {kind:'none'}".to_owned(),
                 code_file: None,
                 run_when: None,
@@ -6444,9 +6598,9 @@ mod tests {
         assert!(validate_output_style_path("output-styles/i-have-adhd.md").is_ok());
         for bad in [
             "",
-            "eli5.md",                     // no dir segment
-            "output-styles/nested/x.md",   // not flat: breaks the mirror's glob
-            "styles/eli5.md",              // wrong dir
+            "eli5.md",                   // no dir segment
+            "output-styles/nested/x.md", // not flat: breaks the mirror's glob
+            "styles/eli5.md",            // wrong dir
             "output-styles/../../etc/passwd",
             "../output-styles/eli5.md",
             "/etc/passwd",
@@ -6482,10 +6636,14 @@ mod tests {
                 "output_styles": [{ "id": "eli5", "file": "output-styles/eli5.md" }]
             }
         }"#;
-        let body = "---\nname: ELI5\nkeep-coding-instructions: true\n---\n\nTalk to me like I'm 5.\n";
+        let body =
+            "---\nname: ELI5\nkeep-coding-instructions: true\n---\n\nTalk to me like I'm 5.\n";
 
         let mut m: PluginManifest = serde_json::from_str(raw).unwrap();
-        assert_eq!(m.output_style_refs(), vec!["output-styles/eli5.md".to_owned()]);
+        assert_eq!(
+            m.output_style_refs(),
+            vec!["output-styles/eli5.md".to_owned()]
+        );
         m.hydrate_output_style_files(|rel| {
             assert_eq!(rel, "output-styles/eli5.md");
             Ok(body.to_owned())
@@ -6615,9 +6773,15 @@ mod tests {
         let m = PluginManifest::parse_and_validate(raw).expect("validates");
         let styles = &m.contributes.as_ref().unwrap().output_styles;
         assert_eq!(styles.len(), 2);
-        assert_eq!(styles[0].source.as_deref(), Some("---\nname: ELI5\n---\n\nSmall words.\n"));
+        assert_eq!(
+            styles[0].source.as_deref(),
+            Some("---\nname: ELI5\n---\n\nSmall words.\n")
+        );
         assert!(styles[0].file.is_none());
-        assert_eq!(styles[1].file.as_deref(), Some("output-styles/plain-text.md"));
+        assert_eq!(
+            styles[1].file.as_deref(),
+            Some("output-styles/plain-text.md")
+        );
         assert!(styles[1].source.is_none());
 
         let round_tripped: PluginManifest =
@@ -6633,7 +6797,9 @@ mod tests {
         .expect("validates");
         assert!(bare.contributes.as_ref().unwrap().output_styles.is_empty());
         assert!(
-            !serde_json::to_string(&bare).unwrap().contains("output_styles"),
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("output_styles"),
             "an empty list must not appear on the wire"
         );
     }
@@ -7831,7 +7997,10 @@ mod tests {
     fn duplicate_permission_level_ids_are_rejected() {
         let err = validate_permission_levels(&[level("read", &[]), level("read", &[])])
             .expect_err("a duplicate id must not validate");
-        assert!(err.contains("duplicate permission level id 'read'"), "got: {err}");
+        assert!(
+            err.contains("duplicate permission level id 'read'"),
+            "got: {err}"
+        );
     }
 
     /// The alphabet is deliberately narrower than a plugin id's: `Read` and `read`
@@ -7839,7 +8008,14 @@ mod tests {
     /// segment once the id reaches an API path.
     #[test]
     fn permission_level_ids_are_restricted_to_a_safe_lowercase_charset() {
-        for good in ["read", "edit", "space.read", "read-only", "read_write", "a1"] {
+        for good in [
+            "read",
+            "edit",
+            "space.read",
+            "read-only",
+            "read_write",
+            "a1",
+        ] {
             assert!(
                 validate_permission_level_id(good).is_ok(),
                 "'{good}' must be accepted"
@@ -7975,7 +8151,10 @@ mod tests {
         }"#;
         let err = PluginManifest::parse_and_validate(raw)
             .expect_err("a dangling implies must fail whole-manifest validation");
-        assert!(err.contains("com.example.bad"), "must name the plugin: {err}");
+        assert!(
+            err.contains("com.example.bad"),
+            "must name the plugin: {err}"
+        );
         assert!(err.contains("implies 'read'"), "got: {err}");
     }
 
@@ -8014,16 +8193,17 @@ mod tests {
             CLOSE_LEVEL,
         ))
         .expect_err("a public route carrying a permission must be refused");
-        assert!(err.contains("public"), "the error must name the cause: {err}");
+        assert!(
+            err.contains("public"),
+            "the error must name the cause: {err}"
+        );
 
         // The same annotation on a non-public route is exactly the supported case.
-        assert!(
-            PluginManifest::parse_and_validate(&manifest_with_route(
-                r#"{ "path": "/webhook", "permission": "tabs.close" }"#,
-                CLOSE_LEVEL,
-            ))
-            .is_ok()
-        );
+        assert!(PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/webhook", "permission": "tabs.close" }"#,
+            CLOSE_LEVEL,
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -8032,7 +8212,8 @@ mod tests {
             r#"{ "path": "/tabs/:id/close", "permission": "tabs.close", "resource_param": "id" }"#,
             CLOSE_LEVEL,
         );
-        let manifest = PluginManifest::parse_and_validate(&raw).expect("a declared level validates");
+        let manifest =
+            PluginManifest::parse_and_validate(&raw).expect("a declared level validates");
         let route = &manifest.sidecars[0].http.as_ref().expect("http").routes[0];
         assert_eq!(route.permission.as_deref(), Some("tabs.close"));
         assert_eq!(route.resource_param.as_deref(), Some("id"));
@@ -8047,7 +8228,10 @@ mod tests {
             CLOSE_LEVEL,
         ))
         .expect_err("an undeclared permission must fail validation");
-        assert!(err.contains("com.example.gated"), "must name the plugin: {err}");
+        assert!(
+            err.contains("com.example.gated"),
+            "must name the plugin: {err}"
+        );
         assert!(err.contains("'tabs.destroy'"), "must name the level: {err}");
 
         // Including the case where the manifest declares NO vocabulary at all —
@@ -8093,9 +8277,11 @@ mod tests {
     /// keys, or every shipped manifest's canonical (Gateway-signed) encoding moves.
     #[test]
     fn an_unannotated_route_parses_ungated_and_emits_no_new_keys() {
-        let manifest =
-            PluginManifest::parse_and_validate(&manifest_with_route(r#"{ "path": "/tabs" }"#, "[]"))
-                .expect("an unannotated route is still valid");
+        let manifest = PluginManifest::parse_and_validate(&manifest_with_route(
+            r#"{ "path": "/tabs" }"#,
+            "[]",
+        ))
+        .expect("an unannotated route is still valid");
         let route = &manifest.sidecars[0].http.as_ref().expect("http").routes[0];
         assert!(route.permission.is_none());
         assert!(route.resource_param.is_none());
@@ -8106,5 +8292,88 @@ mod tests {
             .expect("route object");
         assert!(!encoded.contains_key("permission"), "got: {encoded:?}");
         assert!(!encoded.contains_key("resource_param"), "got: {encoded:?}");
+    }
+
+    fn oauth_manifest(server: &str, grants: &str) -> String {
+        format!(
+            r#"{{
+                "id": "com.example.oauth",
+                "name": "OAuth MCP",
+                "version": "1.0.0",
+                "permission_grants": {grants},
+                "mcp_servers": {{ "mail": {server} }},
+                "runnables": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn remote_mcp_oauth_accepts_only_the_public_client_contract() {
+        let raw = oauth_manifest(
+            r#"{
+                "type": "streamable-http",
+                "url": "https://mcp.example.com/v1",
+                "auth": { "type": "oauth", "client_id": "public-client" }
+            }"#,
+            r#"["mcp:server", "identity.read"]"#,
+        );
+        let parsed = PluginManifest::parse_and_validate(&raw).expect("OAuth manifest validates");
+        assert_eq!(
+            parsed.mcp_servers["mail"]
+                .auth
+                .as_ref()
+                .and_then(McpServerAuthDecl::client_id),
+            Some("public-client")
+        );
+
+        let secret = raw.replace(
+            r#""client_id": "public-client""#,
+            r#""client_id": "public-client", "client_secret": "must-not-parse""#,
+        );
+        assert!(
+            serde_json::from_str::<PluginManifest>(&secret).is_err(),
+            "unknown auth fields must fail closed"
+        );
+    }
+
+    #[test]
+    fn remote_mcp_oauth_rejects_unsafe_transport_and_competing_auth() {
+        for server in [
+            r#"{ "command": "npx", "type": "stdio", "auth": { "type": "oauth" } }"#,
+            r#"{ "command": "npx", "url": "https://mcp.example.com", "auth": { "type": "oauth" } }"#,
+            r#"{ "url": "http://mcp.example.com", "auth": { "type": "oauth" } }"#,
+            r#"{ "url": "https://mcp.example.com/#token", "auth": { "type": "oauth" } }"#,
+            r#"{
+                "url": "https://mcp.example.com",
+                "headers": { "authorization": "Bearer plaintext" },
+                "auth": { "type": "oauth" }
+            }"#,
+        ] {
+            let raw = oauth_manifest(server, r#"["mcp:server", "identity.read"]"#);
+            assert!(
+                PluginManifest::parse_and_validate(&raw).is_err(),
+                "got: {server}"
+            );
+        }
+
+        let loopback = oauth_manifest(
+            r#"{ "url": "http://127.0.0.1:3000/mcp", "auth": { "type": "oauth" } }"#,
+            r#"["mcp:server", "identity.read"]"#,
+        );
+        assert!(PluginManifest::parse_and_validate(&loopback).is_ok());
+    }
+
+    #[test]
+    fn remote_mcp_oauth_requires_both_governance_grants() {
+        for grants in [r#"[]"#, r#"["mcp:server"]"#, r#"["identity.read"]"#] {
+            let raw = oauth_manifest(
+                r#"{ "url": "https://mcp.example.com", "auth": { "type": "oauth" } }"#,
+                grants,
+            );
+            assert!(
+                PluginManifest::parse_and_validate(&raw).is_err(),
+                "got: {grants}"
+            );
+        }
     }
 }

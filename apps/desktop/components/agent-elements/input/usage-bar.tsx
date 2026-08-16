@@ -296,6 +296,49 @@ function formatReset(resetsAt: string | null): string {
 	return `resets in ~${Math.round(hours / 24)}d`;
 }
 
+/**
+ * Compare actual consumption with an even burn over the window. A 7-day window
+ * that has elapsed one day expects roughly 14%; consuming 50% is therefore 36
+ * points in deficit. Unknown dates deliberately produce no pace claim.
+ */
+function paceStatus(usageWindow: UsageWindow): string | null {
+	if (
+		!(usageWindow.resetsAt && usageWindow.windowSeconds) ||
+		usageWindow.windowSeconds <= 0
+	) {
+		return null;
+	}
+	const reset = Date.parse(usageWindow.resetsAt);
+	if (Number.isNaN(reset)) {
+		return null;
+	}
+	const expected = Math.max(
+		0,
+		Math.min(
+			100,
+			100 * (1 - (reset - Date.now()) / (usageWindow.windowSeconds * 1000))
+		)
+	);
+	const difference = usageWindow.usedPercent - expected;
+	if (Math.abs(difference) < 1) {
+		return "on pace";
+	}
+	return difference > 0
+		? `${Math.round(difference)}% in deficit`
+		: `${Math.round(-difference)}% in reserve`;
+}
+
+function paceDotClass(usageWindow: UsageWindow): string {
+	const status = paceStatus(usageWindow);
+	if (status?.includes("deficit")) {
+		return "bg-red-500";
+	}
+	if (status?.includes("reserve")) {
+		return "bg-emerald-500";
+	}
+	return "bg-muted-foreground/40";
+}
+
 /** "$32.84" / "821 credits" / "42%" — one figure, formatted for its kind. */
 function formatValue(value: UsageValue): string {
 	if (value.kind === "dollars") {
@@ -372,6 +415,7 @@ function WindowTooltipRow({
 	const used = Math.max(0, Math.min(100, usageWindow.usedPercent));
 	const shown = mode === "remaining" ? 100 - used : used;
 	const reset = formatReset(usageWindow.resetsAt);
+	const pace = paceStatus(usageWindow);
 	return (
 		<span className="font-medium">
 			{usageWindow.label}: {Math.round(shown)}%{" "}
@@ -380,6 +424,9 @@ function WindowTooltipRow({
 				<span className="ml-1 font-normal text-muted-foreground">
 					· {reset}
 				</span>
+			) : null}
+			{pace ? (
+				<span className="ml-1 font-normal text-muted-foreground">· {pace}</span>
 			) : null}
 		</span>
 	);
@@ -644,6 +691,8 @@ function UsageWindowMeter({
 	// Color always reflects danger (high usage → red), regardless of which
 	// number is displayed; the bar fill matches the displayed number.
 	const reset = formatReset(usageWindow.resetsAt);
+	const pace = paceStatus(usageWindow);
+	const paceClass = paceDotClass(usageWindow);
 	const linearBar = (
 		<span
 			className={cn("h-1 w-8 overflow-hidden rounded-full", trackClass(used))}
@@ -667,6 +716,12 @@ function UsageWindowMeter({
 				<span className="text-[10px] tabular-nums">
 					{shortLabel(usageWindow)}
 				</span>
+				{pace ? (
+					<span
+						aria-hidden="true"
+						className={cn("size-1 rounded-full", paceClass)}
+					/>
+				) : null}
 				{showBar &&
 					(barStyle === "ring" ? (
 						<UsageRing shown={shown} used={used} />
@@ -685,6 +740,7 @@ function UsageWindowMeter({
 					{reset ? (
 						<span className="text-muted-foreground">{reset}</span>
 					) : null}
+					{pace ? <span className="text-muted-foreground">{pace}</span> : null}
 					{plan ? (
 						<span className="text-muted-foreground">Plan: {plan}</span>
 					) : null}

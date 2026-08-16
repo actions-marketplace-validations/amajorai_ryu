@@ -39,6 +39,8 @@ pub struct MockHost {
     pub queue_bail: bool,
     /// `Some` -> `dispatch_finetune` returns Ok with this; `None` -> Err.
     pub finetune: Option<Value>,
+    /// `Some` -> `merge_finetune` returns Ok with this; `None` -> Err.
+    pub merged: Option<Value>,
     /// Count of `reload_skills` calls — the tell that a skill was activated.
     pub reloaded: AtomicUsize,
     pub default_prm: String,
@@ -59,6 +61,7 @@ impl MockHost {
             queue: QueuedApproval::Queued,
             queue_bail: false,
             finetune: None,
+            merged: None,
             reloaded: AtomicUsize::new(0),
             default_prm: "default-prm-model".to_string(),
             default_synth: "default-synth-model".to_string(),
@@ -214,6 +217,13 @@ impl LearningHost for MockHost {
         match &self.finetune {
             Some(v) => Ok(v.clone()),
             None => Err("finetune dispatch failed".to_string()),
+        }
+    }
+
+    async fn merge_finetune(&self, _body: Value) -> Result<Value, String> {
+        match &self.merged {
+            Some(v) => Ok(v.clone()),
+            None => Err("finetune merge failed".to_string()),
         }
     }
 }

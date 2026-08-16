@@ -185,7 +185,7 @@ bun run test:plugins   # every packaged plugin's co-located tests
 ```
 
 The public-facing version of this document is
-`apps/fumadocs/content/docs/develop/extensions/testing-plugin-tools.mdx`; this file
+`apps/fumadocs/content/docs/extend/develop/extensions/testing-plugin-tools.mdx`; this file
 is the contributor-facing one and may name internals the docs page must not.
 
 ## Known gaps (deliberate, not oversights)

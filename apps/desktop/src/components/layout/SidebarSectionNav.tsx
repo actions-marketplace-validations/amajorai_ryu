@@ -84,7 +84,7 @@ export function SidebarSectionNav({
 				<motion.nav
 					animate={{ opacity: open ? 1 : 0 }}
 					aria-label="Jump to sidebar section"
-					className="no-scrollbar flex h-full flex-col gap-0.5 overflow-y-auto p-1.5"
+					className="scroll-fade no-scrollbar flex h-full flex-col gap-0.5 overflow-y-auto p-1.5"
 					initial={false}
 					style={{ pointerEvents: open ? "auto" : "none" }}
 					transition={{ duration: 0.12, delay: open ? 0.05 : 0 }}

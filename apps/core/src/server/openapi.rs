@@ -47,6 +47,7 @@ use utoipa::OpenApi;
         (name = "Gateway", description = "Gateway config/status/audit (proxied)."),
         (name = "Workflows", description = "Workflow DAG engine."),
         (name = "Preferences", description = "Cross-surface preferences KV."),
+        (name = "Usage Review", description = "On-demand conversation and activity reviews."),
 (name = "Activity", description = "Activity API endpoints."),
         (name = "Approvals", description = "Approvals API endpoints."),
         (name = "Clips", description = "Clips API endpoints."),
@@ -113,6 +114,10 @@ use utoipa::OpenApi;
         super::list_apps_catalog,
         super::install_app_from_url,
         super::reload_app_manifests,
+        super::mcp_oauth_api::list,
+        super::mcp_oauth_api::connect,
+        super::mcp_oauth_api::flow,
+        super::mcp_oauth_api::disconnect,
         super::install_app_handler,
         super::enable_app_handler,
         super::disable_app_handler,
@@ -219,6 +224,9 @@ use utoipa::OpenApi;
         super::delete_document,
         super::create_page,
         super::search_space,
+        super::set_retrieval_mode,
+        super::retrieval_mode_status,
+        super::cancel_retrieval_mode,
         // The `document.parse` capability's read model. Only the CAPABILITY route is
         // listed: `parse_document` / `parse_job` carry `#[utoipa::path]` too but are
         // not registered in the router, and documenting an unreachable path in the
@@ -296,6 +304,9 @@ use utoipa::OpenApi;
         super::agent_capabilities,
         super::usage_api::agent_usage,
         super::usage_api::provider_credits,
+        super::usage_review::get_review,
+        super::usage_review::get_settings,
+        super::usage_review::put_settings,
         // Threshold-driven model fallback
         super::routing_api::advice,
         super::routing_api::get_policy,
@@ -316,6 +327,7 @@ use utoipa::OpenApi;
         super::btw_handler,
         super::delete_btw_handler,
         super::chat_permission,
+        super::chat_question,
         super::chat_stream_resume,
         super::chat_suggestions::chat_suggestions,
         // Clips → feature-gated sub-doc merged in `api_doc()` (see Research note).
@@ -431,6 +443,8 @@ use utoipa::OpenApi;
         super::list_connections,
         // Notifications
         super::notifications_api::ack_notification,
+        super::notifications_api::archive_notification,
+        super::notifications_api::unarchive_notification,
         super::all_events_stream,
         super::get_alert_delivery,
         super::get_email_transport,

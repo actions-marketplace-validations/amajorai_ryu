@@ -386,6 +386,10 @@ export function CommunityAgentDetail({
 					<div className="mt-3 flex flex-col gap-3">
 						<RequiresRow label="Tools it expects" values={requires.tools} />
 						<RequiresRow
+							label="Plugins it expects (not installed)"
+							values={requires.requiredPlugins}
+						/>
+						<RequiresRow
 							label="Composio actions (not enabled)"
 							values={requires.composioActions}
 						/>

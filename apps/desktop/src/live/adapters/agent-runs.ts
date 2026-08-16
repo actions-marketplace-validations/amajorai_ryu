@@ -37,15 +37,27 @@ function runToActivity(run: RunSummary): LiveActivity {
 	const status =
 		run.run_status === "completed"
 			? "done"
+			: run.run_status === "awaiting_input"
+				? "waiting"
 			: run.run_status === "failed"
 				? "error"
+				: run.run_status === "interrupted"
+					? "error"
 				: "running";
+	const stateDetail =
+		run.run_status === "awaiting_input"
+			? "Needs your input"
+			: run.run_status === "interrupted"
+				? "Interrupted — continue manually"
+				: run.run_status === "failed"
+					? "Failed"
+					: "Working…";
 	return {
 		id: runId(run.id),
 		appId: "shell",
 		kind: "agent-run",
 		title: run.title ?? "Agent run",
-		detail: detail || "Working…",
+		detail: detail || stateDetail,
 		status,
 		icon: "loader-circle",
 		startedAt: run.created_at * 1000,

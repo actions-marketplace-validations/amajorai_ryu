@@ -733,7 +733,10 @@ pub fn accepts_chat_input(workflow: &Workflow) -> bool {
         Ok(g) => g,
         Err(_) => return false,
     };
-    graph.roots().iter().any(|&idx| matches!(&graph.graph[idx].kind, NodeKind::Input { .. }))
+    graph
+        .roots()
+        .iter()
+        .any(|&idx| matches!(&graph.graph[idx].kind, NodeKind::Input { .. }))
 }
 
 /// Validate, stamp, persist, and reconcile a workflow definition — the single
@@ -1059,10 +1062,13 @@ mod tests {
             name: "no-entry".into(),
             description: None,
             nodes: vec![
-                node("src", NodeKind::Transform {
-                    op: "identity".into(),
-                    template: None,
-                }),
+                node(
+                    "src",
+                    NodeKind::Transform {
+                        op: "identity".into(),
+                        template: None,
+                    },
+                ),
                 node("in", NodeKind::Input { key: None }),
                 node("out", NodeKind::Output { key: None }),
             ],
@@ -1096,6 +1102,9 @@ mod tests {
             to: "in".into(),
             branch: None,
         });
-        assert!(!accepts_chat_input(&wf), "a cyclic workflow is not chat-triggerable");
+        assert!(
+            !accepts_chat_input(&wf),
+            "a cyclic workflow is not chat-triggerable"
+        );
     }
 }

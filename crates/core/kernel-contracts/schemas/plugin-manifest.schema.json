@@ -359,8 +359,14 @@
       "type": "object"
     },
     "Contributes": {
-      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
+      "description": "VS-Code-style **contribution points** (`contributes` in `package.json`).\n\nThe original five surfaces (`commands`/`tools`/`agents`/`workflows`/`policies`)\nare lists of [`ContributionId`] references into the manifest's `runnables`: the\nplugin *declares* that runnable `X` contributes to that surface. This is\ndeclare-by-id, not a second copy of the runnable — the loader cross-validates\nthat every referenced id exists in `runnables`, so a typo is caught at load.\n\nMost surfaces added since are **self-contained**: they carry their own payload\nand reference no runnable at all (`widgets`, `views`, `dock_panels`,\n`sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,\n`slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,\n`message_actions`, `context_menu_items`, `agent_edit_panels`).\n\n# Extending\n\nAdding a surface is two decisions, and getting either wrong is silent:\n\n1. **Id-reference or self-contained?** An id-reference surface is a\n   `Vec<ContributionId>` and MUST be chained into [`Contributes::referenced_ids`]\n   so the loader can catch a typo. A self-contained surface must be left OUT of\n   it — every id in it names something other than a runnable (a PATH binary, a\n   route, a tool namespace), so including it would reject every valid manifest.\n   `referenced_ids` therefore covers exactly the five original surfaces and\n   nothing else; that omission is deliberate, not an oversight to be tidied up.\n2. **Core-interpreted or client-rendered?** If Core acts on the payload\n   (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed\n   struct, because a key Core does not know is by construction a key Core cannot\n   act on. If a client shell renders it (`views`, `dock_panels`,\n   `sidebar_sections`, `settings_tabs`, `composer_controls`,\n   `agent_edit_panels`) it stays opaque\n   JSON, because deserializing into a struct here would DROP any key this Core\n   build does not know about and a newer desktop would lose exactly the fields it\n   was shipped to render.\n\nClient-rendered surfaces are then served, tagged with the owning plugin id, from\n`GET /api/plugins/contributions`. Core-interpreted ones deliberately are not —\nthey are gathered at their own consumption site instead.",
       "properties": {
+        "agent_edit_panels": {
+          "default": [],
+          "description": "Client-rendered panels for the agent edit page. Entries are deliberately\nopaque and self-contained: the desktop owns the panel vocabulary, while\nCore only stores, tags, and forwards the declaration through the plugin\ncontributions endpoint. This lets a newer desktop add an agent-edit\npanel type without requiring every Core node to learn that type first.\nThese entries name no runnable ids and therefore are intentionally absent\nfrom [`Contributes::referenced_ids`].",
+          "items": true,
+          "type": "array"
+        },
         "agents": {
           "default": [],
           "description": "Agents the plugin contributes (referenced by runnable id).",
@@ -420,6 +426,14 @@
           "description": "**App events this plugin emits** — the *provider* half of the hook system,\nand the mirror image of [`Contributes::turn_hooks`] (the *consumer* half).\n\nCore's own hook phases (`post_assistant_turn`, `pre_tool_use`, `context`, …)\nare a closed set built into `plugin_host`, so before this surface existed a\nplugin could only react to things happening *in a chat turn*. An app that\nowns a real-world lifecycle — a meeting ending, a workflow run failing, an\nalert firing — had no way to let anything else react to it. That forced the\nclassic anti-pattern: every consumer polls the producer's HTTP routes, and\nevery new integration is bespoke wiring between two apps that must both be\nchanged.\n\nDeclaring an event here makes it a first-class hook phase. Any other plugin\nconsumes it by naming it in a `turn_hooks[].on`, and any workflow consumes it\nwith an `event` trigger — neither the producer nor Core learns anything about\nthe consumer. Apps therefore both **provide** and **consume** over one\nmechanism.\n\n# Ids are namespaced, and that is what makes collisions impossible\n\nEvery id MUST be `<owning plugin id>#<event name>` — the owning half is\nchecked against the manifest's own `id` at load, and the name half is\n`[a-z0-9][a-z0-9._-]*`. Because a Core phase name never contains `/`, an app\nliterally cannot declare an event that shadows one, no reserved-word list\nrequired. It is also why the emit path can authorize purely from the\nmanifest: the caller's authenticated plugin id must be the id in the event\nname, so an app can only ever emit its **own** events.\n\n# Core-interpreted, so a typed struct\n\nCore reads this table to authorize emits and to serve the event catalog, so\nper this type's own doc comment it gets a typed struct rather than opaque\nJSON. It names event strings rather than runnable ids, so it is\n**self-contained** and stays out of [`Contributes::referenced_ids`].",
           "items": {
             "$ref": "#/$defs/HookEventContribution"
+          },
+          "type": "array"
+        },
+        "live_activities": {
+          "default": [],
+          "description": "**Live activities** the plugin contributes — small, always-live status cards\nthe desktop shell's \"Dynamic Island\" dock (empty-shell launchpad + sidebar)\nrenders for something in progress: an agent run, a download, a pending\napproval, a recording. The desktop half of the same status vocabulary the\nmobile `AgentActivity` uses, so one mental model spans devices.\n\nEach entry is a [`LiveActivityContribution`]: a typed envelope (`id`/`title`/\n`icon`/`accent`/`order`) around an **opaque** `spec` payload the desktop\nrenderer interprets. Like a [`Contributes::sidebar_sections`] entry it carries\na `ViewSource` (a Core `/api/` path the shell polls) and a field-map; unlike a\nsection it maps response ROWS to live-activity cards (status/progress/target)\ninstead of nav rows. The app returns DATA — never code — so a live activity\ncannot be made ugly and needs zero sidecar code.\n\nSelf-contained (it names no runnable), so it stays out of\n[`Contributes::referenced_ids`]; the `spec` stays opaque to Core so a new\nactivity capability is a renderer change, not a Core change. Served + tagged\nwith the owning `plugin` id at `GET /api/plugins/contributions`.",
+          "items": {
+            "$ref": "#/$defs/LiveActivityContribution"
           },
           "type": "array"
         },
@@ -1038,6 +1052,49 @@
       },
       "type": "object"
     },
+    "LiveActivityContribution": {
+      "description": "One app-registered **live activity** — a small, always-live status card the\ndesktop's \"Dynamic Island\" dock (empty-shell launchpad + sidebar) renders for\nsomething in progress: an agent run, a download, a pending approval, a\nrecording. The desktop half of the status vocabulary the mobile `AgentActivity`\nuses (`running` / `waiting` / `review` / `done` / `error`), so one mental model\nspans devices.\n\nA typed envelope around an opaque `spec` (the `LiveActivitySpec` in\n`@ryu/app-host/live-activity`: a `ViewSource` for the live rows, a field-map\nfrom rows to card fields, and a `target` route template). Core stores it\nverbatim and tags it with the owning `plugin` id; the `spec` stays opaque so a\nnew activity capability is a renderer change, not a Core change.",
+      "properties": {
+        "accent": {
+          "description": "Optional accent colour hint (any CSS color) tinting the card.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icon": {
+          "description": "Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Stable id for this activity within the plugin (namespaced into the shell's\ndock identity as `plugin:<pluginId>:<id>:<rowId>`).",
+          "type": "string"
+        },
+        "order": {
+          "description": "Optional placement hint among the dock's activities (lower = first).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spec": {
+          "description": "The opaque activity spec (source/map/target). Interpreted by the desktop\nrenderer, never by Core. Absent = a header-only activity (renders nothing)."
+        },
+        "title": {
+          "description": "Human-facing title shown on the dock card (falls back to the row title).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
     "LocalProcessSpec": {
       "description": "A [`SidecarProcess::Local`] spec: spawn a binary already on the host, no fetch.",
       "properties": {
@@ -1168,8 +1225,33 @@
       },
       "type": "object"
     },
+    "McpServerAuthDecl": {
+      "description": "Authentication Ryu performs on behalf of the user for a remote MCP server.\n\n`deny_unknown_fields` is a security boundary: a publisher cannot smuggle a\nclient secret, token endpoint, redirect URI, token or scope list into a signed\nmanifest and have an older Core silently ignore it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "OAuth 2.1 authorization code with PKCE. `client_id`, when present, is a\nprovider-issued public client id; confidential client secrets are never a\nmanifest field.",
+          "properties": {
+            "client_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "oauth",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "McpServerDecl": {
-      "description": "One declarative **MCP server** a plugin registers (see\n[`PluginManifest::mcp_servers`]) — either a stdio command to spawn or a remote\nHTTP endpoint to call.\n\nThis is the manifest-side, dependency-free mirror of Core's runtime\n`McpServerConfig`: pure data (schemars/serde only) so it can live in\nkernel-contracts, with Core lowering it into its registry type on enable. A\nstdio server is spawned per request as `command args…`; `command_env` lets\nthe manifest name an env var Core resolves to an absolute binary path\n(e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the\nbare `command`. An HTTP server names a [`url`](McpServerDecl::url) instead and\nspawns nothing at all.\n\nThe field names mirror the `mcp.json` dialect users already paste from Cursor\nand Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a\nhand-written config entry are the same shape. Auth belongs in\n[`headers`](McpServerDecl::headers), never in `env` — a remote server has no\nprocess to inherit environment.",
+      "description": "One declarative **MCP server** a plugin registers (see\n[`PluginManifest::mcp_servers`]) — either a stdio command to spawn or a remote\nHTTP endpoint to call.\n\nThis is the manifest-side, dependency-free mirror of Core's runtime\n`McpServerConfig`: pure data (schemars/serde only) so it can live in\nkernel-contracts, with Core lowering it into its registry type on enable. A\nstdio server is spawned per request as `command args…`; `command_env` lets\nthe manifest name an env var Core resolves to an absolute binary path\n(e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the\nbare `command`. An HTTP server names a [`url`](McpServerDecl::url) instead and\nspawns nothing at all.\n\nThe field names mirror the `mcp.json` dialect users already paste from Cursor\nand Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a\nhand-written config entry are the same shape. Static API-key auth may live in\n[`headers`](McpServerDecl::headers). User-delegated OAuth is declared through\n[`auth`](McpServerDecl::auth), and Core owns the resulting token lifecycle.",
       "properties": {
         "args": {
           "description": "Arguments passed to the command.",
@@ -1177,6 +1259,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpServerAuthDecl"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Core-owned OAuth for this remote MCP server. The manifest may name only an\noptional public client id; discovery, PKCE, tokens and redirect URIs are\nintentionally outside the publisher-controlled manifest."
         },
         "command": {
           "description": "Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).\nAbsent for a remote (`url`) server.",

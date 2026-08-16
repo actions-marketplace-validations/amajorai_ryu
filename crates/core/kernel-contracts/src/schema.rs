@@ -164,8 +164,9 @@ pub struct ToolConfig {
     /// `command`: absolute working directory for the child. `None` = inherit Core's.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// `command`: hard wall-clock timeout in seconds (default
-    /// [`DEFAULT_COMMAND_TIMEOUT_SECS`]). The child is killed on elapse.
+    /// `command` and `inline_deno`: hard wall-clock timeout in seconds. Commands
+    /// default to [`DEFAULT_COMMAND_TIMEOUT_SECS`]; inline tools use this value
+    /// as their scoped sandbox deadline when present.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// `command`: how stdout is shaped into the tool result — `"stdout"` (default,

@@ -83,6 +83,10 @@ describe("searchSkills — request builder + card mapping", () => {
 	test("name prefers slug over id when name is absent", async () => {
 		stub(JSON.stringify({ skills: [{ id: "x", slug: "my-slug" }] }));
 		const [card] = await searchSkills(target);
+		expect(card).toBeDefined();
+		if (!card) {
+			return;
+		}
 		expect(card.name).toBe("my-slug");
 		expect(card.downloads).toBe(0);
 	});

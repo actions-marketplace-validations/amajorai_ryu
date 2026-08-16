@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock as TokioRwLock;
@@ -339,6 +339,15 @@ pub struct McpServerConfig {
     /// Request headers sent with every call to a remote server (auth lives here).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
+    /// Core-owned OAuth declaration for a manifest-provided remote server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<crate::plugin_manifest::McpServerAuthDecl>,
+    /// Runtime ownership, never read from or written to `mcp.json`.
+    #[serde(skip)]
+    pub owner_plugin_id: Option<String>,
+    /// Manifest map key paired with `owner_plugin_id`; runtime-only.
+    #[serde(skip)]
+    pub owner_server_name: Option<String>,
     /// Arguments passed to the command.
     #[serde(default)]
     pub args: Vec<String>,
@@ -398,6 +407,9 @@ impl Default for McpServerConfig {
             transport: None,
             url: None,
             headers: BTreeMap::new(),
+            auth: None,
+            owner_plugin_id: None,
+            owner_server_name: None,
             args: Vec::new(),
             env: BTreeMap::new(),
             description: None,
@@ -450,9 +462,7 @@ impl McpServerConfig {
                     .as_deref()
                     .map(str::trim)
                     .filter(|u| !u.is_empty())
-                    .ok_or_else(|| {
-                        anyhow!("MCP server declares an http transport but no 'url'")
-                    })?;
+                    .ok_or_else(|| anyhow!("MCP server declares an http transport but no 'url'"))?;
                 Ok(McpTarget::Http(McpHttpEndpoint {
                     url: url.to_owned(),
                     headers: self.headers.clone(),
@@ -465,7 +475,9 @@ impl McpServerConfig {
                     .map(str::trim)
                     .filter(|c| !c.is_empty())
                     .ok_or_else(|| {
-                        anyhow!("MCP server declares neither a 'command' (stdio) nor a 'url' (http)")
+                        anyhow!(
+                            "MCP server declares neither a 'command' (stdio) nor a 'url' (http)"
+                        )
                     })?;
                 Ok(McpTarget::Stdio(McpStdioCommand {
                     command: spawn_program_for(command),
@@ -503,7 +515,9 @@ impl McpServerConfig {
             Some("stdio") => McpTransportKind::Stdio,
             Some("http" | "streamable-http" | "streamable_http" | "sse") => McpTransportKind::Http,
             // Unstated or unrecognized: infer from which half is filled in.
-            _ if self.url.as_deref().is_some_and(|u| !u.trim().is_empty()) => McpTransportKind::Http,
+            _ if self.url.as_deref().is_some_and(|u| !u.trim().is_empty()) => {
+                McpTransportKind::Http
+            }
             _ => McpTransportKind::Stdio,
         }
     }
@@ -515,6 +529,170 @@ impl McpServerConfig {
             McpTransportKind::Stdio => "stdio",
         }
     }
+}
+
+fn oauth_http_failure(error: &anyhow::Error, status: reqwest::StatusCode) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<client::McpHttpFailure>()
+            .is_some_and(|failure| failure.status == status)
+    })
+}
+
+fn oauth_challenge_header(error: &anyhow::Error) -> Option<String> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<client::McpHttpFailure>()
+            .and_then(|failure| failure.www_authenticate.clone())
+    })
+}
+
+fn oauth_requires_connect(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("authentication required")
+        || message.contains("reconnect required")
+        || message.contains("has no refresh token")
+}
+
+fn oauth_owner_from_principal(principal: &ToolPrincipal) -> Result<String> {
+    match principal {
+        ToolPrincipal::Unrestricted => Ok("local".to_owned()),
+        ToolPrincipal::Owned { user_id, .. } => Ok(user_id.clone()),
+        ToolPrincipal::Unresolved => {
+            bail!("a verified user identity is required for MCP OAuth on a shared node")
+        }
+    }
+}
+
+async fn oauth_profile_for(
+    owner_user_id: &str,
+    cfg: &McpServerConfig,
+    profile_ids: &[String],
+) -> Result<String> {
+    let plugin_id = cfg
+        .owner_plugin_id
+        .as_deref()
+        .context("OAuth MCP server has no owning plugin")?;
+    let server_name = cfg
+        .owner_server_name
+        .as_deref()
+        .context("OAuth MCP server has no owning manifest key")?;
+    let candidates: Vec<&str> = if profile_ids.is_empty() {
+        vec![crate::mcp_oauth::default_profile_id()]
+    } else {
+        profile_ids.iter().map(String::as_str).collect()
+    };
+    let Some(store) = crate::identity::global() else {
+        return Ok(candidates[0].to_owned());
+    };
+    let mut connected = Vec::new();
+    for profile_id in &candidates {
+        if store
+            .find_mcp_oauth_connection(owner_user_id, profile_id, plugin_id, server_name)
+            .await?
+            .is_some_and(|connection| {
+                connection.status == crate::identity::McpOAuthConnectionStatus::Connected
+            })
+        {
+            connected.push((*profile_id).to_owned());
+        }
+    }
+    match connected.as_slice() {
+        [profile_id] => Ok(profile_id.clone()),
+        [] => Ok(candidates[0].to_owned()),
+        _ => bail!(
+            "multiple bound identity profiles are connected to this MCP server; select one profile explicitly"
+        ),
+    }
+}
+
+async fn oauth_target(
+    cfg: &McpServerConfig,
+    owner_user_id: &str,
+    profile_id: &str,
+    force_refresh: bool,
+    session_id: Option<String>,
+) -> Result<McpTarget> {
+    let mut target = cfg.to_target()?;
+    let Some(_) = cfg.auth else {
+        return Ok(target);
+    };
+    let plugin_id = cfg
+        .owner_plugin_id
+        .as_deref()
+        .context("OAuth MCP server has no owning plugin")?;
+    let server_name = cfg
+        .owner_server_name
+        .as_deref()
+        .context("OAuth MCP server has no owning manifest key")?;
+    let resource = cfg
+        .url
+        .as_deref()
+        .context("OAuth MCP server has no resource URL")?;
+    let token = crate::mcp_oauth::global()
+        .access_token(
+            owner_user_id,
+            profile_id,
+            plugin_id,
+            server_name,
+            resource,
+            cfg.auth
+                .as_ref()
+                .and_then(crate::plugin_manifest::McpServerAuthDecl::client_id),
+            force_refresh,
+            session_id,
+        )
+        .await?;
+    if let McpTarget::Http(endpoint) = &mut target {
+        endpoint
+            .headers
+            .insert("Authorization".to_owned(), format!("Bearer {token}"));
+    }
+    Ok(target)
+}
+
+async fn oauth_elicitation(
+    cfg: &McpServerConfig,
+    owner_user_id: &str,
+    profile_id: &str,
+    challenge: Option<String>,
+) -> Result<Value> {
+    let started = crate::mcp_oauth::global()
+        .start_connect(crate::mcp_oauth::ConnectSpec {
+            owner_user_id: owner_user_id.to_owned(),
+            profile_id: profile_id.to_owned(),
+            plugin_id: cfg
+                .owner_plugin_id
+                .clone()
+                .context("OAuth MCP server has no owning plugin")?,
+            server_name: cfg
+                .owner_server_name
+                .clone()
+                .context("OAuth MCP server has no owning manifest key")?,
+            resource_url: cfg
+                .url
+                .clone()
+                .context("OAuth MCP server has no resource URL")?,
+            auth: cfg
+                .auth
+                .clone()
+                .context("OAuth MCP server has no auth declaration")?,
+            callback_mode: crate::mcp_oauth::CallbackMode::Auto,
+            static_headers: cfg.headers.clone(),
+            challenge,
+        })
+        .await?;
+    Ok(crate::identity::to_envelope(
+        &crate::tool_exec::Elicitation {
+            kind: "url".to_owned(),
+            message: format!(
+                "Connect {} before using this MCP server, then retry.",
+                cfg.owner_server_name.as_deref().unwrap_or("the account")
+            ),
+            url: Some(started.authorization_url),
+            requested_schema: None,
+        },
+    ))
 }
 
 /// The two transports a config entry can name. Not the same axis as the wire
@@ -579,6 +757,9 @@ pub fn mcp_server_config_from_decl(
         transport: decl.transport.clone(),
         url: decl.url.clone(),
         headers: decl.headers.clone(),
+        auth: decl.auth.clone(),
+        owner_plugin_id: None,
+        owner_server_name: None,
         args: decl.args.clone(),
         env: decl.env.clone(),
         description: decl.description.clone(),
@@ -631,11 +812,10 @@ pub const GRANT_MCP_SERVER: &str = "mcp:server";
 
 /// Whether a plugin may register its manifest-declared `mcp_servers`.
 ///
-/// **Core**-tier (compiled-in fixtures — `ghost`, `agentbrowser`, `scrapling`) is auto-allowed:
-/// its manifests ship inside the binary and cannot be edited on disk (the loader
-/// parses built-ins FIRST and first-occurrence-wins, so a disk manifest can never
-/// take a Core id). **Community**-tier — anything loaded from
-/// `~/.ryu/plugins` — needs the approved [`GRANT_MCP_SERVER`] grant.
+/// **Core**-tier packages are auto-allowed. Core tier is a reviewed capability
+/// policy, not a statement that the package is embedded in the binary; official
+/// marketplace packages may be installed on disk and still receive this gate.
+/// **Community**-tier packages need the approved [`GRANT_MCP_SERVER`] grant.
 ///
 /// `approved_grants` MUST be the Gateway-approved set
 /// ([`crate::plugins::PluginRecord::approved_grants`]), never the manifest's
@@ -741,7 +921,9 @@ pub fn register_manifest_mcp_servers(
     }
     let mut names = Vec::new();
     for (name, decl) in &manifest.mcp_servers {
-        let config = mcp_server_config_from_decl(decl);
+        let mut config = mcp_server_config_from_decl(decl);
+        config.owner_plugin_id = Some(manifest.id.clone());
+        config.owner_server_name = Some(name.clone());
         if !mcp_server_is_present(&config) {
             tracing::warn!(
                 "plugin '{}' declares MCP server '{name}' but its command '{}' is not \
@@ -1284,8 +1466,11 @@ pub const GHOST_RUN_TOOL: &str = "ghost__ghost_run";
 #[allow(dead_code)]
 pub const AGENTBROWSER_SERVER: &str = "agentbrowser";
 
-/// Separator between server name and tool name in a fully-qualified tool id.
-const TOOL_ID_SEP: &str = "__";
+/// Canonical separator between server name and tool name in a fully-qualified
+/// tool id. Legacy double-underscore ids remain readable at the compatibility
+/// boundary, but newly generated ids use this separator.
+const TOOL_ID_SEP: &str = ".";
+const LEGACY_TOOL_ID_SEP: &str = "__";
 
 /// Synthetic "server" name for tools an enabled plugin re-exposes
 /// (tool-as-Runnable, M3). These ids look like `app__<target-tool-id>` and are
@@ -1293,7 +1478,7 @@ const TOOL_ID_SEP: &str = "__";
 const APP_TOOL_SERVER: &str = "app";
 
 /// Id prefix for app-registered tools (`APP_TOOL_SERVER` + `TOOL_ID_SEP`).
-const APP_TOOL_PREFIX: &str = "app__";
+const APP_TOOL_PREFIX: &str = "app.";
 
 /// Most derived ext-API operations one app may contribute
 /// ([`McpRegistry::set_ext_api_routes`]).
@@ -1463,7 +1648,7 @@ fn effective_tool_grants(
     manifest: &PluginManifest,
     approved_grants: &[String],
 ) -> std::collections::HashSet<String> {
-    match crate::plugins::builtins::tier_for(&manifest.id) {
+    match crate::plugins::builtins::tier_for_manifest(manifest) {
         crate::plugin_manifest::PluginTier::Core => {
             manifest.permission_grants.iter().cloned().collect()
         }
@@ -1649,6 +1834,9 @@ struct ResolvedAppTool {
     /// declared no `permissions` block → the sandbox stays **deny-all** (its
     /// historical zero-permission posture).
     permissions: Option<crate::plugin_manifest::PermissionSet>,
+    /// Optional active-compute deadline for an inline sandbox tool. The value is
+    /// clamped at dispatch so a manifest cannot create an unbounded execution.
+    timeout_secs: Option<u64>,
 }
 
 /// The config-driven MCP server registry. Cheap to clone-share via `Arc`.
@@ -2026,6 +2214,14 @@ impl McpRegistry {
             }
         }
 
+        // Fleet state is a separate, signed overlay. It never rewrites the
+        // user's mcp.json; required entries win name collisions, while blocked
+        // names disappear even if a user-owned config remains on disk.
+        servers.retain(|name, _| !crate::fleet::is_artifact_blocked(name));
+        for (name, config) in crate::fleet::managed_mcp_configs() {
+            servers.insert(name, config);
+        }
+
         servers
     }
 
@@ -2361,21 +2557,23 @@ impl McpRegistry {
             ..Default::default()
         }));
         let servers = self.servers.read().expect("mcp servers RwLock poisoned");
-        summaries.extend(servers.iter().map(|(name, cfg)| ServerSummary {
-            name: name.clone(),
-            // A remote entry has no command; show the endpoint in the column the
-            // UI already renders rather than an empty cell.
-            command: cfg
-                .command
-                .clone()
-                .or_else(|| cfg.url.clone())
-                .unwrap_or_default(),
-            args: cfg.args.clone(),
-            description: cfg.description.clone(),
-            enabled: cfg.enabled,
-            available: config_availability(cfg),
-            transport: Some(cfg.transport_label().to_owned()),
-            url: cfg.url.clone(),
+        summaries.extend(servers.iter().map(|(name, cfg)| {
+            ServerSummary {
+                name: name.clone(),
+                // A remote entry has no command; show the endpoint in the column the
+                // UI already renders rather than an empty cell.
+                command: cfg
+                    .command
+                    .clone()
+                    .or_else(|| cfg.url.clone())
+                    .unwrap_or_default(),
+                args: cfg.args.clone(),
+                description: cfg.description.clone(),
+                enabled: cfg.enabled,
+                available: config_availability(cfg),
+                transport: Some(cfg.transport_label().to_owned()),
+                url: cfg.url.clone(),
+            }
         }));
         summaries
     }
@@ -2388,6 +2586,7 @@ impl McpRegistry {
     /// Split a fully-qualified tool id back into `(server, tool)`.
     pub fn split_tool_id(id: &str) -> Option<(&str, &str)> {
         id.split_once(TOOL_ID_SEP)
+            .or_else(|| id.split_once(LEGACY_TOOL_ID_SEP))
     }
 
     /// List tools for one enabled server, using the cache when warm.
@@ -2396,17 +2595,27 @@ impl McpRegistry {
     /// before any `.await` — never hold an `RwLock` guard across an await point.
     async fn tools_for_server(&self, name: &str) -> Result<Vec<RegistryTool>> {
         // Extract owned config values under the read lock; drop immediately.
-        let (enabled, cmd) = {
+        let cfg = {
             let servers = self.servers.read().expect("mcp servers RwLock poisoned");
             let cfg = servers
                 .get(name)
                 .ok_or_else(|| anyhow!("unknown MCP server: {name}"))?;
-            (cfg.enabled, cfg.to_target())
+            cfg.clone()
         };
-        if !enabled {
+        if !cfg.enabled {
             return Ok(vec![]);
         }
-        let cmd = cmd?;
+        let cmd = if cfg.auth.is_some() {
+            if crate::sidecar::control_plane::registered_org().is_some() {
+                bail!(
+                    "MCP server '{name}' needs an explicit user/profile preflight on this shared node"
+                );
+            }
+            let profile = oauth_profile_for("local", &cfg, &[]).await?;
+            oauth_target(&cfg, "local", &profile, false, None).await?
+        } else {
+            cfg.to_target()?
+        };
 
         if let Some(cached) = self
             .tool_cache
@@ -3122,13 +3331,16 @@ impl McpRegistry {
         // Built-in Composio provider (#474): searchable-not-listed, executed by
         // id prefix. Detected before split because the allowlist guard is
         // id-only (no bare name/server fallback).
-        if tool_id.starts_with("composio__") {
+        if tool_id.starts_with("composio.") || tool_id.starts_with("composio__") {
             if let Some(list) = allowlist {
                 if !list.iter().any(|e| e == tool_id) {
                     return Err(anyhow!("tool '{tool_id}' is not in this agent's allowlist"));
                 }
             }
-            let slug = tool_id.strip_prefix("composio__").unwrap_or(tool_id);
+            let slug = tool_id
+                .strip_prefix("composio.")
+                .or_else(|| tool_id.strip_prefix("composio__"))
+                .unwrap_or(tool_id);
             return composio::dispatch(&self.http, slug, arguments, user_id).await;
         }
 
@@ -3378,9 +3590,8 @@ impl McpRegistry {
                             "agent_id": agent_id,
                             "conversation_id": host_conversation_id,
                         });
-                        let program = crate::tool_exec::build_inline_tool_program(
-                            &arguments, &caller, &code,
-                        );
+                        let program =
+                            crate::tool_exec::build_inline_tool_program(&arguments, &caller, &code);
                         // Lower the owning manifest's unified permission set to the
                         // Deno sandbox. `None` (no `permissions` block) keeps the
                         // historical deny-all posture; a declared set opens exactly
@@ -3413,14 +3624,22 @@ impl McpRegistry {
                         // edge must be boxed to keep the async future finite-sized.
                         // Called on the crate directly (not via the `crate::tool_exec`
                         // facade) so the wiring stays inside this change's file set.
-                        let outcome = Box::pin(ryu_tool_exec::run_sandboxed_with_augment(
-                            program,
-                            invoker,
-                            &resolved.plugin_id,
-                            resolved.permissions.as_ref(),
-                            &augment,
-                        ))
-                        .await;
+                        let deadline = std::time::Duration::from_secs(
+                            resolved
+                                .timeout_secs
+                                .unwrap_or(ryu_tool_exec::DEFAULT_DEADLINE_SECS)
+                                .clamp(30, 600),
+                        );
+                        let outcome =
+                            Box::pin(ryu_tool_exec::run_sandboxed_with_augment_and_deadline(
+                                program,
+                                invoker,
+                                &resolved.plugin_id,
+                                resolved.permissions.as_ref(),
+                                &augment,
+                                deadline,
+                            ))
+                            .await;
                         return match outcome {
                             crate::tool_exec::ExecOutcome::Completed {
                                 result,
@@ -3952,7 +4171,7 @@ impl McpRegistry {
         }
 
         // Extract owned values under the read lock; drop the guard before .await.
-        let (enabled, cmd) = {
+        let cfg = {
             let servers = self.servers.read().expect("mcp servers RwLock poisoned");
             let cfg = servers
                 .get(server)
@@ -3960,13 +4179,8 @@ impl McpRegistry {
             if !cfg.enabled {
                 return Err(anyhow!("MCP server '{server}' is disabled"));
             }
-            (cfg.enabled, cfg.to_target())
+            cfg.clone()
         };
-        let cmd = cmd?;
-
-        if !enabled {
-            return Err(anyhow!("MCP server '{server}' is disabled"));
-        }
 
         // Enforce the per-agent allowlist before spawning anything.
         if let Some(list) = allowlist {
@@ -3976,7 +4190,64 @@ impl McpRegistry {
             }
         }
 
-        client::call_tool(&cmd, tool, arguments).await
+        if cfg.auth.is_none() {
+            return client::call_tool(&cfg.to_target()?, tool, arguments).await;
+        }
+
+        let principal = match self.conversations.as_ref() {
+            Some(store) => ToolPrincipal::resolve(store, host_conversation_id).await,
+            None if crate::sidecar::control_plane::registered_org().is_none() => {
+                ToolPrincipal::Unrestricted
+            }
+            None => ToolPrincipal::Unresolved,
+        };
+        let owner_user_id = oauth_owner_from_principal(&principal)?;
+        let profile_id = oauth_profile_for(&owner_user_id, &cfg, profile_ids).await?;
+        let cmd = match oauth_target(&cfg, &owner_user_id, &profile_id, false, session_id.clone())
+            .await
+        {
+            Ok(target) => target,
+            Err(error) if oauth_requires_connect(&error) => {
+                return oauth_elicitation(&cfg, &owner_user_id, &profile_id, None).await;
+            }
+            Err(error) => return Err(error),
+        };
+        match client::call_tool(&cmd, tool, arguments.clone()).await {
+            Ok(result) => Ok(result),
+            Err(error) if oauth_http_failure(&error, reqwest::StatusCode::UNAUTHORIZED) => {
+                let refreshed =
+                    match oauth_target(&cfg, &owner_user_id, &profile_id, true, session_id.clone())
+                        .await
+                    {
+                        Ok(target) => target,
+                        Err(refresh_error) if oauth_requires_connect(&refresh_error) => {
+                            return oauth_elicitation(&cfg, &owner_user_id, &profile_id, None)
+                                .await;
+                        }
+                        Err(refresh_error) => return Err(refresh_error),
+                    };
+                match client::call_tool(&refreshed, tool, arguments).await {
+                    Ok(result) => Ok(result),
+                    Err(retry_error)
+                        if oauth_http_failure(&retry_error, reqwest::StatusCode::UNAUTHORIZED) =>
+                    {
+                        oauth_elicitation(&cfg, &owner_user_id, &profile_id, None).await
+                    }
+                    Err(retry_error) => Err(retry_error),
+                }
+            }
+            Err(error) if oauth_http_failure(&error, reqwest::StatusCode::FORBIDDEN) => {
+                let challenge = oauth_challenge_header(&error);
+                let is_step_up = challenge.as_deref().is_some_and(|value| {
+                    value.contains("insufficient_scope") || value.contains("scope=")
+                });
+                if !is_step_up {
+                    return Err(error);
+                }
+                oauth_elicitation(&cfg, &owner_user_id, &profile_id, challenge).await
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Register an in-memory tool exposed by an enabled app (tool-as-Runnable,
@@ -4126,9 +4397,7 @@ impl McpRegistry {
         // sidecar that fit perfectly well a moment ago, on nothing but a re-wake.
         let sibling_rows: usize = map
             .iter()
-            .filter(|(key, _)| {
-                key.as_str() != sidecar_key && ext_api_key_owned_by(key, plugin_id)
-            })
+            .filter(|(key, _)| key.as_str() != sidecar_key && ext_api_key_owned_by(key, plugin_id))
             .map(|(_, r)| r.len())
             .sum();
         let plugin_budget = EXT_API_PER_PLUGIN_CAP.saturating_sub(sibling_rows);
@@ -4243,10 +4512,7 @@ impl McpRegistry {
     /// [`Self::set_ext_api_routes`].
     fn ext_api_route(&self, tool_id: &str) -> Option<crate::ext_api::ExtApiRoute> {
         let map = self.ext_api.lock().ok()?;
-        map.values()
-            .flatten()
-            .find(|r| r.id == tool_id)
-            .cloned()
+        map.values().flatten().find(|r| r.id == tool_id).cloned()
     }
 
     /// The ENABLED plugin manifests — the candidate set every capability binding is
@@ -4552,6 +4818,7 @@ impl McpRegistry {
                     grants,
                     plugin_id: manifest.id.clone(),
                     permissions: manifest.permissions.clone(),
+                    timeout_secs: cfg.timeout_secs,
                 });
             }
         }
@@ -5075,7 +5342,7 @@ mod tests {
         register_manifest_mcp_servers(
             reg,
             manifest,
-            crate::plugins::builtins::tier_for(&manifest.id),
+            crate::plugins::builtins::tier_for_manifest(manifest),
             &approved,
         )
     }
@@ -5626,7 +5893,7 @@ mod tests {
                 command: Some(command.to_owned()),
                 args: vec!["-y".to_owned()],
                 ..Default::default()
-        };
+            };
             let McpTarget::Stdio(lowered) = cfg.to_target().expect("stdio target") else {
                 panic!("a config with a command must lower to the stdio transport");
             };
@@ -6203,7 +6470,7 @@ mod tests {
                 transport: declared.map(str::to_owned),
                 url: Some("https://mcp.example.com/mcp".to_owned()),
                 ..Default::default()
-        };
+            };
             assert_eq!(
                 cfg.transport_kind(),
                 McpTransportKind::Http,
@@ -6451,11 +6718,7 @@ mod tests {
     async fn derived_tool_dispatch_rejects_unknown_id() {
         let reg = McpRegistry::empty();
         let err = reg
-            .call_tool(
-                "ryu_ext__ryu_crm__get_records",
-                serde_json::json!({}),
-                None,
-            )
+            .call_tool("ryu_ext__ryu_crm__get_records", serde_json::json!({}), None)
             .await
             .expect_err("an unregistered derived id must be rejected");
         assert!(
@@ -6476,11 +6739,7 @@ mod tests {
             vec![derived_route("ryu_ext__ryu_crm__get_records", "@ryu/crm")],
         );
         let err = reg
-            .call_tool(
-                "ryu_ext__ryu_crm__get_records",
-                serde_json::json!({}),
-                None,
-            )
+            .call_tool("ryu_ext__ryu_crm__get_records", serde_json::json!({}), None)
             .await
             .expect_err("no wired app store means no enabled owner");
         assert!(

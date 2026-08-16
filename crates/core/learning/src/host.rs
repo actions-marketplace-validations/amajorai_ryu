@@ -103,4 +103,8 @@ pub trait LearningHost: Send + Sync {
     /// Dispatch a fine-tune job (the reward-filtered retrain) through Core's
     /// fine-tune path. Returns the sidecar's JSON response or an error string.
     async fn dispatch_finetune(&self, body: Value) -> Result<Value, String>;
+
+    /// Merge a completed adapter into a registered model artifact. Serving
+    /// activation remains a separate Core-owned transaction.
+    async fn merge_finetune(&self, body: Value) -> Result<Value, String>;
 }

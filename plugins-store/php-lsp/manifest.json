@@ -2,6 +2,7 @@
   "id": "@ryu/php-lsp",
   "name": "PHP LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "PHP language server (Intelephense) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install intelephense; the plugin ships config.",
   "tagline": "PHP code intelligence via Intelephense",

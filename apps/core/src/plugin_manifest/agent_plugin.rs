@@ -65,8 +65,7 @@ use serde_json::{Map, Value};
 pub const SPEC_SCHEMA_PREFIX: &str = "https://agent-plugins.org/schemas/";
 
 /// The one manifest schema identifier we implement (§5.2).
-pub const PLUGIN_SCHEMA_URL: &str =
-    "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+pub const PLUGIN_SCHEMA_URL: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 
 /// The one MCP configuration schema identifier we implement (§7.2.1).
 pub const MCP_SCHEMA_URL: &str = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
@@ -200,7 +199,9 @@ fn resolve_command(command: &str, plugin_root: &Path) -> Result<String, String> 
         // path when the file does not exist yet, which `starts_with` still rejects
         // for a `../` escape.
         let resolved = joined.canonicalize().unwrap_or(joined);
-        let root = plugin_root.canonicalize().unwrap_or_else(|_| plugin_root.to_path_buf());
+        let root = plugin_root
+            .canonicalize()
+            .unwrap_or_else(|_| plugin_root.to_path_buf());
         if !resolved.starts_with(&root) {
             return Err(format!(
                 "command '{command}' resolves outside the plugin root"
@@ -267,8 +268,8 @@ fn to_native_server(
         .get("command")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("server '{name}' has no 'command'"))?;
-    let command = resolve_command(command, plugin_root)
-        .map_err(|e| format!("server '{name}': {e}"))?;
+    let command =
+        resolve_command(command, plugin_root).map_err(|e| format!("server '{name}': {e}"))?;
 
     let mut decl = Map::new();
     decl.insert("command".to_string(), Value::String(command));
@@ -423,7 +424,9 @@ fn read_ryu_extension(
         match crate::plugin_manifest::validate_plugin_id(id) {
             Ok(()) => Some(id.to_string()),
             Err(e) => {
-                notes.push(format!("extension id '{id}' is invalid ({e}); derived instead"));
+                notes.push(format!(
+                    "extension id '{id}' is invalid ({e}); derived instead"
+                ));
                 None
             }
         }
@@ -548,9 +551,8 @@ pub fn import_manifest(dir: &Path, raw: &str) -> Result<ImportedAgentPlugin, Str
     // directory name is not the id's on-disk form ships skills the materializer
     // will never look for.
     if dir.join("skills").is_dir() {
-        let expected = crate::plugin_manifest::plugin_dir_name(
-            native["id"].as_str().unwrap_or_default(),
-        );
+        let expected =
+            crate::plugin_manifest::plugin_dir_name(native["id"].as_str().unwrap_or_default());
         let actual = dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -588,9 +590,7 @@ mod tests {
     use super::*;
 
     fn spec_manifest(extra: &str) -> String {
-        format!(
-            r#"{{"$schema":"{PLUGIN_SCHEMA_URL}","name":"summarize"{extra}}}"#
-        )
+        format!(r#"{{"$schema":"{PLUGIN_SCHEMA_URL}","name":"summarize"{extra}}}"#)
     }
 
     #[test]
@@ -610,7 +610,10 @@ mod tests {
         assert_eq!(imported.manifest["id"], "@agent-plugins/summarize");
         assert_eq!(imported.manifest["name"], "summarize");
         assert_eq!(imported.manifest["version"], "0.0.0");
-        assert!(imported.manifest["runnables"].as_array().unwrap().is_empty());
+        assert!(imported.manifest["runnables"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -713,7 +716,10 @@ mod tests {
         let server = &imported.manifest["mcp_servers"]["tool"];
         let arg = server["args"][1].as_str().unwrap();
         assert!(arg.starts_with(dir.path().to_str().unwrap()), "{arg}");
-        assert!(!server["env"]["D"].as_str().unwrap().contains("${PLUGIN_DATA}"));
+        assert!(!server["env"]["D"]
+            .as_str()
+            .unwrap()
+            .contains("${PLUGIN_DATA}"));
     }
 
     #[test]
@@ -759,7 +765,10 @@ mod tests {
         let servers = imported.manifest["mcp_servers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
         assert!(servers.contains_key("ok"));
-        assert!(imported.notes.iter().any(|n| n.contains("remote transport")));
+        assert!(imported
+            .notes
+            .iter()
+            .any(|n| n.contains("remote transport")));
         assert!(imported.notes.iter().any(|n| n.contains("enabled")));
     }
 
@@ -808,6 +817,9 @@ mod tests {
         );
         let imported = import_manifest(dir.path(), &spec_manifest("")).unwrap();
         assert!(imported.manifest.get("mcp_servers").is_none());
-        assert!(imported.notes.iter().any(|n| n.contains("unsupported schema")));
+        assert!(imported
+            .notes
+            .iter()
+            .any(|n| n.contains("unsupported schema")));
     }
 }

@@ -264,7 +264,7 @@ export function RecordDetail({
 				<p className="text-muted-foreground text-sm">
 					{error ?? "That record could not be loaded."}
 				</p>
-				<Button onClick={onBack} size="sm" variant="outline">
+				<Button onClick={onBack} size="sm" variant="ghost">
 					Back
 				</Button>
 			</div>
@@ -301,7 +301,7 @@ export function RecordDetail({
 								);
 						}}
 						size="sm"
-						variant="outline"
+						variant="ghost"
 					>
 						Restore
 					</Button>
@@ -316,7 +316,7 @@ export function RecordDetail({
 
 			<div className="grid min-h-0 flex-1 grid-cols-1 gap-0 overflow-hidden lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
 				{/* Fields + relations */}
-				<aside className="min-h-0 overflow-y-auto border-b p-4 lg:border-r lg:border-b-0">
+				<aside className="scroll-fade min-h-0 overflow-y-auto border-b p-4 lg:border-r lg:border-b-0">
 					<h3 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">
 						Details
 					</h3>
@@ -501,7 +501,7 @@ export function RecordDetail({
 						</div>
 					</div>
 
-					<ol className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+					<ol className="scroll-fade min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
 						{timeline.map((entry) => (
 							<TimelineEntry
 								activity={entry}

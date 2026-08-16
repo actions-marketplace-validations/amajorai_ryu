@@ -236,7 +236,13 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["coordination", "description", "lead_agent_id", "members", "name"]
+            [
+                "coordination",
+                "description",
+                "lead_agent_id",
+                "members",
+                "name"
+            ]
         );
         assert_eq!(obj["coordination"], serde_json::json!("debate-synthesis"));
     }

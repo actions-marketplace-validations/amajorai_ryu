@@ -941,10 +941,8 @@ impl SidecarManager {
                 // died-on-its-own sidecar from rendering as an ordinary scaled-to-zero
                 // one — before it existed this row read `running: true,
                 // failure_reason: None` for a process that no longer existed.
-                failure_reason: crate::sidecar::manifest_sidecar::registration_failure_reason(
-                    name,
-                )
-                .or_else(|| crate::sidecar::manifest_sidecar::crash_reason(name)),
+                failure_reason: crate::sidecar::manifest_sidecar::registration_failure_reason(name)
+                    .or_else(|| crate::sidecar::manifest_sidecar::crash_reason(name)),
             }
         };
         let mut out: Vec<SidecarStatus> = self
@@ -1145,6 +1143,23 @@ impl SidecarManager {
             .iter()
             .find(|(_, owner)| owner.as_str() == name)
             .map(|(port, _)| *port)
+    }
+
+    /// Resolve a live manifest sidecar owned by `plugin_id` to its loopback base URL.
+    ///
+    /// This deliberately goes through [`Self::forward_target`] rather than reading a
+    /// manifest or the declared port. The manager's claim is the proof that Core owns
+    /// the port, and the liveness check prevents returning a URL after the child has
+    /// exited. Requiring the local sidecar name keeps the result unambiguous when a
+    /// plugin declares more than one sidecar.
+    pub fn sidecar_base_url(
+        &self,
+        plugin_id: &str,
+        sidecar_name: &str,
+    ) -> Result<String, ForwardDenied> {
+        let name = crate::sidecar::manifest_sidecar::namespaced_name(plugin_id, sidecar_name);
+        self.forward_target(&name)
+            .map(|target| format!("http://127.0.0.1:{}", target.port()))
     }
 
     /// **The only way to obtain a dialable port for a sidecar.** Returns the port this
@@ -1789,7 +1804,10 @@ mod tests {
 
         // …and the status plane says so, instead of `running: true, reason: None`.
         let statuses = mgr.statuses();
-        let row = statuses.iter().find(|s| s.name == name).expect("status row");
+        let row = statuses
+            .iter()
+            .find(|s| s.name == name)
+            .expect("status row");
         assert!(!row.running, "a crashed sidecar must not report running");
         assert!(
             row.failure_reason
@@ -1822,7 +1840,10 @@ mod tests {
             "a stopped sidecar must never be recorded as crashed"
         );
         let statuses = mgr.statuses();
-        let row = statuses.iter().find(|s| s.name == name).expect("status row");
+        let row = statuses
+            .iter()
+            .find(|s| s.name == name)
+            .expect("status row");
         assert!(row.failure_reason.is_none());
 
         mgr.stop_and_deregister(name).await.unwrap();
@@ -2036,7 +2057,9 @@ mod tests {
             else {
                 continue;
             };
-            HELD.lock().unwrap_or_else(|e| e.into_inner()).push(reservation);
+            HELD.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(reservation);
             // Reserved — but something outside the suite (a stray dev server) could
             // still be serving on the real port. Ask by connecting, never by binding.
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -2184,8 +2207,9 @@ mod tests {
         assert!(
             mgr.statuses().iter().any(|s| s.name == "gate.squatted/svc"
                 && !s.running
-                && s.failure_reason.as_deref().is_some_and(|r| r
-                    .contains(&port.to_string()))),
+                && s.failure_reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains(&port.to_string()))),
             "the status row must carry the same port-naming reason"
         );
 
@@ -2215,13 +2239,18 @@ mod tests {
                 assert_eq!(name, "gate.lazywake/svc");
                 assert_eq!(p, port, "the CLAIMED port is reported, not a manifest one");
             }
-            other => panic!("a registered, not-yet-woken lazy sidecar must be NotRunning: {other:?}"),
+            other => {
+                panic!("a registered, not-yet-woken lazy sidecar must be NotRunning: {other:?}")
+            }
         }
 
         // Waking it makes it dialable, at the same claimed port.
         mgr.wake_sidecar("gate.lazywake/svc").await.unwrap();
         assert!(sc.is_running(), "wake must start the lazy sidecar");
-        assert_eq!(mgr.forward_target("gate.lazywake/svc").unwrap().port(), port);
+        assert_eq!(
+            mgr.forward_target("gate.lazywake/svc").unwrap().port(),
+            port
+        );
     }
 
     /// An EAGER sidecar that registered (claim held) but whose process is down must be
@@ -2294,10 +2323,32 @@ mod tests {
         mgr.register_and_start(sc).await.unwrap();
 
         assert_eq!(mgr.claimed_port("gate.claimed/svc"), Some(claimed));
-        assert_eq!(mgr.forward_target("gate.claimed/svc").unwrap().port(), claimed);
+        assert_eq!(
+            mgr.forward_target("gate.claimed/svc").unwrap().port(),
+            claimed
+        );
         // And an unknown name yields nothing at all — no port to dial, by construction.
         assert!(mgr.claimed_port("plug.nobody/svc").is_none());
         assert!(mgr.forward_target("plug.nobody/svc").is_err());
+    }
+
+    #[tokio::test]
+    async fn sidecar_base_url_resolves_by_plugin_and_local_name() {
+        let mgr = SidecarManager::new_noop();
+        let port = free_port();
+        let sc = FakeSidecar::with_port("com.acme.bridge/backend", port);
+        mgr.register_and_start(sc).await.unwrap();
+
+        assert_eq!(
+            mgr.sidecar_base_url("com.acme.bridge", "backend").unwrap(),
+            format!("http://127.0.0.1:{port}")
+        );
+        assert!(mgr.sidecar_base_url("com.acme.bridge", "missing").is_err());
+
+        mgr.stop_and_deregister("com.acme.bridge/backend")
+            .await
+            .unwrap();
+        assert!(mgr.sidecar_base_url("com.acme.bridge", "backend").is_err());
     }
 
     /// The diagnosability half. A refused claim used to leave the sidecar ABSENT from

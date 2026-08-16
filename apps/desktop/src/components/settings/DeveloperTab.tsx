@@ -189,7 +189,7 @@ export function DeveloperTab() {
 									<Button
 										onClick={handleCopyDiagnostics}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										Copy diagnostics
 									</Button>
@@ -199,11 +199,7 @@ export function DeveloperTab() {
 							/>
 							<SettingsItem
 								actions={
-									<Button
-										onClick={handleCopyConsole}
-										size="sm"
-										variant="outline"
-									>
+									<Button onClick={handleCopyConsole} size="sm" variant="ghost">
 										Copy console
 									</Button>
 								}
@@ -243,7 +239,7 @@ export function DeveloperTab() {
 									<Button
 										onClick={handleCopyMcpConfig}
 										size="sm"
-										variant="outline"
+										variant="ghost"
 									>
 										Copy MCP config
 									</Button>

@@ -117,6 +117,16 @@ pub struct HookContext {
     /// [`Self::input`] instead. A `context` hook branches on which one is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<serde_json::Value>>,
+    /// The exact project-instructions block Core assembled for this turn. This is
+    /// populated only for [`ON_CONTEXT`] so a context plugin can mirror or remove
+    /// the AGENTS.md injection without parsing the surrounding system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_instructions: Option<String>,
+    /// Normalized project rule records discovered for the active working folder.
+    /// Core supplies file metadata/content; a context plugin decides which records
+    /// apply and whether to inject them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_rules: Option<Vec<serde_json::Value>>,
     /// The turns about to be dropped by compaction, and the summary that replaced
     /// them — set for [`ON_SESSION_BEFORE_COMPACT`] and [`ON_SESSION_COMPACT`]
     /// respectively. A `session_compact` hook may rewrite the summary with
@@ -140,7 +150,14 @@ pub enum HookDirective {
     /// the model (a `pre_user_turn` directive; ignored on the post-turn path). The
     /// rewritten text is what gets sent and persisted — the auto-expand plugin uses
     /// this to swap a raw prompt for its improved form.
-    Replace { text: String },
+    Replace {
+        text: String,
+        /// On the ACP `context` phase, discard the pooled session and send the
+        /// rewritten full prompt through a fresh session for this turn. The field
+        /// defaults false so existing hook payloads retain pooled-session behavior.
+        #[serde(default)]
+        fresh_session: bool,
+    },
     /// Inject `text` as **additional context** into the current turn (additive, not
     /// a replacement) — appended to the outgoing user message so the model sees it.
     /// Emitted by `session_start` (setup context) and `pre_user_turn` (per-message
@@ -197,6 +214,19 @@ pub enum HookDirective {
     /// [`Replace`]: HookDirective::Replace
     /// [`Inject`]: HookDirective::Inject
     Handled { text: String },
+    /// Select a different model for the current turn before an ACP session or
+    /// gateway request is created. Only honoured during `pre_model_select`; the
+    /// first non-empty selection wins, so independently installed policy plugins
+    /// cannot silently chain model rewrites.
+    SelectModel {
+        model: String,
+        /// Provider-agnostic reasoning effort carried into the downstream
+        /// request contract; this is not merely explanatory metadata.
+        #[serde(default)]
+        effort: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 impl Default for HookDirective {
@@ -215,6 +245,8 @@ pub struct HookPlugin {
     /// The turn boundary this fires on (`"post_assistant_turn"` or
     /// `"pre_user_turn"`).
     pub on: String,
+    /// Higher-priority hooks run first; ties are deterministic.
+    pub priority: i32,
     /// The JS hook body.
     pub code: String,
     /// The capabilities the plugin was granted (its manifest `permission_grants`).
@@ -232,6 +264,10 @@ pub const ON_POST_ASSISTANT_TURN: &str = "post_assistant_turn";
 /// [`HookDirective::Replace`]). This is the prompt-transform phase the auto-expand
 /// plugin uses.
 pub const ON_PRE_USER_TURN: &str = "pre_user_turn";
+
+/// Fires after the agent binding is resolved but before either model transport is
+/// opened. This is the one awaited hook phase allowed to select a per-turn model.
+pub const ON_PRE_MODEL_SELECT: &str = "pre_model_select";
 
 // ── Claude-Code-style hook phases (the extended set) ─────────────────────────
 //
@@ -619,12 +655,20 @@ pub async fn collect_enabled_hooks(state: &ServerState) -> Vec<HookPlugin> {
                 plugin_id: manifest.id.clone(),
                 hook_id: hook.id.clone(),
                 on: hook.on.clone(),
+                priority: hook.priority,
                 code: hook.code.clone(),
                 grants: grants.clone(),
                 run_when: hook.run_when.clone(),
             });
         }
     }
+    hooks.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+            .then_with(|| left.hook_id.cmp(&right.hook_id))
+    });
     hooks
 }
 
@@ -897,8 +941,10 @@ fn build_hook_program(ctx: &HookContext, entry_code: &str) -> String {
 const host = {{
   sideModel: (a) => tools.host.sideModel(a ?? {{}}),
   runAgent: (a) => tools.host.runAgent(a ?? {{}}),
+  runFanout: (a) => tools.host.runFanout(a ?? {{}}),
   setConversationTitle: (a) => tools.host.setConversationTitle(a ?? {{}}),
   getPreference: (a) => tools.host.getPreference(a ?? {{}}),
+  usage: (a) => tools.host.usageSnapshot(a ?? {{}}),
   storage: {{
     get: (k, ns) => tools.host.storage_get({{ key: String(k), namespace: ns }}),
     set: (k, v, ns) => tools.host.storage_set({{ key: String(k), value: typeof v === "string" ? v : JSON.stringify(v), namespace: ns }}),
@@ -949,6 +995,7 @@ mod tests {
             },
             HookDirective::Replace {
                 text: "rewritten".into(),
+                fresh_session: false,
             },
             HookDirective::Inject {
                 text: "context".into(),
@@ -998,6 +1045,23 @@ mod tests {
             parse_directive(Some(&json!({ "kind": "continue", "text": "keep going" }))),
             HookDirective::Continue {
                 text: "keep going".into()
+            }
+        );
+        // Old hook payloads omit the ACP session flag and must remain pooled.
+        assert_eq!(
+            parse_directive(Some(&json!({ "kind": "replace", "text": "rewrite" }))),
+            HookDirective::Replace {
+                text: "rewrite".into(),
+                fresh_session: false,
+            }
+        );
+        assert_eq!(
+            parse_directive(Some(
+                &json!({ "kind": "replace", "text": "rewrite", "fresh_session": true }),
+            )),
+            HookDirective::Replace {
+                text: "rewrite".into(),
+                fresh_session: true,
             }
         );
         assert_eq!(
@@ -1395,8 +1459,12 @@ mod tests {
             flags: std::iter::once(("io.ryu.double-check".to_string(), true)).collect(),
             ..Default::default()
         };
-        let directive =
-            run_fixture("@ryu/double-check", ctx, serde_json::json!("Wrong: 2+2 is 4.")).await;
+        let directive = run_fixture(
+            "@ryu/double-check",
+            ctx,
+            serde_json::json!("Wrong: 2+2 is 4."),
+        )
+        .await;
         assert_eq!(
             directive,
             HookDirective::Note {
@@ -1662,7 +1730,8 @@ mod tests {
         assert_eq!(
             directive,
             HookDirective::Replace {
-                text: "Investigate and fix the login bug: ...".into()
+                text: "Investigate and fix the login bug: ...".into(),
+                fresh_session: false,
             }
         );
     }
@@ -1704,7 +1773,8 @@ mod tests {
         assert_eq!(
             directive,
             HookDirective::Replace {
-                text: "Write a comprehensive unit test suite for ...".into()
+                text: "Write a comprehensive unit test suite for ...".into(),
+                fresh_session: false,
             }
         );
     }

@@ -29,6 +29,8 @@ export type BuiltinTabKind =
 	| "codereview"
 	| "files"
 	| "cowork"
+	| "sources"
+	| "subagents"
 	| "subagent"
 	| "artifact"
 	| "inspector"

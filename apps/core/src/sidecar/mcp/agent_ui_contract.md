@@ -45,7 +45,7 @@ EXAMPLE spec:
 Prefer this tool over ASCII tables or long markdown when showing structured data,
 forms, metrics, or status. Keep specs focused; one coherent UI per call.
 
-AVAILABLE COMPONENTS (20):
+AVAILABLE COMPONENTS (24):
 - Stack: { direction?: "row" | "column", gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl", align?: "start" | "center" | "end" | "stretch", justify?: "start" | "center" | "end" | "between" | "around", wrap?: boolean } - Vertical or horizontal flex container. The primary layout primitive. [accepts children]
 - Grid: { columns?: number, gap?: "none" | "xs" | "sm" | "md" | "lg" | "xl" } - Responsive equal-column grid. [accepts children]
 - Card: { title?: string, description?: string } - Bordered surface with an optional title/description header. Group related content. [accepts children]
@@ -65,4 +65,8 @@ AVAILABLE COMPONENTS (20):
 - Textarea: { placeholder?: string, value?: string, label?: string, rows?: number } - A multi-line text field. Two-way bind `value` to state.
 - Checkbox: { label?: string, checked?: boolean } - A boolean checkbox. Two-way bind `checked` to state.
 - Switch: { label?: string, checked?: boolean } - A boolean toggle switch. Two-way bind `checked` to state.
-- Select: { placeholder?: string, value?: string, options: Array<{ label: string, value: string }> } - A dropdown select. Provide `options` as { label, value }[] and two-way bind `value` to state.
+- Select: { placeholder?: string, value?: string, options: Array<{ label: string, value: string, description?: string }> } - A dropdown select. Provide `options` as { label, value }[] and two-way bind `value` to state.
+- OptionList: { label?: string, value?: string, options: Array<{ label: string, value: string, description?: string }> } - An accessible single-choice list. Two-way bind `value` to state and use for a small set of explicit choices.
+- Slider: { label?: string, value?: number, min?: number, max?: number, step?: number } - A bounded numeric slider. Two-way bind `value` to state; defaults to 0-100 with step 1.
+- ApprovalCard: { title: string, description?: string, approveLabel?: string, rejectLabel?: string } - A compact approval decision card. Wire `approve` and `reject` events to actions in the element's `on` field.
+- LinkPreview: { title: string, href: string, description?: string, imageSrc?: string } - A safe link preview card. HTTP(S) and mailto URLs are allowed; unsafe schemes render inertly.

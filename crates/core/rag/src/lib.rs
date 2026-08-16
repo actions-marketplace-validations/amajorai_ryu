@@ -21,7 +21,10 @@
 //! chunks Core already holds is orchestration.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex as StdMutex, RwLock,
+};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -592,8 +595,19 @@ impl Embedder {
                 base_url,
                 model,
                 api_key,
-                ..
-            } => remote_embed(base_url, model, api_key.as_deref(), text).await,
+                dims,
+            } => {
+                let embedding =
+                    remote_embed(base_url, model, *dims, api_key.as_deref(), text).await?;
+                anyhow::ensure!(
+                    embedding.len() == *dims,
+                    "embedding provider returned {} dimensions for model '{}' (expected {})",
+                    embedding.len(),
+                    model,
+                    dims
+                );
+                Ok(embedding)
+            }
         }
     }
 }
@@ -669,13 +683,18 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 async fn remote_embed(
     base_url: &str,
     model: &str,
+    dims: usize,
     api_key: Option<&str>,
     text: &str,
 ) -> Result<Vec<f32>> {
     static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
     let endpoint = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
-    let payload = serde_json::json!({ "model": model, "input": text });
+    let payload = serde_json::json!({
+        "model": model,
+        "input": text,
+        "dimensions": dims,
+    });
     let mut builder = client.post(endpoint).json(&payload);
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
         builder = builder.bearer_auth(key);
@@ -696,6 +715,10 @@ async fn remote_embed(
                 .collect::<Vec<f32>>()
         })
         .context("embeddings response missing data[0].embedding")?;
+    anyhow::ensure!(
+        vec.iter().all(|value| value.is_finite()),
+        "embeddings response contains a non-finite value"
+    );
     Ok(vec)
 }
 
@@ -807,6 +830,20 @@ impl Reranker {
                         ranked.push((idx, score));
                     }
                 }
+                anyhow::ensure!(
+                    ranked.len() == documents.len()
+                        && ranked
+                            .iter()
+                            .map(|(idx, _)| *idx)
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            == documents.len(),
+                    "rerank response must contain exactly one result for every document"
+                );
+                anyhow::ensure!(
+                    ranked.iter().all(|(_, score)| score.is_finite()),
+                    "rerank response contains a non-finite score"
+                );
                 ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
                 Ok(ranked)
             }
@@ -926,7 +963,7 @@ async fn remote_rerank(
 #[derive(Clone)]
 pub struct RetrievalStore {
     conn: Arc<Mutex<Connection>>,
-    embedder: Embedder,
+    embedder: Arc<RwLock<Embedder>>,
     reranker: Reranker,
     /// Configured default reranker model id — the fallback reported for the local
     /// reranker (which has no model of its own). Resolved Core-side and passed in.
@@ -937,6 +974,81 @@ pub struct RetrievalStore {
     /// Wired ONCE, Core-side, in `rag_host::open_retrieval_store`'s caller
     /// (`apps/core/src/main.rs`), so every consumer of the process store gets it.
     spaces: Option<Arc<dyn SpaceRecall>>,
+}
+
+/// Terminal or in-flight state for a stale-embedding reindex.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StaleEmbeddingReindexProgress {
+    /// `running`, `completed`, `cancelled`, or `failed`.
+    pub state: String,
+    /// Number of stale rows found when the pass started.
+    pub total: usize,
+    /// Number of rows whose batch was committed.
+    pub processed: usize,
+    /// Number of rows actually updated by committed batches.
+    pub updated: usize,
+    /// A human-readable error when `state` is `failed`.
+    pub error: Option<String>,
+}
+
+impl Default for StaleEmbeddingReindexProgress {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_owned(),
+            total: 0,
+            processed: 0,
+            updated: 0,
+            error: None,
+        }
+    }
+}
+
+/// Cooperative cancellation and progress state for a stale-embedding reindex.
+///
+/// Cancellation is observed between embedding requests and before each batch is
+/// committed. A request already in flight cannot be interrupted by this crate's
+/// embedder abstraction, so callers should treat cancellation as cooperative at
+/// batch boundaries. Cloning this handle is cheap and lets a status endpoint poll
+/// [`Self::progress`] while another task runs the reindex.
+#[derive(Clone, Default)]
+pub struct StaleEmbeddingReindexControl {
+    cancelled: Arc<AtomicBool>,
+    progress: Arc<StdMutex<StaleEmbeddingReindexProgress>>,
+}
+
+impl StaleEmbeddingReindexControl {
+    /// Create a fresh control handle in the `idle` state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request cooperative cancellation. The worker observes this at its next
+    /// safe boundary and leaves the current batch uncommitted.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Return whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot the latest progress without exposing internal synchronization.
+    pub fn progress(&self) -> StaleEmbeddingReindexProgress {
+        self.progress
+            .lock()
+            .expect("stale embedding progress mutex poisoned")
+            .clone()
+    }
+}
+
+/// Result of a cooperatively cancellable stale-embedding reindex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleEmbeddingReindexOutcome {
+    /// Number of rows updated by committed batches.
+    pub updated: usize,
+    /// Whether the pass stopped because its control handle was cancelled.
+    pub cancelled: bool,
 }
 
 impl RetrievalStore {
@@ -982,7 +1094,7 @@ impl RetrievalStore {
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            embedder,
+            embedder: Arc::new(RwLock::new(embedder)),
             reranker,
             reranker_model_id,
             spaces: None,
@@ -1106,7 +1218,7 @@ impl RetrievalStore {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            embedder: Embedder::Local { dims: embed_dims },
+            embedder: Arc::new(RwLock::new(Embedder::Local { dims: embed_dims })),
             reranker: Reranker::Local,
             reranker_model_id,
             spaces: None,
@@ -1123,7 +1235,7 @@ impl RetrievalStore {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            embedder,
+            embedder: Arc::new(RwLock::new(embedder)),
             reranker: Reranker::Local,
             reranker_model_id,
             spaces: None,
@@ -1131,8 +1243,24 @@ impl RetrievalStore {
     }
 
     /// The model id this store uses for embedding.
-    pub fn embedder_model_id(&self) -> &str {
-        self.embedder.model_id()
+    pub fn embedder_model_id(&self) -> String {
+        self.embedder_snapshot().model_id().to_owned()
+    }
+
+    /// Swap the live retrieval embedder. Reindexing is intentionally separate:
+    /// callers install the provider and then run the guarded stale-row pass.
+    pub fn set_embedder(&self, embedder: Embedder) {
+        *self
+            .embedder
+            .write()
+            .expect("retrieval embedder lock poisoned") = embedder;
+    }
+
+    fn embedder_snapshot(&self) -> Embedder {
+        self.embedder
+            .read()
+            .expect("retrieval embedder lock poisoned")
+            .clone()
     }
 
     /// The reranker model id from the registry.
@@ -1232,9 +1360,10 @@ impl RetrievalStore {
         content: &str,
         owner: RetrievalOwner<'_>,
     ) -> Result<()> {
-        let embedding = self.embedder.embed(content).await?;
+        let embedder = self.embedder_snapshot();
+        let embedding = embedder.embed(content).await?;
         let blob = encode_embedding(&embedding);
-        let model = self.embedder.model_id().to_string();
+        let model = embedder.model_id().to_string();
         let now = chrono::Utc::now().timestamp_millis();
         let conn = self.conn.lock().await;
         conn.execute(
@@ -1283,9 +1412,10 @@ impl RetrievalStore {
         importance: i32,
         owner: RetrievalOwner<'_>,
     ) -> Result<()> {
-        let embedding = self.embedder.embed(content).await?;
+        let embedder = self.embedder_snapshot();
+        let embedding = embedder.embed(content).await?;
         let blob = encode_embedding(&embedding);
-        let model = self.embedder.model_id().to_string();
+        let model = embedder.model_id().to_string();
         let now = chrono::Utc::now().timestamp_millis();
         let conn = self.conn.lock().await;
         conn.execute(
@@ -1362,7 +1492,7 @@ impl RetrievalStore {
         // Embed every chunk up front (no DB lock held during network/CPU work),
         // then commit all rows in a single transaction.
         let mut rows: Vec<OkfRow> = Vec::new();
-        let model = self.embedder.model_id().to_string();
+        let model = self.embedder_snapshot().model_id().to_string();
         let now = chrono::Utc::now().timestamp_millis();
         for concept in &bundle.concepts {
             let header = okf_chunk_header(concept);
@@ -1381,7 +1511,7 @@ impl RetrievalStore {
                 } else {
                     format!("{header}\n{body_chunk}")
                 };
-                let embedding = self.embedder.embed(&content).await?;
+                let embedding = self.embedder_snapshot().embed(&content).await?;
                 let blob = encode_embedding(&embedding);
                 let chunk_id = format!("okf:{bundle_id}:{}#{idx}", concept.file_path);
                 rows.push(OkfRow {
@@ -1610,7 +1740,7 @@ impl RetrievalStore {
     /// nothing" bug. Matching the load filter means an embedder swap re-backfills
     /// once (cheap; `index_chunk` upserts via ON CONFLICT).
     pub async fn indexed_memory_ids(&self) -> Result<std::collections::HashSet<String>> {
-        let model = self.embedder.model_id().to_string();
+        let model = self.embedder_snapshot().model_id().to_string();
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare("SELECT id FROM chunks WHERE source = 'memory' AND embedding_model = ?1")
@@ -1623,6 +1753,175 @@ impl RetrievalStore {
             out.insert(row?);
         }
         Ok(out)
+    }
+
+    /// Re-embed chunks written by a different embedding model into the current
+    /// model's vector space.
+    ///
+    /// Retrieval intentionally filters stale rows rather than mixing vectors
+    /// from incomparable models. This bounded, resumable pass restores those
+    /// rows after an embedder swap. Embedding is performed without holding the
+    /// SQLite mutex; rows are committed in small batches, so a failed remote
+    /// embed leaves the remaining stale rows available for a later retry.
+    ///
+    /// Returns the number of rows updated. Calling it when all rows already use
+    /// the current model is a no-op.
+    pub async fn reindex_stale_embeddings(&self) -> Result<usize> {
+        let control = StaleEmbeddingReindexControl::new();
+        Ok(self
+            .reindex_stale_embeddings_with_control(&control)
+            .await?
+            .updated)
+    }
+
+    /// Re-embed stale rows with cooperative cancellation and observable progress.
+    ///
+    /// The existing [`Self::reindex_stale_embeddings`] method remains the
+    /// compatibility entry point. Consumers that need a status/cancel surface
+    /// create one [`StaleEmbeddingReindexControl`], pass a clone to their worker,
+    /// and poll [`StaleEmbeddingReindexControl::progress`] from their status
+    /// handler. Each committed batch is resumable; cancellation never commits a
+    /// partially embedded batch.
+    pub async fn reindex_stale_embeddings_with_control(
+        &self,
+        control: &StaleEmbeddingReindexControl,
+    ) -> Result<StaleEmbeddingReindexOutcome> {
+        let result = self
+            .reindex_stale_embeddings_with_control_inner(control)
+            .await;
+        if let Err(error) = &result {
+            let mut progress = control
+                .progress
+                .lock()
+                .expect("stale embedding progress mutex poisoned");
+            progress.state = "failed".to_owned();
+            progress.error = Some(format!("{error:#}"));
+        }
+        result
+    }
+
+    async fn reindex_stale_embeddings_with_control_inner(
+        &self,
+        control: &StaleEmbeddingReindexControl,
+    ) -> Result<StaleEmbeddingReindexOutcome> {
+        const BATCH_SIZE: usize = 64;
+        let embedder = self.embedder_snapshot();
+        let model = embedder.model_id().to_string();
+        let mut reindexed = 0;
+
+        let total = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(*) FROM chunks WHERE embedding_model != ?1",
+                params![model],
+                |row| row.get::<_, i64>(0),
+            )?
+            .max(0) as usize
+        };
+        {
+            let mut progress = control
+                .progress
+                .lock()
+                .expect("stale embedding progress mutex poisoned");
+            *progress = StaleEmbeddingReindexProgress {
+                state: if control.is_cancelled() {
+                    "cancelled".to_owned()
+                } else {
+                    "running".to_owned()
+                },
+                total,
+                ..StaleEmbeddingReindexProgress::default()
+            };
+        }
+        if control.is_cancelled() {
+            return Ok(StaleEmbeddingReindexOutcome {
+                updated: 0,
+                cancelled: true,
+            });
+        }
+
+        loop {
+            let batch: Vec<(String, String)> = {
+                let conn = self.conn.lock().await;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, content FROM chunks
+                         WHERE embedding_model != ?1
+                         LIMIT ?2",
+                    )
+                    .context("preparing stale embedding scan")?;
+                let rows = stmt.query_map(params![model, BATCH_SIZE as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+                let mut batch = Vec::with_capacity(BATCH_SIZE);
+                for row in rows {
+                    batch.push(row?);
+                }
+                batch
+            };
+
+            if batch.is_empty() {
+                let mut progress = control
+                    .progress
+                    .lock()
+                    .expect("stale embedding progress mutex poisoned");
+                progress.state = "completed".to_owned();
+                progress.processed = progress.total;
+                progress.updated = reindexed;
+                return Ok(StaleEmbeddingReindexOutcome {
+                    updated: reindexed,
+                    cancelled: false,
+                });
+            }
+
+            let batch_len = batch.len();
+            let mut embedded = Vec::with_capacity(batch_len);
+            for (id, content) in &batch {
+                if control.is_cancelled() {
+                    let mut progress = control
+                        .progress
+                        .lock()
+                        .expect("stale embedding progress mutex poisoned");
+                    progress.state = "cancelled".to_owned();
+                    progress.updated = reindexed;
+                    return Ok(StaleEmbeddingReindexOutcome {
+                        updated: reindexed,
+                        cancelled: true,
+                    });
+                }
+                embedded.push((id.clone(), content.clone(), embedder.embed(content).await?));
+            }
+
+            if control.is_cancelled() {
+                let mut progress = control
+                    .progress
+                    .lock()
+                    .expect("stale embedding progress mutex poisoned");
+                progress.state = "cancelled".to_owned();
+                progress.updated = reindexed;
+                return Ok(StaleEmbeddingReindexOutcome {
+                    updated: reindexed,
+                    cancelled: true,
+                });
+            }
+
+            let conn = self.conn.lock().await;
+            let tx = conn
+                .unchecked_transaction()
+                .context("starting embedding reindex transaction")?;
+            for (id, content, embedding) in &embedded {
+                let changed =
+                    update_stale_embedding_if_unchanged(&tx, id, content, embedding, &model)?;
+                reindexed += changed;
+            }
+            tx.commit().context("committing embedding reindex batch")?;
+            let mut progress = control
+                .progress
+                .lock()
+                .expect("stale embedding progress mutex poisoned");
+            progress.processed = (progress.processed + batch_len).min(progress.total);
+            progress.updated = reindexed;
+        }
     }
 
     /// Embed `query`, search memory + the selected Spaces, merge and rank by
@@ -1694,7 +1993,7 @@ impl RetrievalStore {
         if query.trim().is_empty() || opts.top_k == 0 {
             return Ok(Vec::new());
         }
-        let query_embedding = match self.embedder.embed(query).await {
+        let query_embedding = match self.embedder_snapshot().embed(query).await {
             Ok(v) => v,
             // Held, not logged-and-dropped: it is either re-raised below or reported
             // as the reason the memory half is missing from an otherwise real answer.
@@ -1854,7 +2153,7 @@ impl RetrievalStore {
         // cosine scores, and there is no dim guard to catch it — so we filter by
         // model id here. Chunks from a different/unknown embedder are skipped
         // until re-indexed, rather than silently returned as bad matches.
-        let model = self.embedder.model_id().to_string();
+        let model = self.embedder_snapshot().model_id().to_string();
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
@@ -1900,6 +2199,24 @@ impl RetrievalStore {
     }
 }
 
+fn update_stale_embedding_if_unchanged(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    content: &str,
+    embedding: &[f32],
+    model: &str,
+) -> Result<usize> {
+    // The content predicate is the optimistic-concurrency check. A row edited
+    // while the remote embedder was running stays stale and is picked up again
+    // on the next batch instead of being incorrectly marked current.
+    Ok(tx.execute(
+        "UPDATE chunks
+         SET embedding = ?1, embedding_model = ?2
+         WHERE id = ?3 AND content = ?4 AND embedding_model != ?2",
+        params![encode_embedding(embedding), model, id, content],
+    )?)
+}
+
 /// The in-process default RAG provider: the sqlite-backed vector store with its
 /// held embedder + reranker. A bound out-of-process provider (e.g. a GraphRAG
 /// sidecar) would implement the same trait and be selected by the Core-side
@@ -1907,7 +2224,7 @@ impl RetrievalStore {
 #[async_trait::async_trait]
 impl RagProvider for RetrievalStore {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedder.embed(text).await
+        self.embedder_snapshot().embed(text).await
     }
 
     async fn retrieve(&self, query: &str, opts: &RetrievalOptions) -> Result<Vec<ScoredChunk>> {
@@ -2599,6 +2916,178 @@ mod tests {
             "local mode always returns 'local-hashing' (no base URL set)"
         );
         assert_eq!(store.reranker_model_id(), "custom/reranker-test");
+    }
+
+    #[tokio::test]
+    async fn reindex_stale_embeddings_restores_retrieval_and_is_idempotent() {
+        let store = mem_store();
+        store
+            .index_chunk(
+                "stale",
+                ChunkSource::Memory,
+                None,
+                "the user's favorite color is orange",
+                RetrievalOwner::shared(),
+            )
+            .await
+            .unwrap();
+
+        // A model swap makes the old vector intentionally invisible to search.
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "UPDATE chunks SET embedding_model = 'previous/embedder' WHERE id = 'stale'",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(store
+            .retrieve("what is the favorite color", &RetrievalOptions::default())
+            .await
+            .unwrap()
+            .is_empty());
+
+        assert_eq!(store.reindex_stale_embeddings().await.unwrap(), 1);
+        let hits = store
+            .retrieve("what is the favorite color", &RetrievalOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(hits.first().map(|hit| hit.id.as_str()), Some("stale"));
+        assert_eq!(store.reindex_stale_embeddings().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_embedding_reindex_reports_progress() {
+        let store = mem_store();
+        for id in ["stale-a", "stale-b"] {
+            store
+                .index_chunk(
+                    id,
+                    ChunkSource::Memory,
+                    None,
+                    "a stale embedding fixture",
+                    RetrievalOwner::shared(),
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "UPDATE chunks SET embedding_model = 'previous/embedder'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let control = StaleEmbeddingReindexControl::new();
+        let outcome = store
+            .reindex_stale_embeddings_with_control(&control)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.updated, 2);
+        assert!(!outcome.cancelled);
+        assert_eq!(
+            control.progress(),
+            StaleEmbeddingReindexProgress {
+                state: "completed".to_owned(),
+                total: 2,
+                processed: 2,
+                updated: 2,
+                error: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_embedding_reindex_honors_cancellation_before_work() {
+        let store = mem_store();
+        store
+            .index_chunk(
+                "stale",
+                ChunkSource::Memory,
+                None,
+                "a stale embedding fixture",
+                RetrievalOwner::shared(),
+            )
+            .await
+            .unwrap();
+        {
+            let conn = store.conn.lock().await;
+            conn.execute(
+                "UPDATE chunks SET embedding_model = 'previous/embedder' WHERE id = 'stale'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let control = StaleEmbeddingReindexControl::new();
+        control.cancel();
+        let outcome = store
+            .reindex_stale_embeddings_with_control(&control)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            StaleEmbeddingReindexOutcome {
+                updated: 0,
+                cancelled: true,
+            }
+        );
+        assert_eq!(control.progress().state, "cancelled");
+        assert_eq!(control.progress().total, 1);
+        assert_eq!(control.progress().processed, 0);
+    }
+
+    #[test]
+    fn stale_embedding_update_skips_content_changed_during_embedding() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE chunks (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (id, content, embedding, embedding_model)
+             VALUES ('chunk-1', 'old text', X'00', 'old-model')",
+            [],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        // The reindex selected `old text`, then another writer committed this
+        // edit before the embedding result was ready.
+        tx.execute(
+            "UPDATE chunks SET content = 'new text' WHERE id = 'chunk-1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            update_stale_embedding_if_unchanged(
+                &tx,
+                "chunk-1",
+                "old text",
+                &[1.0, 2.0],
+                "current-model",
+            )
+            .unwrap(),
+            0
+        );
+        let model: String = tx
+            .query_row(
+                "SELECT embedding_model FROM chunks WHERE id = 'chunk-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(model, "old-model");
     }
 
     /// AC4b: reranking genuinely changes candidate order.
@@ -3530,7 +4019,13 @@ mod tests {
         // Precondition: the embedder really is broken, so the assertion below is
         // about the restructure and not about a store that quietly fell back local.
         assert!(
-            store.embedder.embed("anything").await.is_err(),
+            store
+                .embedder
+                .read()
+                .expect("embedder lock is not poisoned")
+                .embed("anything")
+                .await
+                .is_err(),
             "fixture broken: the embedder must fail"
         );
 

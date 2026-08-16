@@ -14,7 +14,9 @@ use serde_json::{json, Value};
 
 use crate::server::ServerState;
 use crate::tool_exec::{InvokeOutcome, SandboxBridge, ToolInvokeResult};
-use crate::workflow::delegation::{run_fanout, DelegateSpec, DelegationCaps, PermissionPreset};
+use crate::workflow::delegation::{
+    run_fanout, DelegateSpec, DelegationCaps, PermissionPreset, MAX_DELEGATION_TOKENS,
+};
 
 /// Grant required to call `host.sideModel`.
 const GRANT_SIDE_MODEL: &str = "hook:side-model";
@@ -37,6 +39,8 @@ const GRANT_NAVIGATE: &str = "shell:navigate";
 const GRANT_SET_TITLE: &str = "conversation:set-title";
 /// Grant required to call `host.getPreference`.
 const GRANT_PREFERENCES_READ: &str = "preferences:read";
+/// Grant required to read an agent's normalized subscription usage snapshot.
+const GRANT_USAGE_READ: &str = "usage:read";
 /// Grant required to call `host.recordFeedback` (the Learning message-action seam).
 const GRANT_LEARNING_FEEDBACK: &str = "learning:crud";
 /// Grant required to call `host.synthesizeSkill` (the Learning context-menu seam).
@@ -62,6 +66,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
     Some(match method {
         "model.complete" => "host.sideModel",
         "agent.run" => "host.runAgent",
+        "agent.runFanout" => "host.runFanout",
         "storage.get" => "host.storage_get",
         "storage.set" => "host.storage_set",
         "storage.delete" => "host.storage_delete",
@@ -84,6 +89,7 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "finetune.merge" => "host.finetune_merge",
         "conversation.setTitle" => "host.setConversationTitle",
         "preferences.get" => "host.getPreference",
+        "usage.snapshot" => "host.usageSnapshot",
         "learning.recordFeedback" => "host.recordFeedback",
         "learning.synthesizeSkill" => "host.synthesizeSkill",
         "hooks.run" => "host.runHook",
@@ -141,14 +147,17 @@ impl PluginHookBridge {
         match method {
             "sideModel" => self.side_model(args).await,
             "runAgent" => self.run_agent(args).await,
+            "runFanout" => self.run_fanout(args).await,
             "storage_get" | "storage_set" | "storage_delete" | "storage_keys" => {
                 self.storage(method, args).await
             }
             "crypto_seal" | "crypto_open" | "crypto_status" => self.crypto(method, args).await,
-            "spaces_ensure_space" | "spaces_create_doc" | "spaces_get_doc"
-            | "spaces_update_doc" | "spaces_list_docs" | "spaces_delete_doc" => {
-                self.spaces(method, args).await
-            }
+            "spaces_ensure_space"
+            | "spaces_create_doc"
+            | "spaces_get_doc"
+            | "spaces_update_doc"
+            | "spaces_list_docs"
+            | "spaces_delete_doc" => self.spaces(method, args).await,
             "finetune_capability"
             | "finetune_start"
             | "finetune_list"
@@ -158,6 +167,7 @@ impl PluginHookBridge {
             | "finetune_merge" => self.finetune(method, args).await,
             "setConversationTitle" => self.set_conversation_title(args).await,
             "getPreference" => self.get_preference(args).await,
+            "usageSnapshot" => self.usage_snapshot(args).await,
             "recordFeedback" => self.record_feedback(args).await,
             "synthesizeSkill" => self.synthesize_skill(args).await,
             "runHook" => self.run_own_hook(args).await,
@@ -236,6 +246,30 @@ impl PluginHookBridge {
         }
     }
 
+    /// `host.usageSnapshot({ agent_id })` — read the same normalized, read-only
+    /// subscription windows shown in the composer. The credential reader never
+    /// refreshes tokens and the snapshot contains no credential material.
+    async fn usage_snapshot(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_USAGE_READ) {
+            return err(format!(
+                "capability '{GRANT_USAGE_READ}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let agent_id = args
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if agent_id.is_empty() {
+            return err("host.usageSnapshot requires a non-empty 'agent_id'".to_string());
+        }
+        match serde_json::to_value(ryu_usage::fetch_usage(agent_id).await) {
+            Ok(snapshot) => ok(snapshot),
+            Err(e) => err(e.to_string()),
+        }
+    }
+
     /// `host.recordFeedback({ conversation_id, message_id, rating })` — record a
     /// thumbs vote on an assistant turn. `rating` is `"up"` / `"down"` or `null`
     /// (clear). Wraps `crate::learning::apply_message_feedback` (learning reward +
@@ -274,9 +308,13 @@ impl PluginHookBridge {
                 ))
             }
         }
-        let outcome =
-            crate::learning::apply_message_feedback(&self.state, conversation_id, message_id, rating)
-                .await;
+        let outcome = crate::learning::apply_message_feedback(
+            &self.state,
+            conversation_id,
+            message_id,
+            rating,
+        )
+        .await;
         ok(json!(outcome))
     }
 
@@ -302,7 +340,14 @@ impl PluginHookBridge {
             return err("host.synthesizeSkill requires a non-empty 'conversation_id'".to_string());
         }
         let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-        match ryu_learning::synthesize_skill(&crate::learning::learning_ctx(&self.state), cid, force, None).await {
+        match ryu_learning::synthesize_skill(
+            &crate::learning::learning_ctx(&self.state),
+            cid,
+            force,
+            None,
+        )
+        .await
+        {
             Ok(outcome) => ok(json!(outcome)),
             Err(e) => err(e.to_string()),
         }
@@ -505,7 +550,7 @@ impl PluginHookBridge {
             caps.wall_time_secs = w.clamp(5, 600);
         }
         if let Some(mt) = args.get("max_tokens").and_then(Value::as_u64) {
-            caps.max_tokens = mt.min(u64::from(u32::MAX)) as u32;
+            caps.max_tokens = mt.min(u64::from(MAX_DELEGATION_TOKENS)) as u32;
         }
 
         let spec = DelegateSpec {
@@ -526,6 +571,72 @@ impl PluginHookBridge {
                 },
                 None => err("verifier agent returned no result".to_string()),
             },
+            Err(e) => err(e.to_string()),
+        }
+    }
+
+    /// `host.runFanout({ delegates, caps? })` — run a bounded set of independent
+    /// clean-context delegates concurrently through Core's workflow engine. This
+    /// is deliberately generic: plugins submit data, while delegation policy and
+    /// Gateway routing remain owned by Core.
+    async fn run_fanout(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_RUN_AGENT) {
+            return err(format!(
+                "capability '{GRANT_RUN_AGENT}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let raw_delegates = match args.get("delegates") {
+            Some(Value::Array(items)) if !items.is_empty() => items,
+            _ => return err("host.runFanout requires a non-empty 'delegates' array".to_string()),
+        };
+        if raw_delegates.len() > 20 {
+            return err("host.runFanout accepts at most 20 delegates".to_string());
+        }
+        let delegates: Vec<DelegateSpec> = match raw_delegates
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
+        {
+            Ok(value) => value,
+            Err(e) => return err(format!("host.runFanout has an invalid delegate: {e}")),
+        };
+        let mut ids = HashSet::new();
+        for delegate in &delegates {
+            if delegate.id.trim().is_empty() || delegate.task.trim().is_empty() {
+                return err(
+                    "host.runFanout delegates require non-empty 'id' and 'task'".to_string()
+                );
+            }
+            if !ids.insert(delegate.id.clone()) {
+                return err(format!(
+                    "host.runFanout duplicate delegate id '{}'",
+                    delegate.id
+                ));
+            }
+            if let Some(inline) = &delegate.inline {
+                if inline.system_prompt.trim().is_empty() {
+                    return err("host.runFanout inline system_prompt must be non-empty".to_string());
+                }
+            }
+        }
+        let mut caps = match args.get("caps").cloned() {
+            Some(value) => match serde_json::from_value::<DelegationCaps>(value) {
+                Ok(caps) => caps,
+                Err(e) => return err(format!("host.runFanout has invalid caps: {e}")),
+            },
+            None => DelegationCaps::default(),
+        };
+        caps.max_concurrent = caps.effective_concurrency();
+        caps.wall_time_secs = caps.wall_time_secs.clamp(5, 600);
+        caps.max_tokens = caps.effective_max_tokens();
+        match run_fanout(delegates, caps, 1, None).await {
+            Ok(results) => ok(json!({
+                "ok": true,
+                "count": results.len(),
+                "results": results,
+            })),
             Err(e) => err(e.to_string()),
         }
     }
@@ -1017,6 +1128,16 @@ mod tests {
         assert_eq!(GRANT_PREFERENCES_READ, "preferences:read");
     }
 
+    #[test]
+    fn fanout_token_cap_is_hard_bounded() {
+        let caps = DelegationCaps {
+            max_tokens: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(caps.effective_max_tokens(), MAX_DELEGATION_TOKENS);
+        assert_eq!(DelegationCaps::default().effective_max_tokens(), 4096);
+    }
+
     /// The bridge's local grant consts MUST equal the single-sourced grant the
     /// `ryu-kernel-contracts` host-API table assigns to the corresponding method,
     /// so this gate and the TS app host / `required_grant_for` never drift. Each
@@ -1073,6 +1194,7 @@ mod tests {
         for method in [
             "model.complete",
             "agent.run",
+            "agent.runFanout",
             "storage.get",
             "spaces.createDoc",
             "finetune.start",
@@ -1093,6 +1215,7 @@ mod tests {
             m,
             "sideModel"
                 | "runAgent"
+                | "runFanout"
                 | "storage_get"
                 | "storage_set"
                 | "storage_delete"
@@ -1177,14 +1300,20 @@ mod tests {
         // Idempotent: canonicalizing an already-canonical id is a no-op, so a
         // double-canonicalized call site cannot drift from a single one.
         for id in ["@ryu/goal", "@acme/thing", "unscoped-third-party"] {
-            assert_eq!(canonical_plugin_id(canonical_plugin_id(id)), canonical_plugin_id(id));
+            assert_eq!(
+                canonical_plugin_id(canonical_plugin_id(id)),
+                canonical_plugin_id(id)
+            );
         }
 
         // A legacy (pre-scoping) id and its canonical form must land on the SAME
         // key, or upgrading a built-in orphans its sealed data.
         let legacy = canonical_plugin_id("goal");
         let scoped = canonical_plugin_id("@ryu/goal");
-        assert_eq!(legacy, scoped, "legacy id must canonicalize onto the scoped id");
+        assert_eq!(
+            legacy, scoped,
+            "legacy id must canonicalize onto the scoped id"
+        );
     }
 
     /// End-to-end through the real primitive with the real canonicalization: seal
@@ -1215,7 +1344,10 @@ mod tests {
         // OS keychain — which is both a slow test and one that touches the
         // developer's actual keychain. (This test did exactly that until the key
         // was fixed; the tell was a 46-second unit test.)
-        std::env::set_var("RYU_MASTER_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        std::env::set_var(
+            "RYU_MASTER_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        );
         ryu_crypto::set_global_host(std::sync::Arc::new(TestCryptoHost(
             std::env::temp_dir().join("ryu-bridge-crypto-test"),
         )));
@@ -1226,15 +1358,24 @@ mod tests {
         let mine = ryu_crypto::plugin_cipher(canonical_plugin_id("@ryu/goal"))
             .expect("plugin cipher for @ryu/goal");
         let sealed = mine.seal("hunter2").expect("seal");
-        assert!(sealed.starts_with("encp:v1:"), "own envelope, not the master one");
+        assert!(
+            sealed.starts_with("encp:v1:"),
+            "own envelope, not the master one"
+        );
         assert_eq!(mine.open(&sealed).expect("open"), "hunter2");
 
         let theirs = ryu_crypto::plugin_cipher(canonical_plugin_id("@acme/other")).expect("cipher");
-        assert!(theirs.open(&sealed).is_err(), "another app must not open it");
+        assert!(
+            theirs.open(&sealed).is_err(),
+            "another app must not open it"
+        );
 
         // Master-key ciphertext is REFUSED, not decrypted. This is what keeps the
         // grant from being a general decryption oracle over anything the app can read.
-        assert!(mine.open("enc:v1:AAAA").is_err(), "master envelope must be refused");
+        assert!(
+            mine.open("enc:v1:AAAA").is_err(),
+            "master envelope must be refused"
+        );
 
         // Never-sealed values pass through so a store can migrate in place.
         assert_eq!(mine.open("plain").expect("legacy passthrough"), "plain");

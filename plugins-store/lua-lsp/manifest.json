@@ -2,6 +2,7 @@
   "id": "@ryu/lua-lsp",
   "name": "Lua LSP",
   "version": "0.1.14",
+  "stability": "experimental",
   "category": "Developer Tools",
   "description": "Lua language server (lua-language-server) for the ryu agent: definitions, references, hover, symbols, implementations, call hierarchies and diagnostics after every edit. You install lua-language-server; the plugin ships config.",
   "tagline": "Lua code intelligence via lua-language-server",

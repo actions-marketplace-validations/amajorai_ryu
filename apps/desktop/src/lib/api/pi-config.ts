@@ -28,13 +28,13 @@ export interface PiConfig {
 
 /** A provider Pi supports, as surfaced by the catalog endpoint. */
 export interface PiProvider {
+	/** Every account this provider holds in the sealed vault (labels only —
+	 *  never a credential). Lets the picker list + switch sign-ins. */
+	accounts?: PiAccount[];
 	/** Whether this provider is the currently-active one. */
 	active?: boolean;
 	/** Pi `api` type (openai-completions / anthropic-messages / ...). */
 	api: string;
-	/** Every account this provider holds in the sealed vault (labels only —
-	 *  never a credential). Lets the picker list + switch sign-ins. */
-	accounts?: PiAccount[];
 	/** Environment variable Pi reads for this provider's key (may be empty). */
 	authEnv: string;
 	/** "subscription" | "api-key" | "none" (gateway). */
@@ -96,12 +96,12 @@ export function isPiModelEnabled(
 /** One account a Pi provider holds in the sealed vault (labels only). */
 export interface PiAccount {
 	accountId: string;
-	/** Display name (email, provider label, or "Account N"). */
-	label: string;
-	/** "api_key" | "oauth" | "opaque". */
-	kind: string;
 	/** Whether this is the account Pi will use this turn. */
 	active: boolean;
+	/** "api_key" | "oauth" | "opaque". */
+	kind: string;
+	/** Display name (email, provider label, or "Account N"). */
+	label: string;
 	/** Epoch millis of the last write. */
 	updatedAt: number;
 }

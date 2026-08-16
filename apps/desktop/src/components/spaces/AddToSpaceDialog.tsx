@@ -310,7 +310,7 @@ export function AddToSpaceDialog({
 									void createAndOpen("page");
 								}}
 								type="button"
-								variant="outline"
+								variant="ghost"
 							>
 								<HugeiconsIcon className="size-4" icon={StickyNote01Icon} />
 								New page
@@ -322,7 +322,7 @@ export function AddToSpaceDialog({
 									void createAndOpen("database");
 								}}
 								type="button"
-								variant="outline"
+								variant="ghost"
 							>
 								<HugeiconsIcon className="size-4" icon={Database01Icon} />
 								New database

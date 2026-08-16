@@ -59,8 +59,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugin_manifest::PluginManifest;
 use crate::plugin_manifest::schema::SidecarProcess;
+use crate::plugin_manifest::PluginManifest;
 
 /// The catalog source id of the first-party Ryu marketplace. Items served by this
 /// source went through the publish boundary in `packages/api/src/routers/
@@ -196,13 +196,27 @@ pub struct PluginProvenance {
     /// Whether the manifest signature verified at install.
     #[serde(default)]
     pub signature_verified: bool,
-    /// Set for a manifest compiled into the Core binary.
+    /// Digest of the exact manifest bytes accepted by the signed install path.
+    /// This binds reloaded on-disk bytes to the provenance; an ID match alone
+    /// must never restore Core privileges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    /// Transitional marker for a manifest compiled into the Core binary. This
+    /// means official Ryu content, not system status; system status is derived
+    /// only from `SYSTEM_PLUGINS`.
     #[serde(default)]
     pub builtin: bool,
     /// RFC3339 capture time, so a future staleness policy can expire a capture
     /// without a schema change (revocation is not retroactive — see module docs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_at: Option<String>,
+}
+
+#[must_use]
+pub fn manifest_sha256(manifest: &PluginManifest) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(manifest).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 impl PluginProvenance {
@@ -246,16 +260,23 @@ impl TrustPolicy {
         let Some(p) = provenance else {
             return TrustBasis::Untrusted;
         };
+        // A compiled manifest is an official Ryu artifact, but compilation is
+        // not the same thing as being part of the system. Only the explicit
+        // SYSTEM_PLUGINS allowlist above receives the non-removable
+        // SystemPlugin basis. This distinction lets ordinary first-party
+        // packages move to the verified marketplace without changing their
+        // trust semantics.
         if p.builtin {
-            return TrustBasis::SystemPlugin;
+            return TrustBasis::OfficialMarketplace;
         }
         let from_official = p.source_id.as_deref() == Some(OFFICIAL_MARKETPLACE_SOURCE_ID);
-        let basis = if p.org_verified && from_official {
+        let signed_official = from_official && p.signature_verified;
+        let basis = if p.org_verified && signed_official {
             TrustBasis::VerifiedPublisher {
                 org: p.publisher_org.clone(),
                 tier: p.org_verified_tier.clone(),
             }
-        } else if from_official {
+        } else if signed_official {
             TrustBasis::OfficialMarketplace
         } else {
             // A third-party source can claim `orgVerified` in its own JSON. Ryu's
@@ -415,8 +436,24 @@ mod tests {
             source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
             publisher_org: Some("org_acme".to_owned()),
             org_verified,
+            signature_verified: true,
             ..PluginProvenance::default()
         }
+    }
+
+    #[test]
+    fn official_source_without_a_verified_signature_is_untrusted() {
+        let policy = TrustPolicy::default();
+        assert_eq!(
+            policy.resolve_trust(
+                "com.acme.app",
+                Some(&PluginProvenance {
+                    source_id: Some(OFFICIAL_MARKETPLACE_SOURCE_ID.to_owned()),
+                    ..PluginProvenance::default()
+                }),
+            ),
+            TrustBasis::Untrusted
+        );
     }
 
     fn sideloaded() -> PluginProvenance {
@@ -500,7 +537,7 @@ mod tests {
         let policy = TrustPolicy::default();
         assert_eq!(
             policy.resolve_trust("com.example.compiled", Some(&PluginProvenance::builtin())),
-            TrustBasis::SystemPlugin
+            TrustBasis::OfficialMarketplace
         );
     }
 
@@ -515,7 +552,10 @@ mod tests {
         );
         assert_eq!(LaneKind::UiBundle.enforcement(), Enforcement::Sandboxed);
         assert_eq!(LaneKind::Sidecar.enforcement(), Enforcement::Unenforceable);
-        assert_eq!(LaneKind::McpServer.enforcement(), Enforcement::Unenforceable);
+        assert_eq!(
+            LaneKind::McpServer.enforcement(),
+            Enforcement::Unenforceable
+        );
     }
 
     #[test]

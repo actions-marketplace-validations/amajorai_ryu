@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { AgentUI } from "./agent-ui.tsx";
+import { AgentUI, createAgentUiActionHandlers } from "./agent-ui.tsx";
 
 const sampleSpec = {
 	root: "card",
@@ -31,6 +31,22 @@ const sampleSpec = {
 };
 
 describe("AgentUI", () => {
+	test("forwards submit action values to the host callback", async () => {
+		const values: unknown[] = [];
+		const handlers = createAgentUiActionHandlers((value) => values.push(value));
+
+		await handlers.submit({ value: { choice: "approve" } });
+
+		expect(values).toEqual([{ choice: "approve" }]);
+	});
+
+	test("does not invoke a missing host callback", async () => {
+		const handlers = createAgentUiActionHandlers();
+		await expect(
+			handlers.submit({ value: "ignored" })
+		).resolves.toBeUndefined();
+	});
+
 	test("renders the spec into @ryu/ui components", () => {
 		const html = renderToStaticMarkup(<AgentUI spec={sampleSpec} />);
 		expect(html).toContain("Deploy status");
@@ -55,6 +71,67 @@ describe("AgentUI", () => {
 		const html = renderToStaticMarkup(<AgentUI spec={spec} />);
 		expect(html).toContain("unknown component");
 		expect(html).toContain("NotAComponent");
+	});
+
+	test("renders the safe gallery components", () => {
+		const spec = {
+			root: "stack",
+			elements: {
+				stack: {
+					type: "Stack",
+					props: { gap: "sm" },
+					children: ["options", "approval", "link"],
+				},
+				options: {
+					type: "OptionList",
+					props: {
+						label: "Environment",
+						value: "staging",
+						options: [
+							{ label: "Staging", value: "staging" },
+							{ label: "Production", value: "production" },
+						],
+					},
+					children: [],
+				},
+				approval: {
+					type: "ApprovalCard",
+					props: { title: "Ship release?" },
+					children: [],
+				},
+				link: {
+					type: "LinkPreview",
+					props: {
+						title: "Release notes",
+						href: "https://example.com/releases",
+					},
+					children: [],
+				},
+			},
+		};
+		const html = renderToStaticMarkup(<AgentUI spec={spec} />);
+
+		expect(html).toContain("Environment");
+		expect(html).toContain("Ship release?");
+		expect(html).toContain("Release notes");
+		expect(html).toContain('href="https://example.com/releases"');
+	});
+
+	test("renders unsafe link previews inertly", () => {
+		const spec = {
+			root: "link",
+			elements: {
+				link: {
+					type: "LinkPreview",
+					props: { title: "Unsafe", href: "javascript:alert(1)" },
+					children: [],
+				},
+			},
+		};
+		const html = renderToStaticMarkup(<AgentUI spec={spec} />);
+
+		expect(html).toContain('href="#"');
+		expect(html).not.toContain("javascript:");
 	});
 
 	test("falls back to raw JSON for a structurally-broken spec", () => {

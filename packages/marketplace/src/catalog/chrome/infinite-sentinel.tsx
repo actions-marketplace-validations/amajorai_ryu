@@ -47,6 +47,9 @@ export default function InfiniteSentinel({
 	// Keep the latest callback without re-creating the observer each render.
 	const onLoadMoreRef = useRef(onLoadMore);
 	onLoadMoreRef.current = onLoadMore;
+	const loadingRef = useRef(loading);
+	loadingRef.current = loading;
+	const requestPendingRef = useRef(false);
 
 	useEffect(() => {
 		const el = ref.current;
@@ -56,7 +59,12 @@ export default function InfiniteSentinel({
 		const observerRoot = nearestScrollParent(el) ?? root;
 		const observer = new IntersectionObserver(
 			(entries) => {
-				if (entries[0]?.isIntersecting) {
+				if (
+					entries[0]?.isIntersecting &&
+					!loadingRef.current &&
+					!requestPendingRef.current
+				) {
+					requestPendingRef.current = true;
 					onLoadMoreRef.current();
 				}
 			},
@@ -65,6 +73,15 @@ export default function InfiniteSentinel({
 		observer.observe(el);
 		return () => observer.disconnect();
 	}, [hasMore, root]);
+
+	// A page request is considered complete when the host clears `loading`. The
+	// guard prevents an intersecting sentinel from starting duplicate requests
+	// while React Query (or a host equivalent) is still resolving the page.
+	useEffect(() => {
+		if (!loading) {
+			requestPendingRef.current = false;
+		}
+	}, [loading]);
 
 	if (!(hasMore || loading)) {
 		return null;

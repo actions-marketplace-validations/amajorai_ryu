@@ -73,6 +73,9 @@ export interface StoreItemActionProps {
 	className?: string;
 	/** Overrides the "Disable" menu label (e.g. Engines' "Stop"). */
 	disableLabel?: string;
+	/** Public release-asset download total. While an item is not installed, the
+	 * primary CTA shows this social proof and reveals the Add verb on hover/focus. */
+	downloadCount?: number | null;
 	/** `undefined` = the item has no enable/disable concept (install/uninstall only). */
 	enabled?: boolean;
 	/** Overrides the "Enable" menu label (e.g. Engines' "Set as active"). */
@@ -136,6 +139,7 @@ export default function StoreItemAction({
 	extra,
 	enableLabel = "Enable",
 	disableLabel = "Disable",
+	downloadCount = null,
 	incompatible = null,
 }: StoreItemActionProps) {
 	const reportCtx = useOptionalReport();
@@ -248,6 +252,13 @@ export default function StoreItemAction({
 	}
 
 	if (!installed) {
+		const hasDownloadCount =
+			typeof downloadCount === "number" &&
+			Number.isFinite(downloadCount) &&
+			downloadCount > 0;
+		const idleLabel = hasDownloadCount
+			? formatDownloadCount(downloadCount)
+			: null;
 		return (
 			<ContextMenu>
 				<ContextMenuTrigger
@@ -255,12 +266,26 @@ export default function StoreItemAction({
 					render={<div className="flex items-center" />}
 				>
 					<InstallProgressButton
+						aria-label={idleLabel ? `Add — ${idleLabel} downloads` : "Add"}
+						className={idleLabel ? "group" : undefined}
 						idleVariant="default"
 						installing={busy}
 						onClick={onInstall}
 						percent={percent}
 					>
-						Add
+						{idleLabel ? (
+							<>
+								<HugeiconsIcon className="size-4" icon={Download04Icon} />
+								<span className="group-hover:hidden group-focus-visible:hidden">
+									{idleLabel}
+								</span>
+								<span className="hidden group-hover:inline group-focus-visible:inline">
+									Add
+								</span>
+							</>
+						) : (
+							"Add"
+						)}
 					</InstallProgressButton>
 				</ContextMenuTrigger>
 				<ContextMenuContent align="end">
@@ -359,6 +384,18 @@ export default function StoreItemAction({
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
+}
+
+/** Compact marketplace count: 12,400 → 12.4k, 1,200,000 → 1.2m. */
+function formatDownloadCount(count: number): string {
+	if (count < 1000) {
+		return String(count);
+	}
+	if (count < 1_000_000) {
+		const value = count / 1000;
+		return `${value >= 10 ? Math.round(value) : value.toFixed(1)}k`;
+	}
+	return `${(count / 1_000_000).toFixed(1)}m`;
 }
 
 /**

@@ -261,7 +261,7 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 	},
 	{
 		key: "ryu_queue_drain_mode",
-		label: "How queued messages send",
+		label: "How queued messages send (Auto / Claude Code)",
 		group: "chat",
 	},
 	{ key: "ryu:assistant-mode", label: "Assistant mode", group: "chat" },

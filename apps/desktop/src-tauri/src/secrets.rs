@@ -26,97 +26,97 @@ const SERVICE: &str = "ryu";
 /// logged.  Returns an error string on failure.
 #[tauri::command]
 pub async fn set_provider_key(provider: String, key: String) -> Result<(), String> {
-	if key.is_empty() {
-		return Err("key value must not be empty".to_string());
-	}
-	tokio::task::spawn_blocking(move || {
-		let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
-		entry.set_password(&key).map_err(|e| e.to_string())
-	})
-	.await
-	.map_err(|e| e.to_string())?
+    if key.is_empty() {
+        return Err("key value must not be empty".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
+        entry.set_password(&key).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Read back a previously stored provider key.  Returns `None` when no key has been stored
 /// for this provider (not an error — callers must guard against missing values).
 #[tauri::command]
 pub async fn get_provider_key(provider: String) -> Result<Option<String>, String> {
-	tokio::task::spawn_blocking(move || {
-		let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
-		match entry.get_password() {
-			Ok(v) => Ok(Some(v)),
-			Err(keyring::Error::NoEntry) => Ok(None),
-			Err(e) => Err(e.to_string()),
-		}
-	})
-	.await
-	.map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
+        match entry.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Delete a stored provider key.  Idempotent — deleting a non-existent entry is not an error.
 #[tauri::command]
 pub async fn delete_provider_key(provider: String) -> Result<(), String> {
-	tokio::task::spawn_blocking(move || {
-		let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
-		match entry.delete_credential() {
-			Ok(()) => Ok(()),
-			Err(keyring::Error::NoEntry) => Ok(()),
-			Err(e) => Err(e.to_string()),
-		}
-	})
-	.await
-	.map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        let entry = Entry::new(SERVICE, &provider).map_err(|e| e.to_string())?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	// Validates the Windows Credential Manager round-trip that is the core of AC #1.
-	// We cannot restart the process in a unit test, but writing via CredWrite and reading back
-	// via CredRead proves OS-level persistence — the same mechanism that survives process
-	// restarts.  The entry is cleaned up after the test to be idempotent.
-	#[tokio::test]
-	async fn test_roundtrip_write_read_delete() {
-		let provider = "test-spike-provider".to_string();
-		let secret = "sk-test-byok-spike-value".to_string();
+    // Validates the Windows Credential Manager round-trip that is the core of AC #1.
+    // We cannot restart the process in a unit test, but writing via CredWrite and reading back
+    // via CredRead proves OS-level persistence — the same mechanism that survives process
+    // restarts.  The entry is cleaned up after the test to be idempotent.
+    #[tokio::test]
+    async fn test_roundtrip_write_read_delete() {
+        let provider = "test-spike-provider".to_string();
+        let secret = "sk-test-byok-spike-value".to_string();
 
-		// Write
-		set_provider_key(provider.clone(), secret.clone())
-			.await
-			.expect("set_provider_key should succeed");
+        // Write
+        set_provider_key(provider.clone(), secret.clone())
+            .await
+            .expect("set_provider_key should succeed");
 
-		// Read back
-		let result = get_provider_key(provider.clone())
-			.await
-			.expect("get_provider_key should not error");
-		assert_eq!(result, Some(secret), "round-trip value must match");
+        // Read back
+        let result = get_provider_key(provider.clone())
+            .await
+            .expect("get_provider_key should not error");
+        assert_eq!(result, Some(secret), "round-trip value must match");
 
-		// Delete (cleanup)
-		delete_provider_key(provider.clone())
-			.await
-			.expect("delete_provider_key should succeed");
+        // Delete (cleanup)
+        delete_provider_key(provider.clone())
+            .await
+            .expect("delete_provider_key should succeed");
 
-		// Confirm deleted
-		let after = get_provider_key(provider)
-			.await
-			.expect("get after delete should not error");
-		assert_eq!(after, None, "key should be absent after deletion");
-	}
+        // Confirm deleted
+        let after = get_provider_key(provider)
+            .await
+            .expect("get after delete should not error");
+        assert_eq!(after, None, "key should be absent after deletion");
+    }
 
-	#[tokio::test]
-	async fn test_empty_key_rejected() {
-		let err = set_provider_key("openai".to_string(), String::new())
-			.await
-			.unwrap_err();
-		assert!(!err.is_empty());
-	}
+    #[tokio::test]
+    async fn test_empty_key_rejected() {
+        let err = set_provider_key("openai".to_string(), String::new())
+            .await
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
 
-	#[tokio::test]
-	async fn test_missing_key_returns_none() {
-		let result = get_provider_key("no-such-provider-xyz".to_string())
-			.await
-			.expect("should not error");
-		assert_eq!(result, None);
-	}
+    #[tokio::test]
+    async fn test_missing_key_returns_none() {
+        let result = get_provider_key("no-such-provider-xyz".to_string())
+            .await
+            .expect("should not error");
+        assert_eq!(result, None);
+    }
 }

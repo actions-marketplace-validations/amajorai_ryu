@@ -280,6 +280,16 @@ pub struct StoredMessage {
     /// can show and reason about who said what. None for 1:1 / anonymous turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_name: Option<String>,
+    /// Server-verified source for a non-human turn, when one exists (for
+    /// example, `widget`). This is never accepted from the chat wire body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Server-verified widget instance that authored this user turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_instance_id: Option<String>,
+    /// Server-resolved MCP server that owns the widget instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_server: Option<String>,
     /// Structured render parts (AI SDK reduced UIMessage `parts` array: text /
     /// tool / file), captured server-side as the turn streams. This is what lets a
     /// reloaded conversation re-render its tool-call rows and the cowork context
@@ -326,6 +336,28 @@ pub struct StoredMessage {
     pub sibling_ids: Vec<String>,
     /// Unix milliseconds.
     pub created_at: i64,
+}
+
+/// Server-owned attribution written alongside a persisted message.
+///
+/// This is intentionally not part of [`ChatStreamRequest`]'s deserializable
+/// shape. Callers must obtain it from a Core verification boundary first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageProvenance {
+    pub source: String,
+    pub widget_instance_id: String,
+    pub origin_server: String,
+}
+
+/// The deliberately narrow message projection used by continual learning.
+/// It excludes structured parts and identity-bearing author fields, which are
+/// not learning input even though the general conversation read exposes them.
+#[derive(Debug, Clone)]
+pub struct LearningMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub agent_id: Option<String>,
 }
 
 fn default_sibling_count() -> usize {
@@ -843,6 +875,72 @@ impl ConversationStore {
         self
     }
 
+    /// Swap the semantic message provider before a coordinated re-embed pass.
+    /// Message vectors contain metadata only; the encrypted message body remains
+    /// in this store and is decrypted only for the embedding request.
+    pub async fn set_message_embedder(
+        &self,
+        embedder: std::sync::Arc<dyn ryu_search::SearchEmbedder>,
+    ) -> anyhow::Result<()> {
+        if let Some(index) = self.message_index.clone() {
+            index.set_embedder(embedder).await?;
+        }
+        Ok(())
+    }
+
+    /// Re-embed stale message vectors using the current semantic provider.
+    /// The conversation DB mutex is released before each provider call, and
+    /// indexing remains best-effort per message so one malformed/deleted row
+    /// cannot strand the rest of the pass.
+    pub async fn reindex_message_embeddings(&self) -> anyhow::Result<usize> {
+        let Some(index) = self.message_index.clone() else {
+            return Ok(0);
+        };
+        let embedder = index.embedder();
+        let stale = index
+            .stale_ids(embedder.model_id(), embedder.dims())
+            .await?;
+        let indexed = index.indexed_ids().await?;
+        if stale.is_empty() && indexed.len() == 0 {
+            return Ok(0);
+        }
+        let rows = {
+            let conn = self.conn.lock().await;
+            let mut stmt = conn
+                .prepare("SELECT id, conversation_id, role, content, created_at FROM messages")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (id, conversation_id, role, sealed, created_at) = row?;
+                if stale.contains(&id) || !indexed.contains(&id) {
+                    let content = self.open_content(sealed);
+                    if !content.trim().is_empty() {
+                        pending.push((id, conversation_id, role, content, created_at));
+                    }
+                }
+            }
+            pending
+        };
+        let model = embedder.model_id().to_owned();
+        let mut updated = 0;
+        for (id, conversation_id, role, content, created_at) in rows {
+            let vector = embedder.embed(&content).await?;
+            index
+                .index_message(&id, &conversation_id, &role, &vector, &model, created_at)
+                .await?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
     /// Wire the full-text (FTS5) message index (backing the FTS session-search
     /// recall layer) into the store. Cheap to clone (`Arc` inside). Mirrors
     /// [`with_message_index`]. Population is lazy-on-search and default-OFF, so
@@ -1100,6 +1198,26 @@ impl ConversationStore {
         if !existing_msg_columns.contains("author_name") {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN author_name TEXT")
                 .context("adding author_name column to messages")?;
+        }
+
+        // Additive migration: server-verified widget attribution. Nullable so
+        // ordinary and legacy messages remain unchanged; the conversation_id
+        // column is the binding that keeps this metadata scoped to its thread.
+        for (col, ddl) in [
+            ("source", "ALTER TABLE messages ADD COLUMN source TEXT"),
+            (
+                "widget_instance_id",
+                "ALTER TABLE messages ADD COLUMN widget_instance_id TEXT",
+            ),
+            (
+                "origin_server",
+                "ALTER TABLE messages ADD COLUMN origin_server TEXT",
+            ),
+        ] {
+            if !existing_msg_columns.contains(col) {
+                conn.execute_batch(ddl)
+                    .with_context(|| format!("adding column {col} to messages"))?;
+            }
         }
 
         // Additive migration: structured render parts (AI SDK reduced UIMessage
@@ -1538,7 +1656,7 @@ impl ConversationStore {
         author_name: Option<&str>,
         tenancy: Tenancy,
     ) -> Result<String> {
-        self.append_message_at(
+        self.append_message_as_with_provenance(
             conversation_id,
             role,
             content,
@@ -1547,6 +1665,35 @@ impl ConversationStore {
             author_name,
             tenancy,
             None,
+        )
+        .await
+    }
+
+    /// Append a message with provenance resolved by a server-side verification
+    /// boundary. The provenance is written together with the ordinary message
+    /// row so the existing conversation reload endpoint can render it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_message_as_with_provenance(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        author_user_id: Option<&str>,
+        author_name: Option<&str>,
+        tenancy: Tenancy,
+        provenance: Option<&MessageProvenance>,
+    ) -> Result<String> {
+        self.append_message_at_with_provenance(
+            conversation_id,
+            role,
+            content,
+            agent_id,
+            author_user_id,
+            author_name,
+            tenancy,
+            None,
+            provenance,
         )
         .await
     }
@@ -1571,6 +1718,33 @@ impl ConversationStore {
         author_name: Option<&str>,
         tenancy: Tenancy,
         created_at: Option<i64>,
+    ) -> Result<String> {
+        self.append_message_at_with_provenance(
+            conversation_id,
+            role,
+            content,
+            agent_id,
+            author_user_id,
+            author_name,
+            tenancy,
+            created_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn append_message_at_with_provenance(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        agent_id: Option<&str>,
+        author_user_id: Option<&str>,
+        author_name: Option<&str>,
+        tenancy: Tenancy,
+        created_at: Option<i64>,
+        provenance: Option<&MessageProvenance>,
     ) -> Result<String> {
         let now = created_at.unwrap_or_else(now_millis);
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -1680,9 +1854,22 @@ impl ConversationStore {
             .flatten();
         let sealed = self.cipher.seal(content)?;
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, agent_id, author_user_id, author_name, parent_message_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![message_id, conversation_id, role, sealed, agent_id, author_user_id, author_name, parent_message_id, now],
+            "INSERT INTO messages (id, conversation_id, role, content, agent_id, author_user_id, author_name, source, widget_instance_id, origin_server, parent_message_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                message_id,
+                conversation_id,
+                role,
+                sealed,
+                agent_id,
+                author_user_id,
+                author_name,
+                provenance.map(|p| p.source.as_str()),
+                provenance.map(|p| p.widget_instance_id.as_str()),
+                provenance.map(|p| p.origin_server.as_str()),
+                parent_message_id,
+                now
+            ],
         )
         .context("inserting message")?;
         // Advance the leaf so the next turn chains beneath this one. Only matters
@@ -1741,6 +1928,9 @@ impl ConversationStore {
                         "content": content,
                         "author_user_id": author_user_id,
                         "author_name": author_name,
+                        "source": provenance.map(|p| p.source.as_str()),
+                        "widget_instance_id": provenance.map(|p| p.widget_instance_id.as_str()),
+                        "origin_server": provenance.map(|p| p.origin_server.as_str()),
                         "created_at": now,
                         "agent_id": agent_id,
                     }
@@ -2043,7 +2233,7 @@ impl ConversationStore {
     pub async fn get_messages(&self, conversation_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, parts, parent_message_id, interrupted
+            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, source, widget_instance_id, origin_server, parts, parent_message_id, interrupted
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY created_at ASC, rowid ASC",
@@ -2052,7 +2242,7 @@ impl ConversationStore {
         // JSON string temporarily, then decrypted + parsed below (outside the DB
         // lock, like `content`/`title`).
         let rows = stmt.query_map([conversation_id], |row| {
-            let sealed_parts: Option<String> = row.get(7)?;
+            let sealed_parts: Option<String> = row.get(10)?;
             Ok((
                 StoredMessage {
                     id: row.get(0)?,
@@ -2061,9 +2251,12 @@ impl ConversationStore {
                     agent_id: row.get(3)?,
                     author_user_id: row.get(5)?,
                     author_name: row.get(6)?,
+                    source: row.get(7)?,
+                    widget_instance_id: row.get(8)?,
+                    origin_server: row.get(9)?,
                     parts: None,
-                    parent_message_id: row.get(8)?,
-                    interrupted: row.get::<_, i64>(9)? != 0,
+                    parent_message_id: row.get(11)?,
+                    interrupted: row.get::<_, i64>(12)? != 0,
                     sibling_index: 0,
                     sibling_count: 1,
                     sibling_ids: Vec::new(),
@@ -2078,6 +2271,38 @@ impl ConversationStore {
             msg.content = self.open_content(std::mem::take(&mut msg.content));
             msg.parts = self.open_parts(sealed_parts);
             out.push(msg);
+        }
+        Ok(out)
+    }
+
+    /// Read only the plaintext user/assistant projection allowed into learning.
+    /// This query deliberately does not select or decrypt `parts`,
+    /// `author_user_id`, or `author_name`, and has no read path to the identity
+    /// vault or other encrypted-field stores.
+    pub async fn get_learning_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<LearningMessage>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, role, content, agent_id
+             FROM messages
+             WHERE conversation_id = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map([conversation_id], |row| {
+            Ok(LearningMessage {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                agent_id: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let mut message = row?;
+            message.content = self.open_content(message.content);
+            out.push(message);
         }
         Ok(out)
     }
@@ -2600,7 +2825,7 @@ impl ConversationStore {
         let conn = self.conn.lock().await;
         // Select the newest `limit` rows, then reverse to chronological order.
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name
+            "SELECT id, role, content, agent_id, created_at, author_user_id, author_name, source, widget_instance_id, origin_server
              FROM messages
              WHERE conversation_id = ?1
              ORDER BY created_at DESC, rowid DESC
@@ -2627,6 +2852,9 @@ impl ConversationStore {
                 created_at: row.get(4)?,
                 author_user_id: row.get(5)?,
                 author_name: row.get(6)?,
+                source: row.get(7)?,
+                widget_instance_id: row.get(8)?,
+                origin_server: row.get(9)?,
             })
         })?;
         let mut out = Vec::new();
@@ -3964,6 +4192,55 @@ impl ConversationStore {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn verified_widget_provenance_survives_message_reload() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        let provenance = MessageProvenance {
+            source: "widget".to_owned(),
+            widget_instance_id: "wgt_server_minted".to_owned(),
+            origin_server: "com.example.weather".to_owned(),
+        };
+
+        store
+            .append_message_as_with_provenance(
+                "widget-conversation",
+                "user",
+                "What is the weather?",
+                None,
+                None,
+                None,
+                Tenancy::Unattributed,
+                Some(&provenance),
+            )
+            .await
+            .unwrap();
+
+        // The normal conversation read is the reload/render path. The
+        // attribution must come from the persisted server columns, remain bound
+        // to this conversation row, and never appear in another thread.
+        let reloaded = store
+            .get_conversation_detail("widget-conversation")
+            .await
+            .unwrap()
+            .unwrap();
+        let message = &reloaded.messages[0];
+        assert_eq!(reloaded.id, "widget-conversation");
+        assert_eq!(message.source.as_deref(), Some("widget"));
+        assert_eq!(
+            message.widget_instance_id.as_deref(),
+            Some("wgt_server_minted")
+        );
+        assert_eq!(
+            message.origin_server.as_deref(),
+            Some("com.example.weather")
+        );
+        assert!(store
+            .get_messages("different-conversation")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     /// **The choke-point acceptance test** (task item 1).
     ///
     /// Reads this very source file and asserts there is exactly ONE
@@ -4301,6 +4578,54 @@ mod tests {
         // Proves snippet re-read + cipher.open (decrypted, not the sealed blob).
         assert!(hits[0].content.contains("pepperoni"));
         assert!(!hits[0].content.starts_with("enc:v1:"));
+    }
+
+    #[tokio::test]
+    async fn learning_projection_excludes_structured_and_identity_fields() {
+        let store = ConversationStore::open_in_memory().unwrap();
+        let user_id = store
+            .append_message(
+                "learning-safe",
+                "user",
+                "question",
+                None,
+                Some("verified-user"),
+                None,
+            )
+            .await
+            .unwrap();
+        let assistant_id = store
+            .append_message(
+                "learning-safe",
+                "assistant",
+                "answer",
+                Some("agent-1"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_message_parts(
+                &assistant_id,
+                r#"[{"type":"tool","secret":"do-not-learn"}]"#,
+            )
+            .await
+            .unwrap();
+
+        let messages = store.get_learning_messages("learning-safe").await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, user_id);
+        assert_eq!(messages[0].content, "question");
+        assert_eq!(messages[1].id, assistant_id);
+        assert_eq!(messages[1].agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(messages[1].content, "answer");
+
+        // The general read still has the identity/structured fields, proving the
+        // learning projection—not the fixture—is what excludes them.
+        let general = store.get_messages("learning-safe").await.unwrap();
+        assert_eq!(general[0].author_user_id.as_deref(), Some("verified-user"));
+        assert!(general[1].parts.is_some());
     }
 
     #[tokio::test]
@@ -4806,14 +5131,20 @@ mod tests {
             .list_conversations_visible_with_preview(None, None, false)
             .await
             .unwrap();
-        let a = list.iter().find(|c| c.id == "conv-a").expect("conv-a listed");
+        let a = list
+            .iter()
+            .find(|c| c.id == "conv-a")
+            .expect("conv-a listed");
         // Newest wins, it comes back decrypted, and the newlines are flattened so
         // the two-line sidebar row cannot grow a third line.
         assert_eq!(a.last_message.as_deref(), Some("line one line two"));
         assert_eq!(a.last_message_role.as_deref(), Some("assistant"));
         assert!(a.last_message_at.unwrap_or(0) > 0);
 
-        let b = list.iter().find(|c| c.id == "conv-b").expect("conv-b listed");
+        let b = list
+            .iter()
+            .find(|c| c.id == "conv-b")
+            .expect("conv-b listed");
         assert_eq!(b.last_message.as_deref(), Some("only message"));
         assert_eq!(b.last_message_role.as_deref(), Some("user"));
     }
@@ -5089,7 +5420,10 @@ mod tests {
             normalize_folder_path("/Users/j//Code/ryu"),
             "/Users/j/Code/ryu"
         );
-        assert_eq!(normalize_folder_path("  /Users/j/Code/ryu  "), "/Users/j/Code/ryu");
+        assert_eq!(
+            normalize_folder_path("  /Users/j/Code/ryu  "),
+            "/Users/j/Code/ryu"
+        );
         // Roots survive: stripping these would leave a string that names nothing.
         assert_eq!(normalize_folder_path("/"), "/");
         assert_eq!(normalize_folder_path("C:\\"), "C:\\");
@@ -5224,7 +5558,14 @@ mod tests {
             .await
             .unwrap();
         let truncated = store
-            .append_message("conv-crash", "assistant", "Sure — here is the fi", None, None, None)
+            .append_message(
+                "conv-crash",
+                "assistant",
+                "Sure — here is the fi",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         store.set_run_status("conv-crash", "running").await.unwrap();

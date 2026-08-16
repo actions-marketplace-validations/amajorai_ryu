@@ -149,7 +149,7 @@ export function ModeMenuContent({
 	}
 
 	if (!showSearch) {
-		return <div className="max-h-80 overflow-y-auto">{body}</div>;
+		return <div className="scroll-fade max-h-80 overflow-y-auto">{body}</div>;
 	}
 
 	return (
@@ -171,7 +171,7 @@ export function ModeMenuContent({
 					/>
 				</div>
 			</div>
-			<div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto">{body}</div>
 		</div>
 	);
 }

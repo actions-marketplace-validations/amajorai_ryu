@@ -16,6 +16,7 @@
 // from the client.
 
 import { CodedRpcError, type WidgetRpcErrorCode } from "@ryu/app-host/rpc";
+import type { WidgetMessageAttribution } from "@ryu/blocks/desktop/agent-elements/types.ts";
 import {
 	type ApiTarget,
 	apiUrl,
@@ -138,6 +139,48 @@ export interface WidgetFollowUpInput {
 	toolCallId: string;
 }
 
+export interface WidgetInjectedTurn {
+	conversation_id: string;
+	origin_server: string;
+	prompt: string;
+	role: "user";
+	source: "widget";
+	tool_call_id: string | null;
+	widget_instance_id: string;
+}
+
+export interface WidgetFollowUpResult {
+	injected: WidgetInjectedTurn;
+	ok: true;
+	ticket: string;
+}
+
+function isWidgetFollowUpResult(value: unknown): value is WidgetFollowUpResult {
+	if (typeof value !== "object" || value === null) {
+		return false;
+	}
+	const result = value as { injected?: unknown; ok?: unknown };
+	if (
+		result.ok !== true ||
+		typeof (result as { ticket?: unknown }).ticket !== "string" ||
+		typeof result.injected !== "object" ||
+		result.injected === null
+	) {
+		return false;
+	}
+	const injected = result.injected as Partial<WidgetInjectedTurn>;
+	return (
+		injected.role === "user" &&
+		injected.source === "widget" &&
+		typeof injected.conversation_id === "string" &&
+		typeof injected.origin_server === "string" &&
+		typeof injected.prompt === "string" &&
+		(typeof injected.tool_call_id === "string" ||
+			injected.tool_call_id === null) &&
+		typeof injected.widget_instance_id === "string"
+	);
+}
+
 /**
  * Inject a widget-attributed user turn on the owning conversation through the
  * governed follow-up route (R4/D5). Core gates it (binding + `chat.sendFollowUp`
@@ -147,12 +190,43 @@ export interface WidgetFollowUpInput {
 export async function widgetFollowUp(
 	target: ApiTarget,
 	input: WidgetFollowUpInput
-): Promise<void> {
-	await postWidget<unknown>(target, "/api/widgets/follow-up", {
+): Promise<WidgetFollowUpResult> {
+	const result = await postWidget<unknown>(target, "/api/widgets/follow-up", {
 		instance_id: input.instanceId,
 		tool_call_id: input.toolCallId,
 		prompt: input.prompt,
 	});
+	if (!isWidgetFollowUpResult(result)) {
+		throw new Error("Core returned an invalid widget follow-up envelope");
+	}
+	return result;
+}
+
+/**
+ * Submit the already-governed widget prompt through the normal chat transport.
+ * The callback is the page's `useChat.sendMessage`, so its transport body keeps
+ * the current conversation, agent, model, and other turn context intact.
+ */
+export async function submitWidgetFollowUp(
+	target: ApiTarget,
+	input: WidgetFollowUpInput,
+	sendMessage: (
+		message: { metadata?: WidgetMessageAttribution; text: string },
+		options: { body: { widget_follow_up_ticket: string } }
+	) => Promise<void>
+): Promise<void> {
+	const result = await widgetFollowUp(target, input);
+	await sendMessage(
+		{
+			metadata: {
+				origin_server: result.injected.origin_server,
+				source: "widget",
+				widget_instance_id: result.injected.widget_instance_id,
+			},
+			text: result.injected.prompt,
+		},
+		{ body: { widget_follow_up_ticket: result.ticket } }
+	);
 }
 
 /** The identifiers a state write echoes back (decisions doc D4). */

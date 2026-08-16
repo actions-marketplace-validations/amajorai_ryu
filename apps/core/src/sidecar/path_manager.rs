@@ -102,10 +102,7 @@ impl PathManager {
 /// Pure (given a home and the current `PATH` set) so the rule can be asserted
 /// without mutating the process environment, which a parallel test suite shares.
 #[cfg(not(target_os = "windows"))]
-fn missing_bin_dirs(
-    home: &Path,
-    known: &std::collections::HashSet<PathBuf>,
-) -> Vec<PathBuf> {
+fn missing_bin_dirs(home: &Path, known: &std::collections::HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut seen = known.clone();
     let mut out = Vec::new();
     let candidates = WELL_KNOWN_BIN_DIRS

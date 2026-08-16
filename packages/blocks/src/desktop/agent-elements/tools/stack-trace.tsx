@@ -100,7 +100,7 @@ export const StackTrace = memo(function StackTrace({
 				tool="stack-trace"
 			>
 				{frames.length > 0 ? (
-					<div className="max-h-[340px] overflow-y-auto">
+					<div className="scroll-fade max-h-[340px] overflow-y-auto">
 						{frames.map((frame, index) => (
 							<FrameRow
 								frame={frame}

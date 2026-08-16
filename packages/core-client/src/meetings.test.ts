@@ -44,7 +44,7 @@ function stub(bodyText: string, status = 200): Captured {
 		cap.url = url;
 		cap.init = init;
 		return Promise.resolve(new Response(bodyText, { status }));
-	}) as typeof fetch;
+	}) as unknown as typeof fetch;
 	return cap;
 }
 
@@ -63,7 +63,7 @@ function streamOnce(chunks: string[], init?: ResponseInit): void {
 				}),
 				init
 			)
-		)) as typeof fetch;
+		)) as unknown as typeof fetch;
 }
 
 async function collect(chunks: string[]): Promise<MeetingEvent[]> {
@@ -73,7 +73,16 @@ async function collect(chunks: string[]): Promise<MeetingEvent[]> {
 	return seen;
 }
 
-const meeting = { id: "m1", title: "Sync" };
+const meeting = {
+	created_at: "2026-01-01T00:00:00Z",
+	id: "m1",
+	participants: [],
+	source: "manual" as const,
+	started_at: "2026-01-01T00:00:00Z",
+	status: "detected" as const,
+	title: "Sync",
+	updated_at: "2026-01-01T00:00:00Z",
+};
 
 describe("listMeetings", () => {
 	test("returns the meetings array", async () => {

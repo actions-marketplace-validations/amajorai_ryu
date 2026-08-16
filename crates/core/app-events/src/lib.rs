@@ -81,6 +81,48 @@ pub struct EmitOutcome {
     pub workflows: usize,
 }
 
+/// An optional user-facing notification to raise alongside an emitted event.
+///
+/// When present, Core delivers it into the app-inbox feed (the desktop Inbox
+/// renders it, showing this app's icon) in addition to the hook/workflow fan-out.
+/// Delivering is best-effort on Core's side — the emit itself never fails over a
+/// notification. `target_user_id` names a specific member; omit it on a local
+/// single-user node and Core delivers to the active account.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotifyHint {
+    /// The notification title (the row's headline).
+    pub title: String,
+    /// Optional body text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// One of `info` | `success` | `warning` | `error` (defaults to `info`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    /// The member to deliver to; omit to target the node's active account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_user_id: Option<String>,
+}
+
+impl NotifyHint {
+    /// Build a plain `info` hint with just a title and optional body.
+    #[must_use]
+    pub fn info(title: impl Into<String>, body: Option<String>) -> Self {
+        Self {
+            title: title.into(),
+            body,
+            level: None,
+            target_user_id: None,
+        }
+    }
+
+    /// Mark the hint `level` (`info` | `success` | `warning` | `error`).
+    #[must_use]
+    pub fn with_level(mut self, level: impl Into<String>) -> Self {
+        self.level = Some(level.into());
+        self
+    }
+}
+
 /// Why an emit did not reach Core. Callers that use [`EventEmitter::emit`] never see
 /// these; they exist for [`EventEmitter::try_emit`].
 #[derive(Debug)]
@@ -202,7 +244,22 @@ impl EventEmitter {
     /// swallowed. This is the call site nearly every emitter wants — see the module
     /// docs on why a fan-out failure must not fail the work that produced the event.
     pub async fn emit(&self, event: &str, payload: serde_json::Value) {
-        match self.try_emit(event, payload, None).await {
+        self.emit_with_notify(event, payload, None).await;
+    }
+
+    /// Emit `event` with `payload`, raising a user-facing notification alongside
+    /// the fan-out. Best-effort exactly like [`Self::emit`]; the notify is an
+    /// addition, not a dependency of the emit.
+    pub async fn emit_with_notify(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+        notify: Option<NotifyHint>,
+    ) {
+        match self
+            .try_emit_with_notify(event, payload, None, notify)
+            .await
+        {
             Ok(outcome) => {
                 if outcome.hooks > 0 || outcome.workflows > 0 {
                     tracing::debug!(
@@ -233,6 +290,19 @@ impl EventEmitter {
         payload: serde_json::Value,
         conversation_id: Option<&str>,
     ) -> Result<EmitOutcome, EmitError> {
+        self.try_emit_with_notify(event, payload, conversation_id, None)
+            .await
+    }
+
+    /// [`Self::try_emit`] with an optional [`NotifyHint`] raised alongside the
+    /// event fan-out.
+    pub async fn try_emit_with_notify(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+        conversation_id: Option<&str>,
+        notify: Option<NotifyHint>,
+    ) -> Result<EmitOutcome, EmitError> {
         let (Some(endpoint), Some(token)) = (self.endpoint.as_deref(), self.token.as_deref())
         else {
             return Err(EmitError::NotHosted);
@@ -241,6 +311,9 @@ impl EventEmitter {
         let mut body = serde_json::json!({ "event": event, "payload": payload });
         if let Some(cid) = conversation_id {
             body["conversation_id"] = serde_json::Value::String(cid.to_owned());
+        }
+        if let Some(notify) = notify {
+            body["notify"] = serde_json::to_value(notify).expect("NotifyHint serializes");
         }
 
         let resp = self

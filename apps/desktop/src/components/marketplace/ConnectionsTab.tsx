@@ -28,10 +28,18 @@ import {
 	EmptyTitle,
 } from "@ryu/ui/components/empty";
 import { Input } from "@ryu/ui/components/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@ryu/ui/components/select";
 import { Spinner } from "@ryu/ui/components/spinner";
-import { type ChangeEvent, useMemo, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useState } from "react";
 import { sileo } from "sileo";
 import { openExternal } from "@/lib/tauri-bridge.ts";
+import { useApps } from "@/src/hooks/useApps.ts";
 import {
 	useComposioActions,
 	useComposioConnections,
@@ -40,12 +48,24 @@ import {
 	useComposioTriggers,
 	useInitiateComposioConnection,
 } from "@/src/hooks/useComposioCatalog.ts";
+import { useIdentities } from "@/src/hooks/useIdentities.ts";
+import {
+	useConnectMcpOAuth,
+	useDisconnectMcpOAuth,
+	useMcpOAuthConnections,
+	useMcpOAuthFlow,
+} from "@/src/hooks/useMcpOAuth.ts";
 import type {
 	ComposioConnection,
 	ComposioToolkit,
 } from "@/src/lib/api/composio.ts";
+import type {
+	AppInfo,
+	McpOAuthServerDeclaration,
+} from "@/src/lib/api/plugins.ts";
 
 export default function ConnectionsTab() {
+	const { apps, loading: appsLoading } = useApps();
 	const status = useComposioStatus();
 	const keyConfigured = status.data?.configured ?? false;
 
@@ -79,51 +99,255 @@ export default function ConnectionsTab() {
 		);
 	}, [toolkits.data, query]);
 
-	if (status.isLoading) {
-		return (
-			<div className="flex h-full items-center justify-center">
-				<Spinner className="size-5" />
-			</div>
-		);
-	}
-
-	if (!keyConfigured) {
-		return <KeyMissingState />;
-	}
+	const oauthApps = apps.filter(
+		(app) => app.enabled && app.mcpOAuthServers.length > 0
+	);
 
 	return (
 		<div className="mx-auto max-w-5xl px-6 py-6">
 			<div className="mb-5">
 				<h2 className="font-semibold text-lg">Connections</h2>
 				<p className="text-muted-foreground text-sm">
-					Connect your accounts once here, then attach them to any agent.
-					Powered by Composio.
+					Connect your accounts once here, then attach their tools to any agent.
 				</p>
 			</div>
 
-			<div className="relative mb-5">
-				<HugeiconsIcon
-					className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
-					icon={Search01Icon}
-				/>
-				<Input
-					className="pl-9"
-					onChange={(e: ChangeEvent<HTMLInputElement>) =>
-						setQuery(e.target.value)
-					}
-					placeholder="Search integrations (Gmail, Slack, GitHub…)"
-					value={query}
-				/>
+			<OAuthConnections apps={oauthApps} loading={appsLoading} />
+
+			<div className="mt-8 mb-4">
+				<h3 className="font-medium text-sm">Managed integrations</h3>
+				<p className="text-muted-foreground text-xs">
+					Additional account connections powered by Composio.
+				</p>
 			</div>
 
-			<ToolkitResults
-				connectionByToolkit={connectionByToolkit}
-				error={toolkits.error as Error | null}
-				isLoading={toolkits.isLoading}
-				query={query}
-				toolkits={filtered}
-			/>
+			{status.isLoading ? (
+				<div className="flex justify-center py-12">
+					<Spinner className="size-5" />
+				</div>
+			) : null}
+			{status.isLoading || keyConfigured ? null : <KeyMissingState />}
+			{!status.isLoading && keyConfigured ? (
+				<>
+					<div className="relative mb-5">
+						<HugeiconsIcon
+							className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+							icon={Search01Icon}
+						/>
+						<Input
+							className="pl-9"
+							onChange={(e: ChangeEvent<HTMLInputElement>) =>
+								setQuery(e.target.value)
+							}
+							placeholder="Search integrations (Gmail, Slack, GitHub…)"
+							value={query}
+						/>
+					</div>
+
+					<ToolkitResults
+						connectionByToolkit={connectionByToolkit}
+						error={toolkits.error as Error | null}
+						isLoading={toolkits.isLoading}
+						query={query}
+						toolkits={filtered}
+					/>
+				</>
+			) : null}
 		</div>
+	);
+}
+
+export function OAuthConnections({
+	apps,
+	loading,
+}: {
+	apps: AppInfo[];
+	loading: boolean;
+}) {
+	const identities = useIdentities();
+	const profileIds = Array.from(
+		new Set(["personal", ...identities.profileIds])
+	).sort();
+	if (loading) {
+		return <Spinner className="size-4" />;
+	}
+	if (apps.length === 0) {
+		return null;
+	}
+	return (
+		<section>
+			<div className="mb-3">
+				<h3 className="font-medium text-sm">App and plugin accounts</h3>
+				<p className="text-muted-foreground text-xs">
+					Credentials stay encrypted on this node and are sent only to the
+					declared MCP server.
+				</p>
+			</div>
+			<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				{apps.flatMap((app) =>
+					app.mcpOAuthServers.map((server) => (
+						<OAuthServerCard
+							app={app}
+							key={`${app.id}:${server.name}`}
+							profileIds={profileIds}
+							server={server}
+						/>
+					))
+				)}
+			</div>
+		</section>
+	);
+}
+
+function OAuthServerCard({
+	app,
+	profileIds,
+	server,
+}: {
+	app: AppInfo;
+	profileIds: string[];
+	server: McpOAuthServerDeclaration;
+}) {
+	const [profileId, setProfileId] = useState("personal");
+	const [flowId, setFlowId] = useState<string | null>(null);
+	const status = useMcpOAuthConnections(app.id);
+	const flow = useMcpOAuthFlow(app.id, flowId);
+	const connect = useConnectMcpOAuth(app.id);
+	const disconnect = useDisconnectMcpOAuth(app.id);
+	const serverStatus = status.data?.find(
+		(candidate) => candidate.serverName === server.name
+	);
+	const connection = serverStatus?.connections.find(
+		(candidate) => candidate.profileId === profileId
+	);
+	const connected = connection?.status === "connected";
+	const pending = connect.isPending || flow.data?.status === "pending";
+
+	useEffect(() => {
+		if (!flowId) {
+			return;
+		}
+		if (flow.data?.status === "connected") {
+			setFlowId(null);
+			status.refetch();
+			sileo.success({ title: `${app.name} connected` });
+			return;
+		}
+		if (flow.data?.status === "failed") {
+			setFlowId(null);
+			sileo.error({
+				description: flow.data.error ?? undefined,
+				title: `${app.name} connection failed`,
+			});
+		}
+	}, [app.name, flow.data, flowId, status.refetch]);
+
+	const handleConnect = async () => {
+		try {
+			const started = await connect.mutateAsync({
+				profileId,
+				serverName: server.name,
+			});
+			setFlowId(started.flowId);
+			await openExternal(started.authorizationUrl);
+			sileo.success({
+				description: "Authorize in your browser, then return to Ryu.",
+				title: `Connecting ${app.name}…`,
+			});
+		} catch (error) {
+			sileo.error({
+				title:
+					error instanceof Error ? error.message : "Could not start connect.",
+			});
+		}
+	};
+
+	const handleDisconnect = async () => {
+		try {
+			const result = await disconnect.mutateAsync({
+				profileId,
+				serverName: server.name,
+			});
+			sileo.success({
+				description:
+					result.revocation === "confirmed"
+						? "The provider token was revoked."
+						: "Local credentials were removed; provider revocation could not be confirmed.",
+				title: `${app.name} disconnected`,
+			});
+		} catch (error) {
+			sileo.error({
+				title: error instanceof Error ? error.message : "Could not disconnect.",
+			});
+		}
+	};
+
+	return (
+		<article className="rounded-lg bg-card p-4">
+			<div className="flex items-start justify-between gap-3">
+				<div className="min-w-0">
+					<p className="truncate font-medium text-sm">{app.name}</p>
+					<p className="truncate text-muted-foreground text-xs">
+						{server.name} · {server.resource}
+					</p>
+				</div>
+				<ConnectionStatusBadge connected={connected} pending={pending} />
+			</div>
+			<Select
+				onValueChange={(value) => {
+					if (value) {
+						setProfileId(value);
+					}
+				}}
+				value={profileId}
+			>
+				<SelectTrigger
+					aria-label={`${app.name} identity profile`}
+					className="mt-3 h-8 w-full"
+					size="sm"
+				>
+					<SelectValue placeholder="Identity profile" />
+				</SelectTrigger>
+				<SelectContent>
+					{profileIds.map((id) => (
+						<SelectItem key={id} value={id}>
+							{id}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			{connection?.scopes.length ? (
+				<p className="mt-2 line-clamp-2 text-muted-foreground text-xs">
+					Scopes: {connection.scopes.join(", ")}
+				</p>
+			) : null}
+			<div className="mt-3 flex justify-end gap-2">
+				{app.enabled ? null : (
+					<span className="mr-auto self-center text-muted-foreground text-xs">
+						Enable to connect
+					</span>
+				)}
+				{connected ? (
+					<Button
+						disabled={disconnect.isPending || !app.enabled}
+						onClick={handleDisconnect}
+						size="sm"
+						variant="ghost"
+					>
+						Disconnect
+					</Button>
+				) : null}
+				<Button
+					disabled={pending || profileId.trim().length === 0 || !app.enabled}
+					onClick={handleConnect}
+					size="sm"
+					variant={connected ? "outline" : "default"}
+				>
+					{pending ? <Spinner className="mr-2 size-3.5" /> : null}
+					{connected ? "Reconnect" : "Connect"}
+				</Button>
+			</div>
+		</article>
 	);
 }
 
@@ -393,7 +617,7 @@ function ToolSectionBody({
 		return <p className="text-muted-foreground text-xs">{emptyLabel}</p>;
 	}
 	return (
-		<ul className="max-h-48 space-y-1 overflow-auto">
+		<ul className="scroll-fade max-h-48 space-y-1 overflow-auto">
 			{items.map((item) => (
 				<li
 					className="rounded-md px-2 py-1 text-xs hover:bg-muted/50"

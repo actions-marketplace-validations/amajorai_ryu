@@ -140,7 +140,7 @@ export const CollapsibleText = memo(function CollapsibleText({
 					// edge, so the whole disclosure opens and closes as one surface.
 					"transition-[max-height] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none",
 					!expanded && collapsedMaxHeightClass,
-					showFullHeight && "[max-height:var(--collapsible-full-height)]",
+					showFullHeight && "max-h-[var(--collapsible-full-height)]",
 					onContentClick && "cursor-pointer"
 				)}
 				onClick={onContentClick ? handleContentClick : undefined}

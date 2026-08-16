@@ -100,7 +100,7 @@ export function AnalyticsInspector() {
 		<Dialog onOpenChange={handleOpenChange} open={open}>
 			<DialogTrigger
 				render={
-					<Button size="sm" variant="outline">
+					<Button size="sm" variant="ghost">
 						See what we send
 					</Button>
 				}

@@ -3,13 +3,21 @@
 import { Button } from "@ryu/ui/components/button";
 import { Skeleton } from "@ryu/ui/components/skeleton.tsx";
 import { cn } from "@ryu/ui/lib/utils";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+	type ReactNode,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { deriveContextUsage } from "./context-usage.tsx";
 import { type SuggestionItem, Suggestions } from "./input/suggestions.tsx";
 import { InputBar } from "./input-bar.tsx";
 import { MessageList } from "./message-list.tsx";
 import { ComposerQuotePreview } from "./quote.tsx";
 import type { AgentChatProps } from "./types.ts";
+import { useDeferredQuestion } from "./use-deferred-question.ts";
 
 export function AgentChat({
 	messages,
@@ -23,6 +31,7 @@ export function AgentChat({
 	attachments,
 	showCopyToolbar,
 	onBranch,
+	onAgentUiSubmit,
 	onEditMessage,
 	onRegenerateMessage,
 	onRetryGeneration,
@@ -37,6 +46,10 @@ export function AgentChat({
 	onSpeak,
 	onQuote,
 	onOpenFile,
+	onOpenLink,
+	mentionItems,
+	onWorkflowResume,
+	previewResolvers,
 	quote,
 	onClearQuote,
 	initialScrollBehavior,
@@ -63,9 +76,13 @@ export function AgentChat({
 	contextSize,
 	conversationKey,
 	onOpenContext,
+	draftControls,
 }: AgentChatProps) {
 	const rootRef = useRef<HTMLDivElement>(null);
 	const [draft, setDraft] = useState("");
+	const resolvedDraftControls = draftControls
+		? { ...draftControls, onInsert: (text: string) => setDraft(text) }
+		: undefined;
 
 	// Apply a composer seed (e.g. from a deep link) once per distinct value, so a
 	// pre-filled prompt lands in the textarea without clobbering later edits.
@@ -140,6 +157,22 @@ export function AgentChat({
 	const showPlaceholder = isPlaceholder && !error && messages.length === 0;
 
 	const pendingQuestion = findPendingQuestion(messages, questionTool);
+	const {
+		markComposerActivity,
+		markComposerIdle,
+		visibleQuestion: visiblePendingQuestion,
+	} = useDeferredQuestion(pendingQuestion);
+	const handleDraftChange = useCallback(
+		(nextDraft: string) => {
+			setDraft(nextDraft);
+			if (nextDraft) {
+				markComposerActivity();
+			} else {
+				markComposerIdle();
+			}
+		},
+		[markComposerActivity, markComposerIdle]
+	);
 	const suggestionConfig = resolveSuggestions(suggestions);
 	const showInputSuggestions =
 		emptySuggestionsPlacement === "input" ||
@@ -202,34 +235,38 @@ export function AgentChat({
 			}
 			contextMeter={contextMeter}
 			contextMeterOnOpen={onOpenContext}
+			draftControls={resolvedDraftControls}
 			isDragOver={attachments?.isDragOver}
 			onAttach={attachments?.onAttach}
-			onChange={setDraft}
+			onChange={handleDraftChange}
 			onPaste={attachments?.onPaste}
 			onRemoveFile={attachments?.onRemoveFile}
 			onRemoveImage={attachments?.onRemoveImage}
 			onSend={onSend}
 			onStop={onStop}
 			placeholder={isEmpty ? "Send a message" : "Ask a follow up"}
+			placeholderSuggestion={
+				(followUpItems[0] ?? suggestionConfig.items[0])?.label
+			}
 			questionBar={
-				pendingQuestion
+				visiblePendingQuestion
 					? {
-							id: pendingQuestion.id,
-							questions: pendingQuestion.questions,
-							questionIndex: pendingQuestion.questionIndex,
-							totalQuestions: pendingQuestion.totalQuestions,
-							onPreviousQuestion: pendingQuestion.onPreviousQuestion,
-							onNextQuestion: pendingQuestion.onNextQuestion,
-							submitLabel: pendingQuestion.submitLabel,
-							skipLabel: pendingQuestion.skipLabel,
-							allowSkip: pendingQuestion.allowSkip,
+							id: visiblePendingQuestion.id,
+							questions: visiblePendingQuestion.questions,
+							questionIndex: visiblePendingQuestion.questionIndex,
+							totalQuestions: visiblePendingQuestion.totalQuestions,
+							onPreviousQuestion: visiblePendingQuestion.onPreviousQuestion,
+							onNextQuestion: visiblePendingQuestion.onNextQuestion,
+							submitLabel: visiblePendingQuestion.submitLabel,
+							skipLabel: visiblePendingQuestion.skipLabel,
+							allowSkip: visiblePendingQuestion.allowSkip,
 							onSubmit: (answer) => {
 								questionTool?.onAnswer?.({
-									toolCallId: pendingQuestion.toolCallId,
+									toolCallId: visiblePendingQuestion.toolCallId,
 									question:
-										pendingQuestion.questions[
-											pendingQuestion.questionIndex
-												? pendingQuestion.questionIndex - 1
+										visiblePendingQuestion.questions[
+											visiblePendingQuestion.questionIndex
+												? visiblePendingQuestion.questionIndex - 1
 												: 0
 										],
 									answer,
@@ -239,7 +276,13 @@ export function AgentChat({
 					: undefined
 			}
 			status={status}
-			suggestions={showInputSuggestions ? suggestions : []}
+			suggestions={
+				showInputSuggestions
+					? followUpItems.length > 0
+						? followUpItems
+						: suggestionConfig.items
+					: []
+			}
 			value={draft}
 		/>
 	);
@@ -258,7 +301,7 @@ export function AgentChat({
 			// This matters now because the footer slot can hold a tall surface (the app
 			// launchpad). Before it was ever filled the column always fit, so the
 			// difference was invisible.
-			<div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4">
+			<div className="scroll-fade flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4">
 				<div className="my-auto flex w-full max-w-[720px] flex-col">
 					{emptyStateHeader}
 					{emptySuggestionsPosition === "top" ? emptySuggestionsNode : null}
@@ -294,24 +337,29 @@ export function AgentChat({
 				// (see MessageListProps.historyNotice).
 				historyNotice={historyNotice}
 				initialScrollBehavior={initialScrollBehavior}
+				mentionItems={mentionItems}
 				messageActions={messageActions}
 				messages={listMessages}
+				onAgentUiSubmit={onAgentUiSubmit}
 				onBranch={onBranch}
 				onContributedMessageAction={onContributedMessageAction}
 				onEditMessage={onEditMessage}
 				onFeedback={onFeedback}
 				onOpenFile={onOpenFile}
+				onOpenLink={onOpenLink}
 				onQuote={onQuote}
 				onRegenerateMessage={onRegenerateMessage}
 				onRetryGeneration={onRetryGeneration}
 				onSelectVersion={onSelectVersion}
 				onSpeak={onSpeak}
 				onToggleReaction={onToggleReaction}
+				onWorkflowResume={onWorkflowResume}
+				previewResolvers={previewResolvers}
 				reactionsByMessage={reactionsByMessage}
 				showCopyToolbar={showCopyToolbar}
 				slots={slots}
 				status={status}
-				suppressQuestionTool={Boolean(pendingQuestion)}
+				suppressQuestionTool={Boolean(visiblePendingQuestion)}
 				toolRenderers={toolRenderers}
 				versions={versions}
 			/>

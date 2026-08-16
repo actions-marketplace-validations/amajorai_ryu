@@ -52,7 +52,10 @@
 //! node as single-tenant, fail-OPEN, and hand any holder of the shared
 //! `RYU_TOKEN` full access to other users' scoped resources.
 
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use axum::{
     extract::{
@@ -80,6 +83,17 @@ const SEND_BUFFER: usize = 256;
 const CLOSE_POLICY: u16 = 1008;
 /// WS close code for an unsupported/invalid payload (1003).
 const CLOSE_UNSUPPORTED: u16 = 1003;
+
+/// Maximum serialized size of a stamped presence payload. Presence is ephemeral
+/// awareness, not a document transport; bounding it prevents a client from
+/// using the room fan-out as an unbounded broadcast channel.
+const MAX_PRESENCE_BYTES: usize = 16 * 1024;
+
+/// Application-level keepalive cadence. The server owns liveness so a client
+/// that disappears without a clean WebSocket close cannot retain membership.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+/// A client must answer at least one server ping within this window.
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// How long a collaborative document must go without an applied CRDT update before
 /// it is considered "quiescent" and its materialized projection is written back
@@ -353,22 +367,26 @@ async fn handle_socket(
     };
     let can_write = matches!(access, Access::Write);
 
+    // A unique per-connection member id also owns any seed claim this connection
+    // wins. It is generated before claiming so teardown can release that exact
+    // claim even when other members remain in the room.
+    let member_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
+
     // Single-writer seed arbitration (document rooms only). The client seeds a
     // brand-new empty room from its local `source`; two clients opening the same
     // empty room concurrently would BOTH seed and corrupt the doc (duplicated body /
     // duplicated `col_name` columns). So the server decides exactly one seeder: this
     // caller may seed only if it can write, the doc is still empty, AND it wins the
-    // atomic one-shot claim. `&&` short-circuits so a non-writer / non-empty doc
-    // never consumes the claim, and only the first racer's `claim_seed` returns true.
+    // atomic one-shot claim. `DocRegistry::claim_seed` holds the document lock over
+    // the emptiness check and insert, so an update cannot slip between those steps.
     let may_seed = is_document
         && can_write
-        && state.collab.is_empty(&room_id).unwrap_or(false)
-        && state.collab.claim_seed(&room_id).unwrap_or(false);
+        && state
+            .collab
+            .claim_seed(&room_id, &member_id)
+            .unwrap_or(false);
 
     // ── Join the room ────────────────────────────────────────────────────────
-    // A unique per-connection member id so presence reaping is per-socket (two
-    // tabs of the same user each get their own awareness entry + leave).
-    let member_id = format!("mem_{}", uuid::Uuid::new_v4().simple());
     // Race-safe join: get-or-create + member increment happen under the registry
     // lock, so a concurrent idle eviction can never orphan this membership.
     let membership = state.realtime.join(&room_id, member_id.clone());
@@ -376,6 +394,7 @@ async fn handle_socket(
 
     // Ack the join with the resolved access level — stage-2's client reads this to
     // know whether it may edit (write) or is a read-only viewer.
+    let presence = membership.handle().presence_roster().await;
     let ack = json!({
         "type": "join_ack",
         "room_id": room_id,
@@ -385,8 +404,10 @@ async fn handle_socket(
         // claim — see `may_seed` above. This is the race-proof half of the
         // double-seed fix; the client side is the gate, this is the arbiter.
         "may_seed": may_seed,
+        "presence": presence,
     });
     if ws_tx.send(Message::Text(ack.to_string())).await.is_err() {
+        release_seed_claim_if_needed(&state.collab, &room_id, &member_id, may_seed);
         return;
     }
 
@@ -417,6 +438,13 @@ async fn handle_socket(
             }
         }
     });
+
+    // Prime the interval so the first server ping is one full cadence after the
+    // join acknowledgement, then require a pong before the bounded timeout.
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
+    let mut last_pong = Instant::now();
 
     // ── Document rooms: drive the authoritative CRDT engine ──────────────────
     // Rehydrate the doc (this resolves/creates the in-memory `yrs` replica) and
@@ -464,12 +492,30 @@ async fn handle_socket(
     };
 
     // ── Receive loop: client frames -> room ──────────────────────────────────
-    while let Some(frame) = ws_rx.next().await {
-        let frame = match frame {
-            Ok(f) => f,
-            Err(_) => break,
-        };
-        match frame {
+    loop {
+        tokio::select! {
+            _ = keepalive.tick() => {
+                if last_pong.elapsed() >= KEEPALIVE_TIMEOUT {
+                    tracing::debug!(room_id, "realtime: keepalive timeout");
+                    break;
+                }
+                if out_tx
+                    .send(Message::Text(json!({"type": "ping"}).to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            frame = ws_rx.next() => {
+                let Some(frame) = frame else {
+                    break;
+                };
+                let frame = match frame {
+                    Ok(f) => f,
+                    Err(_) => break,
+                };
+                match frame {
             Message::Text(text) => {
                 let Ok(value) = serde_json::from_str::<Value>(&text) else {
                     continue;
@@ -480,11 +526,11 @@ async fn handle_socket(
                         // member id so peers can attribute it. Presence is relayed
                         // for read-only viewers too (it is the viewer's own
                         // awareness, not a mutation of the resource).
-                        let mut payload = value.get("data").cloned().unwrap_or_else(|| json!({}));
-                        if let Some(obj) = payload.as_object_mut() {
-                            obj.insert("member_id".into(), json!(member_id));
+                        if let Some(payload) =
+                            prepare_presence_payload(value.get("data"), &member_id)
+                        {
+                            membership.publish_presence(payload);
                         }
-                        membership.publish_presence(payload);
                     }
                     Some("ping") => {
                         if out_tx
@@ -494,6 +540,9 @@ async fn handle_socket(
                         {
                             break;
                         }
+                    }
+                    Some("pong") => {
+                        last_pong = Instant::now();
                     }
                     Some("leave") => break,
                     // Unknown control frames are ignored (forward-compatible).
@@ -557,6 +606,8 @@ async fn handle_socket(
             }
             Message::Ping(_) | Message::Pong(_) => {}
             Message::Close(_) => break,
+                }
+            }
         }
     }
 
@@ -574,18 +625,6 @@ async fn handle_socket(
     // so a join racing this drop loses nothing (persistence is the source of truth).
     if is_document && room_handle.member_count() == 0 {
         materialize_to_spaces(&state.collab, &state.spaces, &room_id).await;
-        // If the doc is STILL empty on last-leave, the seed never happened (the
-        // claim winner left before its seed update landed). Release the claim BEFORE
-        // dropping the replica so a future session can re-claim and seed — otherwise
-        // a crashed-before-seed claim would lock the room out of seeding forever.
-        if state.collab.is_empty(&room_id).unwrap_or(false) {
-            if let Err(e) = state.collab.release_seed_claim(&room_id) {
-                tracing::warn!(
-                    room_id,
-                    "collab: release seed claim on last-leave failed: {e:#}"
-                );
-            }
-        }
         if let Err(e) = state.collab.flush_and_drop(&room_id) {
             tracing::warn!(
                 room_id,
@@ -594,11 +633,36 @@ async fn handle_socket(
         }
     }
 
+    // If this connection won the claim but left before its first update, release
+    // only its own claim. This intentionally runs even while other room members
+    // remain connected; waiting for last-leave would strand an empty document.
+    release_seed_claim_if_needed(&state.collab, &room_id, &member_id, may_seed);
+
     // Dropping `quiesce_tx` closes the debounce channel, ending that task.
     drop(quiesce_tx);
     drop(out_tx);
     forward_task.abort();
     let _ = send_task.await;
+}
+
+fn release_seed_claim_if_needed(
+    collab: &ryu_collab::DocRegistry,
+    room_id: &str,
+    member_id: &str,
+    may_seed: bool,
+) {
+    if !may_seed {
+        return;
+    }
+    match collab.release_seed_claim_if_empty(room_id, member_id) {
+        Ok(true) => tracing::debug!(room_id, member_id, "collab: released empty seed claim"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            room_id,
+            member_id,
+            "collab: release seed claim failed: {e:#}"
+        ),
+    }
 }
 
 /// Write a document's materialized CRDT projection back through the spaces embed
@@ -674,6 +738,18 @@ fn close(code: u16, reason: String) -> Message {
         code,
         reason: reason.into(),
     }))
+}
+
+/// Validate and stamp an inbound presence payload before it enters the room
+/// broadcast. Presence is deliberately an object so the server can attach the
+/// authoritative member id without changing the client's shape. The size check
+/// covers the stamped wire representation, not just the untrusted input.
+fn prepare_presence_payload(data: Option<&Value>, member_id: &str) -> Option<Value> {
+    let mut payload = data.cloned().unwrap_or_else(|| json!({}));
+    let object = payload.as_object_mut()?;
+    object.insert("member_id".into(), json!(member_id));
+    let encoded = serde_json::to_vec(&payload).ok()?;
+    (encoded.len() <= MAX_PRESENCE_BYTES).then_some(payload)
 }
 
 #[cfg(test)]
@@ -862,6 +938,29 @@ mod tests {
             ),
             _ => panic!("expected a text frame"),
         }
+    }
+
+    #[test]
+    fn presence_payload_requires_object_and_stamps_member() {
+        let payload = json!({"name": "Ada", "typing": true});
+        let prepared = prepare_presence_payload(Some(&payload), "member-1")
+            .expect("object presence should be accepted");
+        assert_eq!(prepared["member_id"], "member-1");
+        assert_eq!(prepared["typing"], true);
+
+        assert!(prepare_presence_payload(Some(&json!("not-an-object")), "member-1").is_none());
+        assert!(prepare_presence_payload(Some(&json!([1, 2, 3])), "member-1").is_none());
+    }
+
+    #[test]
+    fn oversized_presence_payload_is_dropped() {
+        let payload = json!({"cursor": "x".repeat(MAX_PRESENCE_BYTES)});
+        assert!(prepare_presence_payload(Some(&payload), "member-1").is_none());
+
+        // Missing data remains a valid empty object for backwards compatibility.
+        let empty =
+            prepare_presence_payload(None, "member-1").expect("missing data is empty presence");
+        assert_eq!(empty["member_id"], "member-1");
     }
 
     /// A CRDT `DocSync` frame is opaque binary, passed through byte-for-byte — the

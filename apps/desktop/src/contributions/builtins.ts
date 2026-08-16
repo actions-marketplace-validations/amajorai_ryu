@@ -54,6 +54,10 @@
 import { createElement, type ReactNode } from "react";
 import type { AttachedImage } from "@/components/agent-elements/input-bar.tsx";
 import { CrashBoundary } from "@/src/components/CrashBoundary.tsx";
+import {
+	MemoryDreamPage,
+	MemoryReflectPage,
+} from "@/src/components/memory/MemoryLibrary.tsx";
 import { PANE_CHOOSER_PATH } from "@/src/lib/splitPresets.ts";
 import { WHITEBOARD_PLUGIN_ID } from "@/src/lib/whiteboard/app.ts";
 import AgentEditPage from "@/src/pages/AgentEditPage.tsx";
@@ -104,6 +108,9 @@ const SPACE_APP = /^\/spaces\/[^/]+\/app\/[^/]+\/[^/]+$/;
 const SPACE_DETAIL = /^\/spaces\/[^/]+$/;
 // /library/<section> — opens the unified Library on a specific collection tab.
 const LIBRARY_SECTION = /^\/library\/([^/]+)$/;
+// Memory keeps its Dream and Reflect views as deep links so a review can be
+// reopened from notifications, command palette results, or a shared tab.
+const MEMORY_VIEW = /^\/library\/memory\/(dream|reflect)$/;
 /** `/chat/agent/<agentId>` — the messaging-style merged view: every thread with
  *  that agent in one scroll, with the composer choosing which one a send joins. */
 const CHAT_MERGED_AGENT = /^\/chat\/agent\/([^/]+)$/;
@@ -404,6 +411,12 @@ export function seedBuiltinRoutes(): void {
 		);
 	});
 	// /library/<section> — open the Library on a specific collection tab.
+	pattern(MEMORY_VIEW, (tab) => {
+		const view = tab.path.split("/")[3];
+		return createElement(
+			view === "reflect" ? MemoryReflectPage : MemoryDreamPage
+		);
+	});
 	pattern(LIBRARY_SECTION, (tab) =>
 		createElement(LibraryPage, { initialSection: tab.path.split("/")[2] })
 	);

@@ -34,7 +34,7 @@ function streamOnce(chunks: string[], init?: ResponseInit): void {
 				}),
 				init
 			)
-		)) as typeof fetch;
+		)) as unknown as typeof fetch;
 }
 
 async function collect(chunks: string[]): Promise<DesktopNotification[]> {

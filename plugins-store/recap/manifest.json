@@ -2,6 +2,7 @@
   "id": "@ryu/recap",
   "name": "Recap",
   "version": "0.1.14",
+  "stability": "experimental",
   "description": "Ends a long agent turn with a short recap of what it actually did — the work, the files and commands it named, what it could not finish, and the obvious next step — written by a side model so the main answer is left untouched. Long turns only by default (short answers recap themselves). `/recap` recaps the whole conversation on demand without spending a turn on the main model; `/recap off` mutes the automatic one for that chat.",
   "tagline": "A short recap of what the agent just did",
   "keywords": ["recap", "summary", "review", "productivity", "turn"],

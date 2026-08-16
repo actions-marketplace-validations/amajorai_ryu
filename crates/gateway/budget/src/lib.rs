@@ -1241,7 +1241,10 @@ impl WalletState {
         available_micro_usd: i64,
     ) -> Option<CreditReservation> {
         let amount = amount_micro_usd.max(0);
-        let mut entry = self.in_flight_micro_usd.entry(org_id.to_string()).or_insert(0);
+        let mut entry = self
+            .in_flight_micro_usd
+            .entry(org_id.to_string())
+            .or_insert(0);
         // `>` not `>=`: a request whose estimate exactly consumes the remaining
         // balance is the last one that should be admitted, not the first one
         // refused. Overdraft is bounded by the estimate's error, which is the
@@ -1275,8 +1278,7 @@ impl WalletState {
         if remove {
             // Drop the key at zero so an idle process does not retain an entry
             // per org it has ever served.
-            self.in_flight_micro_usd
-                .remove_if(org_id, |_, v| *v == 0);
+            self.in_flight_micro_usd.remove_if(org_id, |_, v| *v == 0);
         }
     }
 }

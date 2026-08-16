@@ -173,7 +173,8 @@ fn existing_deno() -> Option<(PathBuf, DenoSource)> {
         if path.is_file() {
             return Some((path, DenoSource::Override));
         }
-        if let Some(resolved) = crate::sidecar::adapters::acp::resolve_in_path(&path.to_string_lossy())
+        if let Some(resolved) =
+            crate::sidecar::adapters::acp::resolve_in_path(&path.to_string_lossy())
         {
             return Some((resolved, DenoSource::Override));
         }
@@ -242,10 +243,9 @@ pub async fn ensure_deno() -> Result<PathBuf> {
 
     // Blocking zip work off the reactor. The archive holds exactly one entry
     // (`deno`), so a single-binary extract is the whole job.
-    let extracted =
-        tokio::task::spawn_blocking(move || extract_from_zip(&archive_data, BIN_NAME))
-            .await
-            .context("spawn_blocking for Deno archive extraction")??;
+    let extracted = tokio::task::spawn_blocking(move || extract_from_zip(&archive_data, BIN_NAME))
+        .await
+        .context("spawn_blocking for Deno archive extraction")??;
 
     let dest = managed_path();
     if let Some(parent) = dest.parent() {
@@ -258,7 +258,11 @@ pub async fn ensure_deno() -> Result<PathBuf> {
     // `deno.exe`.with_extension("tmp") also silently drops the `.exe`. The flip
     // side of uniqueness is that a crashed install cannot be overwritten by the
     // next one, so every failure path below reaps its own 80 MB scratch file.
-    let tmp = dest.with_file_name(format!("{}.{}.download-tmp", exe_name(), std::process::id()));
+    let tmp = dest.with_file_name(format!(
+        "{}.{}.download-tmp",
+        exe_name(),
+        std::process::id()
+    ));
     let landed = land_binary(&tmp, &dest, &extracted).await;
     if landed.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -309,11 +313,7 @@ pub async fn ensure_deno() -> Result<PathBuf> {
 /// The executable bit is set BEFORE the rename, deliberately: `dest` is then
 /// never observable in a non-runnable state, and skipping it entirely would
 /// surface only as a "Permission denied" at spawn time, far from here.
-async fn land_binary(
-    tmp: &std::path::Path,
-    dest: &std::path::Path,
-    bytes: &[u8],
-) -> Result<()> {
+async fn land_binary(tmp: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -> Result<()> {
     tokio::fs::write(tmp, bytes)
         .await
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -539,7 +539,10 @@ mod tests {
         let _g = EnvGuard::set(VERSION_ENV, "   ");
         assert_eq!(pinned_version(), DENO_TARGET_VERSION);
         let url = archive_url().expect("a url");
-        assert!(url.contains(&format!("/v{DENO_TARGET_VERSION}/")), "got: {url}");
+        assert!(
+            url.contains(&format!("/v{DENO_TARGET_VERSION}/")),
+            "got: {url}"
+        );
     }
 
     #[tokio::test]
@@ -560,7 +563,10 @@ mod tests {
         let path = ensure_deno().await.expect("the short circuit");
         assert_eq!(path, fake.0);
         // And it left the operator's override exactly as it found it.
-        assert_eq!(std::env::var(DENO_BIN_ENV).ok().map(PathBuf::from), Some(fake.0.clone()));
+        assert_eq!(
+            std::env::var(DENO_BIN_ENV).ok().map(PathBuf::from),
+            Some(fake.0.clone())
+        );
     }
 
     #[test]
@@ -578,9 +584,8 @@ mod tests {
         let _g = EnvGuard::set(DENO_BIN_ENV, "/nonexistent/ryu/deno-does-not-exist");
         // A dangling override must not be reported as an available binary, or
         // `ensure_deno` would hand back a path that cannot spawn.
-        assert!(existing_deno().is_none_or(|(p, _)| p != PathBuf::from(
-            "/nonexistent/ryu/deno-does-not-exist"
-        )));
+        assert!(existing_deno()
+            .is_none_or(|(p, _)| p != PathBuf::from("/nonexistent/ryu/deno-does-not-exist")));
     }
 
     #[test]

@@ -910,7 +910,11 @@ mod tests {
 
         // A catch-all declaration: `route_matches` would admit all three.
         let (routes, dropped) = lower("@ryu/hostile", &api, "/api", &declared(&["/x/*rest"]));
-        assert_eq!(routes.len(), 1, "only the benign path survives: {routes:#?}");
+        assert_eq!(
+            routes.len(),
+            1,
+            "only the benign path survives: {routes:#?}"
+        );
         assert_eq!(routes[0].url, "core:/api/ext/@ryu/hostile/x/ok");
         assert_eq!(
             dropped, 0,

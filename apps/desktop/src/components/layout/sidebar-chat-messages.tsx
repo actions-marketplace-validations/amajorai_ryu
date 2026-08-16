@@ -2,6 +2,8 @@
 
 import { ArrowDown01Icon, Message01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { FileTypeIcon } from "@ryu/blocks/desktop/agent-elements/file-type-icon.tsx";
+import { extractAtFileMentions } from "@ryu/blocks/desktop/agent-elements/linkify-mentions.ts";
 import {
 	HoverCard,
 	HoverCardContent,
@@ -15,6 +17,7 @@ import type { Message } from "@/types/chat.ts";
 
 interface MessageEntry {
 	description?: string;
+	files: string[];
 	id: string;
 	title: string;
 }
@@ -78,6 +81,7 @@ export function SidebarChatMessages({
 						id: msg.id,
 						title: text.length > 72 ? `${text.slice(0, 72)}…` : text,
 						description,
+						files: extractAtFileMentions(`${text}\n${description ?? ""}`),
 					});
 				}
 				setEntries(items);
@@ -137,7 +141,7 @@ export function SidebarChatMessages({
 								{entry.title}
 							</span>
 						</HoverCardTrigger>
-						{entry.description ? (
+						{entry.description || entry.files.length > 0 ? (
 							<HoverCardContent
 								align="start"
 								className="w-72 max-w-[min(18rem,calc(100vw-2rem))] p-3"
@@ -148,7 +152,7 @@ export function SidebarChatMessages({
 									<p className="font-medium text-sm leading-snug">
 										{entry.title}
 									</p>
-									{agent ? (
+									{entry.description && agent ? (
 										<div className="flex items-start gap-2">
 											<span className="mt-0.5 flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted">
 												<AgentAvatar
@@ -167,11 +171,24 @@ export function SidebarChatMessages({
 												</p>
 											</div>
 										</div>
-									) : (
+									) : entry.description ? (
 										<p className="line-clamp-4 text-muted-foreground text-xs leading-relaxed">
 											{entry.description}
 										</p>
-									)}
+									) : null}
+									{entry.files.length > 0 ? (
+										<ul className="space-y-1 border-border/60 border-t pt-2">
+											{entry.files.slice(0, 4).map((file) => (
+												<li
+													className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] text-muted-foreground"
+													key={file}
+												>
+													<FileTypeIcon className="size-3.5" path={file} />
+													<span className="truncate">{file}</span>
+												</li>
+											))}
+										</ul>
+									) : null}
 								</div>
 							</HoverCardContent>
 						) : null}

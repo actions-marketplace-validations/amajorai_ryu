@@ -364,12 +364,7 @@ pub fn capability_title(known: &[PluginManifest], capability: &str) -> Option<St
             if p.capability != capability {
                 continue;
             }
-            let Some(title) = p
-                .title
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-            else {
+            let Some(title) = p.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
                 continue;
             };
             named.push((m.id.as_str(), p.default_provider, title));

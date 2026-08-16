@@ -85,7 +85,7 @@ export function SideChatPanel({ state, onAsk }: SideChatData) {
 
 	return (
 		<div className="flex h-full flex-col">
-			<div className="min-h-0 flex-1 overflow-y-auto p-3">
+			<div className="scroll-fade min-h-0 flex-1 overflow-y-auto p-3">
 				{state?.question && (
 					<p className="mb-2 font-medium text-foreground text-sm leading-snug">
 						{state.question}

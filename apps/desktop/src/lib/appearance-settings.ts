@@ -26,6 +26,10 @@ import {
 	setFriendlyMode,
 } from "@/src/hooks/useFriendlyMode.ts";
 import { setInvertedBackgrounds } from "@/src/hooks/useInvertedBackgrounds.ts";
+import {
+	DEFAULT_NODE_SELECTOR_DETAIL,
+	NODE_SELECTOR_DETAIL_KEY,
+} from "@/src/hooks/useNodeSelectorDetail.ts";
 import { setPersistedToggle } from "@/src/hooks/usePersistedToggle.ts";
 import { setPointerCursor } from "@/src/hooks/usePointerCursor.ts";
 import {
@@ -93,6 +97,7 @@ export const APPEARANCE_KEYS = {
 	// Re-exported from useSeasonalEffects so the seasonal switch reads its key
 	// from the same place as every other Appearance toggle.
 	seasonalEffects: SEASONAL_EFFECTS_KEY,
+	nodeSelectorDetail: NODE_SELECTOR_DETAIL_KEY,
 } as const;
 
 /** Defaults for Appearance toggles / presets (local UI sync after reset). */
@@ -137,6 +142,7 @@ export const APPEARANCE_DEFAULTS = {
 	// default: it only ever writes a key nobody has written, so this three-way
 	// chain still describes what an unseeded consumer falls back to.
 	hideToolDetail: false,
+	nodeSelectorDetail: DEFAULT_NODE_SELECTOR_DETAIL,
 	expandFileEdits: false,
 	expandCommands: false,
 	expandCodeBlocks: false,
@@ -368,6 +374,17 @@ function registerAppearanceSettings(): void {
 			setPersistedToggle(
 				APPEARANCE_KEYS.sidebarOverflowPopover,
 				APPEARANCE_DEFAULTS.sidebarOverflowPopover
+			),
+	});
+
+	registerSetting({
+		id: "appearance.node-selector-detail",
+		category: "appearance",
+		label: "Detailed node picker",
+		reset: () =>
+			setPersistedToggle(
+				APPEARANCE_KEYS.nodeSelectorDetail,
+				APPEARANCE_DEFAULTS.nodeSelectorDetail
 			),
 	});
 

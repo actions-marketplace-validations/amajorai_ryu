@@ -33,6 +33,17 @@ export type SettingsFieldOption =
 			value: string;
 	  };
 /**
+ * Authentication Ryu performs on behalf of the user for a remote MCP server.
+ *
+ * `deny_unknown_fields` is a security boundary: a publisher cannot smuggle a
+ * client secret, token endpoint, redirect URI, token or scope list into a signed
+ * manifest and have an older Core silently ignore it.
+ */
+export type McpServerAuthDecl = {
+	client_id?: string | null;
+	type: "oauth";
+};
+/**
  * What a capability provider acts on — see [`ProvidesEntry::target`].
  *
  * Deliberately two coarse values rather than a taxonomy. The only question a user
@@ -546,7 +557,7 @@ export interface CompanionSurface {
  * and reference no runnable at all (`widgets`, `views`, `dock_panels`,
  * `sidebar_sections`, `sidebar_buttons`, `settings_tabs`, `composer_controls`,
  * `slash_commands`, `turn_hooks`, `tool_filters`, `lsp_servers`,
- * `message_actions`, `context_menu_items`).
+ * `message_actions`, `context_menu_items`, `agent_edit_panels`).
  *
  * # Extending
  *
@@ -563,7 +574,8 @@ export interface CompanionSurface {
  *    (`tool_filters`, `turn_hooks`, `widgets`, `lsp_servers`) it gets a fully typed
  *    struct, because a key Core does not know is by construction a key Core cannot
  *    act on. If a client shell renders it (`views`, `dock_panels`,
- *    `sidebar_sections`, `settings_tabs`, `composer_controls`) it stays opaque
+ *    `sidebar_sections`, `settings_tabs`, `composer_controls`,
+ *    `agent_edit_panels`) it stays opaque
  *    JSON, because deserializing into a struct here would DROP any key this Core
  *    build does not know about and a newer desktop would lose exactly the fields it
  *    was shipped to render.
@@ -573,6 +585,16 @@ export interface CompanionSurface {
  * they are gathered at their own consumption site instead.
  */
 export interface Contributes {
+	/**
+	 * Client-rendered panels for the agent edit page. Entries are deliberately
+	 * opaque and self-contained: the desktop owns the panel vocabulary, while
+	 * Core only stores, tags, and forwards the declaration through the plugin
+	 * contributions endpoint. This lets a newer desktop add an agent-edit
+	 * panel type without requiring every Core node to learn that type first.
+	 * These entries name no runnable ids and therefore are intentionally absent
+	 * from [`Contributes::referenced_ids`].
+	 */
+	agent_edit_panels?: unknown[];
 	/**
 	 * Agents the plugin contributes (referenced by runnable id).
 	 */
@@ -737,6 +759,27 @@ export interface Contributes {
 	 * **self-contained** and stays out of [`Contributes::referenced_ids`].
 	 */
 	hook_events?: HookEventContribution[];
+	/**
+	 * **Live activities** the plugin contributes — small, always-live status cards
+	 * the desktop shell's "Dynamic Island" dock (empty-shell launchpad + sidebar)
+	 * renders for something in progress: an agent run, a download, a pending
+	 * approval, a recording. The desktop half of the same status vocabulary the
+	 * mobile `AgentActivity` uses, so one mental model spans devices.
+	 *
+	 * Each entry is a [`LiveActivityContribution`]: a typed envelope (`id`/`title`/
+	 * `icon`/`accent`/`order`) around an **opaque** `spec` payload the desktop
+	 * renderer interprets. Like a [`Contributes::sidebar_sections`] entry it carries
+	 * a `ViewSource` (a Core `/api/` path the shell polls) and a field-map; unlike a
+	 * section it maps response ROWS to live-activity cards (status/progress/target)
+	 * instead of nav rows. The app returns DATA — never code — so a live activity
+	 * cannot be made ugly and needs zero sidecar code.
+	 *
+	 * Self-contained (it names no runnable), so it stays out of
+	 * [`Contributes::referenced_ids`]; the `spec` stays opaque to Core so a new
+	 * activity capability is a renderer change, not a Core change. Served + tagged
+	 * with the owning `plugin` id at `GET /api/plugins/contributions`.
+	 */
+	live_activities?: LiveActivityContribution[];
 	/**
 	 * **Language servers** the plugin declares, keyed by server name — the
 	 * agent-neutral mirror of Claude Code's `.lsp.json` / `lspServers`, so a config
@@ -1299,6 +1342,50 @@ export interface HookEventContribution {
 	};
 	/**
 	 * Human-readable title for the event picker (workflow trigger UI, docs).
+	 */
+	title: string;
+}
+/**
+ * One app-registered **live activity** — a small, always-live status card the
+ * desktop's "Dynamic Island" dock (empty-shell launchpad + sidebar) renders for
+ * something in progress: an agent run, a download, a pending approval, a
+ * recording. The desktop half of the status vocabulary the mobile `AgentActivity`
+ * uses (`running` / `waiting` / `review` / `done` / `error`), so one mental model
+ * spans devices.
+ *
+ * A typed envelope around an opaque `spec` (the `LiveActivitySpec` in
+ * `@ryu/app-host/live-activity`: a `ViewSource` for the live rows, a field-map
+ * from rows to card fields, and a `target` route template). Core stores it
+ * verbatim and tags it with the owning `plugin` id; the `spec` stays opaque so a
+ * new activity capability is a renderer change, not a Core change.
+ */
+export interface LiveActivityContribution {
+	/**
+	 * Optional accent colour hint (any CSS color) tinting the card.
+	 */
+	accent?: string | null;
+	/**
+	 * Optional glyph id resolved by the shell's Icon primitive (Iconify/Hugeicons).
+	 */
+	icon?: string | null;
+	/**
+	 * Stable id for this activity within the plugin (namespaced into the shell's
+	 * dock identity as `plugin:<pluginId>:<id>:<rowId>`).
+	 */
+	id: string;
+	/**
+	 * Optional placement hint among the dock's activities (lower = first).
+	 */
+	order?: number | null;
+	/**
+	 * The opaque activity spec (source/map/target). Interpreted by the desktop
+	 * renderer, never by Core. Absent = a header-only activity (renders nothing).
+	 */
+	spec?: {
+		[k: string]: unknown;
+	};
+	/**
+	 * Human-facing title shown on the dock card (falls back to the row title).
 	 */
 	title: string;
 }
@@ -1926,7 +2013,7 @@ export interface ThemePreview {
  * One **tool filter**: a fully-qualified tool id a plugin wants withheld from the
  * model's offered tool list.
  *
- * Tools are namespaced `<server>__<tool>` (e.g. `browser__navigate`), so `tool`
+ * Tools are namespaced `<server>.<tool>` (e.g. `browser.navigate`), so `tool`
  * must carry the namespace — a bare `navigate` would be ambiguous across servers
  * and is rejected at load. A **trailing** `*` is a prefix wildcard, which is how a
  * plugin withholds a whole server (`shadow__*`); it is the only wildcard position
@@ -1947,7 +2034,7 @@ export interface ToolFilterContribution {
 	 */
 	reason?: string | null;
 	/**
-	 * Fully-qualified tool id (`<server>__<tool>`), optionally ending in `*` to
+	 * Fully-qualified tool id (`<server>.<tool>`), optionally ending in `*` to
 	 * hide every tool whose id starts with the preceding prefix.
 	 */
 	tool: string;
@@ -2169,16 +2256,24 @@ export interface EnginesReq {
 	web?: string | null;
 }
 /**
- * One declarative **stdio MCP server** a plugin registers (see
- * [`PluginManifest::mcp_servers`]).
+ * One declarative **MCP server** a plugin registers (see
+ * [`PluginManifest::mcp_servers`]) — either a stdio command to spawn or a remote
+ * HTTP endpoint to call.
  *
  * This is the manifest-side, dependency-free mirror of Core's runtime
  * `McpServerConfig`: pure data (schemars/serde only) so it can live in
  * kernel-contracts, with Core lowering it into its registry type on enable. A
- * server is spawned per request as `command args…` (stdio); `command_env` lets
+ * stdio server is spawned per request as `command args…`; `command_env` lets
  * the manifest name an env var Core resolves to an absolute binary path
  * (e.g. `RYU_GHOST_BIN`) so a downloaded `~/.ryu/bin` binary can override the
- * bare `command`.
+ * bare `command`. An HTTP server names a [`url`](McpServerDecl::url) instead and
+ * spawns nothing at all.
+ *
+ * The field names mirror the `mcp.json` dialect users already paste from Cursor
+ * and Claude Desktop (`type` / `url` / `headers`) precisely so a manifest and a
+ * hand-written config entry are the same shape. Static API-key auth may live in
+ * [`headers`](McpServerDecl::headers). User-delegated OAuth is declared through
+ * [`auth`](McpServerDecl::auth), and Core owns the resulting token lifecycle.
  */
 export interface McpServerDecl {
 	/**
@@ -2186,9 +2281,16 @@ export interface McpServerDecl {
 	 */
 	args?: string[];
 	/**
-	 * Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).
+	 * Core-owned OAuth for this remote MCP server. The manifest may name only an
+	 * optional public client id; discovery, PKCE, tokens and redirect URIs are
+	 * intentionally outside the publisher-controlled manifest.
 	 */
-	command: string;
+	auth?: McpServerAuthDecl | null;
+	/**
+	 * Executable to spawn (e.g. `npx`, an absolute path, or a `~/.ryu/bin` name).
+	 * Absent for a remote (`url`) server.
+	 */
+	command?: string | null;
 	/**
 	 * Optional env var whose value, when set, OVERRIDES [`command`] with an
 	 * absolute binary path. Lets a plugin ship a bare `command` that Core repoints
@@ -2212,6 +2314,22 @@ export interface McpServerDecl {
 	env?: {
 		[k: string]: string;
 	};
+	/**
+	 * Request headers sent with every call to a remote server (auth lives here).
+	 */
+	headers?: {
+		[k: string]: string;
+	};
+	/**
+	 * Transport: `stdio`, `http`, `streamable-http`, or `sse`. Absent ⇒ inferred
+	 * from whichever of `command`/`url` is present. `http`, `streamable-http`
+	 * and `sse` all select Core's HTTP transport.
+	 */
+	type?: string | null;
+	/**
+	 * Endpoint URL for a remote (HTTP) server. Absent for a stdio server.
+	 */
+	url?: string | null;
 }
 /**
  * One entry in an app's **user-facing permission vocabulary** — a level an admin
@@ -2908,6 +3026,16 @@ export interface SidecarSpec {
 	 * until the first proxy/broker hit wakes it on demand; a bounded health-wait
 	 * warms it before the request is forwarded. `false` (the default) keeps the
 	 * eager behaviour every existing manifest has: started at enable. Additive.
+	 *
+	 * **Ignored when [`provides_provider`] is set.** Such a sidecar is always started
+	 * eagerly, because the two declarations are mutually exclusive by construction: a
+	 * lazy sidecar's only wake trigger is a proxy/broker hit, while a provider's only
+	 * client is Pi, which dials the registered `baseUrl` directly and never traverses
+	 * the proxy. Nothing could ever wake it, and Core's boot purge of stale
+	 * sidecar-owned provider entries would then leave the provider permanently dead.
+	 * The coercion is logged at `info`; the manifest is NOT rejected.
+	 *
+	 * [`provides_provider`]: SidecarSpec::provides_provider
 	 */
 	lazy?: boolean;
 	/**
@@ -2918,9 +3046,16 @@ export interface SidecarSpec {
 	name: string;
 	/**
 	 * TCP port the process's HTTP server binds to, used to build the health-check
-	 * URL. The plugin is responsible for choosing a free port — there is **no port
-	 * registry in v1**, so a collision with a built-in (e.g. llama.cpp on 8080) is
-	 * the plugin author's responsibility to avoid.
+	 * URL. The plugin is responsible for choosing a free port: there is **no
+	 * allocator** — this number is what Core tries (after the profile offset), and a
+	 * collision is not repaired by moving anyone.
+	 *
+	 * There *is* a gate. `SidecarManager::claim_port` checks a live-sidecar registry
+	 * and bind-probes the port, and **refuses to start** the sidecar if either fails,
+	 * so a collision with a built-in (e.g. llama.cpp on 8080) surfaces as an app that
+	 * does not come up rather than as silent breakage. Detection, not resolution:
+	 * picking a free port is still the author's job. See `docs/port-allocation.md`
+	 * for the band map.
 	 */
 	port: number;
 	/**
@@ -2939,6 +3074,17 @@ export interface SidecarSpec {
 	 * ext-proxy hop and `/api/host/*`), and the host-RPC vocabulary has no
 	 * provider-registration method. Registration is therefore Core-side, driven by
 	 * this declaration.
+	 *
+	 * **Declaring this forces eager start and disables idle-stop**, overriding
+	 * [`lazy`] and [`idle_stop_secs`]. Pi bypasses the ext proxy and dials the
+	 * registered `baseUrl` directly, so no request can ever wake this sidecar on
+	 * demand; a sidecar that is never started never reaches the Healthy edge that
+	 * registers it, and one that is scaled to zero drops out of Pi's model list until
+	 * a wake that will never come. Both coercions are logged at `info` rather than
+	 * rejected by the validator, so existing manifests keep loading.
+	 *
+	 * [`lazy`]: SidecarSpec::lazy
+	 * [`idle_stop_secs`]: SidecarSpec::idle_stop_secs
 	 */
 	provides_provider?: ProviderRegistrationSpec | null;
 }
