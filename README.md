@@ -138,7 +138,8 @@ extension, and identity/billing surfaces remain proprietary and are not part of 
 ### Install (prebuilt binaries)
 
 One line pulls the headless stack — `ryu-core`, `ryu-gateway`, `ryu-cli` — into
-`~/.ryu/bin` and puts it on your PATH. Great for servers, containers, and CI.
+`~/.ryu/bin`, puts it on your PATH, and starts Core so the bundled defaults can begin
+provisioning. Great for servers, containers, and CI.
 
 **macOS & Linux** (x86_64 Linux, Apple Silicon macOS):
 
@@ -152,17 +153,18 @@ curl -fsSL https://raw.githubusercontent.com/amajorai/ryu/main/install.sh | sh
 irm https://raw.githubusercontent.com/amajorai/ryu/main/install.ps1 | iex
 ```
 
-Then just run the CLI — it self-bootstraps, starting a local Core (which brings up
-the Gateway + a fully-local model stack) if none is running:
+The installer waits for Core to become healthy, then the bundled models, engines, and
+skills continue downloading in the background. Island and Ghost are intentionally not
+installed by default yet. Attach with the CLI:
 
 ```bash
-ryu-cli      # fetches + starts Core on first run, then attaches — no API key
+ryu-cli      # attaches to the Core started by the installer — no API key
 ```
 
 Or start the node yourself and point clients at it:
 
 ```bash
-ryu-core     # starts the Gateway + local model stack on :7980
+ryu-core     # restart Core; it brings up the Gateway + local defaults
 ```
 
 <sub>Prebuilt targets: Linux x86_64, macOS Apple Silicon, Windows x86_64. On Intel
