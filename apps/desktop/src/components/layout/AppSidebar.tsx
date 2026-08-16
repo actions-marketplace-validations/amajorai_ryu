@@ -14,6 +14,7 @@ import {
 	Delete01Icon,
 	DeliverySecure01Icon,
 	File01Icon,
+	FileCodeIcon,
 	Folder01Icon,
 	Folder03Icon,
 	FolderOpenIcon,
@@ -116,7 +117,7 @@ import {
 } from "@ryu/ui/components/sidebar.tsx";
 import { toast } from "@ryu/ui/components/sileo.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
-import { StatusBadge } from "@ryu/ui/components/status-badge";
+import { StatusBadge } from "@ryu/ui/components/status-badge.tsx";
 import {
 	type IconComponent,
 	TabsSubtle,
@@ -7112,6 +7113,13 @@ function ProjectRow({
 	const [iconDialogOpen, setIconDialogOpen] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+	const { openTab } = useTabsContext();
+	const openProjectView = (kind: "diff" | "files") => {
+		const path = `/project/${kind}/${encodeURIComponent(bucket.path)}`;
+		openTab(path, {
+			title: `${kind === "diff" ? "Changes" : "Files"} · ${label}`,
+		});
+	};
 	const noun = count === 1 ? "chat" : "chats";
 	return (
 		<>
@@ -7119,11 +7127,23 @@ function ProjectRow({
 				<ContextMenuTrigger>
 					<SubSection
 						action={
-							<SubSectionActionButton
-								icon={Add01Icon}
-								onClick={() => onNewChat(bucket.path)}
-								title="New chat in this folder"
-							/>
+							<div className="flex items-center gap-0.5">
+								<SubSectionActionButton
+									icon={Add01Icon}
+									onClick={() => onNewChat(bucket.path)}
+									title="New chat in this folder"
+								/>
+								<SubSectionActionButton
+									icon={FileCodeIcon}
+									onClick={() => openProjectView("diff")}
+									title="Open project changes"
+								/>
+								<SubSectionActionButton
+									icon={FolderOpenIcon}
+									onClick={() => openProjectView("files")}
+									title="Browse project files"
+								/>
+							</div>
 						}
 						collapsed={collapsed}
 						count={count}

@@ -1,6 +1,12 @@
 ﻿"use client";
 
+import { PatchDiff } from "@pierre/diffs/react";
 import { Button } from "@ryu/ui/components/button";
+import {
+	HoverCard,
+	HoverCardContent,
+	HoverCardTrigger,
+} from "@ryu/ui/components/hover-card";
 import {
 	Popover,
 	PopoverContent,
@@ -347,6 +353,7 @@ export interface InputBarTurnProgress {
 	files: {
 		deletions: number;
 		insertions: number;
+		preview?: string;
 		path: string;
 	}[];
 	insertions: number;
@@ -358,6 +365,56 @@ export interface InputBarTurnProgress {
 		}[];
 		total: number;
 	};
+}
+
+function TurnProgressFile({
+	file,
+}: {
+	file: InputBarTurnProgress["files"][number];
+}) {
+	const row = (
+		<button
+			className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm hover:bg-muted"
+			type="button"
+		>
+			<FileTypeIcon className="size-4 shrink-0" path={file.path} />
+			<span className="min-w-0 flex-1 truncate">{file.path}</span>
+			<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
+				+{file.insertions}
+			</span>
+			<span className="text-red-600 tabular-nums dark:text-red-400">
+				-{file.deletions}
+			</span>
+		</button>
+	);
+	if (!file.preview) {
+		return row;
+	}
+	return (
+		<HoverCard>
+			<HoverCardTrigger closeDelay={120} delay={160} render={row} />
+			<HoverCardContent
+				align="start"
+				className="w-[min(42rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border-border/70 bg-popover/95 p-2 shadow-xl backdrop-blur-xl"
+				side="top"
+				sideOffset={8}
+			>
+				<div className="mb-1 px-2 py-1 font-mono text-muted-foreground text-xs">
+					{file.path}
+				</div>
+				<div className="max-h-[28rem] overflow-auto rounded-xl border border-border/60 bg-background/60">
+					<PatchDiff
+						disableWorkerPool
+						options={{
+							diffStyle: "unified",
+							lineHoverHighlight: "line",
+						}}
+						patch={file.preview}
+					/>
+				</div>
+			</HoverCardContent>
+		</HoverCard>
+	);
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: legacy component
@@ -1303,25 +1360,7 @@ export const InputBar = memo(function InputBar({
 											sideOffset={8}
 										>
 											{turnProgress.files.map((file) => (
-												<div
-													className="flex items-center gap-2 rounded-xl px-2 py-1.5 text-sm"
-													key={file.path}
-													title={file.path}
-												>
-													<FileTypeIcon
-														className="size-4 shrink-0"
-														path={file.path}
-													/>
-													<span className="min-w-0 flex-1 truncate">
-														{file.path}
-													</span>
-													<span className="text-emerald-600 tabular-nums dark:text-emerald-400">
-														+{file.insertions}
-													</span>
-													<span className="text-red-600 tabular-nums dark:text-red-400">
-														-{file.deletions}
-													</span>
-												</div>
+												<TurnProgressFile file={file} key={file.path} />
 											))}
 										</PopoverContent>
 									) : null}
@@ -1353,7 +1392,7 @@ export const InputBar = memo(function InputBar({
 							// No border/ring: the box is distinguished from the darker
 							// `bg-card` frame (and its bars) purely by its lighter `bg-muted`
 							// fill, so there is no ring on the textarea and no sliver.
-							"relative cursor-text rounded-2xl bg-muted",
+							"composer-container relative cursor-text rounded-2xl bg-muted",
 							// A drag-over ring always wins for the duration of the drag so
 							// the drop target stays legible.
 							isDragOver && "ring-2 ring-primary ring-inset"

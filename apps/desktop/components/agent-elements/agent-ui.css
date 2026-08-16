@@ -166,6 +166,112 @@
 	border: transparent;
 }
 
+/*
+ * The composer owns its available width. Container queries keep the picker
+ * legible in a split pane without making the chat page guess a viewport
+ * breakpoint: the agent name remains the anchor, while model/plugin labels and
+ * usage details progressively become icons or move behind their existing menus.
+ */
+.composer-container {
+	container-name: composer;
+	container-type: inline-size;
+}
+
+.composer-settings-trigger-content,
+.composer-setting-segment {
+	min-width: 0;
+}
+
+.composer-settings-trigger-content {
+	max-width: 100%;
+}
+
+.composer-settings-trigger [data-composer-agent-name="true"] {
+	max-width: 15rem;
+}
+
+.composer-settings-trigger [data-composer-model-name="true"] {
+	max-width: 12rem;
+}
+
+.composer-settings-trigger [data-composer-effort-meter="true"] {
+	margin-inline: 0.125rem;
+}
+
+.composer-model-icon {
+	display: none;
+}
+
+.composer-usage-compact {
+	display: none;
+}
+
+@container composer (max-width: 540px) {
+	/* The model still has a one-click affordance; its word is the first thing to
+	 * go because the active agent is the user's primary orientation cue. */
+	.composer-model-trigger {
+		width: 1.75rem;
+		max-width: 1.75rem;
+		padding-inline: 0;
+	}
+
+	.composer-model-trigger .composer-model-name {
+		display: none;
+	}
+
+	.composer-model-trigger .composer-model-icon {
+		display: block;
+	}
+
+	.composer-usage-adaptive .composer-usage-wide {
+		display: none;
+	}
+
+	.composer-usage-adaptive .composer-usage-compact {
+		display: flex;
+	}
+
+	.composer-settings-trigger [data-composer-agent-name="true"] {
+		max-width: 11rem;
+	}
+
+	.composer-settings-trigger [data-composer-model-name="true"] {
+		display: none;
+	}
+
+	.composer-settings-trigger [data-composer-section="model"] {
+		gap: 0;
+	}
+}
+
+@container composer (max-width: 400px) {
+	/* Plain secondary settings remain available in the picker, but do not compete
+	 * with the agent, effort meter, approval icon, send and attach actions. */
+	.composer-settings-trigger [data-composer-section-kind="plain"] {
+		display: none;
+	}
+
+	.composer-settings-trigger [data-composer-agent-name="true"] {
+		max-width: 8rem;
+	}
+
+	.composer-capability-badges {
+		display: none;
+	}
+}
+
+@container composer (max-width: 330px) {
+	/* At the smallest useful split width, the model icon remains discoverable,
+	 * but optional usage is a tooltip-only affordance rather than a fourth pill. */
+	.composer-usage-adaptive {
+		display: none;
+	}
+
+	.composer-settings-trigger [data-composer-agent-name="true"] {
+		max-width: 6.5rem;
+	}
+}
+
 .an-markdown [data-streamdown="code-block"] pre,
 .an-markdown [data-streamdown="code-block"] code {
 	font-size: 12px;

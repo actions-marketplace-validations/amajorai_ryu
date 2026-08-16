@@ -16,7 +16,7 @@ import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
-import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge";
+import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,
@@ -96,6 +96,7 @@ import {
 	composerSelectValue,
 	partitionComposerControls,
 } from "@/src/components/composer/plugin-composer-controls.ts";
+import { patchForFile } from "@/src/components/diffs/RichPatchDiff.tsx";
 import { CHAT_REFERENCE_DRAG_MIME } from "@/src/components/layout/tabDnd.tsx";
 import {
 	extractSubagents,
@@ -134,6 +135,7 @@ import {
 	invalidateGitStatus,
 	invalidateWorktreeDiff,
 	invalidateWorktreeStatus,
+	useWorktreeDiff,
 } from "@/src/hooks/useGitStatus.ts";
 import { useMcp } from "@/src/hooks/useMcp.ts";
 import {
@@ -4909,8 +4911,38 @@ export default function ChatPage({
 		() => deriveTurnComposerProgress(messages),
 		[messages]
 	);
-	const turnProgressRef = useRef(turnProgress);
-	turnProgressRef.current = turnProgress;
+	const composerWorktreeDiff = useWorktreeDiff(chatTarget, diffConvId);
+	const turnProgressWithPreviews = useMemo(() => {
+		if (!turnProgress) {
+			return undefined;
+		}
+		return {
+			...turnProgress,
+			files: turnProgress.files.map((file) => {
+				const worktreeFile = composerWorktreeDiff.files.find(
+					(candidate) =>
+						candidate.path === file.path ||
+						file.path.endsWith(`/${candidate.path}`) ||
+						candidate.path.endsWith(`/${file.path}`)
+				);
+				return worktreeFile
+					? {
+							...file,
+							preview: patchForFile(
+								composerWorktreeDiff.unified_diff,
+								worktreeFile.path
+							),
+						}
+					: file;
+			}),
+		};
+	}, [
+		composerWorktreeDiff.files,
+		composerWorktreeDiff.unified_diff,
+		turnProgress,
+	]);
+	const turnProgressRef = useRef(turnProgressWithPreviews);
+	turnProgressRef.current = turnProgressWithPreviews;
 
 	// Codex-style composer controls: the project (folder) picker on the left,
 	// agent + model pickers on the right, all inside the input card. Held in a

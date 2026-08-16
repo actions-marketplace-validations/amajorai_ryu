@@ -65,3 +65,30 @@ test.describe("skills catalog preview — open and close", () => {
 		await expect(dialog(page)).toBeVisible();
 	});
 });
+
+test("all marketplaces groups the supported registry results", async ({
+	page,
+}) => {
+	await page.goto(STORY_URL);
+	await page.getByRole("button", { name: "Filters", exact: true }).click();
+
+	await expect(
+		page.getByText("All marketplaces", { exact: true })
+	).toBeVisible();
+	await expect(page.locator("h3", { hasText: "skills.sh" })).toBeVisible();
+	await expect(page.locator("h3", { hasText: "browse.sh" })).toBeVisible();
+	await expect(page.locator("h3", { hasText: "ClawHub" })).toBeVisible();
+	await expect(page.locator("h3", { hasText: "LobeHub" })).toBeVisible();
+	await expect(
+		page.locator("h3", { hasText: "Ryu Marketplace" })
+	).toBeVisible();
+
+	await page.getByRole("combobox").nth(1).click();
+	await page.getByRole("option", { name: "ClawHub", exact: true }).click();
+	await expect(
+		page.getByRole("button", { name: "Skill Auditor", exact: true })
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "PDF Filler", exact: true })
+	).toHaveCount(0);
+});

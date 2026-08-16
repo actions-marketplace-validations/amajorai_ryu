@@ -48,7 +48,7 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { Icon } from "@ryu/ui/components/icon.tsx";
-import { toast } from "@ryu/ui/components/sileo";
+import { toast } from "@ryu/ui/components/sileo.tsx";
 import {
 	Tooltip,
 	TooltipContent,
@@ -141,6 +141,7 @@ import {
 	useFileTreePrefs,
 } from "@/src/hooks/useFileTreePrefs.ts";
 import { useFileTreeThemeStyles } from "@/src/hooks/useFileTreeThemeStyles.ts";
+import { invalidateGitStatus } from "@/src/hooks/useGitStatus.ts";
 import { usePluginContributions } from "@/src/hooks/usePluginContributions.ts";
 import {
 	sidebarFloatingChrome,

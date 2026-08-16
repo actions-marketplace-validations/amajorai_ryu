@@ -72,6 +72,8 @@ import { PaneChooserPage } from "@/src/pages/PaneChooserPage.tsx";
 import PluginCompanionPage, {
 	CompanionUnavailable,
 } from "@/src/pages/PluginCompanionPage.tsx";
+import ProjectDiffPage from "@/src/pages/ProjectDiffPage.tsx";
+import ProjectFilesPage from "@/src/pages/ProjectFilesPage.tsx";
 import ReviewPage from "@/src/pages/ReviewPage.tsx";
 import SettingsPage from "@/src/pages/SettingsPage.tsx";
 import SpaceAppDocPage from "@/src/pages/SpaceAppDocPage.tsx";
@@ -138,6 +140,10 @@ const AGENT_EDIT = /^\/agents\/.+\/edit$/;
 // /artifact/:id — a session-local artifact surfaced by the agent, rendered
 // full-size in a workspace tab (see ArtifactViewPage + useArtifactStore).
 const ARTIFACT_VIEW = /^\/artifact\/[^/]+$/;
+// Project-scoped workspace surfaces can be opened as first-class main tabs. The
+// folder is encoded into one segment so Windows drives and nested paths survive
+// the tab router without being mistaken for additional route segments.
+const PROJECT_VIEW = /^\/project\/(diff|files)\/([^/]+)$/;
 // /skills/:id/edit — the SKILL.md editor for an existing skill (the `/skills/new`
 // fresh-draft entry is an exact route). Single id segment ([^/]+), deeper than the
 // `/skills` store exact, so no collision. The skill id is baked into the sandboxed
@@ -490,6 +496,21 @@ export function seedBuiltinRoutes(): void {
 	pattern({ startsWith: "/file/" }, (tab) => {
 		const filePath = decodeURIComponent(tab.path.slice("/file/".length));
 		return createElement(FileEditorPage, { filePath });
+	});
+	// /project/diff/<encoded folder> and /project/files/<encoded folder>
+	pattern(PROJECT_VIEW, (tab) => {
+		const match = tab.path.match(PROJECT_VIEW);
+		let folder = match?.[2] ?? "";
+		try {
+			folder = decodeURIComponent(folder);
+		} catch {
+			// Keep the encoded segment so a malformed deep link fails as an empty
+			// project surface rather than crashing the whole tab shell.
+		}
+		return createElement(
+			match?.[1] === "files" ? ProjectFilesPage : ProjectDiffPage,
+			{ folder }
+		);
 	});
 	// /workflows/build/:id — NL builder for an existing workflow (registered before
 	// WORKFLOW_DETAIL for clarity; the two regexes are disjoint by segment count).

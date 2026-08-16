@@ -35,7 +35,7 @@ import {
 	CommandInput,
 	CommandList,
 } from "@ryu/ui/components/command";
-import { IconGitBranch } from "@tabler/icons-react";
+import { IconCpu, IconGitBranch } from "@tabler/icons-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { CapabilityBadges } from "@/components/agent-elements/input/capability-badges.tsx";
 import {
@@ -577,11 +577,16 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 			/>
 			<button
 				aria-label="Choose provider and model"
-				className="max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
+				className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
 				onClick={() => setModelsOpen(true)}
+				title={activeModelName}
 				type="button"
 			>
-				{activeModelName}
+				<IconCpu
+					aria-hidden="true"
+					className="composer-model-icon size-3.5 shrink-0"
+				/>
+				<span className="composer-model-name truncate">{activeModelName}</span>
 			</button>
 			<CommandDialog
 				onOpenChange={setModelsOpen}
@@ -608,11 +613,18 @@ export function useComposerAgentControls(config: ComposerAgentControlsConfig): {
 			{settingsMenu}
 			{/* Read-only capability badges (tools / thinking / vision) — local
 			    models / flagship Ryu only; hidden for external ACP harnesses. */}
-			{showCapabilityBadges && <CapabilityBadges capabilities={capabilities} />}
+			{showCapabilityBadges && (
+				<CapabilityBadges
+					capabilities={capabilities}
+					className="composer-capability-badges"
+				/>
+			)}
 			{/* Only the FULL trigger shows usage as a standalone chip: both compact
 			    modes already fold the same meters into the trigger's `trailing`, so
 			    rendering the chip too would show every meter twice. */}
-			{compact || compactTrigger ? null : <UsageBar agentId={agentId} />}
+			{compact || compactTrigger ? null : (
+				<UsageBar adaptive agentId={agentId} />
+			)}
 		</div>
 	);
 

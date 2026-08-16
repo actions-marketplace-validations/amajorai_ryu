@@ -25,63 +25,45 @@ import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
+} from "@ryu/ui/components/tooltip.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+	DiffFilePreviewPopover,
+	patchForFile,
+	RichPatchDiff,
+} from "@/src/components/diffs/RichPatchDiff.tsx";
+import {
+	diffViewPrefsToOptions,
+	useDiffViewPrefs,
+} from "@/src/hooks/useDiffViewPrefs.ts";
 import {
 	invalidateGitStatus,
 	invalidateWorktreeDiff,
 	invalidateWorktreeStatus,
 	useWorktreeDiff,
+	useWorktreeStatus,
 } from "@/src/hooks/useGitStatus.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { ApplyResult, FileSummary } from "@/src/lib/api/git.ts";
 import { applyWorktree } from "@/src/lib/api/git.ts";
+import { joinPath, writeProjectFile } from "@/src/lib/files.ts";
 
 interface DiffReviewPaneProps {
 	runId: string;
 	target: ApiTarget;
 }
 
-// ── Line-level diff renderer ──────────────────────────────────────────────────
-
-function DiffLine({ line, number }: { line: string; number: number }) {
-	const isAdd = line.startsWith("+") && !line.startsWith("+++");
-	const isDel = line.startsWith("-") && !line.startsWith("---");
-	const isHunk = line.startsWith("@@");
-	const isFilePath = line.startsWith("---") || line.startsWith("+++");
-
-	let cls = "font-mono text-xs leading-6 whitespace-pre select-text";
-	if (isAdd) {
-		cls += " bg-emerald-500/[0.08] text-foreground";
-	} else if (isDel) {
-		cls += " bg-rose-500/[0.08] text-foreground";
-	} else if (isHunk) {
-		cls += " bg-blue-500/[0.08] text-blue-600 dark:text-blue-400";
-	} else if (isFilePath) {
-		cls += " text-muted-foreground";
-	} else {
-		cls += " text-foreground";
-	}
-
-	return (
-		<div className={cn("grid grid-cols-[3rem_1fr]", cls)}>
-			<span className="sticky left-0 border-border/50 border-r bg-inherit pr-2 text-right text-muted-foreground/45 tabular-nums">
-				{number}
-			</span>
-			<span className="px-3">{line || " "}</span>
-		</div>
-	);
-}
-
 // ── Per-file summary row ──────────────────────────────────────────────────────
 
 function FileSummaryRow({
 	file,
+	patch,
 	selected,
 	onSelect,
 }: {
 	file: FileSummary;
+	patch: string;
 	onSelect: () => void;
 	selected: boolean;
 }) {
@@ -101,7 +83,7 @@ function FileSummaryRow({
 				? "text-destructive dark:text-destructive"
 				: "text-muted-foreground";
 
-	return (
+	const row = (
 		<button
 			className={cn(
 				"flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors hover:bg-muted/50",
@@ -154,25 +136,13 @@ function FileSummaryRow({
 			)}
 		</button>
 	);
-}
-
-const DIFF_HEADER_RE = /^diff --git a\/(.+?) b\/(.+)$/gm;
-
-/** Pull one file's patch out of a multi-file unified diff. */
-function patchForFile(unifiedDiff: string, path: string): string {
-	const matches = [...unifiedDiff.matchAll(DIFF_HEADER_RE)];
-	if (matches.length === 0) {
-		return unifiedDiff;
-	}
-	const matchIndex = matches.findIndex(
-		(match) => match[1] === path || match[2] === path
+	return patch ? (
+		<DiffFilePreviewPopover filePath={file.path} patch={patch}>
+			{row}
+		</DiffFilePreviewPopover>
+	) : (
+		row
 	);
-	if (matchIndex < 0) {
-		return unifiedDiff;
-	}
-	const start = matches[matchIndex]?.index ?? 0;
-	const end = matches[matchIndex + 1]?.index ?? unifiedDiff.length;
-	return unifiedDiff.slice(start, end).trimEnd();
 }
 
 // ── Apply state ───────────────────────────────────────────────────────────────
@@ -192,7 +162,14 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 	// whatever the diff was the first time it rendered, for as long as it stayed
 	// mounted — including after the change had been committed outside the app.
 	const diff = useWorktreeDiff(target, runId);
+	const worktreeStatus = useWorktreeStatus(target, runId);
+	const diffPrefs = useDiffViewPrefs();
+	const diffOptions = useMemo(
+		() => diffViewPrefsToOptions(diffPrefs),
+		[diffPrefs]
+	);
 	const [expanded, setExpanded] = useState(true);
+	const [editMode, setEditMode] = useState(false);
 	const [applyState, setApplyState] = useState<ApplyState>({ status: "idle" });
 	const [filter, setFilter] = useState("");
 	const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -249,9 +226,22 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 	const selectedPatch = selectedFile
 		? patchForFile(diff.unified_diff, selectedFile.path)
 		: diff.unified_diff;
-	const diffLines = selectedPatch.split("\n");
 	const totalAdditions = diff.files.reduce((sum, f) => sum + f.additions, 0);
 	const totalDeletions = diff.files.reduce((sum, f) => sum + f.deletions, 0);
+	const saveEditedFile = useCallback(
+		async (file: { contents: string }) => {
+			if (!(worktreeStatus.path && selectedFile)) {
+				return;
+			}
+			await writeProjectFile(
+				joinPath(worktreeStatus.path, selectedFile.path),
+				file.contents
+			);
+			invalidateGitStatus();
+			invalidateWorktreeDiff(runId);
+		},
+		[runId, selectedFile, worktreeStatus.path]
+	);
 
 	const applied =
 		applyState.status === "merged" ||
@@ -266,46 +256,61 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 
 	return (
 		<div className="@container overflow-hidden rounded-2xl border border-border/70 bg-background text-sm shadow-sm">
-			<button
-				aria-expanded={expanded}
-				className="flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/30"
-				onClick={() => setExpanded((prev) => !prev)}
-				type="button"
-			>
-				{expanded ? (
+			<div className="flex items-center border-border/60 border-b">
+				<button
+					aria-expanded={expanded}
+					className="flex min-w-0 flex-1 items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+					onClick={() => setExpanded((prev) => !prev)}
+					type="button"
+				>
+					{expanded ? (
+						<HugeiconsIcon
+							aria-hidden
+							className="size-3.5 shrink-0 text-muted-foreground"
+							icon={ArrowDown01Icon}
+						/>
+					) : (
+						<HugeiconsIcon
+							aria-hidden
+							className="size-3.5 shrink-0 text-muted-foreground"
+							icon={ArrowRight01Icon}
+						/>
+					)}
 					<HugeiconsIcon
 						aria-hidden
 						className="size-3.5 shrink-0 text-muted-foreground"
-						icon={ArrowDown01Icon}
+						icon={WorkflowCircle06Icon}
 					/>
-				) : (
-					<HugeiconsIcon
-						aria-hidden
-						className="size-3.5 shrink-0 text-muted-foreground"
-						icon={ArrowRight01Icon}
-					/>
-				)}
-				<HugeiconsIcon
-					aria-hidden
-					className="size-3.5 shrink-0 text-muted-foreground"
-					icon={WorkflowCircle06Icon}
-				/>
-				<span className="font-medium text-sm">
-					{diff.files.length} file{diff.files.length === 1 ? "" : "s"} changed
-				</span>
-				<span className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
-					{totalAdditions > 0 && (
-						<span className="text-success dark:text-success">
-							+{totalAdditions}
-						</span>
+					<span className="font-medium text-sm">
+						{diff.files.length} file{diff.files.length === 1 ? "" : "s"} changed
+					</span>
+					<span className="ml-auto flex items-center gap-2 text-muted-foreground text-xs">
+						{totalAdditions > 0 && (
+							<span className="text-success dark:text-success">
+								+{totalAdditions}
+							</span>
+						)}
+						{totalDeletions > 0 && (
+							<span className="text-destructive dark:text-destructive">
+								-{totalDeletions}
+							</span>
+						)}
+					</span>
+				</button>
+				<button
+					aria-pressed={editMode}
+					className={cn(
+						"mr-3 rounded-md px-2 py-1 text-xs transition-colors",
+						editMode
+							? "bg-primary text-primary-foreground"
+							: "text-muted-foreground hover:bg-muted"
 					)}
-					{totalDeletions > 0 && (
-						<span className="text-destructive dark:text-destructive">
-							-{totalDeletions}
-						</span>
-					)}
-				</span>
-			</button>
+					onClick={() => setEditMode((current) => !current)}
+					type="button"
+				>
+					{editMode ? "Editing" : "Edit"}
+				</button>
+			</div>
 
 			{expanded && (
 				<div className="border-border border-t">
@@ -341,15 +346,14 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 									</span>
 								)}
 							</div>
-							<div className="max-h-[34rem] overflow-auto bg-muted/10">
-								{diffLines.map((line, idx) => (
-									<DiffLine
-										// The patch order is immutable for this render; duplicate lines need their position.
-										key={`${idx}-${line}`}
-										line={line}
-										number={idx + 1}
-									/>
-								))}
+							<div className="max-h-[34rem] overflow-auto bg-muted/10 p-2">
+								<RichPatchDiff
+									editMode={editMode}
+									filePath={selectedFile?.path}
+									onSave={worktreeStatus.path ? saveEditedFile : undefined}
+									options={diffOptions}
+									patch={selectedPatch}
+								/>
 							</div>
 						</div>
 						<aside className="border-border/60 border-t @4xl:border-t-0 bg-muted/10 p-2">
@@ -380,6 +384,7 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 										file={file}
 										key={file.path}
 										onSelect={() => setSelectedPath(file.path)}
+										patch={patchForFile(diff.unified_diff, file.path)}
 										selected={file.path === selectedFile?.path}
 									/>
 								))}

@@ -18,10 +18,11 @@ import {
 	CatalogHostProvider,
 } from "@ryu/marketplace/catalog/host";
 import SkillsCatalogSection from "@ryu/marketplace/catalog/skills";
-import type {
-	SkillCard,
-	SkillDetail,
-	SkillsCatalogState,
+import {
+	ALL_SKILL_SOURCES_ID,
+	type SkillCard,
+	type SkillDetail,
+	type SkillsCatalogState,
 } from "@ryu/marketplace/catalog/types";
 import { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -29,20 +30,70 @@ import "../../src/index.css";
 
 const SKILLS: SkillCard[] = [
 	{
+		catalogSourceId: "skills-sh",
+		catalogSourceName: "skills.sh",
 		id: "acme/repo/pdf-filler",
 		installed: false,
 		installs: 1200,
 		name: "PDF Filler",
 		slug: "pdf-filler",
-		source: "acme",
+		source: "skills.sh",
+		trustLevel: "community",
 	},
 	{
+		catalogSourceId: "skills-sh",
+		catalogSourceName: "skills.sh",
 		id: "acme/repo/csv-tidy",
 		installed: false,
 		installs: 40,
 		name: "CSV Tidy",
 		slug: "csv-tidy",
-		source: "acme",
+		source: "skills.sh",
+		trustLevel: "community",
+	},
+	{
+		catalogSourceId: "browse-sh",
+		catalogSourceName: "browse.sh",
+		id: "browse.sh/web-search",
+		installed: false,
+		installs: 980,
+		name: "Web Search",
+		slug: "web-search",
+		source: "browse.sh",
+		trustLevel: "trusted",
+	},
+	{
+		catalogSourceId: "clawhub",
+		catalogSourceName: "ClawHub",
+		id: "clawhub/skill-auditor",
+		installed: false,
+		installs: 760,
+		name: "Skill Auditor",
+		slug: "skill-auditor",
+		source: "ClawHub",
+		trustLevel: "community",
+	},
+	{
+		catalogSourceId: "lobehub",
+		catalogSourceName: "LobeHub",
+		id: "lobehub/lateral-thinking",
+		installed: false,
+		installs: 430,
+		name: "Lateral Thinking",
+		slug: "lateral-thinking",
+		source: "LobeHub",
+		trustLevel: "community",
+	},
+	{
+		catalogSourceId: "ryu-marketplace",
+		catalogSourceName: "Ryu Marketplace",
+		id: "ryu/meeting-notes",
+		installed: false,
+		installs: 210,
+		name: "Meeting Notes",
+		slug: "meeting-notes",
+		source: "Ryu Marketplace",
+		trustLevel: "builtin",
 	},
 ];
 
@@ -78,9 +129,18 @@ const NOOP_ASYNC = () => Promise.resolve();
  *  exists to catch. */
 function useStorySkillsCatalog(): SkillsCatalogState {
 	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [activeSource, setActiveSource] = useState(ALL_SKILL_SOURCES_ID);
 	const select = useCallback((id: string) => setSelectedId(id), []);
+	const selectSource = useCallback((id: string) => {
+		setActiveSource(id);
+		setSelectedId(null);
+	}, []);
+	const visibleSkills =
+		activeSource === ALL_SKILL_SOURCES_ID
+			? SKILLS
+			: SKILLS.filter((skill) => skill.catalogSourceId === activeSource);
 	return {
-		activeSource: "skills-sh",
+		activeSource,
 		addingMarketplace: false,
 		addMarketplace: NOOP_ASYNC,
 		detail: selectedId ? detailFor(selectedId) : null,
@@ -99,15 +159,25 @@ function useStorySkillsCatalog(): SkillsCatalogState {
 		select,
 		selectedId,
 		selectingSource: false,
-		selectSource: NOOP,
+		selectSource,
 		setInstalledOnly: NOOP,
 		setOrg: NOOP,
 		setQuery: NOOP,
 		setSkillEnabled: NOOP_ASYNC,
 		setSort: NOOP,
-		skills: SKILLS,
+		skills: visibleSkills,
 		sort: "popular",
-		sources: [{ builtin: true, displayName: "skills.sh", id: "skills-sh" }],
+		sources: [
+			{ builtin: true, displayName: "skills.sh", id: "skills-sh" },
+			{ builtin: true, displayName: "browse.sh", id: "browse-sh" },
+			{ builtin: true, displayName: "ClawHub", id: "clawhub" },
+			{ builtin: true, displayName: "LobeHub", id: "lobehub" },
+			{
+				builtin: true,
+				displayName: "Ryu Marketplace",
+				id: "ryu-marketplace",
+			},
+		],
 		togglingSkill: null,
 	};
 }

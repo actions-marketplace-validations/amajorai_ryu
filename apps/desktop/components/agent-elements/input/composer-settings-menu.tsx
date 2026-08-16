@@ -19,7 +19,7 @@ import {
 	DropdownMenuTrigger,
 } from "@ryu/ui/components/dropdown-menu.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
-import { type ReactElement, type ReactNode, useState } from "react";
+import { Fragment, type ReactElement, type ReactNode, useState } from "react";
 import { COMPOSER_SELECT_TRIGGER } from "@/components/agent-elements/input/composer-select.ts";
 
 export interface ComposerSettingItem {
@@ -289,6 +289,24 @@ export function ComposerSettingsMenu({
 			seg.effortName ? `${seg.name} ${seg.effortName}` : seg.name
 		),
 	].join(" · ");
+	const sectionByKey = new Map(
+		visibleSections.map((section) => [section.key, section])
+	);
+	const effortSections = visibleSections.filter(
+		(section) => section.variant === "slider"
+	);
+	const findFoldedEffort = (segment: (typeof segments)[number]) =>
+		segment.effortName
+			? (effortSections.find(
+					(section) => activeItemName(section) === segment.effortName
+				) ?? effortSections[0])
+			: undefined;
+	const compactSegments = [
+		segments.find((segment) => segment.key === "agent"),
+		...segments.filter(
+			(segment) => segment.key !== "agent" && segment.iconOnly
+		),
+	].filter((segment): segment is (typeof segments)[number] => Boolean(segment));
 
 	/** Apply a setting without dismissing — users often chain model + thinking. */
 	const selectItem = (section: ComposerSettingsSection) => (id: string) => {
@@ -351,35 +369,41 @@ export function ComposerSettingsMenu({
 					render={
 						<Button
 							aria-label={triggerLabel}
-							className={cn(COMPOSER_SELECT_TRIGGER, className)}
+							className={cn(
+								COMPOSER_SELECT_TRIGGER,
+								"composer-settings-trigger min-w-0 max-w-full",
+								className
+							)}
 							size="sm"
 							type="button"
 							variant="ghost"
 						/>
 					}
 				>
-					<span className="flex min-w-0 items-center gap-1 truncate font-medium">
+					<span className="composer-settings-trigger-content flex min-w-0 items-center gap-1 truncate font-medium">
 						{leading}
 						{compact ? (
-							// Compact mode names only the agent (the first section); the model
-							// and approval settings stay reachable inside the dropdown.
-							<span className="truncate">{segments[0]?.name}</span>
-						) : (
-							segments.map(
-								({ key, name, effortName, iconOnly, loading }, i) => {
-									const deco = decoByKey.get(key);
+							// Compact mode keeps the agent identity plus the two settings that
+							// benefit from a glanceable visual cue: decorated approval icons and
+							// the effort meter. Model names and plain plugin values stay in the
+							// picker, where they have room to be read.
+							<>
+								{compactSegments.map((segment, index) => {
+									const deco = decoByKey.get(segment.key);
 									return (
 										<span
-											className="flex items-center gap-1"
-											key={key}
-											// An icon-only mode has no on-screen word; hovering it must
-											// still say which mode it is.
-											title={iconOnly ? name : undefined}
+											className="composer-setting-segment flex min-w-0 items-center gap-1"
+											data-composer-section={segment.key}
+											data-composer-section-kind={
+												segment.key === "agent" ? "agent" : "decorated"
+											}
+											key={segment.key}
+											title={segment.iconOnly ? segment.name : undefined}
 										>
-											{i > 0 && (
+											{index > 0 && (
 												<span className="text-muted-foreground/50">·</span>
 											)}
-											{loading ? (
+											{segment.loading ? (
 												<HugeiconsIcon
 													className="shrink-0 animate-spin text-muted-foreground"
 													icon={Loading03Icon}
@@ -389,6 +413,7 @@ export function ComposerSettingsMenu({
 											) : (
 												deco && (
 													<HugeiconsIcon
+														aria-hidden="true"
 														className={cn("shrink-0", deco.className)}
 														icon={deco.icon}
 														size={13}
@@ -396,29 +421,100 @@ export function ComposerSettingsMenu({
 													/>
 												)
 											)}
-											{/* A recognised mode is its icon + colour; its word would
-										    only repeat what the tone already says. */}
-											{iconOnly ? null : (
+											{segment.key === "agent" && (
 												<span
-													className={cn(
-														"truncate",
-														loading ? "text-muted-foreground" : deco?.className
-													)}
+													className="truncate"
+													data-composer-agent-name="true"
 												>
-													{name}
-												</span>
-											)}
-											{/* Effort rides the model after an en dash — one setting
-										    reading as one fact, not two bulleted ones. */}
-											{effortName && (
-												<span className="truncate text-muted-foreground">
-													– {effortName}
+													{segment.name}
 												</span>
 											)}
 										</span>
 									);
-								}
-							)
+								})}
+								{effortSections.map((section) => (
+									<Fragment key={`effort-${section.key}`}>
+										<span className="text-muted-foreground/50">·</span>
+										<EffortMeter section={section} />
+									</Fragment>
+								))}
+							</>
+						) : (
+							segments.map((segment, i) => {
+								const { key, name, effortName, iconOnly, loading } = segment;
+								const deco = decoByKey.get(key);
+								const section = sectionByKey.get(key);
+								const foldedEffort = findFoldedEffort(segment);
+								const isEffort = section?.variant === "slider";
+								const kind = isEffort
+									? "effort"
+									: key === "agent"
+										? "agent"
+										: key === "model"
+											? "model"
+											: iconOnly
+												? "decorated"
+												: "plain";
+								return (
+									<span
+										className="composer-setting-segment flex min-w-0 items-center gap-1"
+										data-composer-section={key}
+										data-composer-section-kind={kind}
+										key={key}
+										title={iconOnly ? name : undefined}
+									>
+										{i > 0 && (
+											<span
+												className="text-muted-foreground/50"
+												data-composer-separator={key}
+											>
+												·
+											</span>
+										)}
+										{loading ? (
+											<HugeiconsIcon
+												className="shrink-0 animate-spin text-muted-foreground"
+												icon={Loading03Icon}
+												size={13}
+												strokeWidth={2}
+											/>
+										) : (
+											deco && (
+												<HugeiconsIcon
+													aria-hidden="true"
+													className={cn("shrink-0", deco.className)}
+													data-composer-mode-icon="true"
+													icon={deco.icon}
+													size={13}
+													strokeWidth={2}
+												/>
+											)
+										)}
+										{isEffort || iconOnly ? null : (
+											<span
+												className={cn(
+													"truncate",
+													loading ? "text-muted-foreground" : deco?.className
+												)}
+												data-composer-agent-name={
+													key === "agent" ? "true" : undefined
+												}
+												data-composer-model-name={
+													key === "model" ? "true" : undefined
+												}
+											>
+												{name}
+											</span>
+										)}
+										{!loading && isEffort && section ? (
+											<EffortMeter section={section} />
+										) : null}
+										{!loading && effortName && foldedEffort ? (
+											<EffortMeter section={foldedEffort} />
+										) : null}
+									</span>
+								);
+							})
 						)}
 						{trailing}
 					</span>

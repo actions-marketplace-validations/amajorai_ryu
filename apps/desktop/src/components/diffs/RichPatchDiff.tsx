@@ -201,12 +201,9 @@ export function RichPatchDiff({
 				| { lineNumber: number }[]
 				| undefined
 		) => {
-			if (baselineRef.current === null) {
-				baselineRef.current = file.contents;
-			}
 			setEditedFile(file);
 			const nextComments = annotationComments(lineAnnotations);
-			if (nextComments.length > 0) {
+			if (lineAnnotations !== undefined) {
 				setComments(nextComments);
 			}
 		},
@@ -307,8 +304,8 @@ export function RichPatchDiff({
 
 	const dirty =
 		editedFile !== null &&
-		baselineRef.current !== null &&
-		editedFile.contents !== baselineRef.current;
+		(baselineRef.current === null ||
+			editedFile.contents !== baselineRef.current);
 	const save = useCallback(async () => {
 		if (!(editedFile && onSave && dirty)) {
 			return;

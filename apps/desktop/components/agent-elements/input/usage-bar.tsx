@@ -4,8 +4,8 @@ import {
 	Tooltip,
 	TooltipContent,
 	TooltipTrigger,
-} from "@ryu/ui/components/tooltip";
-import { cn } from "@ryu/ui/lib/utils";
+} from "@ryu/ui/components/tooltip.tsx";
+import { cn } from "@ryu/ui/lib/utils.ts";
 import { memo } from "react";
 import { useAgentUsage } from "@/src/hooks/useAgentUsage.ts";
 import { useProviderCredits } from "@/src/hooks/useProviderCredits.ts";
@@ -47,8 +47,11 @@ export const UsageBar = memo(function UsageBar({
 	className,
 	visible,
 	compact,
+	adaptive = false,
 }: {
 	agentId: string | null;
+	/** Render both densities so the composer can switch at its container width. */
+	adaptive?: boolean;
 	className?: string;
 	/**
 	 * Override the "show the meter" gate. Defaults to the shared `visible` pref
@@ -78,28 +81,26 @@ export const UsageBar = memo(function UsageBar({
 	if (usage.windows.length === 0 && usage.meters.length === 0) {
 		return null;
 	}
-	if (compact) {
-		return (
-			<div className={cn("flex items-center gap-1", className)}>
-				{usage.windows.length > 0 ? (
-					<CompactUsageMeter
-						barStyle={prefs.showBar ? prefs.barStyle : "bar"}
-						meters={usage.meters}
-						mode={prefs.mode}
-						plan={usage.plan}
-						windows={usage.windows}
-					/>
-				) : null}
-				{/* With no percent windows to hang the shared tooltip on, the
-				    non-percent rows still need their own chips. */}
-				{usage.windows.length === 0
-					? usage.meters.map((meter) => (
-							<MeterChip key={meter.label} meter={meter} plan={usage.plan} />
-						))
-					: null}
-			</div>
-		);
-	}
+	const compactContent = (
+		<div className="flex items-center gap-1">
+			{usage.windows.length > 0 ? (
+				<CompactUsageMeter
+					barStyle={prefs.showBar ? prefs.barStyle : "bar"}
+					meters={usage.meters}
+					mode={prefs.mode}
+					plan={usage.plan}
+					windows={usage.windows}
+				/>
+			) : null}
+			{/* With no percent windows to hang the shared tooltip on, the
+			    non-percent rows still need their own chips. */}
+			{usage.windows.length === 0
+				? usage.meters.map((meter) => (
+						<MeterChip key={meter.label} meter={meter} plan={usage.plan} />
+					))
+				: null}
+		</div>
+	);
 	// Bound the inline row. Core can report six rows for one agent (Codex with the
 	// Spark limit: four windows plus banked resets and credits), and the composer's
 	// control cluster shares its line with the settings menu, the capability badges
@@ -107,8 +108,8 @@ export const UsageBar = memo(function UsageBar({
 	// both reference apps hide their secondary metrics behind.
 	const inlineWindows = usage.windows.slice(0, INLINE_WINDOW_LIMIT);
 	const inlineMeters = usage.meters.slice(0, INLINE_METER_LIMIT);
-	return (
-		<div className={cn("flex items-center gap-1.5", className)}>
+	const fullContent = (
+		<div className="flex items-center gap-1.5">
 			{inlineWindows.map((usageWindow) => (
 				<UsageWindowMeter
 					barStyle={prefs.barStyle}
@@ -129,6 +130,24 @@ export const UsageBar = memo(function UsageBar({
 				plan={usage.plan}
 				windows={usage.windows.slice(INLINE_WINDOW_LIMIT)}
 			/>
+		</div>
+	);
+
+	if (adaptive) {
+		return (
+			<div className={cn("composer-usage-adaptive", className)}>
+				<div className="composer-usage-wide">{fullContent}</div>
+				<div className="composer-usage-compact">{compactContent}</div>
+			</div>
+		);
+	}
+	return compact ? (
+		<div className={cn("flex items-center gap-1", className)}>
+			{compactContent}
+		</div>
+	) : (
+		<div className={cn("flex items-center gap-1.5", className)}>
+			{fullContent}
 		</div>
 	);
 });
