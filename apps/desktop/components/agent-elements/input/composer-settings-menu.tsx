@@ -80,11 +80,10 @@ export interface ComposerSettingsMenuProps {
 	align?: "start" | "center" | "end";
 	className?: string;
 	/**
-	 * Compact trigger: show ONLY the first section's active value (the agent
-	 * name) instead of the full `Agent · Model · Approval` summary. Used in the
-	 * composer's single-row compact mode, where the trigger reads
-	 * `[agent logo] Ryu [usage] ⌄` — the model/approval settings still live
-	 * inside the dropdown, just not spelled out in the trigger.
+	 * Compact trigger: keep the agent name plus any icon-only settings and the
+	 * effort meter, while model names and plain plugin values stay in the
+	 * dropdown. Used in the composer's single-row compact mode where every
+	 * visible token must earn its width.
 	 */
 	compact?: boolean;
 	/**
@@ -183,6 +182,7 @@ function EffortMeter({
 				className
 			)}
 			data-composer-effort-meter="true"
+			role="img"
 			title={`Effort: ${active.name}`}
 		>
 			{Array.from({ length: barCount }, (_, index) => (
@@ -240,7 +240,7 @@ export function ComposerSettingsMenu({
 	// inside the dropdown (agent/model have no `decorate`, so they stay plain).
 	//
 	// How those segments COMPOSE — a decorated mode collapsing to its icon,
-	// reasoning effort riding on the model after an en dash — is
+	// reasoning effort becoming a bar meter on the model — is
 	// `composeTriggerSummary`, kept pure in @ryu/blocks so the rules are testable
 	// without a renderer. Everything here is the rendering of its verdict.
 	const summary = visibleSections
@@ -293,7 +293,10 @@ export function ComposerSettingsMenu({
 		visibleSections.map((section) => [section.key, section])
 	);
 	const effortSections = visibleSections.filter(
-		(section) => section.variant === "slider"
+		(section) =>
+			section.variant === "slider" &&
+			!section.loading &&
+			section.items.length > 1
 	);
 	const findFoldedEffort = (segment: (typeof segments)[number]) =>
 		segment.effortName

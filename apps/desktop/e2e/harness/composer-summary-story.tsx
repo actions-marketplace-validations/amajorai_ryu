@@ -4,12 +4,13 @@
 //
 // The trigger used to spell every setting out as its own bulleted segment
 // (`Ryu · Claude Sonnet 4.5 · Accept edits · High`). It now compacts: the
-// permission mode is its icon + colour, reasoning effort rides the model after
-// an en dash, and the ACP harness sits in parentheses on the agent name. The
-// composition rules are unit-tested (`composer-trigger-summary.test.ts`); what
-// only a browser can answer is whether that verdict RENDERS — that the icon-only
-// mode still paints an icon rather than an empty gap, and that dropping its word
-// did not drop it from the accessible name too.
+// permission mode is its icon + colour, reasoning effort is a glanceable bar
+// meter, model and usage labels collapse at the composer's own width, and the
+// ACP harness sits in parentheses on the agent name. The composition rules are
+// unit-tested (`composer-trigger-summary.test.ts`); what only a browser can
+// answer is whether that verdict RENDERS — that the icon-only mode still paints
+// an icon rather than an empty gap, the meter remains announced, and the
+// container-width density changes do not clip the textarea controls.
 //
 // The second mount is opencode's real shape, taken from an actual `opencode acp`
 // probe: its `mode` config option is decorated (category `"mode"`) but its
@@ -19,6 +20,7 @@
 // Hermetic: the menu is presentational, so no Core node, no Tauri, no context.
 
 import { approvalModeStyle } from "@ryu/blocks/composer/composer-approval-style";
+import { IconCpu } from "@tabler/icons-react";
 import { createRoot } from "react-dom/client";
 import {
 	ComposerSettingsMenu,
@@ -103,6 +105,60 @@ const OPENCODE_SECTIONS: ComposerSettingsSection[] = [
 	},
 ];
 
+// The real composer keeps the model picker beside the agent/settings picker.
+// Keeping that same split here makes the container-query story exercise the
+// exact narrow-row shape rather than a decorative approximation.
+const COMPOSER_SECTIONS = RYU_SECTIONS.filter(
+	(section) => section.key !== "model"
+);
+
+function ComposerPreview({
+	label,
+	testId,
+	width,
+}: {
+	label: string;
+	testId: string;
+	width: number;
+}) {
+	return (
+		<section className="flex flex-col gap-2" data-testid={testId}>
+			<div className="flex items-center justify-between text-muted-foreground text-xs">
+				<h2 className="font-medium text-foreground">{label}</h2>
+				<span>{width}px container</span>
+			</div>
+			<div
+				className="composer-container min-w-0 rounded-2xl bg-muted p-3"
+				style={{ width }}
+			>
+				<textarea
+					aria-label={`${label} message`}
+					className="min-h-16 w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+					placeholder="Ask anything…"
+					rows={2}
+				/>
+				<div className="mt-3 flex min-w-0 items-center gap-1">
+					<ComposerSettingsMenu sections={COMPOSER_SECTIONS} />
+					<button
+						aria-label="Choose provider and model"
+						className="composer-model-trigger max-w-44 truncate rounded-md px-2 py-1 text-muted-foreground text-xs hover:bg-muted/50 hover:text-foreground"
+						title="Claude Sonnet 4.5"
+						type="button"
+					>
+						<IconCpu
+							aria-hidden="true"
+							className="composer-model-icon size-3.5 shrink-0"
+						/>
+						<span className="composer-model-name truncate">
+							Claude Sonnet 4.5
+						</span>
+					</button>
+				</div>
+			</div>
+		</section>
+	);
+}
+
 function Story() {
 	return (
 		<div className="flex min-h-screen flex-col gap-8 bg-background p-6">
@@ -121,6 +177,12 @@ function Story() {
 			<section className="flex flex-col gap-2" data-testid="ryu-compact">
 				<h2 className="font-medium text-sm">Flagship (compact)</h2>
 				<ComposerSettingsMenu compact sections={RYU_SECTIONS} />
+			</section>
+			<section className="flex flex-col gap-3" data-testid="adaptive">
+				<h2 className="font-medium text-sm">Composer width adaptation</h2>
+				<ComposerPreview label="Wide" testId="adaptive-wide" width={680} />
+				<ComposerPreview label="Medium" testId="adaptive-medium" width={420} />
+				<ComposerPreview label="Tight" testId="adaptive-tight" width={300} />
 			</section>
 		</div>
 	);

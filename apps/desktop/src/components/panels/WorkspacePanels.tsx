@@ -1464,6 +1464,14 @@ function isSafeGitRef(ref: string): boolean {
 	return ref.length > 0 && !ref.startsWith("-") && SAFE_GIT_REF.test(ref);
 }
 
+// tauri-plugin-shell's line-oriented collector appends a newline to each
+// stdout record even though the record already contains its terminator. Git's
+// unified format uses a leading space for blank context lines, so collapsing
+// the duplicated transport separators restores the patch before parsing.
+function normalizeGitStdout(output: string): string {
+	return output.replace(/\r?\n(?:\r?\n)+/g, "\n");
+}
+
 function buildDiffCommand(
 	mode: DiffMode,
 	commit: CommitInfo | null,
@@ -1522,7 +1530,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 					stderr: string;
 					code: number;
 				}>("shell_execute", { command, cwd: folder, shell: shellArg });
-				return r.stdout;
+				return normalizeGitStdout(r.stdout);
 			} catch {
 				return "";
 			}

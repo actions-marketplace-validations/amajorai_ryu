@@ -11,10 +11,10 @@
 //     accept edits). Only when the value has NO decoration does its text
 //     survive — opencode's `build` matches none of the approval styles, and an
 //     icon-less empty segment would silently drop the setting from view.
-//   • reasoning effort rides ON the model segment after an en dash
-//     (`Sonnet 4.5 – High`) rather than as another bullet, because effort is a
-//     property of the run the model does. With no model segment to ride on it
-//     keeps its own bullet rather than rendering a dangling dash.
+//   • reasoning effort rides ON the model segment rather than as another bullet,
+//     because effort is a property of the run the model does. The renderer can
+//     show that ownership as a bar meter. With no model segment to ride on it
+//     keeps its own segment rather than losing the setting altogether.
 //   • the ACP harness behind an agent whose name doesn't already imply it is
 //     appended in parentheses (`Ryu (pi)`), so the agent segment answers "which
 //     harness am I actually driving" without a bullet of its own.
@@ -48,8 +48,9 @@ export interface TriggerSummarySource {
 /** One rendered segment of the trigger summary. */
 export interface TriggerSummarySegment {
 	/**
-	 * Effort level folded onto this segment, shown after an en dash. Set only on
-	 * the model segment; an effort with no model keeps a segment of its own.
+	 * Effort level folded onto this segment. Set only on the model segment; an
+	 * effort with no model keeps a segment of its own. Renderers choose the
+	 * density, such as a labelled bar meter or a compact icon treatment.
 	 */
 	effortName?: string;
 	/**
