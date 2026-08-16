@@ -13,6 +13,10 @@ import {
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import type {
+	AgentMessageContext,
+	AgentMessageIdentity,
+} from "@ryu/blocks/desktop/agent-elements/types.ts";
+import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
@@ -1229,6 +1233,45 @@ export default function ChatPage({
 			),
 		};
 	}, [agentId, teamId, agents, teams]);
+
+	// The agent-comms transcript renderer uses the same roster and avatar primitive
+	// as the main assistant header, so a sender stays recognizable in both places.
+	const agentMessageContext = useMemo<AgentMessageContext>(() => {
+		const identityForAgent = (
+			agent: AgentSummary,
+			id = agent.id
+		): AgentMessageIdentity => ({
+			avatar: (
+				<AgentAvatar
+					avatarUrl={agent.avatarUrl}
+					className="size-full rounded-full object-contain"
+					engine={engineForAgent(agent)}
+					size="16px"
+				/>
+			),
+			id,
+			name: agent.name,
+		});
+		const activeAgent = agents.find((agent) => agent.id === agentId);
+		const current = activeAgent
+			? identityForAgent(activeAgent)
+			: {
+					avatar: assistantIdentity.avatar,
+					id: agentId ?? "agent",
+					name: assistantIdentity.name ?? "Agent",
+				};
+
+		return {
+			current,
+			resolve: (id) => {
+				const normalizedId = id.startsWith("acp:") ? id.slice(4) : id;
+				const agent = agents.find(
+					(candidate) => candidate.id === id || candidate.id === normalizedId
+				);
+				return agent ? identityForAgent(agent, id) : undefined;
+			},
+		};
+	}, [agentId, agents, assistantIdentity]);
 
 	// Marks for the live status row. A team is the case where more than one agent
 	// is genuinely on the same turn, so it contributes one mark per member; a
@@ -5578,6 +5621,7 @@ export default function ChatPage({
 					>
 						<WidgetHostContext.Provider value={widgetHostValue}>
 							<AgentChat
+								agentMessageContext={agentMessageContext}
 								assistantAvatar={assistantIdentity.avatar}
 								assistantName={assistantIdentity.name}
 								assistantPlanningAvatars={assistantPlanningAvatars}

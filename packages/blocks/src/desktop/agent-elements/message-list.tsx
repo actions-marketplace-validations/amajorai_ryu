@@ -97,6 +97,7 @@ import { ToolGroup } from "./tools/tool-group.tsx";
 import { isToolActivityGroupCandidate } from "./tools/tool-grouping.ts";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer.tsx";
 import {
+	type AgentMessageContext,
 	type AgentUiSubmit,
 	type CustomToolRendererProps,
 	type MentionItem,
@@ -130,6 +131,8 @@ export interface MessageListProps {
 	 * to the spiral loader when there is no avatar at all.
 	 */
 	assistantPlanningAvatars?: React.ReactNode[];
+	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
+	agentMessageContext?: AgentMessageContext;
 	className?: string;
 	classNames?: {
 		userMessage?: string;
@@ -305,7 +308,7 @@ export interface MessageListProps {
 			onEditSubmit?: (text: string) => void;
 			onEditCancel?: () => void;
 		}>;
-		ToolRenderer?: React.ComponentType<ToolRendererProps>;
+	ToolRenderer?: React.ComponentType<ToolRendererProps>;
 	};
 	status: ChatStatus;
 	suppressQuestionTool?: boolean;
@@ -328,6 +331,7 @@ interface ToolPartBase {
 }
 
 interface ToolRendererProps {
+	agentMessageContext?: AgentMessageContext;
 	chatStatus?: string;
 	nestedTools?: ToolPartBase[];
 	onAgentUiSubmit?: AgentUiSubmit;
@@ -1636,6 +1640,7 @@ export const MessageList = memo(function MessageList({
 	assistantAvatar,
 	assistantName,
 	assistantPlanningAvatars,
+	agentMessageContext,
 	currentUser,
 	slots,
 	classNames,
@@ -2346,6 +2351,7 @@ export const MessageList = memo(function MessageList({
 																	previewResolvers={previewResolvers}
 																	suppressQuestionTool={suppressQuestionTool}
 																	ToolRendererComponent={CustomToolRenderer}
+																	agentMessageContext={agentMessageContext}
 																	toolRenderers={toolRenderers}
 																/>
 															);
@@ -2586,7 +2592,9 @@ function AssistantParts({
 	onRetryGeneration,
 	onWorkflowResume,
 	onAgentUiSubmit,
+	agentMessageContext,
 }: {
+	agentMessageContext?: AgentMessageContext;
 	msg: UIMessage;
 	isLast: boolean;
 	isStreaming: boolean;
@@ -2941,6 +2949,7 @@ function AssistantParts({
 						: undefined;
 				pushPart(
 					<ToolRendererComponent
+						agentMessageContext={agentMessageContext}
 						chatStatus={chatStreamingStatus}
 						key={part.toolCallId ?? `${msg.id}-tool-${i}`}
 						nestedTools={nestedTools}
@@ -2967,6 +2976,7 @@ function AssistantParts({
 					isLast && isStreaming ? "streaming" : undefined;
 				pushPart(
 					<ToolRendererComponent
+						agentMessageContext={agentMessageContext}
 						chatStatus={chatStreamingStatus}
 						key={
 							widgetToolCallId
@@ -3055,6 +3065,7 @@ function AssistantParts({
 		expandCommands,
 		expandFileEdits,
 		ToolRendererComponent,
+		agentMessageContext,
 		toolRenderers,
 		onRetryGeneration,
 		onOpenFile,

@@ -5,6 +5,31 @@ export function readProjectFile(path: string): Promise<string> {
 	return invokeWhenReady<string>("read_project_file", { path });
 }
 
+interface ShellOutput {
+	stdout: string;
+	code: number;
+}
+
+function quoteShellArg(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Read a committed file without losing blank lines through the shell bridge. */
+export async function readGitProjectFile(
+	folder: string,
+	path: string
+): Promise<string> {
+	const result = await invokeWhenReady<ShellOutput>("shell_execute", {
+		command: `git show ${quoteShellArg(`HEAD:${path}`)}`,
+		cwd: folder,
+		shell: null,
+	});
+	if (result.code !== 0) {
+		throw new Error(`Unable to read ${path} from HEAD`);
+	}
+	return result.stdout;
+}
+
 /** Write a UTF-8 text file to disk by absolute path. */
 export function writeProjectFile(path: string, content: string): Promise<void> {
 	return invokeWhenReady<void>("write_project_file", { path, content });

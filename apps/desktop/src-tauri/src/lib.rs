@@ -1468,6 +1468,7 @@ async fn shell_execute(
                 code = payload.code.unwrap_or(1);
             }
             CommandEvent::Error(message) => stderr.extend(message.into_bytes()),
+            _ => {}
         }
     }
 

@@ -3,7 +3,11 @@ import { memo } from "react";
 import { AgentUI } from "../agent-ui/agent-ui.tsx";
 import { useChatDisplayPrefs } from "../chat-display-prefs.tsx";
 import { QuestionTool } from "../question/question-tool.tsx";
-import type { CustomToolRendererProps, WidgetAvailablePart } from "../types.ts";
+import type {
+	AgentMessageContext,
+	CustomToolRendererProps,
+	WidgetAvailablePart,
+} from "../types.ts";
 import { getToolStatus } from "../utils/format-tool.ts";
 import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 import { useWidgetHost } from "../widget-host-context.tsx";
@@ -12,6 +16,10 @@ import {
 	artifactIdForPart,
 	isArtifactPart,
 } from "./artifact-tool.tsx";
+import {
+	AgentMessageTool,
+	isAgentMessageToolPart,
+} from "./agent-message-tool.tsx";
 import { BashTool } from "./bash-tool.tsx";
 import { EditTool } from "./edit-tool.tsx";
 import { GenericTool } from "./generic-tool.tsx";
@@ -31,6 +39,7 @@ import {
 import { ToolTimingProvider } from "./tool-timing.tsx";
 
 export interface ToolRendererProps {
+	agentMessageContext?: AgentMessageContext;
 	chatStatus?: string;
 	nestedTools?: any[];
 	onAgentUiSubmit?: (value: unknown) => void | Promise<void>;
@@ -134,6 +143,7 @@ const ToolRendererInner = memo(function ToolRendererInner({
 	chatStatus,
 	toolRenderers,
 	onAgentUiSubmit,
+	agentMessageContext,
 }: ToolRendererProps) {
 	const partType = part.type as string;
 	const { groupToolUses, expandFileEdits, expandCommands } =
@@ -190,6 +200,18 @@ const ToolRendererInner = memo(function ToolRendererInner({
 	// instead of a bare tool row, mirroring the AI SDK "Sandbox" element.
 	if (isCodeExecPart(part)) {
 		return <SandboxTool chatStatus={chatStatus} part={part} />;
+	}
+
+	// Switchboard's send call is a transcript event, not generic tool detail:
+	// keep the sender/recipient visible and show the actual message as a bubble.
+	if (isAgentMessageToolPart(partType, part.toolName)) {
+		return (
+			<AgentMessageTool
+				chatStatus={chatStatus}
+				context={agentMessageContext}
+				part={part}
+			/>
+		);
 	}
 
 	// Specialized tool components with variant dispatch

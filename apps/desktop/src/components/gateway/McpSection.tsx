@@ -12,10 +12,18 @@
 // removing servers and editing per-agent allowlists is the Tools page in the
 // app (see `@ryu/blocks` Tools surface). Management links out from here.
 
+import { Search01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { Badge } from "@ryu/ui/components/badge.tsx";
+import {
+	InputGroup,
+	InputGroupAddon,
+	InputGroupInput,
+} from "@ryu/ui/components/input-group.tsx";
 import { Spinner } from "@ryu/ui/components/spinner.tsx";
 import { useEffect, useState } from "react";
 import {
+	SettingsCard,
 	SettingsGroup,
 	SettingsItem,
 	SettingsSection,
@@ -158,6 +166,7 @@ export function McpSection({ target }: { target: ApiTarget }) {
 	const [tools, setTools] = useState<McpTool[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
+	const [query, setQuery] = useState("");
 
 	useEffect(() => {
 		let cancelled = false;
@@ -185,26 +194,56 @@ export function McpSection({ target }: { target: ApiTarget }) {
 			cancelled = true;
 		};
 	}, [target]);
+	const needle = query.trim().toLowerCase();
+	const filteredServers = servers.filter((server) =>
+		server.name.toLowerCase().includes(needle)
+	);
+	const filteredTools = tools.filter((tool) =>
+		[tool.name, tool.server, tool.id].some((value) =>
+			value.toLowerCase().includes(needle)
+		)
+	);
 
 	return (
 		<div className="flex flex-col gap-4">
 			<SettingsSection
 				caption="The MCP servers this node exposes. A host (Claude Desktop, Cursor, …) that connects to Ryu can call the tools below through the same governance as everything else."
+				headerAction={
+					<InputGroup className="w-64">
+						<InputGroupAddon>
+							<HugeiconsIcon className="size-4" icon={Search01Icon} />
+						</InputGroupAddon>
+						<InputGroupInput
+							aria-label="Search MCP servers and tools"
+							onChange={(event) => setQuery(event.target.value)}
+							placeholder="Search servers and tools…"
+							value={query}
+						/>
+					</InputGroup>
+				}
 				title="MCP servers"
 			>
-				<ServersList error={error} loading={loading} servers={servers} />
+				<SettingsCard className="flex flex-col gap-2">
+					<ServersList
+						error={error}
+						loading={loading}
+						servers={filteredServers}
+					/>
+				</SettingsCard>
 			</SettingsSection>
 
 			<SettingsSection
 				caption="Tools advertised by enabled servers, grouped by server. Per-agent allowlists are managed on the Tools page."
 				title="Available tools"
 			>
-				<ToolsList
-					error={error}
-					loading={loading}
-					servers={servers}
-					tools={tools}
-				/>
+				<SettingsCard className="flex flex-col gap-3">
+					<ToolsList
+						error={error}
+						loading={loading}
+						servers={servers}
+						tools={filteredTools}
+					/>
+				</SettingsCard>
 			</SettingsSection>
 		</div>
 	);

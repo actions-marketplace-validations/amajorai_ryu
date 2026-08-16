@@ -21,6 +21,7 @@ import {
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { FileContents } from "@pierre/diffs";
 import {
 	Tooltip,
 	TooltipContent,
@@ -47,11 +48,21 @@ import {
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import type { ApplyResult, FileSummary } from "@/src/lib/api/git.ts";
 import { applyWorktree } from "@/src/lib/api/git.ts";
-import { joinPath, writeProjectFile } from "@/src/lib/files.ts";
+import {
+	joinPath,
+	readGitProjectFile,
+	readProjectFile,
+	writeProjectFile,
+} from "@/src/lib/files.ts";
 
 interface DiffReviewPaneProps {
 	runId: string;
 	target: ApiTarget;
+}
+
+interface FullDiffFiles {
+	oldFile: FileContents | null;
+	newFile: FileContents | null;
 }
 
 // ── Per-file summary row ──────────────────────────────────────────────────────
@@ -226,6 +237,48 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 	const selectedPatch = selectedFile
 		? patchForFile(diff.unified_diff, selectedFile.path)
 		: diff.unified_diff;
+	const [fullFiles, setFullFiles] = useState<FullDiffFiles | null>(null);
+	useEffect(() => {
+		const folder = worktreeStatus.path;
+		const path = selectedFile?.path;
+		if (!(folder && path)) {
+			setFullFiles(null);
+			return;
+		}
+
+		let cancelled = false;
+		setFullFiles(null);
+		Promise.all([
+			readGitProjectFile(folder, path).catch(() => null),
+			readProjectFile(joinPath(folder, path)).catch(() => null),
+		]).then(([oldContents, newContents]) => {
+			if (cancelled) {
+				return;
+			}
+			setFullFiles({
+				oldFile:
+					oldContents === null
+						? null
+						: {
+							cacheKey: `${path}:HEAD`,
+							contents: oldContents,
+							name: path,
+						},
+				newFile:
+					newContents === null
+						? null
+						: {
+							cacheKey: `${path}:working`,
+							contents: newContents,
+							name: path,
+						},
+			});
+		});
+
+		return () => {
+			cancelled = true;
+		};
+	}, [selectedFile?.path, worktreeStatus.path]);
 	const totalAdditions = diff.files.reduce((sum, f) => sum + f.additions, 0);
 	const totalDeletions = diff.files.reduce((sum, f) => sum + f.deletions, 0);
 	const saveEditedFile = useCallback(
@@ -350,8 +403,10 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 								<RichPatchDiff
 									editMode={editMode}
 									filePath={selectedFile?.path}
+									newFile={fullFiles?.newFile}
 									onSave={worktreeStatus.path ? saveEditedFile : undefined}
 									options={diffOptions}
+									oldFile={fullFiles?.oldFile}
 									patch={selectedPatch}
 								/>
 							</div>
