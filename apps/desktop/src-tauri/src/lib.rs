@@ -1446,12 +1446,35 @@ async fn shell_execute(
         }
     }
 
-    let output = cmd.output().await.map_err(|e| e.to_string())?;
+    // The plugin's `output()` helper reads line-oriented events and appends a
+    // newline to each event. That changes the bytes for commands such as
+    // `git diff` and corrupts file contents that contain blank lines. Raw
+    // events preserve stdout/stderr exactly while keeping the same async
+    // process lifecycle.
+    let (mut events, _child) = cmd
+        .set_raw_out(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut code = 1;
+
+    use tauri_plugin_shell::process::CommandEvent;
+    while let Some(event) = events.recv().await {
+        match event {
+            CommandEvent::Stdout(bytes) => stdout.extend(bytes),
+            CommandEvent::Stderr(bytes) => stderr.extend(bytes),
+            CommandEvent::Terminated(payload) => {
+                code = payload.code.unwrap_or(1);
+            }
+            CommandEvent::Error(message) => stderr.extend(message.into_bytes()),
+        }
+    }
 
     Ok(ShellOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code().unwrap_or(1),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        code,
     })
 }
 

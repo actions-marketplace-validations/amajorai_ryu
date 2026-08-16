@@ -6,8 +6,9 @@ import type {
 	FileDiffOptions,
 	SelectedLineRange,
 } from "@pierre/diffs";
+import { parseDiffFromFile } from "@pierre/diffs";
 import { Editor, type EditorOptions } from "@pierre/diffs/edit";
-import { EditProvider, PatchDiff } from "@pierre/diffs/react";
+import { EditProvider, FileDiff, PatchDiff } from "@pierre/diffs/react";
 import {
 	HoverCard,
 	HoverCardContent,
@@ -15,7 +16,13 @@ import {
 } from "@ryu/ui/components/hover-card.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties, ReactElement, ReactNode } from "react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 
 export interface ReviewCommentMetadata {
 	body: string;
@@ -26,8 +33,10 @@ export interface RichPatchDiffProps {
 	className?: string;
 	editMode?: boolean;
 	filePath?: string;
+	newFile?: FileContents | null;
 	onSave?: (file: FileContents) => Promise<void>;
 	onSelection?: (text: string) => void;
+	oldFile?: FileContents | null;
 	options?: FileDiffOptions<ReviewCommentMetadata>;
 	patch: string;
 	showSave?: boolean;
@@ -138,8 +147,10 @@ export function RichPatchDiff({
 	className,
 	editMode = false,
 	filePath,
+	newFile,
 	onSave,
 	onSelection,
+	oldFile,
 	options,
 	patch,
 	showSave = true,
@@ -155,6 +166,17 @@ export function RichPatchDiff({
 	const [saving, setSaving] = useState(false);
 	const baselineRef = useRef<string | null>(null);
 	const commentCountRef = useRef(0);
+	const hydratedDiff = useMemo(() => {
+		if (oldFile === undefined && newFile === undefined) {
+			return null;
+		}
+		return parseDiffFromFile(oldFile ?? null, newFile ?? null);
+	}, [newFile, oldFile]);
+
+	useEffect(() => {
+		baselineRef.current = newFile?.contents ?? null;
+		setEditedFile(null);
+	}, [newFile?.contents]);
 
 	const addComment = useCallback(
 		(line: { lineNumber: number; side: "additions" | "deletions" }) => {
@@ -342,17 +364,31 @@ export function RichPatchDiff({
 						)}
 					</div>
 				)}
-				<PatchDiff
-					disableWorkerPool
-					edit={editMode}
-					editorOptions={editorOptions}
-					lineAnnotations={comments}
-					options={diffOptions}
-					patch={patch}
-					renderAnnotation={renderAnnotation}
-					renderGutterUtility={renderGutterUtility}
-					selectedLines={selectedLines}
-				/>
+				{hydratedDiff ? (
+					<FileDiff
+						disableWorkerPool
+						edit={editMode && newFile !== null}
+						editorOptions={editorOptions}
+						fileDiff={hydratedDiff}
+						lineAnnotations={comments}
+						options={diffOptions}
+						renderAnnotation={renderAnnotation}
+						renderGutterUtility={renderGutterUtility}
+						selectedLines={selectedLines}
+					/>
+				) : (
+					<PatchDiff
+						disableWorkerPool
+						edit={editMode}
+						editorOptions={editorOptions}
+						lineAnnotations={comments}
+						options={diffOptions}
+						patch={patch}
+						renderAnnotation={renderAnnotation}
+						renderGutterUtility={renderGutterUtility}
+						selectedLines={selectedLines}
+					/>
+				)}
 			</div>
 		</EditProvider>
 	);

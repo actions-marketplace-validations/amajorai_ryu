@@ -310,6 +310,7 @@ fn default_grant_allowlist() -> Vec<String> {
         // its old in-Core provider. Same re-enable rationale as the scopes above.
         "tool:command:spider",
         "tool:command:rtk",
+        "tool:command:bws",
         // Ship-code-in-a-manifest, for BOTH an `inline_deno` tool and a capability
         // ADAPTER (the JS a layer provider ships when its shape — an async job API,
         // a token vocabulary — is beyond what the declarative binding fields can
@@ -341,6 +342,11 @@ fn default_grant_allowlist() -> Vec<String> {
         // needs to publish a plan at all never exist. Swappable via the
         // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override, like its neighbours.
         "mcp:blueprint",
+        // Seeded MCP plugins own these server names, but `mcp` is a reserved
+        // namespace and therefore still requires an exact reviewed entry.
+        "mcp:agentation",
+        "mcp:docs",
+        "mcp:expect",
         // Same rule, same reason: `@ryu/reasoning` declares `mcp:reasoning` and shipped
         // without this row, so `every_builtin_fixture_grant_is_allowlisted` has been red
         // and a disable→re-enable of that app fails with GrantsDenied. Every sidecar app
@@ -368,6 +374,10 @@ fn default_grant_allowlist() -> Vec<String> {
         // `RYU_MARKETPLACE_GRANT_ALLOWLIST` env override.
         "browser.connect",
         "identity.read",
+        // Cross-plugin host capabilities used by seeded UX and usage bridges.
+        "app:http",
+        "preferences:write",
+        "usage:read",
         // Widget-render consent: a plugin (built-in Ryu App or third-party MCP
         // server) that declares a `contributes.widgets[]` binding must hold this
         // grant for its tool to auto-promote a sandboxed widget into chat. Gated

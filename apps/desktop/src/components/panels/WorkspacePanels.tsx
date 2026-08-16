@@ -26,6 +26,7 @@ import {
 	UserGroupIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { FileContents } from "@pierre/diffs";
 import type {
 	ContextMenuItem as FileTreeContextMenuItem,
 	ContextMenuOpenContext as FileTreeContextMenuOpenContext,
@@ -156,7 +157,11 @@ import {
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { CONTRIBUTED_LINK_OPENED_EVENT } from "@/src/lib/contributed-link-handler.ts";
-import { joinPath, writeProjectFile } from "@/src/lib/files.ts";
+import {
+	joinPath,
+	readProjectFile,
+	writeProjectFile,
+} from "@/src/lib/files.ts";
 import { pageRoute, SIDE_PANEL_PAGES } from "@/src/lib/page-routes.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
@@ -1445,6 +1450,11 @@ interface CommitInfo {
 	subject: string;
 }
 
+interface FullDiffFiles {
+	oldFile: FileContents | null;
+	newFile: FileContents | null;
+}
+
 // `%x09` makes git emit a real tab between the hash and the subject, so we let
 // git insert the delimiter instead of pushing a control char through the shell.
 const GIT_LOG_FORMAT = "%H%x09%s";
@@ -1464,12 +1474,8 @@ function isSafeGitRef(ref: string): boolean {
 	return ref.length > 0 && !ref.startsWith("-") && SAFE_GIT_REF.test(ref);
 }
 
-// tauri-plugin-shell's line-oriented collector appends a newline to each
-// stdout record even though the record already contains its terminator. Git's
-// unified format uses a leading space for blank context lines, so collapsing
-// the duplicated transport separators restores the patch before parsing.
-function normalizeGitStdout(output: string): string {
-	return output.replace(/\r?\n(?:\r?\n)+/g, "\n");
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function buildDiffCommand(
@@ -1507,6 +1513,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	const [commits, setCommits] = useState<CommitInfo[]>([]);
 	const [branches, setBranches] = useState<string[]>([]);
 	const [patch, setPatch] = useState("");
+	const [fullFiles, setFullFiles] = useState<Record<string, FullDiffFiles>>({});
 	const [loading, setLoading] = useState(false);
 	const [editMode, setEditMode] = useState(false);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
@@ -1530,7 +1537,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 					stderr: string;
 					code: number;
 				}>("shell_execute", { command, cwd: folder, shell: shellArg });
-				return normalizeGitStdout(r.stdout);
+				return r.stdout;
 			} catch {
 				return "";
 			}
@@ -1592,6 +1599,55 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 		refresh();
 	}, [refresh]);
 
+	// PatchDiff is intentionally read-only for partial patches. Hydrate the
+	// working-tree view with both file versions so the library can attach its
+	// full editor surface when Edit mode is enabled.
+	useEffect(() => {
+		if (!folder || mode !== "working" || !patch.trim()) {
+			setFullFiles({});
+			return;
+		}
+
+		let cancelled = false;
+		setFullFiles({});
+		const files = splitPatchByFile(patch);
+
+		void Promise.all(
+			files.map(async (file): Promise<[string, FullDiffFiles]> => {
+				const [oldContents, newContents] = await Promise.all([
+					git(`git show ${shellQuote(`HEAD:${file.path}`)}`),
+					readProjectFile(joinPath(folder, file.path)).catch(() => null),
+				]);
+				return [
+					file.path,
+					{
+						oldFile: {
+							cacheKey: `${file.path}:HEAD`,
+							contents: oldContents,
+							name: file.path,
+						},
+						newFile:
+							newContents === null
+								? null
+								: {
+									cacheKey: `${file.path}:working`,
+									contents: newContents,
+									name: file.path,
+								  },
+					},
+				];
+			})
+		).then((entries) => {
+			if (!cancelled) {
+				setFullFiles(Object.fromEntries(entries));
+			}
+		});
+
+		return () => {
+			cancelled = true;
+		};
+	}, [folder, git, mode, patch]);
+
 	const modeLabel = (() => {
 		if (mode === "staged") {
 			return "Staged";
@@ -1629,6 +1685,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 					<RichPatchDiff
 						editMode={editMode}
 						filePath={file.path}
+						newFile={fullFiles[file.path]?.newFile}
 						key={file.path}
 						onSave={
 							mode === "working"
@@ -1639,6 +1696,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 							...diffOptions,
 							collapsed: collapseTail && i >= EAGER_DIFF_FILE_COUNT,
 						}}
+						oldFile={fullFiles[file.path]?.oldFile}
 						patch={file.patch}
 					/>
 				))}
