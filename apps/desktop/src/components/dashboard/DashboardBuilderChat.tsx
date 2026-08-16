@@ -145,6 +145,7 @@ export function DashboardBuilderChat({
 		target,
 		compact: messages.length > 0,
 		conversationId,
+		isWorking: status === "streaming" || status === "submitted",
 	});
 	const takeImagesRef = useRef(composer.takeImages);
 	takeImagesRef.current = composer.takeImages;

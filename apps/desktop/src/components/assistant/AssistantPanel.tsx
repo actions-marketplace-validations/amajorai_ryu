@@ -639,6 +639,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		target: chatTarget,
 		compactTrigger: true,
 		conversationId: convId,
+		isWorking: status === "streaming" || status === "submitted",
 		// Image-gen only on the chat composer — the builder pane describes what to
 		// build, where a free-form "generate image" prompt has no place.
 		onGenerateImage: handleGenerateImage,
@@ -648,6 +649,7 @@ export function AssistantPanel({ bare = false }: { bare?: boolean } = {}) {
 		compactTrigger: true,
 		placeholder: BUILDER_PLACEHOLDER,
 		conversationId: activeConvId,
+		isWorking: status === "streaming" || status === "submitted",
 	});
 	const activeComposer = isBuilder ? builderComposer : genericComposer;
 	const composerSlot = activeComposer.inputBar;

@@ -31,6 +31,11 @@ import {
 import type { ModelOption } from "@/components/agent-elements/types.ts";
 import { VoiceModeSurface } from "@/src/components/voice/VoiceModeSurface.tsx";
 import { useAgents } from "@/src/hooks/useAgents.ts";
+import {
+	composerSelectionToastDescription,
+	shouldShowComposerSelectionToast,
+	useComposerSelectionApplyMode,
+} from "@/src/hooks/useComposerSelectionApplyMode.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useVoiceMode } from "@/src/hooks/useVoiceMode.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -146,6 +151,8 @@ export interface ComposerSlotOptions {
 	 * opt-in per surface, not derived here.
 	 */
 	ghost?: GhostControls;
+	/** Whether this surface currently has an agent turn in flight. */
+	isWorking?: boolean;
 	/**
 	 * Offer "Create new agent" in the agent picker. The surface routes it (a tab, a
 	 * dialog), so it's a callback rather than a slot-owned navigation.
@@ -193,10 +200,27 @@ export function useComposerSlot(
 		onCreateAgent,
 		onGenerateImage,
 		onSelectTeam,
+		isWorking = false,
 		teamId,
 		teams,
 	} = options;
 	const { agents } = useAgents();
+	const [composerSelectionApplyMode] = useComposerSelectionApplyMode();
+	const announceComposerSelection = useCallback(
+		(setting: string, value: string) => {
+			if (!shouldShowComposerSelectionToast(isWorking)) {
+				return;
+			}
+			toast.info({
+				id: "ryu-composer-selection-applied",
+				title: `${setting}: ${value}`,
+				description: composerSelectionToastDescription(
+					composerSelectionApplyMode
+				),
+			});
+		},
+		[composerSelectionApplyMode, isWorking]
+	);
 
 	// The agent's ACP-advertised Model + Thinking/approval selectors, derived the
 	// same way ChatPage and the launchpad derive them (shared hook), so this
@@ -208,13 +232,16 @@ export function useComposerSlot(
 	// detents replaces in place instead of stacking a toast per detent.
 	const handleAcpSelectionApplied = useCallback(
 		(setting: string, value: string) => {
-			toast.info({
-				id: "ryu-acp-selection-applied",
-				title: `${setting}: ${value}`,
-				description: "Applies from your next message.",
-			});
+			announceComposerSelection(setting, value);
 		},
-		[]
+		[announceComposerSelection]
+	);
+	const handleModelChange = useCallback(
+		(modelId: string) => {
+			runtime.setModel(modelId);
+			announceComposerSelection("Model", modelId);
+		},
+		[announceComposerSelection, runtime.setModel]
 	);
 
 	const acp = useComposerAcpSections({
@@ -222,7 +249,7 @@ export function useComposerSlot(
 		agents,
 		modelOptions: runtime.modelOptions,
 		engineModel: runtime.effectiveModel,
-		onEngineModelChange: runtime.setModel,
+		onEngineModelChange: handleModelChange,
 		onSelectionApplied: handleAcpSelectionApplied,
 	});
 
@@ -234,8 +261,22 @@ export function useComposerSlot(
 		(nextAgentId: string) => {
 			recordRecent({ kind: "agent", agentId: nextAgentId });
 			runtime.setAgentId(nextAgentId);
+			const selectedAgent = agents.find(
+				(candidate) => candidate.id === nextAgentId
+			);
+			announceComposerSelection("Agent", selectedAgent?.name ?? nextAgentId);
 		},
-		[runtime.setAgentId]
+		[agents, announceComposerSelection, runtime.setAgentId]
+	);
+	const handleSelectTeam = useCallback(
+		(nextTeamId: string) => {
+			onSelectTeam?.(nextTeamId);
+			const selectedTeam = teams?.find(
+				(candidate) => candidate.id === nextTeamId
+			);
+			announceComposerSelection("Agent", selectedTeam?.name ?? "Team");
+		},
+		[announceComposerSelection, onSelectTeam, teams]
 	);
 
 	const {
@@ -256,11 +297,11 @@ export function useComposerSlot(
 		onSelectAgent: handleSelectAgent,
 		teams,
 		teamId,
-		onSelectTeam,
+		onSelectTeam: handleSelectTeam,
 		onCreateAgent,
 		modelOptions: runtime.modelOptions,
 		model: runtime.effectiveModel,
-		onModelChange: runtime.setModel,
+		onModelChange: handleModelChange,
 		modelSection: acp.modelSection,
 		extraSections: acp.extraSections,
 		compact,
