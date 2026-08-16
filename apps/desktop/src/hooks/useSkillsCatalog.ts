@@ -16,17 +16,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type AddMarketplaceParams,
-		addMarketplaceSource,
+	addMarketplaceSource,
 	fetchSkillDetail,
 	fetchSkillSources,
 	type InstalledSkill,
 	installSkill,
 	listSkills,
+	removeMarketplaceSource,
+	reorderMarketplaceSource,
 	type SkillCard,
 	type SkillCatalogSource,
 	type SkillDetail,
-	removeMarketplaceSource,
-	reorderMarketplaceSource,
 	searchSkills,
 	setSkillActive,
 } from "@/src/lib/api/skills.ts";
@@ -49,13 +49,6 @@ export interface UseSkillsCatalogResult {
 	addingMarketplace: boolean;
 	/** Add a custom Claude plugin marketplace as a skill source. */
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
-	/** Remove a custom Claude plugin marketplace. */
-	removeMarketplace: (id: string) => Promise<void>;
-	/** Move a custom marketplace one position in the source list. */
-	reorderMarketplace: (
-		id: string,
-		direction: "up" | "down"
-	) => Promise<void>;
 	detail: SkillDetail | null;
 	detailError: string | null;
 	detailLoading: boolean;
@@ -75,6 +68,10 @@ export interface UseSkillsCatalogResult {
 	/** Active org/owner "browse this org" filter (empty = none). */
 	org: string;
 	query: string;
+	/** Remove a custom Claude plugin marketplace. */
+	removeMarketplace: (id: string) => Promise<void>;
+	/** Move a custom marketplace one position in the source list. */
+	reorderMarketplace: (id: string, direction: "up" | "down") => Promise<void>;
 	select: (id: string) => void;
 	selectedId: string | null;
 	/** Kept for the shared Store contract; source selection is local and instant. */

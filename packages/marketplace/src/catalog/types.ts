@@ -940,11 +940,6 @@ export interface SkillsCatalogState {
 	activeSource: string;
 	addingMarketplace: boolean;
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
-	removeMarketplace: (id: string) => Promise<void>;
-	reorderMarketplace: (
-		id: string,
-		direction: MarketplaceMoveDirection
-	) => Promise<void>;
 	detail: SkillDetail | null;
 	detailError: string | null;
 	detailLoading: boolean;
@@ -960,6 +955,11 @@ export interface SkillsCatalogState {
 	loading: boolean;
 	org: string;
 	query: string;
+	removeMarketplace: (id: string) => Promise<void>;
+	reorderMarketplace: (
+		id: string,
+		direction: MarketplaceMoveDirection
+	) => Promise<void>;
 	select: (id: string) => void;
 	selectedId: string | null;
 	selectingSource: boolean;

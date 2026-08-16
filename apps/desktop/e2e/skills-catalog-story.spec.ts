@@ -72,7 +72,9 @@ test("all marketplaces stays visible while the popover manages sources", async (
 	await page.goto(STORY_URL);
 	await page.getByRole("button", { name: "Filters", exact: true }).click();
 
-	await expect(page.getByText("All marketplaces", { exact: true })).toHaveCount(0);
+	await expect(page.getByText("All marketplaces", { exact: true })).toHaveCount(
+		0
+	);
 	await expect(
 		page.getByRole("button", { name: "Add marketplace", exact: true })
 	).toBeVisible();
@@ -85,7 +87,9 @@ test("all marketplaces stays visible while the popover manages sources", async (
 		page.locator("h3", { hasText: "Ryu Marketplace" })
 	).toBeVisible();
 
-	await page.getByRole("button", { name: "Add marketplace", exact: true }).click();
+	await page
+		.getByRole("button", { name: "Add marketplace", exact: true })
+		.click();
 	await expect(page.getByText("Marketplaces", { exact: true })).toBeVisible();
 	await expect(page.getByText("Team Skills", { exact: true })).toBeVisible();
 	await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
@@ -102,5 +106,7 @@ test("all marketplaces stays visible while the popover manages sources", async (
 	await expect(
 		page.getByRole("button", { name: "Skill Auditor", exact: true })
 	).toBeVisible();
-	await expect(page.getByRole("button", { name: "PDF Filler", exact: true })).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "PDF Filler", exact: true })
+	).toBeVisible();
 });

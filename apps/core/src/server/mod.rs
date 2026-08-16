@@ -2688,6 +2688,25 @@ pub fn create_router(
         // conversation + stable tool_call_id pair.
         .route("/api/chat/question", post(chat_question))
         .route("/api/chat/cancel", post(chat_cancel))
+        // Shared background-process surface. Producers publish snapshots and
+        // poll the control queue; Core never kills an arbitrary PID itself.
+        .route("/api/background/processes", get(list_background_processes))
+        .route(
+            "/api/background/processes/sync",
+            post(sync_background_process),
+        )
+        .route(
+            "/api/background/processes/release",
+            post(release_background_process),
+        )
+        .route(
+            "/api/background/processes/control",
+            post(control_background_processes),
+        )
+        .route(
+            "/api/background/processes/:process_id/stop",
+            post(stop_background_process),
+        )
         // Resume a running chat stream (reconnect to an in-flight ACP turn).
         .route(
             "/api/chat/stream/resume/:conversation_id",
@@ -8471,6 +8490,82 @@ fn build_channel_commands(
 /// manifest/front-matter description renders as one menu row.
 fn flatten_one_line(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundProcessQuery {
+    running_only: Option<bool>,
+    producer: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundProcessSyncBody {
+    process: crate::background_processes::BackgroundProcess,
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundProcessIdBody {
+    process_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundProcessControlBody {
+    #[serde(default)]
+    process_ids: Vec<String>,
+}
+
+async fn list_background_processes(
+    Query(query): Query<BackgroundProcessQuery>,
+) -> Json<serde_json::Value> {
+    let producer = query.producer.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    Json(json!({
+        "processes": crate::background_processes::list(query.running_only.unwrap_or(true), producer),
+    }))
+}
+
+async fn sync_background_process(
+    Json(body): Json<BackgroundProcessSyncBody>,
+) -> axum::response::Response {
+    match crate::background_processes::upsert(body.process) {
+        Ok(process) => Json(json!({ "process": process })).into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error),
+    }
+}
+
+async fn release_background_process(
+    Json(body): Json<BackgroundProcessIdBody>,
+) -> Json<serde_json::Value> {
+    let released = crate::background_processes::release(body.process_id.trim());
+    Json(json!({ "ok": true, "released": released }))
+}
+
+async fn control_background_processes(
+    Json(body): Json<BackgroundProcessControlBody>,
+) -> Json<serde_json::Value> {
+    let process_ids = body
+        .process_ids
+        .into_iter()
+        .map(|process_id| process_id.trim().to_string())
+        .filter(|process_id| !process_id.is_empty())
+        .take(512)
+        .collect::<Vec<_>>();
+    let stops = crate::background_processes::take_stop_requests(&process_ids)
+        .into_iter()
+        .map(|stop| json!({ "process_id": stop.process_id, "reason": stop.reason }))
+        .collect::<Vec<_>>();
+    Json(json!({ "stops": stops }))
+}
+
+async fn stop_background_process(Path(process_id): Path<String>) -> axum::response::Response {
+    match crate::background_processes::request_stop(&process_id) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "requested": true,
+            "process_id": process_id,
+        }))
+        .into_response(),
+        Err(error) => json_error(StatusCode::CONFLICT, error),
+    }
 }
 
 /// `GET /api/channels/commands` — the slash commands a channel bot should publish.

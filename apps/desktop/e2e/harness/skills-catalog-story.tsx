@@ -18,11 +18,11 @@ import {
 	CatalogHostProvider,
 } from "@ryu/marketplace/catalog/host";
 import SkillsCatalogSection from "@ryu/marketplace/catalog/skills";
-import {
-	type SkillCard,
-	type SkillCatalogSource,
-	type SkillDetail,
-	type SkillsCatalogState,
+import type {
+	SkillCard,
+	SkillCatalogSource,
+	SkillDetail,
+	SkillsCatalogState,
 } from "@ryu/marketplace/catalog/types";
 import { useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -143,12 +143,15 @@ function useStorySkillsCatalog(): SkillsCatalogState {
 		{ builtin: false, displayName: "Research Lab", id: "research-lab" },
 	]);
 	const select = useCallback((id: string) => setSelectedId(id), []);
-	const addMarketplace = useCallback(async (params: { id: string; displayName: string }) => {
-		setSources((current) => [
-			...current,
-			{ builtin: false, displayName: params.displayName, id: params.id },
-		]);
-	}, []);
+	const addMarketplace = useCallback(
+		async (params: { id: string; displayName: string }) => {
+			setSources((current) => [
+				...current,
+				{ builtin: false, displayName: params.displayName, id: params.id },
+			]);
+		},
+		[]
+	);
 	const removeMarketplace = useCallback(async (id: string) => {
 		setSources((current) => current.filter((source) => source.id !== id));
 	}, []);
@@ -165,8 +168,7 @@ function useStorySkillsCatalog(): SkillsCatalogState {
 					return current;
 				}
 				const customPosition = customIndexes.indexOf(currentIndex);
-				const targetPosition =
-					customPosition + (direction === "up" ? -1 : 1);
+				const targetPosition = customPosition + (direction === "up" ? -1 : 1);
 				const targetIndex = customIndexes[targetPosition];
 				if (targetIndex === undefined) {
 					return current;

@@ -4,6 +4,7 @@ mod agent_routing;
 mod agent_selection;
 mod agents;
 mod approvals;
+mod background_processes;
 mod auth;
 mod capabilities;
 mod catalog;

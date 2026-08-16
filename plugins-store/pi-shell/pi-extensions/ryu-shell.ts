@@ -354,6 +354,13 @@ let orphanScanDone = false;
 /** Bound by the extension factory; undefined while the session is tearing down. */
 let reportCompletion: ((shell: BackgroundShell) => void) | undefined;
 
+/** The process owner advertised to Core's generic background-process bridge. */
+const BACKGROUND_PRODUCER = "@ryu/pi-shell";
+
+/** One poller services every live shell in this Pi process. */
+let controlPollTimer: ReturnType<typeof setInterval> | undefined;
+let controlPollInFlight = false;
+
 // ── Small helpers ───────────────────────────────────────────────────────────
 
 /** Message of a thrown value, without assuming it is an Error. */
@@ -373,6 +380,147 @@ function log(message: string): void {
 	} catch {
 		// A closed stderr must never break a turn.
 	}
+}
+
+function backgroundProcessId(shellOrId: BackgroundShell | string): string {
+	const shellId = typeof shellOrId === "string" ? shellOrId : shellOrId.id;
+	return `${process.pid}:${shellId}`;
+}
+
+function coreUrl(): string | undefined {
+	const raw = process.env.RYU_MCP_CORE_URL?.trim();
+	return raw ? raw.replace(/\/+$/, "") : undefined;
+}
+
+async function coreBackgroundRequest<T>(
+	requestPath: string,
+	init: RequestInit,
+	quiet = false
+): Promise<T | undefined> {
+	const base = coreUrl();
+	if (!base) {
+		return undefined;
+	}
+	const headers = new Headers(init.headers);
+	headers.set("content-type", "application/json");
+	const token = process.env.RYU_MCP_CORE_TOKEN?.trim();
+	if (token) {
+		headers.set("authorization", `Bearer ${token}`);
+	}
+	try {
+		const response = await fetch(`${base}${requestPath}`, {
+			...init,
+			headers,
+		});
+		if (!response.ok) {
+			throw new Error(`${response.status} ${response.statusText}`);
+		}
+		return (await response.json()) as T;
+	} catch (error) {
+		if (!quiet) {
+			log(`Core background bridge ${requestPath} failed (${errorText(error)}).`);
+		}
+		return undefined;
+	}
+}
+
+function backgroundProcessSnapshot(shell: BackgroundShell) {
+	const exit = shell.exit;
+	return {
+		process_id: backgroundProcessId(shell),
+		shell_id: shell.id,
+		producer: BACKGROUND_PRODUCER,
+		kind: "shell",
+		label: shell.description ?? shell.command,
+		description: shell.description,
+		command: shell.command,
+		cwd: shell.cwd,
+		pid: shell.pid,
+		started_at: shell.startedAt,
+		elapsed_ms: Date.now() - shell.startedAt,
+		running: isLive(shell),
+		exit_code: exit?.code ?? null,
+		exit_signal: exit?.signal ?? null,
+	};
+}
+
+async function publishBackgroundProcess(shell: BackgroundShell): Promise<void> {
+	await coreBackgroundRequest(
+		"/api/background/processes/sync",
+		{
+			body: JSON.stringify({ process: backgroundProcessSnapshot(shell) }),
+			method: "POST",
+		},
+		true
+	);
+}
+
+async function releaseBackgroundProcess(processId: string): Promise<void> {
+	await coreBackgroundRequest(
+		"/api/background/processes/release",
+		{ body: JSON.stringify({ process_id: processId }), method: "POST" },
+		true
+	);
+}
+
+function stopControlPoller(): void {
+	if (controlPollTimer) {
+		clearInterval(controlPollTimer);
+		controlPollTimer = undefined;
+	}
+}
+
+async function pollStopRequests(): Promise<void> {
+	if (controlPollInFlight || !coreUrl()) {
+		return;
+	}
+	const live = liveShells();
+	if (live.length === 0) {
+		stopControlPoller();
+		return;
+	}
+	controlPollInFlight = true;
+	const response = await coreBackgroundRequest<{
+		stops?: Array<{ process_id?: string; reason?: string }>;
+	}>(
+		"/api/background/processes/control",
+		{
+			body: JSON.stringify({
+				process_ids: live.map((shell) => backgroundProcessId(shell)),
+			}),
+			method: "POST",
+		},
+		true
+	);
+	controlPollInFlight = false;
+	for (const stop of response?.stops ?? []) {
+		if (typeof stop.process_id !== "string") {
+			continue;
+		}
+		const shell = live.find(
+			(candidate) => backgroundProcessId(candidate) === stop.process_id
+		);
+		if (shell && isLive(shell)) {
+			await terminate(
+				shell,
+				stop.reason?.trim() || "stopped from Ryu"
+			);
+		}
+	}
+	if (liveShells().length === 0) {
+		stopControlPoller();
+	}
+}
+
+function ensureControlPoller(): void {
+	if (!coreUrl() || controlPollTimer) {
+		return;
+	}
+	controlPollTimer = setInterval(() => {
+		void pollStopRequests();
+	}, 500);
+	controlPollTimer.unref?.();
+	void pollStopRequests();
 }
 
 /**
@@ -618,21 +766,22 @@ function rememberSessionDir(ctx: ExtensionContext): void {
 
 /** Persist a freshly spawned shell so a later process can see it never finished. */
 function recordStarted(shell: BackgroundShell): void {
-	if (!ledgerPath()) {
-		return;
+	if (ledgerPath()) {
+		updateLedger((ledger) => {
+			pruneLedger(ledger);
+			ledger.shells[shell.id] = {
+				command: shell.command,
+				cwd: shell.cwd,
+				description: shell.description,
+				pid: shell.pid,
+				process_pid: process.pid,
+				started_at: shell.startedAt,
+				status: "running",
+			};
+		});
 	}
-	updateLedger((ledger) => {
-		pruneLedger(ledger);
-		ledger.shells[shell.id] = {
-			command: shell.command,
-			cwd: shell.cwd,
-			description: shell.description,
-			pid: shell.pid,
-			process_pid: process.pid,
-			started_at: shell.startedAt,
-			status: "running",
-		};
-	});
+	void publishBackgroundProcess(shell);
+	ensureControlPoller();
 }
 
 /**
@@ -660,12 +809,12 @@ function recordFinished(shell: BackgroundShell): void {
 
 /** Forget a shell whose final output has been collected. Mirrors the in-memory release. */
 function recordReleased(id: string): void {
-	if (!ledgerPath()) {
-		return;
+	void releaseBackgroundProcess(backgroundProcessId(id));
+	if (ledgerPath()) {
+		updateLedger((ledger) => {
+			delete ledger.shells[id];
+		});
 	}
-	updateLedger((ledger) => {
-		delete ledger.shells[id];
-	});
 }
 
 /** The ledger record for an id, or undefined. Used to explain a stale id to the model. */
@@ -806,6 +955,7 @@ function finish(shell: BackgroundShell, exit: ShellExit): void {
 	// Persist the completion so a later process does not mistake this shell for
 	// an orphan (see the durable-ledger section). No-op when no ledger exists.
 	recordFinished(shell);
+	void publishBackgroundProcess(shell);
 	if (!shell.suppressCompletionNotification) {
 		reportCompletion?.(shell);
 	}
@@ -872,6 +1022,7 @@ function terminate(
  * survived a reload.
  */
 async function stopAllShells(reason: string): Promise<void> {
+	stopControlPoller();
 	const entries = [...shells.values()];
 	shells = new Map();
 	await Promise.all(
@@ -1052,6 +1203,7 @@ async function resolveCwd(raw: unknown, sessionCwd: string): Promise<string> {
 
 /** The structured half of a tool result, identical across all three tools. */
 function shellDetails(shell: BackgroundShell, drainedChars: number) {
+	const background = backgroundProcessSnapshot(shell);
 	return {
 		command: shell.command,
 		cwd: shell.cwd,
@@ -1063,6 +1215,11 @@ function shellDetails(shell: BackgroundShell, drainedChars: number) {
 		pid: shell.pid,
 		running: isLive(shell),
 		shell_id: shell.id,
+		process_id: background.process_id,
+		producer: background.producer,
+		kind: background.kind,
+		started_at: background.started_at,
+		background_process: background,
 	};
 }
 

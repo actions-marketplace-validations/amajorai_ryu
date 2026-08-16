@@ -1000,6 +1000,46 @@ mod tests {
             .any(|s| s.id == "my-mirror"));
     }
 
+    #[test]
+    fn custom_sources_can_move_and_remove_without_touching_builtins() {
+        let reg = CatalogSourceRegistry::with_file(temp_path("manage-custom"));
+        for (id, display_name) in [("first", "First"), ("second", "Second")] {
+            reg.add_custom(CustomSourceSpec {
+                kind: CatalogKind::Skill,
+                id: id.to_string(),
+                display_name: display_name.to_string(),
+                base_url: None,
+                auth: None,
+            })
+            .unwrap();
+        }
+
+        let custom_ids = |registry: &CatalogSourceRegistry| {
+            registry
+                .sources_for(CatalogKind::Skill)
+                .into_iter()
+                .filter(|source| !source.builtin)
+                .map(|source| source.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(custom_ids(&reg), ["first", "second"]);
+
+        reg.move_custom(CatalogKind::Skill, "second", -1).unwrap();
+        assert_eq!(custom_ids(&reg), ["second", "first"]);
+        reg.remove_custom(CatalogKind::Skill, "second").unwrap();
+        assert_eq!(custom_ids(&reg), ["first"]);
+
+        assert!(reg
+            .remove_custom(CatalogKind::Skill, "skills-sh")
+            .is_err());
+        assert!(reg
+            .move_custom(CatalogKind::Skill, "skills-sh", 1)
+            .is_err());
+        assert!(reg
+            .remove_custom(CatalogKind::Skill, "missing")
+            .is_err());
+    }
+
     #[tokio::test]
     async fn active_model_source_resolves_to_its_endpoint_host() {
         let file = temp_path("endpoint-host");

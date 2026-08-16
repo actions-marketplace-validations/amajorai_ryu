@@ -17,6 +17,8 @@ import {
 	fetchSkillSources,
 	installSkill,
 	listSkills,
+	removeMarketplaceSource,
+	reorderMarketplaceSource,
 	searchSkills,
 	selectSkillSource,
 	setSkillActive,
@@ -267,6 +269,31 @@ describe("catalog sources", () => {
 		expect(JSON.parse(cap.init?.body as string)).toEqual({
 			kind: "skill",
 			id: "c",
+		});
+	});
+});
+
+describe("marketplace management", () => {
+	test("removeMarketplaceSource sends a DELETE body", async () => {
+		const cap = stub(JSON.stringify({ ok: true }));
+		await removeMarketplaceSource(target, "mine");
+		expect(cap.url).toBe("http://127.0.0.1:7980/api/catalog/sources");
+		expect(cap.init?.method).toBe("DELETE");
+		expect(JSON.parse(cap.init?.body as string)).toEqual({
+			kind: "skill",
+			id: "mine",
+		});
+	});
+
+	test("reorderMarketplaceSource sends the direction", async () => {
+		const cap = stub(JSON.stringify({ ok: true }));
+		await reorderMarketplaceSource(target, "mine", "down");
+		expect(cap.url).toBe("http://127.0.0.1:7980/api/catalog/sources/reorder");
+		expect(cap.init?.method).toBe("POST");
+		expect(JSON.parse(cap.init?.body as string)).toEqual({
+			kind: "skill",
+			id: "mine",
+			direction: "down",
 		});
 	});
 });

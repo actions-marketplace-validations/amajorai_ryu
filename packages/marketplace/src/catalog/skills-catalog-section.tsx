@@ -67,10 +67,10 @@ import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
-import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import StoreItemAction, {
 	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
+import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import {
 	ListingAsideCard,
 	ListingDetailShell,
@@ -365,16 +365,16 @@ export default function SkillsCatalogSection({
 				detailTitle={detail?.card.name ?? "Skill"}
 				filter={{
 					panel: (
-							<SkillsFilterPanel
-								addingMarketplace={addingMarketplace}
+						<SkillsFilterPanel
+							addingMarketplace={addingMarketplace}
 							addMarketplace={addMarketplace}
 							canAuthor={canAuthor}
 							chips={chips}
 							friendly={friendly}
 							installedOnly={installedOnly}
-								onCreate={openNewSkill}
-								removeMarketplace={removeMarketplace}
-								reorderMarketplace={reorderMarketplace}
+							onCreate={openNewSkill}
+							removeMarketplace={removeMarketplace}
+							reorderMarketplace={reorderMarketplace}
 							setFriendly={setFriendly}
 							setInstalledOnly={setInstalledOnly}
 							setSort={setSort}
@@ -404,7 +404,7 @@ export default function SkillsCatalogSection({
 							enabledByKey={enabledByKey}
 							error={error}
 							fetchNextPage={fetchNextPage}
-								groupBySource
+							groupBySource
 							hasNextPage={hasNextPage}
 							installing={installing}
 							loading={loading}
@@ -579,10 +579,7 @@ function SkillSourcePicker({
 		}
 	};
 
-	const runSourceAction = async (
-		id: string,
-		action: () => Promise<void>
-	) => {
+	const runSourceAction = async (id: string, action: () => Promise<void>) => {
 		setSourceActionId(id);
 		setAddError(null);
 		try {
@@ -608,17 +605,15 @@ function SkillSourcePicker({
 							</PopoverTrigger>
 						}
 					/>
-					<TooltipContent>
-						Add or manage skill marketplaces
-					</TooltipContent>
+					<TooltipContent>Add or manage skill marketplaces</TooltipContent>
 				</Tooltip>
 				<PopoverContent className="w-[24rem]">
 					<div className="flex flex-col gap-4">
 						<div className="flex flex-col gap-1">
 							<p className="font-medium text-sm">Marketplaces</p>
 							<p className="text-muted-foreground text-xs">
-								All registered sources are shown in the catalog. Custom marketplaces
-								can be reordered or removed here.
+								All registered sources are shown in the catalog. Custom
+								marketplaces can be reordered or removed here.
 							</p>
 						</div>
 						<div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
@@ -636,24 +631,24 @@ function SkillSourcePicker({
 										<div className="min-w-0 flex-1">
 											<p className="truncate text-sm">{source.displayName}</p>
 											<p className="text-muted-foreground text-xs">
-												{manageable ? "Custom marketplace" : "Built-in registry"}
+												{manageable
+													? "Custom marketplace"
+													: "Built-in registry"}
 											</p>
 										</div>
 										{manageable ? (
 											<div className="flex shrink-0 items-center gap-0.5">
 												<Button
 													aria-label={`Move ${source.displayName} up`}
-													disabled={
-														sourceActionId !== null || customIndex <= 0
-													}
+													disabled={sourceActionId !== null || customIndex <= 0}
 													onClick={() => {
 														runSourceAction(source.id, () =>
 															reorderMarketplace(source.id, "up")
 														).catch(() => undefined);
-												}}
-												size="icon"
-												variant="ghost"
-											>
+													}}
+													size="icon"
+													variant="ghost"
+												>
 													<HugeiconsIcon
 														className="size-4"
 														icon={ArrowUp01Icon}
@@ -669,10 +664,10 @@ function SkillSourcePicker({
 														runSourceAction(source.id, () =>
 															reorderMarketplace(source.id, "down")
 														).catch(() => undefined);
-												}}
-												size="icon"
-												variant="ghost"
-											>
+													}}
+													size="icon"
+													variant="ghost"
+												>
 													<HugeiconsIcon
 														className="size-4"
 														icon={ArrowDown01Icon}
@@ -685,10 +680,10 @@ function SkillSourcePicker({
 														runSourceAction(source.id, () =>
 															removeMarketplace(source.id)
 														).catch(() => undefined);
-												}}
-												size="icon"
-												variant="ghost"
-											>
+													}}
+													size="icon"
+													variant="ghost"
+												>
 													{busy ? (
 														<Spinner className="size-4" />
 													) : (
