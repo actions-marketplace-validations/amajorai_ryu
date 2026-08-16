@@ -139,15 +139,15 @@ jobs:
           # flips it to stable once every build job has actually succeeded.
           gh release create "$TAG" --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --prerelease
 
-  # apps/tui is the RECOMMENDED terminal client (apps/cli is deprecated), but it
-  # is Bun/TypeScript, not Rust, so it cannot ride the cargo matrix below.
+  # apps/cli is the terminal client. It is Bun/TypeScript, not Rust, so it
+  # cannot ride the cargo matrix below.
   # `bun build --compile` produces a standalone executable per platform.
   #
   # It must be built NATIVELY on each OS: @opentui/core pulls a platform-specific
   # native package (@opentui/core-<plat>), so cross-compiling from one runner
   # fails to resolve the others. One job per OS, no cross-targets.
   #
-  # The assets are named `ryu-cli-*` even though they ARE the TUI: install.sh,
+  # The assets are named `ryu-cli-*`: install.sh,
   # install.ps1, and Core's updater fetch that exact name. Keeping the name means
   # the deprecated Rust CLI simply disappears without breaking a single installer
   # or updater contract.
@@ -176,7 +176,7 @@ jobs:
             Windows) plat="windows-x86_64" ;;
           esac
           mkdir -p dist
-          ( cd apps/tui && bun build --compile src/index.tsx --outfile "../../dist/ryu-cli-${plat}${ext}" )
+          ( cd apps/cli && bun build --compile src/index.tsx --outfile "../../dist/ryu-cli-${plat}${ext}" )
           ( cd dist
             if command -v sha256sum >/dev/null 2>&1; then sha256sum "ryu-cli-${plat}${ext}" > "ryu-cli-${plat}${ext}.sha256"
             elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "ryu-cli-${plat}${ext}" > "ryu-cli-${plat}${ext}.sha256"; fi )

@@ -21,10 +21,12 @@
 import {
 	ArrowUpRight01Icon,
 	CloudUploadIcon,
+	ComputerTerminal01Icon,
 	FolderLibraryIcon,
 	GitCommitIcon,
 	Loading01Icon,
 	SentIcon,
+	StopIcon,
 	Tick02Icon,
 	WorkflowCircle06Icon,
 } from "@hugeicons/core-free-icons";
@@ -39,6 +41,7 @@ import {
 	DialogTitle,
 } from "@ryu/ui/components/dialog.tsx";
 import { cn } from "@ryu/ui/lib/utils";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
 	DiffStat,
@@ -48,6 +51,11 @@ import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkCont
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
 import type { BouncyAccordionItem } from "@/src/components/ui/bouncy-accordion.tsx";
 import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
+import {
+	listBackgroundProcesses,
+	requestStopBackgroundProcess,
+	type BackgroundProcess,
+} from "@/src/lib/api/background-processes.ts";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	commitPush,
@@ -78,6 +86,63 @@ type CommitState =
 	| { status: "loading" }
 	| { status: "done"; label: string }
 	| { status: "error"; message: string };
+
+function formatBackgroundElapsed(elapsedMs: number): string {
+	const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+	if (seconds < 60) {
+		return `${seconds}s`;
+	}
+	const minutes = Math.floor(seconds / 60);
+	return `${minutes}m${seconds % 60}s`;
+}
+
+function BackgroundProcessRow({
+	process,
+	stopping,
+	onStop,
+}: {
+	onStop: (processId: string) => void;
+	process: BackgroundProcess;
+	stopping: boolean;
+}) {
+	const label = process.label?.trim() || process.command;
+	return (
+		<div className="group flex min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-xs transition-colors hover:bg-muted/50">
+			<span className="grid size-5 shrink-0 place-items-center text-muted-foreground">
+				<HugeiconsIcon
+					aria-hidden
+					className="size-3.5"
+					icon={ComputerTerminal01Icon}
+				/>
+			</span>
+			<span className="min-w-0 flex-1">
+				<span className="block truncate" title={process.command}>
+					{label}
+				</span>
+				<span className="block truncate text-[10px] text-muted-foreground">
+					{process.cwd} · {formatBackgroundElapsed(process.elapsed_ms)}
+				</span>
+			</span>
+			<button
+				aria-label={`Stop ${label}`}
+				className="grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 disabled:cursor-wait disabled:opacity-100"
+				disabled={stopping}
+				onClick={(event) => {
+					event.stopPropagation();
+					onStop(process.process_id);
+				}}
+			title={stopping ? "Stopping…" : "Stop process"}
+			type="button"
+			>
+				<HugeiconsIcon
+					aria-hidden
+					className={cn("size-3.5", stopping && "animate-pulse")}
+					icon={StopIcon}
+				/>
+			</button>
+		</div>
+	);
+}
 
 /** The Environment row body: pickers + git line-stats + commit/push dialog. */
 function EnvironmentDescription({
@@ -272,6 +337,38 @@ export function PinnedSummaryPanel({
 	const targetRef = useRef(target);
 	targetRef.current = target;
 
+	const [stoppingProcessId, setStoppingProcessId] = useState<string | null>(
+		null
+	);
+	const [backgroundError, setBackgroundError] = useState<string | null>(null);
+	const backgroundProcessesQuery = useQuery({
+		enabled: Boolean(target.url),
+		queryFn: () => listBackgroundProcesses(target),
+		queryKey: ["background-processes", target.url],
+		refetchInterval: 1000,
+		retry: false,
+		staleTime: 0,
+	});
+	const backgroundProcesses = backgroundProcessesQuery.data ?? [];
+
+	const handleStopBackgroundProcess = async (processId: string) => {
+		if (stoppingProcessId) {
+			return;
+		}
+		setBackgroundError(null);
+		setStoppingProcessId(processId);
+		try {
+			await requestStopBackgroundProcess(targetRef.current, processId);
+			await backgroundProcessesQuery.refetch();
+		} catch (error) {
+			setBackgroundError(
+				error instanceof Error ? error.message : "Could not stop process."
+			);
+		} finally {
+			setStoppingProcessId(null);
+		}
+	};
+
 	// Shared with every other git surface, so this panel's counts can never
 	// disagree with the branch pill above it.
 	const { status: gitStatus } = useGitStatus(target, folder);
@@ -326,6 +423,49 @@ export function PinnedSummaryPanel({
 	// A push is worth doing when there are local changes or unpushed commits.
 	const hasWork = changedCount > 0 || ahead > 0;
 
+	const backgroundItem: BouncyAccordionItem | null =
+		backgroundProcesses.length === 0
+			? null
+			: {
+					id: "background-processes",
+					icon: (
+						<HugeiconsIcon
+							aria-hidden
+							className="size-4"
+							icon={ComputerTerminal01Icon}
+						/>
+					),
+					title: (
+						<span className="flex items-center gap-2">
+							<span className="font-medium text-foreground text-xs">
+								Background processes
+							</span>
+							<span className="rounded-full bg-muted px-1.5 text-[10px] text-muted-foreground tabular-nums">
+								{backgroundProcesses.length}
+							</span>
+						</span>
+					),
+					description: (
+						<div className="flex flex-col gap-1">
+							{backgroundProcesses.map((process) => (
+								<BackgroundProcessRow
+									key={process.process_id}
+									onStop={(processId) => {
+										void handleStopBackgroundProcess(processId);
+									}}
+									process={process}
+									stopping={stoppingProcessId === process.process_id}
+								/>
+							))}
+							{backgroundError && (
+								<p className="px-1.5 text-destructive text-[10px]">
+									{backgroundError}
+								</p>
+							)}
+						</div>
+					),
+				};
+
 	// The Environment row: pickers + git line-stats + commit & push. Always
 	// present — with no folder it degrades to the project picker + a hint, which
 	// keeps the panel from collapsing to nothing (see the file header).
@@ -365,7 +505,10 @@ export function PinnedSummaryPanel({
 		>
 			<CoworkContextPanel
 				{...cowork}
-				leadingItems={[environmentItem]}
+				leadingItems={[
+					environmentItem,
+					...(backgroundItem ? [backgroundItem] : []),
+				]}
 				maxItemsPerSection={5}
 				variant="summary"
 			/>

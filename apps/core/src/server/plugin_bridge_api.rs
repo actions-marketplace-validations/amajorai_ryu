@@ -79,6 +79,8 @@ fn bridge_path_for(method: &str) -> Option<&'static str> {
         "finetune.merge" => Some("host.finetune_merge"),
         "conversation.setTitle" => Some("host.setConversationTitle"),
         "preferences.get" => Some("host.getPreference"),
+        "background.list" => Some("host.background_list"),
+        "background.stop" => Some("host.background_stop"),
         "learning.recordFeedback" => Some("host.recordFeedback"),
         "learning.synthesizeSkill" => Some("host.synthesizeSkill"),
         "hooks.run" => Some("host.runHook"),
@@ -559,6 +561,14 @@ mod tests {
             bridge_path_for("preferences.get"),
             Some("host.getPreference")
         );
+        assert_eq!(
+            bridge_path_for("background.list"),
+            Some("host.background_list")
+        );
+        assert_eq!(
+            bridge_path_for("background.stop"),
+            Some("host.background_stop")
+        );
         // `finetune.stream` is a STREAMING method — it has a required grant but no
         // unary bridge path (it's handled by the stream endpoint, not dispatch).
         assert_eq!(bridge_path_for("finetune.stream"), None);
@@ -601,6 +611,10 @@ mod tests {
             required_grant_for("preferences.get"),
             Some("preferences:read")
         );
+        assert_eq!(
+            required_grant_for("background.list"),
+            Some("background:control")
+        );
         // `view.action` is grant-gated but has NO unary bridge path — it is
         // dispatched by its own branch (501 until an app hook runtime consumes it).
         assert_eq!(required_grant_for("view.action"), Some("views:actions"));
@@ -635,6 +649,8 @@ mod tests {
             "finetune.merge",
             "conversation.setTitle",
             "preferences.get",
+            "background.list",
+            "background.stop",
         ] {
             assert!(bridge_path_for(method).is_some());
             assert!(required_grant_for(method).is_some());

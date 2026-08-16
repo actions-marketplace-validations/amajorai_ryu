@@ -19,6 +19,7 @@
 
 import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
+	type BackgroundProcess,
 	type Capability,
 	capabilitiesFromGrants,
 	type CryptoStatus,
@@ -134,6 +135,22 @@ export function IslandPluginHost({
 					"agent.run",
 					input
 				) as Promise<string>,
+			backgroundList: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"background.list",
+					input
+			) as Promise<BackgroundProcess[]>,
+			backgroundStop: (input) =>
+				pluginHostInvoke(
+					companion.pluginId,
+					"background.stop",
+					input
+				) as Promise<{
+					ok: boolean;
+					requested: boolean;
+					process_id: string;
+				}>,
 			storageGet: (input) =>
 				pluginHostInvoke(companion.pluginId, "storage.get", input) as Promise<
 					string | null

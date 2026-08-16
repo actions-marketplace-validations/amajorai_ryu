@@ -39,6 +39,8 @@ const GRANT_NAVIGATE: &str = "shell:navigate";
 const GRANT_SET_TITLE: &str = "conversation:set-title";
 /// Grant required to call `host.getPreference`.
 const GRANT_PREFERENCES_READ: &str = "preferences:read";
+/// Grant required to list and request stops for Core-visible background processes.
+const GRANT_BACKGROUND_CONTROL: &str = "background:control";
 /// Grant required to read an agent's normalized subscription usage snapshot.
 const GRANT_USAGE_READ: &str = "usage:read";
 /// Grant required to call `host.recordFeedback` (the Learning message-action seam).
@@ -89,6 +91,8 @@ pub fn dispatch_path_for(method: &str) -> Option<&'static str> {
         "finetune.merge" => "host.finetune_merge",
         "conversation.setTitle" => "host.setConversationTitle",
         "preferences.get" => "host.getPreference",
+        "background.list" => "host.background_list",
+        "background.stop" => "host.background_stop",
         "usage.snapshot" => "host.usageSnapshot",
         "learning.recordFeedback" => "host.recordFeedback",
         "learning.synthesizeSkill" => "host.synthesizeSkill",
@@ -167,12 +171,69 @@ impl PluginHookBridge {
             | "finetune_merge" => self.finetune(method, args).await,
             "setConversationTitle" => self.set_conversation_title(args).await,
             "getPreference" => self.get_preference(args).await,
+            "background_list" => self.background_list(args).await,
+            "background_stop" => self.background_stop(args).await,
             "usageSnapshot" => self.usage_snapshot(args).await,
             "recordFeedback" => self.record_feedback(args).await,
             "synthesizeSkill" => self.synthesize_skill(args).await,
             "runHook" => self.run_own_hook(args).await,
             "navigate" => self.navigate(args),
             other => err(format!("unknown host capability '{other}'")),
+        }
+    }
+
+    /// `host.background.list({ running_only?, producer? })` — return the shared
+    /// Core registry projection. The process owner remains responsible for
+    /// honoring stop requests; this read is safe for both hooks and apps.
+    async fn background_list(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_BACKGROUND_CONTROL) {
+            return err(format!(
+                "capability '{GRANT_BACKGROUND_CONTROL}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let running_only = args
+            .get("running_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let producer = args
+            .get("producer")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match serde_json::to_value(crate::background_processes::list(
+            running_only,
+            producer,
+        )) {
+            Ok(value) => ok(value),
+            Err(error) => err(format!("could not list background processes: {error}")),
+        }
+    }
+
+    /// `host.background.stop({ process_id })` — enqueue a cooperative stop for
+    /// the process owner. Core never sends a signal to an arbitrary PID.
+    async fn background_stop(&self, args: Value) -> InvokeOutcome {
+        if !self.grants.contains(GRANT_BACKGROUND_CONTROL) {
+            return err(format!(
+                "capability '{GRANT_BACKGROUND_CONTROL}' not granted to plugin '{}'",
+                self.plugin_id
+            ));
+        }
+        let process_id = args
+            .get("process_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if process_id.is_empty() {
+            return err("host.background.stop requires a non-empty 'process_id'".to_string());
+        }
+        match crate::background_processes::request_stop(process_id) {
+            Ok(()) => ok(json!({
+                "ok": true,
+                "requested": true,
+                "process_id": process_id,
+            })),
+            Err(error) => err(error),
         }
     }
 
@@ -1126,6 +1187,7 @@ mod tests {
         assert_eq!(GRANT_FINETUNE, "finetune:runs");
         assert_eq!(GRANT_SET_TITLE, "conversation:set-title");
         assert_eq!(GRANT_PREFERENCES_READ, "preferences:read");
+        assert_eq!(GRANT_BACKGROUND_CONTROL, "background:control");
     }
 
     #[test]
@@ -1154,6 +1216,10 @@ mod tests {
         assert_eq!(grant_for("finetune.start"), Some(GRANT_FINETUNE));
         assert_eq!(grant_for("conversation.setTitle"), Some(GRANT_SET_TITLE));
         assert_eq!(grant_for("preferences.get"), Some(GRANT_PREFERENCES_READ));
+        assert_eq!(
+            grant_for("background.list"),
+            Some(GRANT_BACKGROUND_CONTROL)
+        );
     }
 
     /// Every method `dispatch_path_for` maps MUST (a) carry a grant in the
@@ -1200,6 +1266,8 @@ mod tests {
             "finetune.start",
             "conversation.setTitle",
             "preferences.get",
+            "background.list",
+            "background.stop",
         ] {
             assert!(
                 dispatch_path_for(method).is_some(),
@@ -1238,6 +1306,8 @@ mod tests {
                 | "finetune_merge"
                 | "setConversationTitle"
                 | "getPreference"
+                | "background_list"
+                | "background_stop"
                 | "recordFeedback"
                 | "synthesizeSkill"
                 | "runHook"

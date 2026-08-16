@@ -209,6 +209,7 @@ export type Capability =
 	// `activity.*` family, including the `activity.openSession` shell-navigation verb
 	// that opens the chat tab for an item's session id.
 	| "activity.read"
+	| "background.control"
 	// Timeline (grant `timeline:read`) — the `@ryu/timeline` app renders the
 	// CapCut-style activity replay scrubber (Shadow's captured lanes + keyframe
 	// preview + Dayflow work journal) from its sandboxed companion frame. Host-direct
@@ -414,6 +415,25 @@ export type QuestJudgeResult = Record<string, unknown>;
 export interface ActivityRecord {
 	id: string;
 	[key: string]: unknown;
+}
+
+/** A Core-visible background process. The process owner handles the stop request;
+ * the host never receives or signals an operating-system PID directly. */
+export interface BackgroundProcess {
+	process_id: string;
+	shell_id?: string | null;
+	producer: string;
+	kind: string;
+	label?: string | null;
+	description?: string | null;
+	command: string;
+	cwd: string;
+	pid?: number | null;
+	started_at: number;
+	elapsed_ms: number;
+	running: boolean;
+	exit_code?: number | null;
+	exit_signal?: string | null;
 }
 
 /** One Shadow timeline event as the device-local `/timeline` returns it (grant
@@ -777,6 +797,15 @@ export interface HostServices {
 	 *  Core call); fire-and-forget from the frame's view (mirrors the desktop page's
 	 *  clickable row). */
 	activityOpenSession?(input: { session_id: string }): void;
+	/** List Core-visible background processes, running by default. */
+	backgroundList?(input: {
+		producer?: string;
+		running_only?: boolean;
+	}): Promise<BackgroundProcess[]>;
+	/** Request a process owner to stop one of its live processes. */
+	backgroundStop?(input: {
+		process_id: string;
+	}): Promise<{ ok: boolean; requested: boolean; process_id: string }>;
 	/** Forward a call to `/api/ext/<owning-plugin-id><path>`. */
 	appRequest?(input: AppRequestPayload): Promise<unknown>;
 	/** Approve a pending request (`POST /api/approvals/:id/approve`). */
@@ -1713,6 +1742,7 @@ const CODED_ERROR_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
 	// selected in another app, which is a wider reach than editing a todo.
 	"quests.capture",
 	"activity.read",
+	"background.control",
 	"mail.crud",
 	"calendar.crud",
 	"learning.crud",
@@ -3213,6 +3243,32 @@ export async function dispatchRpc(
 				);
 			}
 			return await services.activityList(input);
+		}
+		case "background.list": {
+			const input = asBackgroundListArg(args[0]);
+			if (!services.backgroundList) {
+				throw new CodedRpcError(
+					"server_error",
+					"background.list is not available"
+				);
+			}
+			return await services.backgroundList(input);
+		}
+		case "background.stop": {
+			const input = asBackgroundStopArg(args[0]);
+			if (!input) {
+				throw new CodedRpcError(
+					"invalid_args",
+					"background.stop requires a { process_id: string }"
+				);
+			}
+			if (!services.backgroundStop) {
+				throw new CodedRpcError(
+					"server_error",
+					"background.stop is not available"
+				);
+			}
+			return await services.backgroundStop(input);
 		}
 		case "activity.openSession": {
 			const input = asActivitySessionArg(args[0]);
@@ -4949,6 +5005,40 @@ export function asActivityListArg(data: unknown): { limit?: number } {
 	return typeof o.limit === "number" && Number.isFinite(o.limit)
 		? { limit: o.limit }
 		: {};
+}
+
+/** Narrow an optional background-process list arg. Core applies the running-only
+ * default; invalid optional fields are dropped rather than widening the read. */
+export function asBackgroundListArg(data: unknown): {
+	producer?: string;
+	running_only?: boolean;
+} {
+	if (typeof data !== "object" || data === null) {
+		return {};
+	}
+	const o = data as Record<string, unknown>;
+	const result: { producer?: string; running_only?: boolean } = {};
+	if (typeof o.running_only === "boolean") {
+		result.running_only = o.running_only;
+	}
+	if (typeof o.producer === "string" && o.producer.trim().length > 0) {
+		result.producer = o.producer.trim();
+	}
+	return result;
+}
+
+/** Narrow a background stop arg so an empty id never reaches the Core queue. */
+export function asBackgroundStopArg(
+	data: unknown
+): { process_id: string } | null {
+	if (typeof data !== "object" || data === null) {
+		return null;
+	}
+	const processId = (data as Record<string, unknown>).process_id;
+	if (typeof processId !== "string" || processId.trim().length === 0) {
+		return null;
+	}
+	return { process_id: processId.trim() };
 }
 
 /** Narrow an RPC argument to a `{ session_id: string }` for `activity.openSession`.

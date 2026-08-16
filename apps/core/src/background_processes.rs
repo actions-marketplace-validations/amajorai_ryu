@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const FINISHED_RETENTION: Duration = Duration::from_secs(5 * 60);
+const RUNNING_RETENTION: Duration = Duration::from_secs(30);
 const MAX_RECORDS: usize = 512;
 const MAX_TEXT_LENGTH: usize = 16 * 1024;
 
@@ -102,7 +103,9 @@ fn refresh_elapsed(process: &mut BackgroundProcess) {
 fn prune_locked(entries: &mut HashMap<String, RegistryEntry>) {
     let now = Instant::now();
     entries.retain(|_, entry| {
-        entry.process.running || now.duration_since(entry.updated_at) <= FINISHED_RETENTION
+        let age = now.duration_since(entry.updated_at);
+        (entry.process.running && age <= RUNNING_RETENTION)
+            || (!entry.process.running && age <= FINISHED_RETENTION)
     });
 
     if entries.len() <= MAX_RECORDS {
@@ -161,7 +164,8 @@ pub fn list(running_only: bool, producer: Option<&str>) -> Vec<BackgroundProcess
         .values_mut()
         .filter_map(|entry| {
             refresh_elapsed(&mut entry.process);
-            let producer_matches = producer.is_none_or(|value| entry.process.producer == value);
+            let producer_matches =
+                producer.map_or(true, |value| entry.process.producer == value);
             let running_matches = !running_only || entry.process.running;
             (producer_matches && running_matches).then(|| entry.process.clone())
         })

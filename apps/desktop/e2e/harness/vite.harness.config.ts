@@ -44,10 +44,7 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				index: path.resolve(harnessDir, "index.html"),
-				agentMessage: path.resolve(
-					harnessDir,
-					"agent-message-story.html"
-				),
+				agentMessage: path.resolve(harnessDir, "agent-message-story.html"),
 				onboardingAgents: path.resolve(
 					harnessDir,
 					"onboarding-agents-story.html"

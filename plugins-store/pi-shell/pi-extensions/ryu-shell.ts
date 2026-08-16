@@ -480,6 +480,7 @@ async function pollStopRequests(): Promise<void> {
 		return;
 	}
 	controlPollInFlight = true;
+	await Promise.all(live.map((shell) => publishBackgroundProcess(shell)));
 	const response = await coreBackgroundRequest<{
 		stops?: Array<{ process_id?: string; reason?: string }>;
 	}>(

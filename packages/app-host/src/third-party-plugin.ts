@@ -198,6 +198,12 @@ export function thirdPartyPluginSrcdoc(
             }
             return h.promise;
           },
+          // Shared background-process registry (needs background:control). Stop
+          // is a cooperative request delivered to the process owner.
+          background: {
+            list: function (args) { return call("background.list", [args || {}]); },
+            stop: function (args) { return call("background.stop", [args || {}]); }
+          },
           // Durable per-app KV (needs storage:kv). Values are strings.
           storage: {
             get: function (args) { return call("storage.get", [args || {}]); },
@@ -312,6 +318,12 @@ export function thirdPartyPluginSrcdoc(
           engineModels: function () { return call("registry.engineModels", []); },
           ttsEngines: function () { return call("registry.ttsEngines", []); },
           agents: function () { return call("registry.agents", []); }
+        },
+        // Background processes (needs grant background:control). Stop is a
+        // cooperative request delivered to the process owner.
+        background: {
+          list: function (a) { return call("background.list", [a || {}]); },
+          stop: function (a) { return call("background.stop", [a || {}]); }
         },
         // Asset picker: GIFs via the host (Core proxy needs the node token). Icons/
         // logos are fetched directly by the app under its per-app CSP allowlist.
@@ -805,6 +817,12 @@ function htmlCompanionHeadFragment(
         engineModels: function () { return call("registry.engineModels", []); },
         ttsEngines: function () { return call("registry.ttsEngines", []); },
         agents: function () { return call("registry.agents", []); }
+      },
+      // Background processes (needs grant background:control). Stop is a
+      // cooperative request delivered to the process owner.
+      background: {
+        list: function (a) { return call("background.list", [a || {}]); },
+        stop: function (a) { return call("background.stop", [a || {}]); }
       },
       // Asset picker: GIFs go through the host (Core proxy needs the node token).
       // Icons/logos are fetched DIRECTLY by the app under its per-app CSP allowlist

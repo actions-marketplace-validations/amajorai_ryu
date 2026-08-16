@@ -52,7 +52,7 @@ use serde::Serialize;
 /// `1.y` (y ≥ x) kernel unchanged. The `ryu-plugin-ready` handshake carries this
 /// value as `hostApiVersion`; the host accepts a missing value (legacy) this
 /// major and only annotates it (no rejection).
-pub const HOST_API_VERSION: &str = "1.2.0";
+pub const HOST_API_VERSION: &str = "1.3.0";
 
 /// One method in the host↔plugin RPC surface — the row type of the single-sourced
 /// `method → capability → grant` table.
@@ -871,6 +871,20 @@ pub const HOST_API_METHODS: &[HostApiMethod] = &[
         "activity.openSession",
         "activity.read",
         Some("activity:read"),
+        false,
+        true,
+    ),
+    m(
+        "background.list",
+        "background.control",
+        Some("background:control"),
+        false,
+        true,
+    ),
+    m(
+        "background.stop",
+        "background.control",
+        Some("background:control"),
         false,
         true,
     ),

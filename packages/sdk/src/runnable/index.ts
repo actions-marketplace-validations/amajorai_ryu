@@ -26,6 +26,8 @@ export { defineAgent } from "./agent.ts";
 export type { AppToolSpec, DefineAppOptions } from "./app.ts";
 export { appToolId, defineApp } from "./app.ts";
 export type {
+	BackgroundClient,
+	BackgroundProcess,
 	DurableClient,
 	EnginesClient,
 	HttpPrimitiveTransportOptions,

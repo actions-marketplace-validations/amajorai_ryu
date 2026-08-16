@@ -944,6 +944,10 @@ const host = {{
   runFanout: (a) => tools.host.runFanout(a ?? {{}}),
   setConversationTitle: (a) => tools.host.setConversationTitle(a ?? {{}}),
   getPreference: (a) => tools.host.getPreference(a ?? {{}}),
+  background: {{
+    list: (a) => tools.host.background_list(a ?? {{}}),
+    stop: (a) => tools.host.background_stop(a ?? {{}}),
+  }},
   usage: (a) => tools.host.usageSnapshot(a ?? {{}}),
   storage: {{
     get: (k, ns) => tools.host.storage_get({{ key: String(k), namespace: ns }}),

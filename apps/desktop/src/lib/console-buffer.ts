@@ -12,6 +12,9 @@
 
 const MAX_ENTRIES = 500;
 
+/** Maximum number of lines the crash screen will place on the clipboard. */
+export const MAX_CONSOLE_COPY_LINES = 5000;
+
 type Level = "log" | "info" | "warn" | "error" | "debug";
 
 interface Entry {
@@ -88,6 +91,29 @@ export const getConsoleBufferText = (): string =>
 			(entry) => `[${entry.time}] ${entry.level.toUpperCase()} ${entry.text}`
 		)
 		.join("\n");
+
+/** Keep copied console output useful when one entry expands to many lines. */
+export const limitConsoleText = (
+	text: string,
+	maxLines = MAX_CONSOLE_COPY_LINES
+): string => {
+	const lineLimit = Math.floor(maxLines);
+	if (!text || lineLimit <= 0) {
+		return "";
+	}
+
+	const lines = text.split("\n");
+	if (lines.length <= lineLimit) {
+		return text;
+	}
+
+	const retainedLineCount = lineLimit - 1;
+	const omittedLineCount = lines.length - retainedLineCount;
+	const marker = `[... ${omittedLineCount} earlier console lines omitted ...]`;
+	return retainedLineCount > 0
+		? [marker, ...lines.slice(-retainedLineCount)].join("\n")
+		: marker;
+};
 
 /** Whether console capture is currently active (dev build or developer mode). */
 export const isConsoleCaptureActive = (): boolean => installed;

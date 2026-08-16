@@ -43,7 +43,11 @@ import {
 import { Spinner } from "@ryu/ui/components/spinner";
 import { Component, type ErrorInfo, Fragment, type ReactNode } from "react";
 import { isDeveloperMode } from "@/src/hooks/useDeveloperMode.ts";
-import { getConsoleBufferText } from "@/src/lib/console-buffer.ts";
+import {
+	getConsoleBufferText,
+	limitConsoleText,
+	MAX_CONSOLE_COPY_LINES,
+} from "@/src/lib/console-buffer.ts";
 import { reportCrashEvent, reportError } from "@/src/lib/crash.ts";
 import { getCrashRoute } from "@/src/lib/crash-context.ts";
 import {
@@ -383,8 +387,12 @@ export class CrashBoundary extends Component<
 			parts.push("Component stack:", componentStack.trim(), "");
 		}
 		parts.push(getConsoleBufferText());
+		const copiedText = limitConsoleText(
+			parts.join("\n"),
+			MAX_CONSOLE_COPY_LINES
+		);
 		try {
-			await navigator.clipboard.writeText(parts.join("\n"));
+			await navigator.clipboard.writeText(copiedText);
 			this.setState({ copied: true });
 		} catch {
 			// Clipboard writes can reject without focus/permission; nothing to do.

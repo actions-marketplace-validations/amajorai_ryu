@@ -316,6 +316,16 @@ export const PRIMITIVE_BINDINGS: Record<string, PrimitiveBinding> = {
 		method: "model.complete",
 		grant: "hook:side-model",
 	},
+	"background.list": {
+		transport: "bridge",
+		method: "background.list",
+		grant: "background:control",
+	},
+	"background.stop": {
+		transport: "bridge",
+		method: "background.stop",
+		grant: "background:control",
+	},
 	// Host-direct media data-path (the host holds the node token; returns data: URLs).
 	"image.generate": {
 		transport: "direct",
@@ -468,6 +478,37 @@ export interface EnginesClient {
 	}): Promise<number[][]>;
 }
 
+/** One process visible through the shared Core background registry. */
+export interface BackgroundProcess {
+	process_id: string;
+	shell_id?: string | null;
+	producer: string;
+	kind: string;
+	label?: string | null;
+	description?: string | null;
+	command: string;
+	cwd: string;
+	pid?: number | null;
+	started_at: number;
+	elapsed_ms: number;
+	running: boolean;
+	exit_code?: number | null;
+	exit_signal?: string | null;
+}
+
+/** Background-process registry and cooperative stop requests. */
+export interface BackgroundClient {
+	list(input?: {
+		producer?: string;
+		runningOnly?: boolean;
+	}): Promise<BackgroundProcess[]>;
+	stop(input: { processId: string }): Promise<{
+		ok: boolean;
+		requested: boolean;
+		process_id: string;
+	}>;
+}
+
 /** TTS primitive — speech synthesis (`crates/ryu-tts`). */
 export interface TtsClient {
 	/**
@@ -513,6 +554,7 @@ export interface ImageClient {
  * Core node) — the same "what runs vs what is allowed" split as `ctx.gateway`.
  */
 export interface RyuPrimitives {
+	background: BackgroundClient;
 	durable: DurableClient;
 	engines: EnginesClient;
 	image: ImageClient;
@@ -542,6 +584,21 @@ function brokerCall(
  */
 export function createPrimitives(transport: PrimitiveTransport): RyuPrimitives {
 	return {
+		background: {
+			list: (input) =>
+				transport.bridge("background.list", {
+					producer: input?.producer,
+					running_only: input?.runningOnly,
+				}) as Promise<BackgroundProcess[]>,
+			stop: (input) =>
+				transport.bridge("background.stop", {
+					process_id: input.processId,
+				}) as Promise<{
+					ok: boolean;
+					requested: boolean;
+					process_id: string;
+				}>,
+		},
 		rag: {
 			retrieve: (input) =>
 				brokerCall(transport, "rag", "retrieve", input) as Promise<RagChunk[]>,

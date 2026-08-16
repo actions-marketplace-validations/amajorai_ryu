@@ -140,6 +140,25 @@ export interface RyuHostServices {
 	 *  or any other agent field (invariant: no capability returns a secret). Gated
 	 *  by the `core:list_agents` grant. */
 	listAgents(): Promise<{ id: string; name: string }[]>;
+	/** Read and cooperatively stop Core-visible background processes. */
+	background: {
+		list(input?: {
+			producer?: string;
+			running_only?: boolean;
+		}): Promise<{
+			process_id: string;
+			command: string;
+			cwd: string;
+			elapsed_ms: number;
+			running: boolean;
+			[key: string]: unknown;
+		}[]>;
+		stop(input: { process_id: string }): Promise<{
+			ok: boolean;
+			requested: boolean;
+			process_id: string;
+		}>;
+	};
 	/** Open a tab at a path (built-in or a route this plugin contributed). */
 	openTab(path: string): void;
 	/** Read/write the plugin's own Spaces docs (scoped by grant). */

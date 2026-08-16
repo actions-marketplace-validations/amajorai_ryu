@@ -124,6 +124,8 @@ export type {
 } from "./runnable/app.ts";
 export { appToolId, defineApp } from "./runnable/app.ts";
 export type {
+	BackgroundClient,
+	BackgroundProcess,
 	DurableClient,
 	EnginesClient,
 	HttpPrimitiveTransportOptions,

@@ -22,6 +22,7 @@ import { ExtensionHost } from "@ryu/app-host/ExtensionHost";
 import {
 	type ActivityRecord,
 	type ApprovalRecord,
+	type BackgroundProcess,
 	type CalendarAgentRecord,
 	type CalendarJobRecord,
 	type CalendarWorkflowRecord,
@@ -842,6 +843,24 @@ export function PluginHostPanel({
 					"agent.run",
 					input
 				) as Promise<string>,
+			backgroundList: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"background.list",
+					input
+				) as Promise<BackgroundProcess[]>,
+			backgroundStop: (input) =>
+				pluginHostInvoke(
+					toTarget(node),
+					companion.pluginId,
+					"background.stop",
+					input
+				) as Promise<{
+					ok: boolean;
+					requested: boolean;
+					process_id: string;
+				}>,
 			storageGet: (input) =>
 				pluginHostInvoke(
 					toTarget(node),

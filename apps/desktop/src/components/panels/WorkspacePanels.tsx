@@ -1713,9 +1713,9 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	return (
 		<div className="flex h-full flex-col">
 			{/* Diff source selector */}
-			<div className="flex shrink-0 items-center gap-1 border-border/60 border-b bg-sidebar px-1.5 py-1">
+			<div className="flex shrink-0 items-center gap-1 px-1.5 py-1">
 				<DropdownMenu>
-					<DropdownMenuTrigger className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-muted-foreground text-xs transition-colors hover:bg-sidebar-accent hover:text-foreground">
+					<DropdownMenuTrigger className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-muted-foreground text-xs transition-colors hover:bg-muted/50 hover:text-foreground">
 						<HugeiconsIcon className="size-3.5 shrink-0" icon={FileCodeIcon} />
 						<span className="truncate">{modeLabel}</span>
 						<HugeiconsIcon
@@ -1800,7 +1800,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 				<div className="flex-1" />
 				{/* Quick split ↔ stacked toggle. Full option set lives in
 				    Settings › Appearance › Diff viewer. */}
-				<div className="mr-1 flex shrink-0 items-center rounded-md bg-background p-0.5">
+				<div className="mr-1 flex shrink-0 items-center gap-0.5">
 					{(
 						[
 							["split", "Split"],
@@ -1810,10 +1810,10 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 						<button
 							aria-pressed={diffPrefs.diffStyle === value}
 							className={cn(
-								"rounded px-2 py-0.5 text-[11px] transition-colors",
+								"h-6 rounded-full px-2 font-medium text-[11px] transition-colors",
 								diffPrefs.diffStyle === value
-									? "bg-sidebar-accent text-foreground"
-									: "text-muted-foreground hover:text-foreground"
+									? "bg-muted text-foreground"
+									: "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
 							)}
 							key={value}
 							onClick={() => setDiffViewPrefs({ diffStyle: value })}
@@ -1826,10 +1826,10 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 				<button
 					aria-pressed={editMode}
 					className={cn(
-						"rounded-md px-2 py-1 text-[11px] transition-colors",
+						"h-6 rounded-full px-2.5 font-medium text-[11px] transition-colors",
 						editMode
 							? "bg-primary text-primary-foreground"
-							: "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+							: "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
 					)}
 					onClick={() => setEditMode((current) => !current)}
 					type="button"
@@ -1841,7 +1841,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 						render={
 							<button
 								aria-label="Refresh diff"
-								className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+								className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
 								onClick={refresh}
 								type="button"
 							>
