@@ -41,5 +41,18 @@ export default defineConfig({
 		outDir: path.resolve(harnessDir, "dist"),
 		target: "chrome105",
 		emptyOutDir: true,
+		rollupOptions: {
+			input: {
+				index: path.resolve(harnessDir, "index.html"),
+				onboardingAgents: path.resolve(
+					harnessDir,
+					"onboarding-agents-story.html"
+				),
+				onboardingChoose: path.resolve(
+					harnessDir,
+					"onboarding-choose-story.html"
+				),
+			},
+		},
 	},
 });

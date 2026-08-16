@@ -27,7 +27,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 const RELEASE_BASE: &str = "https://github.com/amajorai/ryu/releases/latest/download";

@@ -13,6 +13,7 @@
 // cache dedupes instead of double-fetching, then filter client-side. Every query
 // is gated on a non-empty query, so nothing fetches until the user types.
 
+import { ALL_SKILL_SOURCES_ID } from "@ryu/marketplace/catalog/types";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { fetchAgentCatalog } from "@/src/lib/api/agents.ts";
@@ -102,7 +103,11 @@ export function useStoreSearch(query: string): UseStoreSearchResult {
 		queryFn: () =>
 			searchSkills(
 				{ url, token },
-				{ query: debounced, limit: PER_REALM_LIMIT }
+				{
+					query: debounced,
+					limit: PER_REALM_LIMIT,
+					source: ALL_SKILL_SOURCES_ID,
+				}
 			),
 		enabled,
 	});

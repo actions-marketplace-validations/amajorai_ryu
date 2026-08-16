@@ -210,16 +210,23 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		placeholderData: keepPreviousData,
 	});
 
+	const detailSource = selectedSource ?? activeSource;
 	const detailQuery = useQuery({
-		queryKey: ["skills", "detail", url, selectedId],
-		queryFn: () => fetchSkillDetail({ url, token }, selectedId as string),
+		queryKey: ["skills", "detail", url, selectedId, detailSource],
+		queryFn: () =>
+			fetchSkillDetail(
+				{ url, token },
+				selectedId as string,
+				detailSource === ALL_SKILL_SOURCES_ID ? undefined : detailSource
+			),
 		enabled: selectedId !== null,
 	});
 
 	const installMutation = useMutation({
-		mutationFn: () => installSkill({ url, token }, selectedId as string),
-		onMutate: async () => {
-			const key = ["skills", "detail", url, selectedId];
+		mutationFn: (vars: { id: string; source?: string }) =>
+			installSkill({ url, token }, vars.id, vars.source),
+		onMutate: async (vars) => {
+			const key = ["skills", "detail", url, vars.id, detailSource];
 			await qc.cancelQueries({ queryKey: key });
 			const previous = qc.getQueryData<SkillDetail>(key);
 			if (previous) {
@@ -235,10 +242,10 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 				qc.setQueryData(ctx.key, ctx.previous);
 			}
 		},
-		onSettled: () => {
+		onSettled: (_data, _error, vars) => {
 			Promise.resolve(
 				qc.invalidateQueries({
-					queryKey: ["skills", "detail", url, selectedId],
+					queryKey: ["skills", "detail", url, vars.id, detailSource],
 				})
 			).catch(() => undefined);
 			Promise.resolve(
@@ -318,14 +325,28 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	// calling `select("")`. Storing that verbatim left a selection that is neither
 	// null nor resolvable: the detail query fired for the empty id, and any
 	// `selectedId != null` test upstream read the closed preview as open.
-	const select = useCallback((id: string) => setSelectedId(id || null), []);
+	const select = useCallback(
+		(id: string) => {
+			if (!id) {
+				setSelectedId(null);
+				setSelectedSource(null);
+				return;
+			}
+			const card = skills.find((item) => item.id === id);
+			setSelectedSource(card?.catalogSourceId ?? activeSource);
+			setSelectedId(id);
+		},
+		[activeSource, skills]
+	);
 
 	const install = useCallback(async () => {
 		if (!selectedId) {
 			return;
 		}
-		await installMutation.mutateAsync();
-	}, [selectedId, installMutation]);
+		const source =
+			detailSource === ALL_SKILL_SOURCES_ID ? undefined : detailSource;
+		await installMutation.mutateAsync({ id: selectedId, source });
+	}, [detailSource, installMutation, selectedId]);
 
 	return {
 		skills,
@@ -349,10 +370,10 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 			detailQuery.error instanceof Error ? detailQuery.error.message : null,
 		installing: installMutation.isPending ? selectedId : null,
 		install,
-		sources: sourcesQuery.data?.sources ?? [],
+		sources,
 		activeSource,
 		selectSource,
-		selectingSource: selectSourceMutation.isPending,
+		selectingSource: false,
 		addMarketplace,
 		addingMarketplace: addMarketplaceMutation.isPending,
 		installedSkills,

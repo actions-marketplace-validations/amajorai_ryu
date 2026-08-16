@@ -230,7 +230,7 @@ emit "bootstrap" "ryu" "complete" 100
 cat <<EOF
 
 Next:
-  ryu-core     # already running; starts the Gateway + local defaults if restarted
+  ryu-core     # already running; bundled defaults continue provisioning
   ryu-cli      # in another terminal, connect the TUI to it
 
 Point any OpenAI-compatible client at the Gateway: http://127.0.0.1:7981/v1

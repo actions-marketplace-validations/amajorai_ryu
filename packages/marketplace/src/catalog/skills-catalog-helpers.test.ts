@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	formatCount,
 	formatDateLabel,
+	groupSkillsBySource,
 	isMarkdownFile,
 	resolveSkillKey,
 	skillAuthoringEnabled,
@@ -101,6 +102,35 @@ describe("resolveSkillKey", () => {
 		// The toggle needs to target a disabled-but-installed skill, so a `false`
 		// value must still resolve the key rather than be treated as absent.
 		expect(resolveSkillKey({ thing: false }, card())).toBe("thing");
+	});
+});
+
+describe("groupSkillsBySource", () => {
+	test("keeps the all-marketplaces source order and labels each section", () => {
+		const sections = groupSkillsBySource([
+			card({
+				catalogSourceId: "clawhub",
+				catalogSourceName: "ClawHub",
+				id: "clawhub/one",
+			}),
+			card({
+				catalogSourceId: "lobehub",
+				catalogSourceName: "LobeHub",
+				id: "lobehub/two",
+			}),
+			card({
+				catalogSourceId: "clawhub",
+				catalogSourceName: "ClawHub",
+				id: "clawhub/three",
+			}),
+		]);
+
+		expect(sections.map((section) => section.label)).toEqual([
+			"ClawHub",
+			"LobeHub",
+		]);
+		expect(sections[0]?.skills).toHaveLength(2);
+		expect(sections[1]?.skills[0]?.id).toBe("lobehub/two");
 	});
 });
 

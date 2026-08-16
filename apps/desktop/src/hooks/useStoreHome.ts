@@ -25,7 +25,10 @@
 // layer (:3000). The featured rail degrades to empty on any error (signed out, no
 // org, network) so a Core-only home is never blocked by the money layer.
 
-import type { CardDither } from "@ryu/marketplace/catalog/types";
+import {
+	ALL_SKILL_SOURCES_ID,
+	type CardDither,
+} from "@ryu/marketplace/catalog/types";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { fetchAgentCatalog, installAgent } from "@/src/lib/api/agents.ts";
@@ -151,7 +154,11 @@ export function useStoreHome(): UseStoreHomeResult {
 
 	const skillsQuery = useQuery({
 		queryKey: ["store-home", "skills", url],
-		queryFn: () => searchSkills({ url, token }, { limit: PER_ROW_LIMIT }),
+		queryFn: () =>
+			searchSkills(
+				{ url, token },
+				{ limit: PER_ROW_LIMIT, source: ALL_SKILL_SOURCES_ID }
+			),
 	});
 
 	const mcpQuery = useQuery({
@@ -248,10 +255,12 @@ export function useStoreHome(): UseStoreHomeResult {
 			apps: plugins,
 			plugins,
 			skills: (card) =>
-				runAdd(card.id, () => installSkill({ url, token }, card.id), [
-					["store-home", "skills", url],
-					["skills"],
-				]),
+				runAdd(
+					card.id,
+					() =>
+						installSkill({ url, token }, card.id, card.registryId ?? undefined),
+					[["store-home", "skills", url], ["skills"]]
+				),
 			mcp: (card) =>
 				runAdd(card.id, () => installMcpServer({ url, token }, card.id), [
 					["store-home", "mcp", url],
@@ -283,7 +292,7 @@ export function useStoreHome(): UseStoreHomeResult {
 			.map<HomeCard>((s) => ({
 				id: s.id,
 				name: s.name,
-				description: s.source || null,
+				description: s.catalogSourceName ?? s.source ?? null,
 				tag: "Skill",
 				iconId: null,
 				iconUrl: null,
@@ -291,6 +300,7 @@ export function useStoreHome(): UseStoreHomeResult {
 				installed: s.installed,
 				builtIn: false,
 				modelFormat: null,
+				registryId: s.catalogSourceId,
 			}));
 		if (skills.length > 0) {
 			result.push({

@@ -17,12 +17,13 @@
 // nothing. Anything a section fetches on demand (details, next pages, community)
 // is deliberately left alone.
 //
-// Two realms key their list on the node's ACTIVE catalog source, which is itself
-// a fetch; those chain (`ensureQueryData` for the source, then the list) rather
-// than guessing an id, because a list prefetched under the wrong source id is
-// exactly the silent no-op this file exists to avoid.
+// The federated Apps and Skills views key their list on an explicit `all` source,
+// so the warm-up can use the same stable request-local selector the sections use.
 
-import { ALL_PLUGIN_SOURCES_ID } from "@ryu/marketplace/catalog/types";
+import {
+	ALL_PLUGIN_SOURCES_ID,
+	ALL_SKILL_SOURCES_ID,
+} from "@ryu/marketplace/catalog/types";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
@@ -81,18 +82,15 @@ export function useStorePrefetch(): void {
 			})
 		).catch(ignore);
 
-		// Skills — the list key carries the active source, which is its own read.
-		qc.ensureQueryData(skillSourcesQuery(target))
-			.then((sources) =>
-				qc.prefetchQuery(
-					skillListQuery(target, {
-						query: "",
-						installedOnly: false,
-						source: sources?.active ?? "",
-					})
-				)
-			)
-			.catch(ignore);
+		// Skills — browse the same live all-marketplaces view as the section.
+		qc.prefetchQuery(skillSourcesQuery(target)).catch(ignore);
+		qc.prefetchQuery(
+			skillListQuery(target, {
+				query: "",
+				installedOnly: false,
+				source: ALL_SKILL_SOURCES_ID,
+			})
+		).catch(ignore);
 		qc.prefetchQuery(installedSkillsQuery(target)).catch(ignore);
 		// Skill packs — the Packs shelf above the skills list.
 		qc.prefetchQuery(skillPacksQuery(target)).catch(ignore);

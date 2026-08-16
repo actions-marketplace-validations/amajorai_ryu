@@ -25,6 +25,9 @@
  */
 export const ALL_PLUGIN_SOURCES_ID = "all";
 
+/** The live federated view across every registered Skill marketplace. */
+export const ALL_SKILL_SOURCES_ID = "all";
+
 /** The host surfaces a plugin can declare support for.
  *
  *  Mirrors the `Surface` enum in `crates/core/kernel-contracts/src/manifest.rs`
@@ -536,12 +539,12 @@ export interface CatalogEntry {
 	 *  the local version overlaid; that turns an advisory into a real refusal. */
 	compatibility?: CompatibilityVerdict | null;
 	description: string;
+	descriptor_only?: boolean;
+	developer?: string | null;
 	/** Public GitHub release-asset downloads, summed across every published
 	 * release. The producer excludes signatures, manifests and text metadata so
 	 * this is a count of distributable payloads rather than release bookkeeping. */
 	downloads?: number | null;
-	descriptor_only?: boolean;
-	developer?: string | null;
 	/** Host version floors this listing declares (the manifest's `engines`), one
 	 *  semver requirement per surface. `ryu` is the CORE floor — the legacy
 	 *  spelling, kept because every manifest in the wild uses it.
@@ -857,6 +860,9 @@ export interface AddMarketplaceParams {
 
 /** A Skill row in the left-hand selector, as the Skills section reads it. */
 export interface SkillCard {
+	/** Marketplace stamp added by Core in the all-marketplaces view. */
+	catalogSourceId?: string | null;
+	catalogSourceName?: string | null;
 	/** One-line "what this does". Present for INSTALLED cards (read from the
 	 *  on-disk SKILL.md front matter) and on the detail card; absent for a browse
 	 *  result, because skills.sh's search payload carries no description. Cards
@@ -869,6 +875,8 @@ export interface SkillCard {
 	name: string;
 	slug: string;
 	source: string;
+	/** Registry-level trust claim: builtin, trusted, or community. */
+	trustLevel?: string | null;
 }
 
 /** A file inside a Skill package. */
@@ -911,7 +919,7 @@ export interface SkillDetail {
 	url: string;
 }
 
-/** One selectable skills catalog source (skills.sh + custom marketplaces). */
+/** One selectable skills catalog source (registries + custom marketplaces). */
 export interface SkillCatalogSource {
 	baseUrl?: string | null;
 	builtin?: boolean;

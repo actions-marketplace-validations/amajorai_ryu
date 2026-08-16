@@ -695,6 +695,15 @@ export default function OnboardingPage() {
 	const liveStatusRef = useRef<string | null>(null);
 	const doneStatusRef = useRef<string[]>([]);
 	const [localPercent, setLocalPercent] = useState<number | null>(null);
+	const updateLocalPercent = useCallback((percent: number | null) => {
+		if (percent === null) {
+			setLocalPercent(null);
+			return;
+		}
+		setLocalPercent((previous) =>
+			previous === null ? percent : Math.max(previous, percent)
+		);
+	}, []);
 	// Which path the user picked on `choose`, or null while they are still on the
 	// fork. Only the local path cares whether this device's Core came up, so this
 	// is what gates the "Couldn't start Ryu" screen — a user on a remote or cloud
@@ -720,9 +729,9 @@ export default function OnboardingPage() {
 	const reportLocalStatus = useCallback(
 		(status: string | null, percent?: number | null) => {
 			liveStatusRef.current = status;
-			setLocalPercent(percent ?? null);
+			updateLocalPercent(percent ?? null);
 		},
-		[]
+		[updateLocalPercent]
 	);
 
 	/** Record something that has actually COMPLETED. These keep appearing in the
@@ -767,7 +776,7 @@ export default function OnboardingPage() {
 					reportDone(`${label} installed`);
 					liveStatusRef.current = null;
 				}
-				setLocalPercent(percent);
+				updateLocalPercent(percent);
 			} else if (payload.phase === "core") {
 				if (payload.status === "started") {
 					liveStatusRef.current = "Starting Ryu Core…";
@@ -775,7 +784,7 @@ export default function OnboardingPage() {
 					reportDone("Ryu Core is healthy");
 					liveStatusRef.current = null;
 				}
-				setLocalPercent(percent);
+				updateLocalPercent(percent);
 			} else if (payload.phase === "defaults") {
 				if (
 					payload.component === "bundled-defaults" &&
@@ -789,12 +798,12 @@ export default function OnboardingPage() {
 				) {
 					liveStatusRef.current = null;
 				}
-				setLocalPercent(percent);
+				updateLocalPercent(percent);
 			} else if (payload.phase === "bootstrap") {
 				// `startLocalCore` still performs the Desktop health wait after the
 				// script exits, so leave room for that phase before the local-stack
 				// and agent steps take the bar to completion.
-				setLocalPercent(payload.status === "complete" ? 75 : percent);
+				updateLocalPercent(payload.status === "complete" ? 75 : percent);
 			} else if (payload.phase === "error") {
 				liveStatusRef.current = null;
 			}
@@ -804,7 +813,7 @@ export default function OnboardingPage() {
 				fn();
 			}
 		};
-	}, [reportDone]);
+	}, [reportDone, updateLocalPercent]);
 
 	// Agents found on the user's system (pre-selected) and the curated suggested
 	// set (opt-in). Only the flagship Ryu agent is installed by default.

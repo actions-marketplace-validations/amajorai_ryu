@@ -96,6 +96,7 @@ import type {
 	SkillDetail,
 	SkillSort,
 } from "./types.ts";
+import { ALL_SKILL_SOURCES_ID } from "./types.ts";
 import { useFriendlyMode } from "./use-friendly-mode.ts";
 
 /**
@@ -119,6 +120,19 @@ export function formatCount(n: number): string {
 		return `${(n / 1000).toFixed(1)}k`;
 	}
 	return String(n);
+}
+
+function skillTrustLabel(value: string | null | undefined): string | null {
+	if (value === "builtin") {
+		return "Built-in source";
+	}
+	if (value === "trusted") {
+		return "Trusted source";
+	}
+	if (value === "community") {
+		return "Community source";
+	}
+	return value?.trim() || null;
 }
 
 /**
@@ -186,10 +200,10 @@ export function skillAuthoringEnabled(
 }
 
 /**
- * Skills catalog Store section, shared by desktop and web. Browses the active
- * catalog source (skills.sh by default, or a custom Claude plugin marketplace)
- * joined with live installed/enabled state, and drives install → enable → disable
- * on desktop.
+ * Skills catalog Store section, shared by desktop and web. Browses the live
+ * federated catalog by default (skills.sh, GitHub taps, browse.sh, ClawHub,
+ * LobeHub, Ryu/custom marketplaces) joined with live installed/enabled state,
+ * and drives install → enable → disable on desktop.
  *
  * Desktop injects its real Core-node catalog hook + install layer + `navigate`
  * (which unlocks the SKILL.md authoring UI) through the {@link CatalogHost}; web
@@ -388,6 +402,7 @@ export default function SkillsCatalogSection({
 							enabledByKey={enabledByKey}
 							error={error}
 							fetchNextPage={fetchNextPage}
+							groupBySource={activeSource === ALL_SKILL_SOURCES_ID}
 							hasNextPage={hasNextPage}
 							installing={installing}
 							loading={loading}
@@ -513,11 +528,9 @@ function SkillsFilterPanel({
 }
 
 /**
- * Source dropdown (skills.sh + any custom Claude plugin marketplaces) plus an
- * "Add marketplace" popover. A marketplace is a repo/URL/local directory
- * pointing at a `marketplace.json` (`.claude-plugin/`, `.ryu-plugin/`, …). The
- * dropdown only shows when there is a real choice; the add control is always
- * available.
+ * Source dropdown (all public registries + custom Claude marketplaces) plus an
+ * "Add marketplace" popover. The default all-marketplaces view is a live
+ * federation; selecting a row narrows the same request path to one source.
  */
 function SkillSourcePicker({
 	sources,
@@ -539,10 +552,13 @@ function SkillSourcePicker({
 	const [name, setName] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
 
-	const sourceItems = sources.map((s) => ({
-		value: s.id,
-		label: s.displayName,
-	}));
+	const sourceItems = [
+		{ value: ALL_SKILL_SOURCES_ID, label: "All marketplaces" },
+		...sources.map((s) => ({
+			value: s.id,
+			label: s.displayName,
+		})),
+	];
 
 	const submit = async () => {
 		const trimmedRepo = repo.trim();
@@ -569,7 +585,7 @@ function SkillSourcePicker({
 
 	return (
 		<div className="flex items-center gap-2">
-			{sources.length > 1 && (
+			{sourceItems.length > 1 && (
 				<Select
 					disabled={selectingSource}
 					items={sourceItems}
@@ -648,12 +664,40 @@ function SkillSourcePicker({
 	);
 }
 
+export interface SkillSourceSection {
+	id: string;
+	label: string;
+	skills: SkillCard[];
+}
+
+/** Group the federated result by the registry that produced each card. */
+export function groupSkillsBySource(
+	skills: readonly SkillCard[]
+): SkillSourceSection[] {
+	const sections = new Map<string, SkillSourceSection>();
+	for (const skill of skills) {
+		const id = skill.catalogSourceId ?? skill.source ?? "other";
+		const existing = sections.get(id);
+		if (existing) {
+			existing.skills.push(skill);
+			continue;
+		}
+		sections.set(id, {
+			id,
+			label: skill.catalogSourceName ?? skill.source ?? "Other marketplaces",
+			skills: [skill],
+		});
+	}
+	return [...sections.values()];
+}
+
 function SkillList({
 	skills,
 	loading,
 	error,
 	selectedId,
 	onSelect,
+	groupBySource,
 	cardInstall,
 	setSkillEnabled,
 	enabledByKey,
@@ -668,6 +712,7 @@ function SkillList({
 	error: string | null;
 	selectedId: string | null;
 	onSelect: (id: string) => void;
+	groupBySource: boolean;
 	cardInstall: (id: string) => void;
 	setSkillEnabled: (id: string, active: boolean) => Promise<void>;
 	enabledByKey: Record<string, boolean>;
@@ -680,6 +725,9 @@ function SkillList({
 }) {
 	// The IntersectionObserver root is the layout's scroll column, not the viewport.
 	const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+	const sections = groupBySource
+		? groupSkillsBySource(skills)
+		: [{ id: "all", label: "", skills }];
 
 	if (loading && skills.length === 0) {
 		return (
@@ -711,65 +759,74 @@ function SkillList({
 
 	return (
 		<div ref={setScrollEl}>
-			<StoreCardGrid>
-				{skills.map((s) => (
-					<StoreCatalogCard
-						action={
-							<SkillCardAction
-								card={s}
-								downloadCount={s.downloads}
-								enabled={enabledByKey[s.id]}
-								installBusy={installing === s.id}
-								onDisable={() => {
-									setSkillEnabled(s.id, false).catch(() => undefined);
-								}}
-								onEnable={() => {
-									setSkillEnabled(s.id, true).catch(() => undefined);
-								}}
-								onInstall={() => cardInstall(s.id)}
-								onOpenSettings={settingsOpener(s.id)}
-								toggleBusy={togglingSkill === s.id}
+			{sections.map((section) => (
+				<section className="flex flex-col gap-2" key={section.id}>
+					{section.label ? (
+						<h3 className="px-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">
+							{section.label}
+						</h3>
+					) : null}
+					<StoreCardGrid>
+						{section.skills.map((s) => (
+							<StoreCatalogCard
+								action={
+									<SkillCardAction
+										card={s}
+										downloadCount={s.downloads}
+										enabled={enabledByKey[s.id]}
+										installBusy={installing === s.id}
+										onDisable={() => {
+											setSkillEnabled(s.id, false).catch(() => undefined);
+										}}
+										onEnable={() => {
+											setSkillEnabled(s.id, true).catch(() => undefined);
+										}}
+										onInstall={() => cardInstall(s.id)}
+										onOpenSettings={settingsOpener(s.id)}
+										toggleBusy={togglingSkill === s.id}
+									/>
+								}
+								// The same verbs the card's own control offers, installed states
+								// included — the gesture used to work only on skills you had not
+								// added yet, which is the half with the least to do to it.
+								contextMenu={storeItemContextMenu({
+									enabled: s.installed ? enabledByKey[s.id] : undefined,
+									installed: s.installed,
+									onDisable: () => {
+										setSkillEnabled(s.id, false).catch(() => undefined);
+									},
+									onEnable: () => {
+										setSkillEnabled(s.id, true).catch(() => undefined);
+									},
+									onInstall: () => cardInstall(s.id),
+									onOpenSettings: settingsOpener(s.id) ?? undefined,
+								})}
+								// The SKILL.md one-liner when the source could give us one
+								// without a per-card round trip (installed skills always can),
+								// else the provenance line every card showed before.
+								description={
+									s.description?.trim() ||
+									(s.installs > 0
+										? `${s.source} · ${formatCount(s.installs)} installs`
+										: s.source)
+								}
+								icon={
+									<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
+								}
+								key={s.id}
+								// A skill's `owner/repo[/subdir]` id IS its namespace — the same
+								// string the fetcher installs from — so it keys likes exactly as
+								// an app's `@scope/name` does.
+								likeNamespace={s.id}
+								name={s.name}
+								onClick={() => onSelect(s.id)}
+								seedId={s.id}
+								selected={s.id === selectedId}
 							/>
-						}
-						// The same verbs the card's own control offers, installed states
-						// included — the gesture used to work only on skills you had not
-						// added yet, which is the half with the least to do to it.
-						contextMenu={storeItemContextMenu({
-							enabled: s.installed ? enabledByKey[s.id] : undefined,
-							installed: s.installed,
-							onDisable: () => {
-								setSkillEnabled(s.id, false).catch(() => undefined);
-							},
-							onEnable: () => {
-								setSkillEnabled(s.id, true).catch(() => undefined);
-							},
-							onInstall: () => cardInstall(s.id),
-							onOpenSettings: settingsOpener(s.id) ?? undefined,
-						})}
-						// The SKILL.md one-liner when the source could give us one
-						// without a per-card round trip (installed skills always can),
-						// else the provenance line every card showed before.
-						description={
-							s.description?.trim() ||
-							(s.installs > 0
-								? `${s.source} · ${formatCount(s.installs)} installs`
-								: s.source)
-						}
-						icon={
-							<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
-						}
-						key={s.id}
-						// A skill's `owner/repo[/subdir]` id IS its namespace — the same
-						// string the fetcher installs from — so it keys likes exactly as
-						// an app's `@scope/name` does.
-						likeNamespace={s.id}
-						name={s.name}
-						onClick={() => onSelect(s.id)}
-						seedId={s.id}
-						selected={s.id === selectedId}
-					/>
-				))}
-			</StoreCardGrid>
+						))}
+					</StoreCardGrid>
+				</section>
+			))}
 			<InfiniteSentinel
 				hasMore={hasNextPage}
 				loading={false}
@@ -918,6 +975,7 @@ function SkillDetailPanel({
 
 	const title = friendly ? titleCase(card.name) : card.name;
 	const sourceLabel = card.source || "skills.sh";
+	const trustLabel = skillTrustLabel(card.trustLevel);
 
 	return (
 		<ListingDetailShell
@@ -968,6 +1026,7 @@ function SkillDetailPanel({
 					badges={[
 						card.installed ? (skillEnabled ? "Enabled" : "Added") : null,
 						sourceLabel,
+						trustLabel,
 					].filter((b): b is string => Boolean(b))}
 					icon={
 						// Skills carry no art of their own — no manifest, no icon field. The

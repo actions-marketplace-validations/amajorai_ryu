@@ -9,8 +9,8 @@
 // light theme and 12% in dark. Whether they read as cards at all is a fact about
 // resolved colour in each scheme, so both columns are rendered side by side.
 //
-// The local card is also the one that carries live install progress, so the third
-// column pins the `localChecking` + `localProgress` state the real page enters
+// The local card is also the one that carries live install progress, so the
+// progress columns pin the component milestones emitted by the public installer
 // after the "Run AI locally" pick.
 
 import { OnboardingView } from "@ryu/blocks/desktop/onboarding";
@@ -96,26 +96,25 @@ createRoot(document.getElementById("root") as HTMLElement).render(
 		<Column dark={false} label="Light" />
 		<Column dark label="Dark" />
 		{/* Everything after the press happens on the `installing` phase — ONE
-		    progress surface for the download, the boot and the local-stack wait,
-		    rather than a second one bolted onto the card. The subtitle is the live
-		    line and the bar is the real download fraction. */}
+		    progress surface for the installer, Core boot, and local-stack wait.
+		    These are the same component milestones the Desktop listener renders. */}
 		<Progress
 			dark
-			label="Loop: flavour tick"
-			percent={34}
-			status="Installing the AI engine"
+			label="Installer: Core"
+			percent={15}
+			status="Installing Ryu Core…"
 		/>
 		<Progress
 			dark
-			label="Loop: real tick"
-			percent={34}
-			status="Downloading Ryu Core 35%"
+			label="Installer: Gateway"
+			percent={30}
+			status="Installing the model gateway…"
 		/>
 		<Progress
 			dark
-			label="Loop: gateway tick"
-			percent={49}
-			status="Downloading the model gateway 30%"
+			label="Installer: defaults"
+			percent={80}
+			status="Installing bundled models, engines, and skills…"
 		/>
 		{/* The failure state must stay ONE cell: emitted as a sibling it would push
 		    `connect` onto a third row and break the cloud-spans-row-one layout. */}

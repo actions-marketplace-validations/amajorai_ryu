@@ -30176,6 +30176,62 @@ fn skill_cards_from_value(value: serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
+/// Ryu Marketplace's cross-kind detail endpoint returns its native commerce
+/// envelope, while the Skills UI consumes the shared `{ card, readme, files }`
+/// detail contract. Normalize that one source here so a Ryu skill behaves like
+/// every other registry without teaching the desktop about commerce payloads.
+fn normalize_skill_detail(
+    source: &crate::catalog_source::Source,
+    id: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    if !matches!(source, crate::catalog_source::Source::RyuMarketplace(_)) {
+        return value;
+    }
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| id.rsplit('/').next().unwrap_or(id));
+    let description = value
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let url = value
+        .get("installSource")
+        .or_else(|| value.get("install_source"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(id)
+        .to_string();
+    json!({
+        "card": {
+            "id": id,
+            "source": source.display_name(),
+            "slug": id.rsplit('/').next().unwrap_or(id),
+            "name": name,
+            "description": description,
+            "installs": 0,
+            "downloads": 0,
+            "installed": false,
+            "trust_level": "builtin",
+        },
+        "description": description,
+        "readme": description,
+        "metadata": {
+            "installs": null,
+            "github_stars": null,
+            "first_seen": null,
+            "github_created_at": null,
+            "github_updated_at": null,
+            "github_pushed_at": null,
+            "security_audits": [],
+            "repository_url": null,
+        },
+        "files": [],
+        "url": url,
+    })
+}
+
 /// Build a live, de-duplicated catalog from every registered Skill source.
 ///
 /// This is intentionally a runtime builder rather than a generated checked-in
@@ -30297,7 +30353,7 @@ async fn all_skill_catalog_detail(
         )
         .await
         {
-            Ok(Ok(value)) => return Ok(value),
+            Ok(Ok(value)) => return Ok(normalize_skill_detail(&source, id, value)),
             Ok(Err(error)) => {
                 tracing::debug!(source = %meta.id, error = %error, "skill detail source did not claim id")
             }
@@ -30307,6 +30363,37 @@ async fn all_skill_catalog_detail(
         }
     }
     Err(anyhow::anyhow!("skill `{id}` was not found in any registered source"))
+}
+
+#[cfg(test)]
+mod skill_catalog_view_tests {
+    use super::{skill_card_matches_query, skill_cards_from_value, SKILL_ALL_SOURCES_ID};
+    use serde_json::json;
+
+    #[test]
+    fn all_view_selector_is_not_a_registered_source_id() {
+        assert_eq!(SKILL_ALL_SOURCES_ID, "all");
+    }
+
+    #[test]
+    fn card_matching_covers_id_name_source_and_description() {
+        let card = json!({
+            "id": "lobehub/lateral-thinking",
+            "name": "Lateral Thinking",
+            "source": "lobehub",
+            "description": "Explore alternate solutions"
+        });
+        assert!(skill_card_matches_query(&card, "lateral"));
+        assert!(skill_card_matches_query(&card, "alternate"));
+        assert!(skill_card_matches_query(&card, "LOBEHUB"));
+        assert!(!skill_card_matches_query(&card, "calendar"));
+        assert!(skill_card_matches_query(&card, ""));
+    }
+
+    #[test]
+    fn source_response_without_skills_degrades_to_empty() {
+        assert!(skill_cards_from_value(json!({ "items": [] })).is_empty());
+    }
 }
 
 /// `GET /api/skills/catalog?query=&limit=&installed_only=&source=`
@@ -30419,7 +30506,10 @@ async fn skills_catalog_detail(
         );
     };
     match source.detail(&state.client, id).await {
-        Ok(value) => (StatusCode::OK, Json(value)),
+        Ok(value) => (
+            StatusCode::OK,
+            Json(normalize_skill_detail(&source, id, value)),
+        ),
         Err(error) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({ "error": error.to_string() })),

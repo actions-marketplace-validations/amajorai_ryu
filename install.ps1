@@ -177,7 +177,7 @@ if ($startCore -eq '1') {
 Emit-Progress 'bootstrap' 'ryu' 'complete' 100
 Write-Host ''
 Write-Host 'Next:'
-Write-Host '  ryu-core     # already running; starts the Gateway + local defaults if restarted'
+Write-Host '  ryu-core     # already running; bundled defaults continue provisioning'
 Write-Host '  ryu-cli      # in another terminal, connect the TUI to it'
 Write-Host ''
 Write-Host 'Point any OpenAI-compatible client at the Gateway: http://127.0.0.1:7981/v1'

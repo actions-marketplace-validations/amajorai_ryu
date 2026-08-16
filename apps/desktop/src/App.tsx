@@ -311,7 +311,7 @@ function MainApp() {
 				payload.phase === "bootstrap" &&
 				payload.status === "complete"
 			) {
-				toast.success("Ryu setup is ready");
+				toast.success("Core is ready; bundled defaults continue downloading");
 			} else if (payload.phase === "error") {
 				toast.error(payload.error ?? "Ryu setup failed");
 			}
