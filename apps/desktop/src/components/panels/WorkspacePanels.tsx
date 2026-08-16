@@ -26,7 +26,6 @@ import {
 	UserGroupIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { PatchDiff } from "@pierre/diffs/react";
 import type {
 	ContextMenuItem as FileTreeContextMenuItem,
 	ContextMenuOpenContext as FileTreeContextMenuOpenContext,
@@ -80,6 +79,10 @@ import {
 	type InspectedPart,
 	PartInspector,
 } from "@/src/components/chat/PartInspector.tsx";
+import {
+	RichPatchDiff,
+	splitPatchByFile,
+} from "@/src/components/diffs/RichPatchDiff.tsx";
 import { OverflowTooltip } from "@/src/components/layout/overflow-tooltip.tsx";
 import type { ContextPanelView } from "@/src/components/panels/ContextPanel.tsx";
 import { ContextPanel } from "@/src/components/panels/ContextPanel.tsx";
@@ -152,6 +155,7 @@ import {
 import type { PluginDockPanel } from "@/src/lib/api/plugins.ts";
 import type { Artifact } from "@/src/lib/artifacts.ts";
 import { CONTRIBUTED_LINK_OPENED_EVENT } from "@/src/lib/contributed-link-handler.ts";
+import { joinPath, writeProjectFile } from "@/src/lib/files.ts";
 import { pageRoute, SIDE_PANEL_PAGES } from "@/src/lib/page-routes.ts";
 import PluginCompanionPage from "@/src/pages/PluginCompanionPage.tsx";
 import PluginViewPage from "@/src/pages/PluginViewPage.tsx";
@@ -1180,7 +1184,7 @@ function PanelEmptyState({
 
 // ── File tree panel (@pierre/trees) ──────────────────────────────────────────
 
-function FileTreePanel({ folder }: { folder?: string | null }) {
+export function FileTreePanel({ folder }: { folder?: string | null }) {
 	const [paths, setPaths] = useState<readonly string[]>([]);
 	const [loading, setLoading] = useState(false);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
@@ -1480,21 +1484,6 @@ function buildDiffCommand(
 	return "git diff HEAD";
 }
 
-/** `@pierre/diffs` `PatchDiff` is SINGULAR — it throws "patch must contain exactly
- *  1 file diff" on a multi-file patch. A `git diff` almost always spans several
- *  files, so split it on the `diff --git` file boundaries and render one PatchDiff
- *  per file. Keyed by the file path so React reconciles cleanly across refreshes. */
-function splitPatchByFile(patch: string): { path: string; patch: string }[] {
-	return patch
-		.split(/\n(?=diff --git )/)
-		.map((chunk) => chunk.trim())
-		.filter(Boolean)
-		.map((chunk) => {
-			const match = chunk.match(/^diff --git a\/\S+ b\/(\S+)/);
-			return { path: match ? match[1] : chunk.slice(0, 60), patch: chunk };
-		});
-}
-
 // Files beyond this index are rendered collapsed once a patch touches more than
 // LARGE_PATCH_FILE_COUNT files — collapsed diffs skip syntax highlighting until
 // the user expands them, which keeps a 50-file review from tokenizing everything
@@ -1502,7 +1491,7 @@ function splitPatchByFile(patch: string): { path: string; patch: string }[] {
 const EAGER_DIFF_FILE_COUNT = 15;
 const LARGE_PATCH_FILE_COUNT = 20;
 
-function PatchDiffPanel({ folder }: { folder?: string | null }) {
+export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	const [mode, setMode] = useState<DiffMode>("working");
 	const [commit, setCommit] = useState<CommitInfo | null>(null);
 	const [branch, setBranch] = useState<string | null>(null);
@@ -1510,6 +1499,7 @@ function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	const [branches, setBranches] = useState<string[]>([]);
 	const [patch, setPatch] = useState("");
 	const [loading, setLoading] = useState(false);
+	const [editMode, setEditMode] = useState(false);
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
 	const diffPrefs = useDiffViewPrefs();
 
@@ -1577,6 +1567,18 @@ function PatchDiffPanel({ folder }: { folder?: string | null }) {
 			.finally(() => setLoading(false));
 	}, [folder, git, mode, commit, branch]);
 
+	const saveEditedFile = useCallback(
+		async (path: string, file: { contents: string }) => {
+			if (!folder || mode !== "working") {
+				return;
+			}
+			await writeProjectFile(joinPath(folder, path), file.contents);
+			invalidateGitStatus(folder);
+			toast.success(`${path} saved`);
+		},
+		[folder, mode]
+	);
+
 	useEffect(() => {
 		refresh();
 	}, [refresh]);
@@ -1615,9 +1617,15 @@ function PatchDiffPanel({ folder }: { folder?: string | null }) {
 		body = (
 			<div className="flex flex-col gap-3">
 				{files.map((file, i) => (
-					<PatchDiff
-						disableWorkerPool
+					<RichPatchDiff
+						editMode={editMode}
+						filePath={file.path}
 						key={file.path}
+						onSave={
+							mode === "working"
+								? (edited) => saveEditedFile(file.path, edited)
+								: undefined
+						}
 						options={{
 							...diffOptions,
 							collapsed: collapseTail && i >= EAGER_DIFF_FILE_COUNT,
@@ -1748,6 +1756,19 @@ function PatchDiffPanel({ folder }: { folder?: string | null }) {
 						</button>
 					))}
 				</div>
+				<button
+					aria-pressed={editMode}
+					className={cn(
+						"rounded-md px-2 py-1 text-[11px] transition-colors",
+						editMode
+							? "bg-primary text-primary-foreground"
+							: "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+					)}
+					onClick={() => setEditMode((current) => !current)}
+					type="button"
+				>
+					{editMode ? "Editing" : "Edit"}
+				</button>
 				<Tooltip>
 					<TooltipTrigger
 						render={

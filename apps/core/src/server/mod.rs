@@ -30158,13 +30158,14 @@ fn all_skill_view_sources(
 /// filter upstream, but this second check keeps the merged view honest for bulk
 /// indexes and custom marketplaces that return an unfiltered page.
 fn skill_card_matches_query(card: &serde_json::Value, needle: &str) -> bool {
+    let needle = needle.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return true;
     }
     ["id", "name", "slug", "source", "description"]
         .into_iter()
         .filter_map(|key| card.get(key).and_then(serde_json::Value::as_str))
-        .any(|value| value.to_ascii_lowercase().contains(needle))
+        .any(|value| value.to_ascii_lowercase().contains(&needle))
 }
 
 /// Pull the `skills` array from one source's normalized response.

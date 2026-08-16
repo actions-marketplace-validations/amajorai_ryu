@@ -57,6 +57,7 @@ export function AgentChat({
 	assistantAvatar,
 	assistantName,
 	assistantPlanningAvatars,
+	agentMessageContext,
 	currentUser,
 	seedDraft,
 	onDraftChange,
@@ -321,6 +322,7 @@ export function AgentChat({
 	} else {
 		transcriptNode = (
 			<MessageList
+				agentMessageContext={agentMessageContext}
 				assistantAvatar={assistantAvatar}
 				assistantName={assistantName}
 				assistantPlanningAvatars={assistantPlanningAvatars}

@@ -149,6 +149,57 @@ function activeItemName(section: ComposerSettingsSection): string | undefined {
 	return activeItem(section)?.name;
 }
 
+/** A glanceable effort indicator whose scale follows the live option list. */
+function EffortMeter({
+	className,
+	section,
+}: {
+	className?: string;
+	section: ComposerSettingsSection;
+}) {
+	const activeIndex = Math.max(
+		0,
+		section.items.findIndex((item) => item.id === section.value)
+	);
+	const active = activeItem(section);
+	const barCount = Math.min(5, Math.max(3, section.items.length));
+	const filledBars =
+		section.items.length > 1
+			? Math.max(
+					1,
+					Math.round((activeIndex / (section.items.length - 1)) * barCount)
+				)
+			: 0;
+
+	if (!active || section.items.length < 2) {
+		return null;
+	}
+
+	return (
+		<span
+			aria-label={`Effort: ${active.name}`}
+			className={cn(
+				"composer-effort-meter inline-flex h-4 shrink-0 items-end gap-px text-primary",
+				className
+			)}
+			data-composer-effort-meter="true"
+			title={`Effort: ${active.name}`}
+		>
+			{Array.from({ length: barCount }, (_, index) => (
+				<span
+					aria-hidden="true"
+					className={cn(
+						"w-1 rounded-[1px] transition-colors",
+						index < filledBars ? "bg-current" : "bg-muted-foreground/25"
+					)}
+					key={index}
+					style={{ height: `${5 + index * 2}px` }}
+				/>
+			))}
+		</span>
+	);
+}
+
 /**
  * One composer control that merges the agent, model, and approval-policy (plus
  * any agent-advertised config) pickers into a single dropdown. The trigger shows

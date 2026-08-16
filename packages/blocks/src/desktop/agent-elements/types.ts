@@ -47,6 +47,19 @@ export interface CustomToolRendererProps {
 	status: "pending" | "streaming" | "success" | "error";
 }
 
+/** Identity data used by transcript surfaces that render agent-to-agent work. */
+export interface AgentMessageIdentity {
+	avatar?: React.ReactNode;
+	id: string;
+	name: string;
+}
+
+/** Host-provided agent identities for the agent-comms transcript renderer. */
+export interface AgentMessageContext {
+	current?: AgentMessageIdentity;
+	resolve?: (id: string) => AgentMessageIdentity | undefined;
+}
+
 /** CSP hints a widget's MCP server may declare. Ignored as network grants in v1
  *  (D3): `connect-src` is hard-pinned to `'none'` and `resource_domains` is not
  *  honored, so both fields are wire-completeness only. */
@@ -149,6 +162,7 @@ export interface ChatSlots {
 		[key: string]: unknown;
 	}>;
 	ToolRenderer: React.ComponentType<{
+		agentMessageContext?: AgentMessageContext;
 		part: {
 			type: string;
 			toolCallId?: string;
@@ -215,6 +229,8 @@ export interface ContributedMessageAction {
 }
 
 export interface AgentChatProps {
+	/** Agent identities used when an agent-comms tool becomes a transcript activity. */
+	agentMessageContext?: AgentMessageContext;
 	/** Avatar node shown beside each assistant turn — the active agent's logo, or
 	 * a fanned stack of member logos for a team. When omitted, no avatar shows. */
 	assistantAvatar?: React.ReactNode;
