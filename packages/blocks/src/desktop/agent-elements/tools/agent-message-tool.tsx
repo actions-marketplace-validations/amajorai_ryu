@@ -16,70 +16,15 @@ import type {
 	AgentMessageIdentity,
 } from "../types.ts";
 import { getToolStatus } from "../utils/format-tool.ts";
-import { unwrapMcpOutput } from "../utils/unwrap-mcp-output.ts";
 import { GenericTool } from "./generic-tool.tsx";
-
-export interface AgentMessageToolPart {
-	input?: unknown;
-	output?: unknown;
-	result?: unknown;
-	state?: string;
-	type?: string;
-}
-
-export interface AgentMessagePayload {
-	from?: string;
-	text: string;
-	to: string;
-}
+import {
+	readAgentMessageOutput,
+	readAgentMessagePayload,
+	type AgentMessageToolPart,
+} from "./agent-message-tool-logic.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
-}
-
-function readString(record: Record<string, unknown> | null, key: string) {
-	const value = record?.[key];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function outputForPart(part: AgentMessageToolPart): unknown {
-	if (part.output !== undefined && part.output !== null) {
-		return unwrapMcpOutput(part.output);
-	}
-	return part.result === undefined ? undefined : unwrapMcpOutput(part.result);
-}
-
-/** Recognize both MCP wire parts and the AI SDK's dynamic-tool form. */
-export function isAgentMessageToolPart(
-	partType: string,
-	toolName?: string
-): boolean {
-	return (
-		toolName === "agents__send" ||
-		partType === "tool-agents__send" ||
-		partType.endsWith("__agents__send")
-	);
-}
-
-/** Read the send arguments and the host-derived sender from a tool part. */
-export function readAgentMessagePayload(
-	part: AgentMessageToolPart
-): AgentMessagePayload | null {
-	const input = unwrapMcpOutput(part.input);
-	const inputRecord = isRecord(input) ? input : null;
-	const output = outputForPart(part);
-	const outputRecord = isRecord(output) ? output : null;
-	const to = readString(inputRecord, "to") ?? readString(outputRecord, "to");
-	const text =
-		readString(inputRecord, "text") ?? readString(outputRecord, "text");
-	if (!to || !text) {
-		return null;
-	}
-	return {
-		from: readString(outputRecord, "from"),
-		text,
-		to,
-	};
 }
 
 function prettyAgentId(id: string): string {
@@ -174,7 +119,7 @@ export const AgentMessageTool = memo(function AgentMessageTool({
 
 	const sender = identityFor(payload.from ?? context?.current?.id ?? "agent", context);
 	const recipient = identityFor(payload.to, context);
-	const output = outputForPart(part);
+	const output = readAgentMessageOutput(part);
 	const deliveryFailed = isRecord(output) && output.ok === false;
 	const failed = isError || isInterrupted || deliveryFailed;
 	const activityVerb = failed

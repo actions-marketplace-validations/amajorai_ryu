@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ApiTarget } from "@/src/lib/api/client.ts";
 import {
 	type AddMarketplaceParams,
-	addMarketplaceSource,
+		addMarketplaceSource,
 	fetchSkillDetail,
 	fetchSkillSources,
 	type InstalledSkill,
@@ -25,6 +25,8 @@ import {
 	type SkillCard,
 	type SkillCatalogSource,
 	type SkillDetail,
+	removeMarketplaceSource,
+	reorderMarketplaceSource,
 	searchSkills,
 	setSkillActive,
 } from "@/src/lib/api/skills.ts";
@@ -47,6 +49,13 @@ export interface UseSkillsCatalogResult {
 	addingMarketplace: boolean;
 	/** Add a custom Claude plugin marketplace as a skill source. */
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
+	/** Remove a custom Claude plugin marketplace. */
+	removeMarketplace: (id: string) => Promise<void>;
+	/** Move a custom marketplace one position in the source list. */
+	reorderMarketplace: (
+		id: string,
+		direction: "up" | "down"
+	) => Promise<void>;
 	detail: SkillDetail | null;
 	detailError: string | null;
 	detailLoading: boolean;
@@ -199,6 +208,43 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		(params: AddMarketplaceParams) =>
 			addMarketplaceMutation.mutateAsync(params),
 		[addMarketplaceMutation]
+	);
+
+	const removeMarketplaceMutation = useMutation({
+		mutationFn: (id: string) => removeMarketplaceSource({ url, token }, id),
+		onSuccess: (_data, id) => {
+			if (sourceOverride === id) {
+				setSourceOverride(null);
+			}
+			Promise.resolve(
+				qc.invalidateQueries({ queryKey: ["skills", "sources", url] })
+			).catch(() => undefined);
+			Promise.resolve(
+				qc.invalidateQueries({ queryKey: ["skills", "list", url] })
+			).catch(() => undefined);
+		},
+	});
+	const removeMarketplace = useCallback(
+		(id: string) => removeMarketplaceMutation.mutateAsync(id),
+		[removeMarketplaceMutation]
+	);
+
+	const reorderMarketplaceMutation = useMutation({
+		mutationFn: ({ id, direction }: { id: string; direction: "up" | "down" }) =>
+			reorderMarketplaceSource({ url, token }, id, direction),
+		onSuccess: () => {
+			Promise.resolve(
+				qc.invalidateQueries({ queryKey: ["skills", "sources", url] })
+			).catch(() => undefined);
+			Promise.resolve(
+				qc.invalidateQueries({ queryKey: ["skills", "list", url] })
+			).catch(() => undefined);
+		},
+	});
+	const reorderMarketplace = useCallback(
+		(id: string, direction: "up" | "down") =>
+			reorderMarketplaceMutation.mutateAsync({ id, direction }),
+		[reorderMarketplaceMutation]
 	);
 
 	const listQuery = useQuery({
@@ -376,6 +422,8 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		selectingSource: false,
 		addMarketplace,
 		addingMarketplace: addMarketplaceMutation.isPending,
+		removeMarketplace,
+		reorderMarketplace,
 		installedSkills,
 		enabledByKey,
 		setSkillEnabled,

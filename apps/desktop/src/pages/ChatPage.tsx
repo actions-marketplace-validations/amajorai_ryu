@@ -13,14 +13,14 @@ import {
 } from "@ryu/blocks/desktop/agent-elements/artifact-host-context.tsx";
 import { deriveContextUsage } from "@ryu/blocks/desktop/agent-elements/context-usage.tsx";
 import type {
-	AgentMessageContext,
-	AgentMessageIdentity,
-} from "@ryu/blocks/desktop/agent-elements/types.ts";
-import type {
 	ComposerMenuGroup,
 	ComposerMenuItem,
 } from "@ryu/blocks/desktop/agent-elements/input/composer-menu.tsx";
 import { mergeResumedReplyMessage } from "@ryu/blocks/desktop/agent-elements/resume-merge.ts";
+import type {
+	AgentMessageContext,
+	AgentMessageIdentity,
+} from "@ryu/blocks/desktop/agent-elements/types.ts";
 import {
 	WidgetHostContext,
 	type WidgetHostServices,

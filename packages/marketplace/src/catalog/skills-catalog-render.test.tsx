@@ -38,6 +38,8 @@ function makeSkillsState(
 		activeSource: "skills-sh",
 		addingMarketplace: false,
 		addMarketplace: () => Promise.resolve(),
+		removeMarketplace: () => Promise.resolve(),
+		reorderMarketplace: () => Promise.resolve(),
 		detail: null,
 		detailError: null,
 		detailLoading: false,

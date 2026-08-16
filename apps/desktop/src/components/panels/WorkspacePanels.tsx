@@ -1451,8 +1451,8 @@ interface CommitInfo {
 }
 
 interface FullDiffFiles {
-	oldFile: FileContents | null;
 	newFile: FileContents | null;
+	oldFile: FileContents | null;
 }
 
 // `%x09` makes git emit a real tab between the hash and the subject, so we let
@@ -1603,7 +1603,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 	// working-tree view with both file versions so the library can attach its
 	// full editor surface when Edit mode is enabled.
 	useEffect(() => {
-		if (!folder || mode !== "working" || !patch.trim()) {
+		if (!folder || mode !== "working" || !editMode || !patch.trim()) {
 			setFullFiles({});
 			return;
 		}
@@ -1630,10 +1630,10 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 							newContents === null
 								? null
 								: {
-									cacheKey: `${file.path}:working`,
-									contents: newContents,
-									name: file.path,
-								  },
+										cacheKey: `${file.path}:working`,
+										contents: newContents,
+										name: file.path,
+									},
 					},
 				];
 			})
@@ -1646,7 +1646,7 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 		return () => {
 			cancelled = true;
 		};
-	}, [folder, git, mode, patch]);
+	}, [editMode, folder, git, mode, patch]);
 
 	const modeLabel = (() => {
 		if (mode === "staged") {
@@ -1685,8 +1685,9 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 					<RichPatchDiff
 						editMode={editMode}
 						filePath={file.path}
-						newFile={fullFiles[file.path]?.newFile}
 						key={file.path}
+						newFile={fullFiles[file.path]?.newFile}
+						oldFile={fullFiles[file.path]?.oldFile}
 						onSave={
 							mode === "working"
 								? (edited) => saveEditedFile(file.path, edited)
@@ -1696,7 +1697,6 @@ export function PatchDiffPanel({ folder }: { folder?: string | null }) {
 							...diffOptions,
 							collapsed: collapseTail && i >= EAGER_DIFF_FILE_COUNT,
 						}}
-						oldFile={fullFiles[file.path]?.oldFile}
 						patch={file.patch}
 					/>
 				))}

@@ -16,13 +16,7 @@ import {
 } from "@ryu/ui/components/hover-card.tsx";
 import { cn } from "@ryu/ui/lib/utils.ts";
 import type { CSSProperties, ReactElement, ReactNode } from "react";
-import {
-	useCallback,
-	useEffect,
-	useMemo,
-	useRef,
-	useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export interface ReviewCommentMetadata {
 	body: string;
@@ -34,9 +28,9 @@ export interface RichPatchDiffProps {
 	editMode?: boolean;
 	filePath?: string;
 	newFile?: FileContents | null;
+	oldFile?: FileContents | null;
 	onSave?: (file: FileContents) => Promise<void>;
 	onSelection?: (text: string) => void;
-	oldFile?: FileContents | null;
 	options?: FileDiffOptions<ReviewCommentMetadata>;
 	patch: string;
 	showSave?: boolean;

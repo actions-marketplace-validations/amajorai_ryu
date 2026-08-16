@@ -16,10 +16,8 @@ import {
 	artifactIdForPart,
 	isArtifactPart,
 } from "./artifact-tool.tsx";
-import {
-	AgentMessageTool,
-	isAgentMessageToolPart,
-} from "./agent-message-tool.tsx";
+import { AgentMessageTool } from "./agent-message-tool.tsx";
+import { isAgentMessageToolPart } from "./agent-message-tool-logic.ts";
 import { BashTool } from "./bash-tool.tsx";
 import { EditTool } from "./edit-tool.tsx";
 import { GenericTool } from "./generic-tool.tsx";

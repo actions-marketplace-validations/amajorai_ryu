@@ -2383,7 +2383,13 @@ pub fn create_router(
         // active selection. The catalogs themselves route through these sources.
         .route(
             "/api/catalog/sources",
-            get(catalog_sources_list).post(catalog_sources_add),
+            get(catalog_sources_list)
+                .post(catalog_sources_add)
+                .delete(catalog_sources_remove),
+        )
+        .route(
+            "/api/catalog/sources/reorder",
+            post(catalog_sources_reorder),
         )
         .route("/api/catalog/sources/select", post(catalog_sources_select))
         // ── Skills (`/api/skills/*` + `/api/skills/catalog/*`) are merged as their
@@ -29631,6 +29637,78 @@ async fn catalog_sources_add(
         auth: body.auth,
     };
     match state.catalog_sources.add_custom(spec) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveCatalogSourceBody {
+    kind: crate::catalog_source::CatalogKind,
+    id: String,
+}
+
+/// `DELETE /api/catalog/sources { kind, id }`
+/// Removes a user-added source. Built-in registries are intentionally immutable.
+#[utoipa::path(
+    delete,
+    path = "/api/catalog/sources",
+    tag = "Catalog",
+    summary = "Remove a custom catalog source",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn catalog_sources_remove(
+    State(state): State<ServerState>,
+    Json(body): Json<RemoveCatalogSourceBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.catalog_sources.remove_custom(body.kind, &body.id) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ReorderCatalogSourceBody {
+    kind: crate::catalog_source::CatalogKind,
+    id: String,
+    direction: String,
+}
+
+/// `POST /api/catalog/sources/reorder { kind, id, direction: up|down }`
+/// Moves a user-added source within its kind's custom-source order.
+#[utoipa::path(
+    post,
+    path = "/api/catalog/sources/reorder",
+    tag = "Catalog",
+    summary = "Reorder a custom catalog source",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "OK", body = serde_json::Value))
+)]
+async fn catalog_sources_reorder(
+    State(state): State<ServerState>,
+    Json(body): Json<ReorderCatalogSourceBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let delta = match body.direction.as_str() {
+        "up" => -1,
+        "down" => 1,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "direction must be `up` or `down`" })),
+            );
+        }
+    };
+    match state
+        .catalog_sources
+        .move_custom(body.kind, &body.id, delta)
+    {
         Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Err(e) => (
             StatusCode::BAD_REQUEST,

@@ -6,8 +6,8 @@ export function readProjectFile(path: string): Promise<string> {
 }
 
 interface ShellOutput {
-	stdout: string;
 	code: number;
+	stdout: string;
 }
 
 function quoteShellArg(value: string): string {

@@ -1,6 +1,9 @@
 import {
 	Add01Icon,
+	ArrowDown01Icon,
+	ArrowUp01Icon,
 	CheckmarkCircle02Icon,
+	Delete01Icon,
 	Download01Icon,
 	PencilEdit01Icon,
 	SparklesIcon,
@@ -64,6 +67,7 @@ import StoreCatalogCard from "./chrome/store-catalog-card.tsx";
 import StoreCatalogLayout, {
 	StoreCardGrid,
 } from "./chrome/store-catalog-layout.tsx";
+import StoreShelfHeading from "./chrome/store-shelf-heading.tsx";
 import StoreItemAction, {
 	storeItemContextMenu,
 } from "./chrome/store-item-action.tsx";
@@ -91,12 +95,12 @@ import { REALM_ICONS } from "./realm-icons.ts";
 import { safeHttpUrl } from "./safe-url.ts";
 import type {
 	AddMarketplaceParams,
+	MarketplaceMoveDirection,
 	SkillCard,
 	SkillCatalogSource,
 	SkillDetail,
 	SkillSort,
 } from "./types.ts";
-import { ALL_SKILL_SOURCES_ID } from "./types.ts";
 import { useFriendlyMode } from "./use-friendly-mode.ts";
 
 /**
@@ -249,11 +253,10 @@ export default function SkillsCatalogSection({
 		installing,
 		install,
 		sources,
-		activeSource,
-		selectSource,
-		selectingSource,
 		addMarketplace,
 		addingMarketplace,
+		removeMarketplace,
+		reorderMarketplace,
 		enabledByKey,
 		setSkillEnabled,
 		togglingSkill,
@@ -362,17 +365,16 @@ export default function SkillsCatalogSection({
 				detailTitle={detail?.card.name ?? "Skill"}
 				filter={{
 					panel: (
-						<SkillsFilterPanel
-							activeSource={activeSource}
-							addingMarketplace={addingMarketplace}
+							<SkillsFilterPanel
+								addingMarketplace={addingMarketplace}
 							addMarketplace={addMarketplace}
 							canAuthor={canAuthor}
 							chips={chips}
 							friendly={friendly}
 							installedOnly={installedOnly}
-							onCreate={openNewSkill}
-							selectingSource={selectingSource}
-							selectSource={selectSource}
+								onCreate={openNewSkill}
+								removeMarketplace={removeMarketplace}
+								reorderMarketplace={reorderMarketplace}
 							setFriendly={setFriendly}
 							setInstalledOnly={setInstalledOnly}
 							setSort={setSort}
@@ -402,7 +404,7 @@ export default function SkillsCatalogSection({
 							enabledByKey={enabledByKey}
 							error={error}
 							fetchNextPage={fetchNextPage}
-							groupBySource={activeSource === ALL_SKILL_SOURCES_ID}
+								groupBySource
 							hasNextPage={hasNextPage}
 							installing={installing}
 							loading={loading}
@@ -433,11 +435,10 @@ function SkillsFilterPanel({
 	sort,
 	setSort,
 	sources,
-	activeSource,
-	selectSource,
-	selectingSource,
 	addMarketplace,
 	addingMarketplace,
+	removeMarketplace,
+	reorderMarketplace,
 	friendly,
 	setFriendly,
 	installedOnly,
@@ -449,11 +450,13 @@ function SkillsFilterPanel({
 	sort: SkillSort;
 	setSort: (s: SkillSort) => void;
 	sources: SkillCatalogSource[];
-	activeSource: string;
-	selectSource: (id: string) => void;
-	selectingSource: boolean;
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
 	addingMarketplace: boolean;
+	removeMarketplace: (id: string) => Promise<void>;
+	reorderMarketplace: (
+		id: string,
+		direction: MarketplaceMoveDirection
+	) => Promise<void>;
 	friendly: boolean;
 	setFriendly: (v: boolean) => void;
 	installedOnly: boolean;
@@ -489,11 +492,10 @@ function SkillsFilterPanel({
 						</SelectContent>
 					</Select>
 					<SkillSourcePicker
-						activeSource={activeSource}
 						addingMarketplace={addingMarketplace}
 						addMarketplace={addMarketplace}
-						selectingSource={selectingSource}
-						selectSource={selectSource}
+						removeMarketplace={removeMarketplace}
+						reorderMarketplace={reorderMarketplace}
 						sources={sources}
 					/>
 				</div>
@@ -528,37 +530,31 @@ function SkillsFilterPanel({
 }
 
 /**
- * Source dropdown (all public registries + custom Claude marketplaces) plus an
- * "Add marketplace" popover. The default all-marketplaces view is a live
- * federation; selecting a row narrows the same request path to one source.
+ * Marketplace management popover. The catalog always shows every source; this
+ * control is only for adding a custom marketplace and maintaining its order.
  */
 function SkillSourcePicker({
 	sources,
-	activeSource,
-	selectSource,
-	selectingSource,
 	addMarketplace,
 	addingMarketplace,
+	removeMarketplace,
+	reorderMarketplace,
 }: {
 	sources: SkillCatalogSource[];
-	activeSource: string;
-	selectSource: (id: string) => void;
-	selectingSource: boolean;
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
 	addingMarketplace: boolean;
+	removeMarketplace: (id: string) => Promise<void>;
+	reorderMarketplace: (
+		id: string,
+		direction: MarketplaceMoveDirection
+	) => Promise<void>;
 }) {
 	const [open, setOpen] = useState(false);
 	const [repo, setRepo] = useState("");
 	const [name, setName] = useState("");
 	const [addError, setAddError] = useState<string | null>(null);
-
-	const sourceItems = [
-		{ value: ALL_SKILL_SOURCES_ID, label: "All marketplaces" },
-		...sources.map((s) => ({
-			value: s.id,
-			label: s.displayName,
-		})),
-	];
+	const [sourceActionId, setSourceActionId] = useState<string | null>(null);
+	const customSources = sources.filter((source) => !source.builtin);
 
 	const submit = async () => {
 		const trimmedRepo = repo.trim();
@@ -583,31 +579,25 @@ function SkillSourcePicker({
 		}
 	};
 
+	const runSourceAction = async (
+		id: string,
+		action: () => Promise<void>
+	) => {
+		setSourceActionId(id);
+		setAddError(null);
+		try {
+			await action();
+		} catch (e) {
+			setAddError(
+				e instanceof Error ? e.message : "Failed to update marketplace"
+			);
+		} finally {
+			setSourceActionId(null);
+		}
+	};
+
 	return (
 		<div className="flex items-center gap-2">
-			{sourceItems.length > 1 && (
-				<Select
-					disabled={selectingSource}
-					items={sourceItems}
-					onValueChange={(value) => {
-						if (value) {
-							selectSource(value);
-						}
-					}}
-					value={activeSource}
-				>
-					<SelectTrigger className="h-8 w-[150px] text-sm" size="sm">
-						<SelectValue placeholder="Source" />
-					</SelectTrigger>
-					<SelectContent>
-						{sourceItems.map((opt) => (
-							<SelectItem key={opt.value} value={opt.value}>
-								{opt.label}
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
-			)}
 			<Popover onOpenChange={setOpen} open={open}>
 				<Tooltip>
 					<TooltipTrigger
@@ -619,44 +609,148 @@ function SkillSourcePicker({
 						}
 					/>
 					<TooltipContent>
-						Add a Claude plugin marketplace as a skill source
+						Add or manage skill marketplaces
 					</TooltipContent>
 				</Tooltip>
-				<PopoverContent className="w-80">
-					<div className="flex flex-col gap-3">
+				<PopoverContent className="w-[24rem]">
+					<div className="flex flex-col gap-4">
 						<div className="flex flex-col gap-1">
-							<Label htmlFor="mp-repo">Repo, git URL, or local path</Label>
-							<Input
-								id="mp-repo"
-								onChange={(e) => setRepo(e.target.value)}
-								placeholder="owner/repo, https://…/marketplace.json, or /path/to/marketplace"
-								value={repo}
-							/>
+							<p className="font-medium text-sm">Marketplaces</p>
+							<p className="text-muted-foreground text-xs">
+								All registered sources are shown in the catalog. Custom marketplaces
+								can be reordered or removed here.
+							</p>
 						</div>
-						<div className="flex flex-col gap-1">
-							<Label htmlFor="mp-name">Display name (optional)</Label>
-							<Input
-								id="mp-name"
-								onChange={(e) => setName(e.target.value)}
-								placeholder="My Marketplace"
-								value={name}
-							/>
+						<div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+							{sources.map((source) => {
+								const customIndex = customSources.findIndex(
+									(item) => item.id === source.id
+								);
+								const manageable = !source.builtin;
+								const busy = sourceActionId === source.id;
+								return (
+									<div
+										className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent"
+										key={source.id}
+									>
+										<div className="min-w-0 flex-1">
+											<p className="truncate text-sm">{source.displayName}</p>
+											<p className="text-muted-foreground text-xs">
+												{manageable ? "Custom marketplace" : "Built-in registry"}
+											</p>
+										</div>
+										{manageable ? (
+											<div className="flex shrink-0 items-center gap-0.5">
+												<Button
+													aria-label={`Move ${source.displayName} up`}
+													disabled={
+														sourceActionId !== null || customIndex <= 0
+													}
+													onClick={() => {
+														runSourceAction(source.id, () =>
+															reorderMarketplace(source.id, "up")
+														).catch(() => undefined);
+												}}
+												size="icon"
+												variant="ghost"
+											>
+													<HugeiconsIcon
+														className="size-4"
+														icon={ArrowUp01Icon}
+													/>
+												</Button>
+												<Button
+													aria-label={`Move ${source.displayName} down`}
+													disabled={
+														sourceActionId !== null ||
+														customIndex === customSources.length - 1
+													}
+													onClick={() => {
+														runSourceAction(source.id, () =>
+															reorderMarketplace(source.id, "down")
+														).catch(() => undefined);
+												}}
+												size="icon"
+												variant="ghost"
+											>
+													<HugeiconsIcon
+														className="size-4"
+														icon={ArrowDown01Icon}
+													/>
+												</Button>
+												<Button
+													aria-label={`Delete ${source.displayName}`}
+													disabled={sourceActionId !== null}
+													onClick={() => {
+														runSourceAction(source.id, () =>
+															removeMarketplace(source.id)
+														).catch(() => undefined);
+												}}
+												size="icon"
+												variant="ghost"
+											>
+													{busy ? (
+														<Spinner className="size-4" />
+													) : (
+														<HugeiconsIcon
+															className="size-4"
+															icon={Delete01Icon}
+														/>
+													)}
+												</Button>
+											</div>
+										) : (
+											<span className="shrink-0 text-muted-foreground text-xs">
+												Built-in
+											</span>
+										)}
+									</div>
+								);
+							})}
 						</div>
-						{addError && <p className="text-destructive text-xs">{addError}</p>}
-						<Button
-							disabled={addingMarketplace}
-							onClick={() => {
-								submit().catch(() => undefined);
-							}}
-							size="sm"
-						>
-							{addingMarketplace ? (
-								<Spinner className="size-4" />
-							) : (
-								<HugeiconsIcon className="size-4" icon={Add01Icon} />
+						<div className="flex flex-col gap-3 border-t pt-3">
+							<div className="flex flex-col gap-1">
+								<p className="font-medium text-sm">Add marketplace</p>
+								<p className="text-muted-foreground text-xs">
+									Connect a repo, git URL, or local marketplace path.
+								</p>
+							</div>
+							<div className="flex flex-col gap-1">
+								<Label htmlFor="mp-repo">Repo, git URL, or local path</Label>
+								<Input
+									id="mp-repo"
+									onChange={(e) => setRepo(e.target.value)}
+									placeholder="owner/repo or /path/to/marketplace"
+									value={repo}
+								/>
+							</div>
+							<div className="flex flex-col gap-1">
+								<Label htmlFor="mp-name">Display name (optional)</Label>
+								<Input
+									id="mp-name"
+									onChange={(e) => setName(e.target.value)}
+									placeholder="My Marketplace"
+									value={name}
+								/>
+							</div>
+							{addError && (
+								<p className="text-destructive text-xs">{addError}</p>
 							)}
-							{addingMarketplace ? "Adding…" : "Add marketplace"}
-						</Button>
+							<Button
+								disabled={addingMarketplace || sourceActionId !== null}
+								onClick={() => {
+									submit().catch(() => undefined);
+								}}
+								size="sm"
+							>
+								{addingMarketplace ? (
+									<Spinner className="size-4" />
+								) : (
+									<HugeiconsIcon className="size-4" icon={Add01Icon} />
+								)}
+								{addingMarketplace ? "Adding…" : "Add marketplace"}
+							</Button>
+						</div>
 					</div>
 				</PopoverContent>
 			</Popover>
@@ -728,6 +822,62 @@ function SkillList({
 	const sections = groupBySource
 		? groupSkillsBySource(skills)
 		: [{ id: "all", label: "", skills }];
+	const sourceShelved = groupBySource && sections.length > 1;
+	const renderCard = (s: SkillCard) => (
+		<StoreCatalogCard
+			action={
+				<SkillCardAction
+					card={s}
+					downloadCount={s.downloads}
+					enabled={enabledByKey[s.id]}
+					installBusy={installing === s.id}
+					onDisable={() => {
+						setSkillEnabled(s.id, false).catch(() => undefined);
+					}}
+					onEnable={() => {
+						setSkillEnabled(s.id, true).catch(() => undefined);
+					}}
+					onInstall={() => cardInstall(s.id)}
+					onOpenSettings={settingsOpener(s.id)}
+					toggleBusy={togglingSkill === s.id}
+				/>
+			}
+			// The same verbs the card's own control offers, installed states
+			// included — the gesture used to work only on skills you had not
+			// added yet, which is the half with the least to do to it.
+			contextMenu={storeItemContextMenu({
+				enabled: s.installed ? enabledByKey[s.id] : undefined,
+				installed: s.installed,
+				onDisable: () => {
+					setSkillEnabled(s.id, false).catch(() => undefined);
+				},
+				onEnable: () => {
+					setSkillEnabled(s.id, true).catch(() => undefined);
+				},
+				onInstall: () => cardInstall(s.id),
+				onOpenSettings: settingsOpener(s.id) ?? undefined,
+			})}
+			// The SKILL.md one-liner when the source could give us one
+			// without a per-card round trip (installed skills always can),
+			// else the provenance line every card showed before.
+			description={
+				s.description?.trim() ||
+				(s.installs > 0
+					? `${s.source} · ${formatCount(s.installs)} installs`
+					: s.source)
+			}
+			icon={<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />}
+			key={s.id}
+			// A skill's `owner/repo[/subdir]` id IS its namespace — the same
+			// string the fetcher installs from — so it keys likes exactly as
+			// an app's `@scope/name` does.
+			likeNamespace={s.id}
+			name={s.name}
+			onClick={() => onSelect(s.id)}
+			seedId={s.id}
+			selected={s.id === selectedId}
+		/>
+	);
 
 	if (loading && skills.length === 0) {
 		return (
@@ -759,74 +909,18 @@ function SkillList({
 
 	return (
 		<div ref={setScrollEl}>
-			{sections.map((section) => (
-				<section className="flex flex-col gap-2" key={section.id}>
-					{section.label ? (
-						<h3 className="px-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">
-							{section.label}
-						</h3>
-					) : null}
-					<StoreCardGrid>
-						{section.skills.map((s) => (
-							<StoreCatalogCard
-								action={
-									<SkillCardAction
-										card={s}
-										downloadCount={s.downloads}
-										enabled={enabledByKey[s.id]}
-										installBusy={installing === s.id}
-										onDisable={() => {
-											setSkillEnabled(s.id, false).catch(() => undefined);
-										}}
-										onEnable={() => {
-											setSkillEnabled(s.id, true).catch(() => undefined);
-										}}
-										onInstall={() => cardInstall(s.id)}
-										onOpenSettings={settingsOpener(s.id)}
-										toggleBusy={togglingSkill === s.id}
-									/>
-								}
-								// The same verbs the card's own control offers, installed states
-								// included — the gesture used to work only on skills you had not
-								// added yet, which is the half with the least to do to it.
-								contextMenu={storeItemContextMenu({
-									enabled: s.installed ? enabledByKey[s.id] : undefined,
-									installed: s.installed,
-									onDisable: () => {
-										setSkillEnabled(s.id, false).catch(() => undefined);
-									},
-									onEnable: () => {
-										setSkillEnabled(s.id, true).catch(() => undefined);
-									},
-									onInstall: () => cardInstall(s.id),
-									onOpenSettings: settingsOpener(s.id) ?? undefined,
-								})}
-								// The SKILL.md one-liner when the source could give us one
-								// without a per-card round trip (installed skills always can),
-								// else the provenance line every card showed before.
-								description={
-									s.description?.trim() ||
-									(s.installs > 0
-										? `${s.source} · ${formatCount(s.installs)} installs`
-										: s.source)
-								}
-								icon={
-									<HugeiconsIcon className="size-5" icon={REALM_ICONS.skills} />
-								}
-								key={s.id}
-								// A skill's `owner/repo[/subdir]` id IS its namespace — the same
-								// string the fetcher installs from — so it keys likes exactly as
-								// an app's `@scope/name` does.
-								likeNamespace={s.id}
-								name={s.name}
-								onClick={() => onSelect(s.id)}
-								seedId={s.id}
-								selected={s.id === selectedId}
-							/>
-						))}
-					</StoreCardGrid>
-				</section>
-			))}
+			{sourceShelved ? (
+				<div className="flex flex-col gap-6">
+					{sections.map((section) => (
+						<section key={section.id}>
+							<StoreShelfHeading>{section.label}</StoreShelfHeading>
+							<StoreCardGrid>{section.skills.map(renderCard)}</StoreCardGrid>
+						</section>
+					))}
+				</div>
+			) : (
+				<StoreCardGrid>{skills.map(renderCard)}</StoreCardGrid>
+			)}
 			<InfiniteSentinel
 				hasMore={hasNextPage}
 				loading={false}

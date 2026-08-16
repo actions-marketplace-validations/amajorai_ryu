@@ -61,8 +61,8 @@ interface DiffReviewPaneProps {
 }
 
 interface FullDiffFiles {
-	oldFile: FileContents | null;
 	newFile: FileContents | null;
+	oldFile: FileContents | null;
 }
 
 // ── Per-file summary row ──────────────────────────────────────────────────────
@@ -260,18 +260,18 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 					oldContents === null
 						? null
 						: {
-							cacheKey: `${path}:HEAD`,
-							contents: oldContents,
-							name: path,
-						},
+								cacheKey: `${path}:HEAD`,
+								contents: oldContents,
+								name: path,
+							},
 				newFile:
 					newContents === null
 						? null
 						: {
-							cacheKey: `${path}:working`,
-							contents: newContents,
-							name: path,
-						},
+								cacheKey: `${path}:working`,
+								contents: newContents,
+								name: path,
+							},
 			});
 		});
 
@@ -404,9 +404,9 @@ export function DiffReviewPane({ target, runId }: DiffReviewPaneProps) {
 									editMode={editMode}
 									filePath={selectedFile?.path}
 									newFile={fullFiles?.newFile}
+									oldFile={fullFiles?.oldFile}
 									onSave={worktreeStatus.path ? saveEditedFile : undefined}
 									options={diffOptions}
-									oldFile={fullFiles?.oldFile}
 									patch={selectedPatch}
 								/>
 							</div>

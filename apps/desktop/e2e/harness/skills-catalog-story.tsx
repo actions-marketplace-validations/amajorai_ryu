@@ -19,8 +19,8 @@ import {
 } from "@ryu/marketplace/catalog/host";
 import SkillsCatalogSection from "@ryu/marketplace/catalog/skills";
 import {
-	ALL_SKILL_SOURCES_ID,
 	type SkillCard,
+	type SkillCatalogSource,
 	type SkillDetail,
 	type SkillsCatalogState,
 } from "@ryu/marketplace/catalog/types";
@@ -129,20 +129,62 @@ const NOOP_ASYNC = () => Promise.resolve();
  *  exists to catch. */
 function useStorySkillsCatalog(): SkillsCatalogState {
 	const [selectedId, setSelectedId] = useState<string | null>(null);
-	const [activeSource, setActiveSource] = useState(ALL_SKILL_SOURCES_ID);
+	const [sources, setSources] = useState<SkillCatalogSource[]>([
+		{ builtin: true, displayName: "skills.sh", id: "skills-sh" },
+		{ builtin: true, displayName: "browse.sh", id: "browse-sh" },
+		{ builtin: true, displayName: "ClawHub", id: "clawhub" },
+		{ builtin: true, displayName: "LobeHub", id: "lobehub" },
+		{
+			builtin: true,
+			displayName: "Ryu Marketplace",
+			id: "ryu-marketplace",
+		},
+		{ builtin: false, displayName: "Team Skills", id: "team-skills" },
+		{ builtin: false, displayName: "Research Lab", id: "research-lab" },
+	]);
 	const select = useCallback((id: string) => setSelectedId(id), []);
-	const selectSource = useCallback((id: string) => {
-		setActiveSource(id);
-		setSelectedId(null);
+	const addMarketplace = useCallback(async (params: { id: string; displayName: string }) => {
+		setSources((current) => [
+			...current,
+			{ builtin: false, displayName: params.displayName, id: params.id },
+		]);
 	}, []);
-	const visibleSkills =
-		activeSource === ALL_SKILL_SOURCES_ID
-			? SKILLS
-			: SKILLS.filter((skill) => skill.catalogSourceId === activeSource);
+	const removeMarketplace = useCallback(async (id: string) => {
+		setSources((current) => current.filter((source) => source.id !== id));
+	}, []);
+	const reorderMarketplace = useCallback(
+		async (id: string, direction: "up" | "down") => {
+			setSources((current) => {
+				const customIndexes = current.flatMap((source, index) =>
+					source.builtin ? [] : [index]
+				);
+				const currentIndex = customIndexes.find(
+					(index) => current[index]?.id === id
+				);
+				if (currentIndex === undefined) {
+					return current;
+				}
+				const customPosition = customIndexes.indexOf(currentIndex);
+				const targetPosition =
+					customPosition + (direction === "up" ? -1 : 1);
+				const targetIndex = customIndexes[targetPosition];
+				if (targetIndex === undefined) {
+					return current;
+				}
+				const next = [...current];
+				[next[currentIndex], next[targetIndex]] = [
+					next[targetIndex],
+					next[currentIndex],
+				];
+				return next;
+			});
+		},
+		[]
+	);
 	return {
-		activeSource,
+		activeSource: "all",
 		addingMarketplace: false,
-		addMarketplace: NOOP_ASYNC,
+		addMarketplace,
 		detail: selectedId ? detailFor(selectedId) : null,
 		detailError: null,
 		detailLoading: false,
@@ -159,25 +201,17 @@ function useStorySkillsCatalog(): SkillsCatalogState {
 		select,
 		selectedId,
 		selectingSource: false,
-		selectSource,
+		selectSource: NOOP,
+		removeMarketplace,
+		reorderMarketplace,
 		setInstalledOnly: NOOP,
 		setOrg: NOOP,
 		setQuery: NOOP,
 		setSkillEnabled: NOOP_ASYNC,
 		setSort: NOOP,
-		skills: visibleSkills,
+		skills: SKILLS,
 		sort: "popular",
-		sources: [
-			{ builtin: true, displayName: "skills.sh", id: "skills-sh" },
-			{ builtin: true, displayName: "browse.sh", id: "browse-sh" },
-			{ builtin: true, displayName: "ClawHub", id: "clawhub" },
-			{ builtin: true, displayName: "LobeHub", id: "lobehub" },
-			{
-				builtin: true,
-				displayName: "Ryu Marketplace",
-				id: "ryu-marketplace",
-			},
-		],
+		sources,
 		togglingSkill: null,
 	};
 }

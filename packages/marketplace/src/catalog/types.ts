@@ -854,6 +854,9 @@ export interface AddMarketplaceParams {
 	id: string;
 }
 
+/** One-step movement within the custom marketplace order. */
+export type MarketplaceMoveDirection = "up" | "down";
+
 // ---------------------------------------------------------------------------
 // Skills realm
 // ---------------------------------------------------------------------------
@@ -937,6 +940,11 @@ export interface SkillsCatalogState {
 	activeSource: string;
 	addingMarketplace: boolean;
 	addMarketplace: (params: AddMarketplaceParams) => Promise<void>;
+	removeMarketplace: (id: string) => Promise<void>;
+	reorderMarketplace: (
+		id: string,
+		direction: MarketplaceMoveDirection
+	) => Promise<void>;
 	detail: SkillDetail | null;
 	detailError: string | null;
 	detailLoading: boolean;

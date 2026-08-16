@@ -375,6 +375,79 @@ impl CatalogSourceRegistry {
         self.save_custom()
     }
 
+    /// Remove a custom source and persist the updated source order.
+    pub fn remove_custom(&self, kind: CatalogKind, id: &str) -> Result<()> {
+        if self
+            .builtin
+            .get(&kind)
+            .is_some_and(|v| v.iter().any(|s| s.id() == id))
+        {
+            bail!("`{id}` is a built-in source and cannot be removed");
+        }
+
+        let removed = {
+            let mut custom = self
+                .custom
+                .write()
+                .map_err(|_| anyhow::anyhow!("custom sources lock poisoned"))?;
+            let Some(list) = custom.get_mut(&kind) else {
+                bail!("unknown custom source `{id}` for kind `{kind}`");
+            };
+            let original_len = list.len();
+            list.retain(|s| s.id() != id);
+            let removed = original_len != list.len();
+            let empty = list.is_empty();
+            if empty {
+                custom.remove(&kind);
+            }
+            removed
+        };
+
+        if !removed {
+            bail!("unknown custom source `{id}` for kind `{kind}`");
+        }
+        self.save_custom()
+    }
+
+    /// Move a custom source one slot up or down in its persisted order.
+    pub fn move_custom(&self, kind: CatalogKind, id: &str, delta: i32) -> Result<()> {
+        if !matches!(delta, -1 | 1) {
+            bail!("source order delta must be -1 or 1");
+        }
+        if self
+            .builtin
+            .get(&kind)
+            .is_some_and(|v| v.iter().any(|s| s.id() == id))
+        {
+            bail!("`{id}` is a built-in source and cannot be reordered");
+        }
+
+        let moved = {
+            let mut custom = self
+                .custom
+                .write()
+                .map_err(|_| anyhow::anyhow!("custom sources lock poisoned"))?;
+            let Some(list) = custom.get_mut(&kind) else {
+                bail!("unknown custom source `{id}` for kind `{kind}`");
+            };
+            let Some(index) = list.iter().position(|s| s.id() == id) else {
+                bail!("unknown custom source `{id}` for kind `{kind}`");
+            };
+            let target = index as i32 + delta;
+            if !(0..list.len() as i32).contains(&target) {
+                false
+            } else {
+                list.swap(index, target as usize);
+                true
+            }
+        };
+
+        if moved {
+            self.save_custom()?;
+        }
+        Ok(())
+    }
+
     /// Persist the active source id for a kind. Rejects an unknown id.
     pub async fn set_active(
         &self,

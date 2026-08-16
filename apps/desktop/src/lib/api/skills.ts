@@ -376,6 +376,45 @@ export async function addMarketplaceSource(
 	}
 }
 
+/** Remove a custom skill marketplace. Built-in registries are rejected by Core. */
+export async function removeMarketplaceSource(
+	target: ApiTarget,
+	id: string
+): Promise<void> {
+	const json = await request<{ ok?: boolean; error?: string }>(
+		target,
+		"/api/catalog/sources",
+		{
+			method: "DELETE",
+			body: { kind: "skill", id },
+		}
+	);
+	if (json.ok === false) {
+		throw new Error(json.error ?? "Failed to remove marketplace");
+	}
+}
+
+export type MarketplaceMoveDirection = "up" | "down";
+
+/** Move a custom skill marketplace one position in the marketplace list. */
+export async function reorderMarketplaceSource(
+	target: ApiTarget,
+	id: string,
+	direction: MarketplaceMoveDirection
+): Promise<void> {
+	const json = await request<{ ok?: boolean; error?: string }>(
+		target,
+		"/api/catalog/sources/reorder",
+		{
+			method: "POST",
+			body: { kind: "skill", id, direction },
+		}
+	);
+	if (json.ok === false) {
+		throw new Error(json.error ?? "Failed to reorder marketplace");
+	}
+}
+
 // ── Skill packs (#packs) ────────────────────────────────────────────────────
 //
 // A pack is a named collection of skills — a repo whose `SKILL.md` dirs are the

@@ -66,15 +66,17 @@ test.describe("skills catalog preview — open and close", () => {
 	});
 });
 
-test("all marketplaces groups the supported registry results", async ({
+test("all marketplaces stays visible while the popover manages sources", async ({
 	page,
 }) => {
 	await page.goto(STORY_URL);
 	await page.getByRole("button", { name: "Filters", exact: true }).click();
 
+	await expect(page.getByText("All marketplaces", { exact: true })).toHaveCount(0);
 	await expect(
-		page.getByText("All marketplaces", { exact: true })
+		page.getByRole("button", { name: "Add marketplace", exact: true })
 	).toBeVisible();
+	await expect(page.getByRole("combobox")).toHaveCount(1);
 	await expect(page.locator("h3", { hasText: "skills.sh" })).toBeVisible();
 	await expect(page.locator("h3", { hasText: "browse.sh" })).toBeVisible();
 	await expect(page.locator("h3", { hasText: "ClawHub" })).toBeVisible();
@@ -83,12 +85,22 @@ test("all marketplaces groups the supported registry results", async ({
 		page.locator("h3", { hasText: "Ryu Marketplace" })
 	).toBeVisible();
 
-	await page.getByRole("combobox").nth(1).click();
-	await page.getByRole("option", { name: "ClawHub", exact: true }).click();
+	await page.getByRole("button", { name: "Add marketplace", exact: true }).click();
+	await expect(page.getByText("Marketplaces", { exact: true })).toBeVisible();
+	await expect(page.getByText("Team Skills", { exact: true })).toBeVisible();
+	await expect(page.getByText("Research Lab", { exact: true })).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Move Research Lab up" })
+	).toBeVisible();
+	await expect(
+		page.getByRole("button", { name: "Delete Team Skills" })
+	).toBeVisible();
+
+	await page.getByRole("button", { name: "Delete Team Skills" }).click();
+	await expect(page.getByText("Team Skills", { exact: true })).toHaveCount(0);
+
 	await expect(
 		page.getByRole("button", { name: "Skill Auditor", exact: true })
 	).toBeVisible();
-	await expect(
-		page.getByRole("button", { name: "PDF Filler", exact: true })
-	).toHaveCount(0);
+	await expect(page.getByRole("button", { name: "PDF Filler", exact: true })).toBeVisible();
 });
