@@ -123,6 +123,11 @@ import { useAgents } from "@/src/hooks/useAgents.ts";
 import { useApps } from "@/src/hooks/useApps.ts";
 import { useComposerAutoQueue } from "@/src/hooks/useComposerAutoQueue.ts";
 import { useComposerDraftAutosave } from "@/src/hooks/useComposerDraftAutosave.ts";
+import {
+	composerSelectionToastDescription,
+	shouldShowComposerSelectionToast,
+	useComposerSelectionApplyMode,
+} from "@/src/hooks/useComposerSelectionApplyMode.ts";
 import { useComposerShortcutBindings } from "@/src/hooks/useComposerShortcutBindings.ts";
 import { useEngineModels } from "@/src/hooks/useEngineModels.ts";
 import {
@@ -1257,14 +1262,39 @@ export default function ChatPage({
 		return agent ? [mark(agent)] : [];
 	}, [agentId, teamId, agents, teams]);
 
+	// Whether a turn is in flight, for the pick notice below. A ref because the
+	// notice callback is created here, above `useChat`'s `status` (assigned into
+	// this ref right after that hook), and reading it live would be a TDZ error.
+	const turnInFlightRef = useRef(false);
+	const [composerSelectionApplyMode] = useComposerSelectionApplyMode();
+	const announceComposerSelection = useCallback(
+		(setting: string, value: string) => {
+			// An idle picker already makes the next message's target obvious. The
+			// toast is only useful when a response is in flight and the pick cannot
+			// change that response.
+			if (!shouldShowComposerSelectionToast(turnInFlightRef.current)) {
+				return;
+			}
+			toast.info({
+				id: "ryu-composer-selection-applied",
+				title: `${setting}: ${value}`,
+				description: composerSelectionToastDescription(
+					composerSelectionApplyMode
+				),
+			});
+		},
+		[composerSelectionApplyMode]
+	);
+
 	const handleModelChange = useCallback(
 		(modelId: string) => {
 			setSelectedModel(modelId);
 			if (agentId) {
 				setAgentModel(agentId, modelId);
 			}
+			announceComposerSelection("Model", modelId);
 		},
-		[agentId]
+		[agentId, announceComposerSelection]
 	);
 
 	// ── ACP session controls (Zed-style, data-driven per active agent) ──
@@ -1299,28 +1329,17 @@ export default function ChatPage({
 		AcpConfigOption[] | null
 	>(null);
 
-	// Whether a turn is in flight, for the pick notice below. A ref because the
-	// notice callback is created here, ABOVE `useChat`'s `status` (assigned into
-	// this ref right after that hook), and reading it live would be a TDZ error.
-	const turnInFlightRef = useRef(false);
-	// Changing Approval / Model / Thinking mid-chat is silent by design: the pick
-	// is sticky, rides the NEXT turn's request body, and Core re-applies it to the
-	// live ACP session before that turn's prompt (`apply_turn_config`). Nothing on
-	// screen moves, so without this the user has no way to know the switch took —
-	// the "did my bypass-permissions click do anything?" gap. One fixed toast slot
-	// so dragging the thinking slider across detents replaces in place instead of
+	// Changing Approval / Model / Thinking mid-chat is sticky: the pick rides the
+	// next request body and Core re-applies it to the live ACP session before that
+	// turn's prompt (`apply_turn_config`). The busy-only toast closes the gap where
+	// nothing on screen moves, while keeping idle picker changes quiet. One fixed
+	// toast slot means dragging the thinking slider replaces in place instead of
 	// stacking a toast per detent.
 	const handleAcpSelectionApplied = useCallback(
 		(setting: string, value: string) => {
-			toast.info({
-				id: "ryu-acp-selection-applied",
-				title: `${setting}: ${value}`,
-				description: turnInFlightRef.current
-					? "Applies after the current response."
-					: "Applies from your next message.",
-			});
+			announceComposerSelection(setting, value);
 		},
-		[]
+		[announceComposerSelection]
 	);
 
 	const acp = useComposerAcpSections({
@@ -5029,7 +5048,11 @@ export default function ChatPage({
 		agentId,
 		teamId,
 		onCreateAgent: () => openCreateAgent(),
-		onSelectTeam: (id) => setTeamId(id),
+		onSelectTeam: (id) => {
+			setTeamId(id);
+			const team = teams.find((candidate) => candidate.id === id);
+			announceComposerSelection("Agent", team?.name ?? "Team");
+		},
 		onSelectAgent: (id) => {
 			setTeamId(null);
 			setAgentId(id);
@@ -5038,6 +5061,8 @@ export default function ChatPage({
 			// is why nothing reads this key except a fresh composer's initializer.
 			rememberLastUsedAgent(id);
 			setSelectedModel(getAgentModel(id));
+			const selectedAgent = agents.find((candidate) => candidate.id === id);
+			announceComposerSelection("Agent", selectedAgent?.name ?? id);
 		},
 		modelOptions,
 		model: effectiveModel,

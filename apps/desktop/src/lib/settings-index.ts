@@ -249,6 +249,14 @@ export const SETTINGS_ENTRIES: SettingsEntry[] = [
 		label: "Queued messages send",
 	},
 	{
+		id: "general.chats.composer-selection-changes",
+		dialog: "app",
+		section: "general",
+		group: "Chats",
+		label: "Composer selection changes",
+		keywords: "agent model effort next turn next user message",
+	},
+	{
 		id: "general.terminal.terminal-shell",
 		dialog: "app",
 		section: "general",

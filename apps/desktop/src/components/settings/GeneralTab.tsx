@@ -29,6 +29,10 @@ import { useAutoHideTitleBar } from "@/src/hooks/useAutoHideTitleBar.ts";
 import { useAutoImportThreads } from "@/src/hooks/useAutoImportThreads.ts";
 import { useAutoSetupImportSetting } from "@/src/hooks/useAutoSetupImportSetting.ts";
 import {
+	type ComposerSelectionApplyMode,
+	useComposerSelectionApplyMode,
+} from "@/src/hooks/useComposerSelectionApplyMode.ts";
+import {
 	setNodeTabOverride,
 	useNodeTabOverride,
 } from "@/src/hooks/useNodeDisplayMode.ts";
@@ -83,6 +87,14 @@ const QUEUE_DRAIN_OPTIONS: { value: QueueDrainMode; label: string }[] = [
 	{ value: "send-all", label: "Send all together" },
 ];
 
+const COMPOSER_SELECTION_APPLY_OPTIONS: {
+	value: ComposerSelectionApplyMode;
+	label: string;
+}[] = [
+	{ value: "next-turn", label: "On the next turn" },
+	{ value: "next-user-message", label: "On the next user message" },
+];
+
 // Which shell the built-in terminal and git actions run their commands through.
 // "auto" lets the Rust side pick the OS default; every other value is an
 // allowlisted shell name understood by the `shell_execute` command.
@@ -126,6 +138,8 @@ export function GeneralTab() {
 	const tabSwitchBehavior = useTabSwitchBehavior();
 	const startupBehavior = useStartupBehavior();
 	const queueDrainMode = useQueueDrainMode();
+	const [composerSelectionApplyMode, setComposerSelectionApplyModeSetting] =
+		useComposerSelectionApplyMode();
 	const terminalShell = useWorkspaceStore((s) => s.terminalShell);
 	const setTerminalShell = useWorkspaceStore((s) => s.setTerminalShell);
 	const [autoImportThreads, setAutoImportThreads] = useAutoImportThreads();
@@ -475,6 +489,35 @@ export function GeneralTab() {
 						}
 						description="When you send messages while an agent is still replying, they wait in a queue. Auto delivers all pending messages together at the next safe turn boundary, like Claude Code; the other choices let you choose oldest-first, latest-first, or send-all behavior explicitly."
 						title="Queued messages send"
+					/>
+					<SettingsItem
+						actions={
+							<Select
+								items={COMPOSER_SELECTION_APPLY_OPTIONS}
+								onValueChange={(value) => {
+									if (value === "next-turn" || value === "next-user-message") {
+										setComposerSelectionApplyModeSetting(value);
+									}
+								}}
+								value={composerSelectionApplyMode}
+							>
+								<SelectTrigger
+									className="h-8 w-56 flex-shrink-0 text-sm"
+									id="composer-selection-apply-mode-select"
+								>
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									{COMPOSER_SELECTION_APPLY_OPTIONS.map((option) => (
+										<SelectItem key={option.value} value={option.value}>
+											{option.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						}
+						description="Choose when changes to the composer’s agent, model, and effort controls take effect. The confirmation toast only appears while an agent is working."
+						title="Composer selection changes"
 					/>
 				</SettingsGroup>
 			</SettingsSection>

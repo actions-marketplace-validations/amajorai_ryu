@@ -264,6 +264,11 @@ export const SYNCABLE_KEYS: SyncableKey[] = [
 		label: "How queued messages send (Auto / Claude Code)",
 		group: "chat",
 	},
+	{
+		key: "ryu:composer-selection-apply-mode",
+		label: "Composer selection changes",
+		group: "chat",
+	},
 	{ key: "ryu:assistant-mode", label: "Assistant mode", group: "chat" },
 	{
 		key: "ryu:auto-import-agent-threads",
