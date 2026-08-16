@@ -25,7 +25,6 @@ $installDir = if ($env:RYU_INSTALL_DIR) { $env:RYU_INSTALL_DIR } else { Join-Pat
 $binaries   = @('ryu-core', 'ryu-gateway', 'ryu-cli')
 $progressFormat = if ($env:RYU_PROGRESS_FORMAT) { $env:RYU_PROGRESS_FORMAT } else { 'human' }
 $startCore  = if ($env:RYU_START_CORE) { $env:RYU_START_CORE } else { '1' }
-$installDefaults = if ($env:RYU_INSTALL_DEFAULTS) { $env:RYU_INSTALL_DEFAULTS } else { '1' }
 $coreBind   = if ($env:RYU_CORE_BIND) { $env:RYU_CORE_BIND } else { '127.0.0.1:7980' }
 $coreUrl    = if ($env:RYU_CORE_URL) { $env:RYU_CORE_URL } else { 'http://127.0.0.1:7980' }
 $installMarker = if ($env:RYU_INSTALL_MARKER) { $env:RYU_INSTALL_MARKER } else { 'latest' }
@@ -78,9 +77,10 @@ for ($index = 0; $index -lt $binaries.Count; $index++) {
   $out   = Join-Path $installDir "$bin.exe"
   $before = $index * 15
   $after = ($index + 1) * 15
-  if ((Test-Path $out) -and -not $forceInstall) {
+  $markerPath = "$out.version"
+  $markerMatches = (Test-Path $markerPath) -and ((Get-Content -Raw -Path $markerPath).Trim() -eq $installMarker)
+  if ((Test-Path $out) -and $markerMatches -and -not $forceInstall) {
     Write-Host "  $bin already installed"
-    Set-Content -Path "$out.version" -Value $installMarker -NoNewline
     Emit-Progress 'binary' $bin 'skipped' $after
     continue
   }
@@ -167,13 +167,8 @@ if ($startCore -eq '1') {
   if (-not $healthy) { Fail-Install 'ryu-core' "Ryu Core did not become healthy at $coreUrl" }
   Emit-Progress 'core' 'ryu-core' 'complete' 75
 
-  if ($installDefaults -eq '1') {
-    Write-Host '  Core is provisioning bundled models, engines, skills, and defaults'
-    Emit-Progress 'defaults' 'bundled-defaults' 'started' 80
-  } else {
-    Write-Host '  bundled defaults were not requested'
-    Emit-Progress 'defaults' 'bundled-defaults' 'skipped' 80
-  }
+  Write-Host '  Core is provisioning bundled models, engines, skills, and defaults'
+  Emit-Progress 'defaults' 'bundled-defaults' 'started' 80
   Write-Host '  Island and Ghost installs are disabled for this release'
   Emit-Progress 'defaults' 'island' 'skipped' 85
   Emit-Progress 'defaults' 'ghost' 'skipped' 85

@@ -30099,34 +30099,226 @@ async fn okf_export(
     }
 }
 
-// ── Skills catalog (browse + install from skills.sh, all logic in Core) ──────
+// ── Skills catalog (browse + install from every registered source) ──────────
 //
-// The desktop/mobile/extension are pure GUI layers over these endpoints. Uses
-// the public, no-key skills.sh endpoints. See `crate::skills_catalog`.
+// The desktop/mobile/extension are pure GUI layers over these endpoints. The
+// source adapters live behind `catalog_source`; the route also exposes an
+// Hermes-style live "all marketplaces" view that fans out to each registered
+// source and stamps every card with its originating marketplace.
 
-/// Resolve the active Skill catalog [`Source`]. Defaults to the built-in
-/// skills.sh source when nothing resolves.
-async fn active_skill_source(state: &ServerState) -> Option<crate::catalog_source::Source> {
+/// The per-request selector that means "build one catalog from every Skill
+/// source". It is a view, not a persisted source, so it never appears in
+/// `/api/catalog/sources` and cannot become the node-global active preference.
+const SKILL_ALL_SOURCES_ID: &str = "all";
+
+/// A wedged marketplace must not hold the whole Skills page hostage. The all
+/// view is best-effort: a source that fails or times out contributes no cards,
+/// while the other registries still render.
+const SKILL_ALL_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Resolve which Skill catalog source a request addresses.
+///
+/// An explicit, registered `?source=` wins over the node-global preference;
+/// `?source=all` addresses the live federated view. Unknown/stale ids degrade
+/// to the persisted active source for compatibility with older clients.
+async fn resolve_skill_source_id(
+    state: &ServerState,
+    requested: Option<&str>,
+) -> String {
+    if let Some(id) = requested.map(str::trim).filter(|id| !id.is_empty()) {
+        if id == SKILL_ALL_SOURCES_ID
+            || state
+                .catalog_sources
+                .source_by_id(crate::catalog_source::CatalogKind::Skill, id)
+                .is_some()
+        {
+            return id.to_string();
+        }
+    }
     state
         .catalog_sources
-        .get_active(
+        .active_id(
             crate::catalog_source::CatalogKind::Skill,
             &state.preferences,
         )
         .await
+        .unwrap_or_else(|| "skills-sh".to_string())
 }
 
-/// `GET /api/skills/catalog?query=&limit=&installed_only=`
+/// The sources visited by the live all-marketplaces view, in picker order.
+fn all_skill_view_sources(
+    state: &ServerState,
+) -> Vec<crate::catalog_source::SourceMeta> {
+    state
+        .catalog_sources
+        .sources_for(crate::catalog_source::CatalogKind::Skill)
+}
+
+/// Does a normalized Skill card match the query? Source adapters are allowed to
+/// filter upstream, but this second check keeps the merged view honest for bulk
+/// indexes and custom marketplaces that return an unfiltered page.
+fn skill_card_matches_query(card: &serde_json::Value, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    ["id", "name", "slug", "source", "description"]
+        .into_iter()
+        .filter_map(|key| card.get(key).and_then(serde_json::Value::as_str))
+        .any(|value| value.to_ascii_lowercase().contains(needle))
+}
+
+/// Pull the `skills` array from one source's normalized response.
+fn skill_cards_from_value(value: serde_json::Value) -> Vec<serde_json::Value> {
+    value
+        .get("skills")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Build a live, de-duplicated catalog from every registered Skill source.
 ///
-/// Source-aware (#463): the active Skill source (skills.sh by default, or a
-/// custom Claude plugin marketplace) owns search. The installed-only view is
-/// always source-agnostic (it scans the on-disk skills dir), so it uses the
-/// skills.sh helper which reads local state.
+/// This is intentionally a runtime builder rather than a generated checked-in
+/// index: each adapter already owns its upstream shape, detail URL, trust label,
+/// and install semantics. The fan-out mirrors Hermes' `build_skills_index.py`,
+/// but keeps the result fresh and lets custom marketplaces participate without a
+/// Ryu release. The response is bounded per source and a failed source is
+/// skipped rather than blanking the whole store.
+async fn all_skill_catalog_cards(
+    state: &ServerState,
+    query: &str,
+    limit: usize,
+    installed_only: bool,
+) -> Vec<serde_json::Value> {
+    let source_pairs: Vec<_> = all_skill_view_sources(state)
+        .into_iter()
+        .filter_map(|meta| {
+            state
+                .catalog_sources
+                .source_by_id(crate::catalog_source::CatalogKind::Skill, &meta.id)
+                .map(|source| (meta, source))
+        })
+        .collect();
+    let needle = query.trim().to_ascii_lowercase();
+    let futures = source_pairs.into_iter().map(|(meta, source)| {
+        let request = crate::catalog_source::CatalogQuery {
+            query: query.to_string(),
+            limit,
+            extra: {
+                let mut extra = serde_json::Map::new();
+                extra.insert(
+                    "installed_only".to_string(),
+                    serde_json::Value::String(installed_only.to_string()),
+                );
+                extra
+            },
+            ..Default::default()
+        };
+        async move {
+            let result = tokio::time::timeout(
+                SKILL_ALL_SOURCE_TIMEOUT,
+                source.search(&state.client, &request),
+            )
+            .await;
+            (meta, result)
+        }
+    });
+    let results = futures_util::future::join_all(futures).await;
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (meta, result) in results {
+        let value = match result {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    source = %meta.id,
+                    error = %error,
+                    "skill source failed in the all-marketplaces view; skipping it"
+                );
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    source = %meta.id,
+                    timeout_secs = SKILL_ALL_SOURCE_TIMEOUT.as_secs(),
+                    "skill source timed out in the all-marketplaces view; skipping it"
+                );
+                continue;
+            }
+        };
+        for mut card in skill_cards_from_value(value) {
+            if !skill_card_matches_query(&card, &needle)
+                || (installed_only
+                    && card.get("installed").and_then(serde_json::Value::as_bool) != Some(true))
+            {
+                continue;
+            }
+            let Some(id) = card
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(object) = card.as_object_mut() {
+                object.insert("catalog_source_id".to_string(), json!(meta.id));
+                object.insert(
+                    "catalog_source_name".to_string(),
+                    json!(meta.display_name),
+                );
+            }
+            out.push(card);
+        }
+    }
+    out
+}
+
+/// Resolve detail for a card in the all view when an older client did not send
+/// the card's source stamp. New clients send the stamp and take the fast path;
+/// this fallback keeps direct API callers and deep links useful.
+async fn all_skill_catalog_detail(
+    state: &ServerState,
+    id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    for meta in all_skill_view_sources(state) {
+        let Some(source) = state
+            .catalog_sources
+            .source_by_id(crate::catalog_source::CatalogKind::Skill, &meta.id)
+        else {
+            continue;
+        };
+        match tokio::time::timeout(
+            SKILL_ALL_SOURCE_TIMEOUT,
+            source.detail(&state.client, id),
+        )
+        .await
+        {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(error)) => {
+                tracing::debug!(source = %meta.id, error = %error, "skill detail source did not claim id")
+            }
+            Err(_) => {
+                tracing::debug!(source = %meta.id, "skill detail source timed out")
+            }
+        }
+    }
+    Err(anyhow::anyhow!("skill `{id}` was not found in any registered source"))
+}
+
+/// `GET /api/skills/catalog?query=&limit=&installed_only=&source=`
+///
+/// An explicit `source` is request-local. `source=all` builds one merged view
+/// from skills.sh, GitHub taps, browse.sh, ClawHub, LobeHub, Ryu Marketplace,
+/// and any user-added Claude marketplaces.
 #[utoipa::path(
     get,
     path = "/api/skills/catalog",
     tag = "Skills",
-    summary = "Browse the skills catalog (skills.sh)",
+    summary = "Browse the federated skills catalog",
     responses((status = 200, description = "OK", body = serde_json::Value))
 )]
 async fn skills_catalog_list(
@@ -30142,42 +30334,54 @@ async fn skills_catalog_list(
         .get("installed_only")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
+    let source_id = resolve_skill_source_id(&state, params.get("source").map(String::as_str)).await;
 
-    // Marketplace sources have no concept of a local installed-only view, so the
-    // installed query always uses the skills.sh helper (it reads the on-disk dir).
-    if !installed_only {
-        if let Some(source) = active_skill_source(&state).await {
-            if !matches!(source, crate::catalog_source::Source::SkillsSh(_)) {
-                let mut q = crate::catalog_source::CatalogQuery {
-                    query: query.to_string(),
-                    limit,
-                    ..Default::default()
-                };
-                q.extra.insert(
-                    "installed_only".to_string(),
-                    serde_json::Value::String(installed_only.to_string()),
-                );
-                return match source.search(&state.client, &q).await {
-                    Ok(value) => (StatusCode::OK, Json(value)),
-                    Err(e) => (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": e.to_string(), "skills": [] })),
-                    ),
-                };
-            }
-        }
+    if source_id == SKILL_ALL_SOURCES_ID {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "skills": all_skill_catalog_cards(&state, query, limit, installed_only).await,
+            })),
+        );
     }
 
-    match crate::skills_catalog::search_skills(&state.client, query, limit, installed_only).await {
-        Ok(skills) => (StatusCode::OK, Json(json!({ "skills": skills }))),
-        Err(e) => (
+    let Some(source) = state
+        .catalog_sources
+        .source_by_id(crate::catalog_source::CatalogKind::Skill, &source_id)
+    else {
+        return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string(), "skills": [] })),
+            Json(json!({ "error": "skill catalog source unavailable", "skills": [] })),
+        );
+    };
+    let mut request = crate::catalog_source::CatalogQuery {
+        query: query.to_string(),
+        limit,
+        ..Default::default()
+    };
+    request.extra.insert(
+        "installed_only".to_string(),
+        serde_json::Value::String(installed_only.to_string()),
+    );
+    match source.search(&state.client, &request).await {
+        Ok(mut value) => {
+            if installed_only {
+                if let Some(cards) = value.get_mut("skills").and_then(serde_json::Value::as_array_mut) {
+                    cards.retain(|card| {
+                        card.get("installed").and_then(serde_json::Value::as_bool) == Some(true)
+                    });
+                }
+            }
+            (StatusCode::OK, Json(value))
+        }
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string(), "skills": [] })),
         ),
     }
 }
 
-/// `GET /api/skills/catalog/detail?id=owner%2Frepo%2Fslug`
+/// `GET /api/skills/catalog/detail?id=owner%2Frepo%2Fslug&source=`
 #[utoipa::path(
     get,
     path = "/api/skills/catalog/detail",
@@ -30195,26 +30399,30 @@ async fn skills_catalog_detail(
             Json(json!({ "error": "missing required `id` query parameter" })),
         );
     };
-    // Source-aware (#463): a marketplace source resolves detail from its manifest.
-    if let Some(source) = active_skill_source(&state).await {
-        if !matches!(source, crate::catalog_source::Source::SkillsSh(_)) {
-            return match source.detail(&state.client, id).await {
-                Ok(value) => (StatusCode::OK, Json(value)),
-                Err(e) => (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": e.to_string() })),
-                ),
-            };
-        }
+    let source_id = resolve_skill_source_id(&state, params.get("source").map(String::as_str)).await;
+    if source_id == SKILL_ALL_SOURCES_ID {
+        return match all_skill_catalog_detail(&state, id).await {
+            Ok(value) => (StatusCode::OK, Json(value)),
+            Err(error) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": error.to_string() })),
+            ),
+        };
     }
-    match crate::skills_catalog::skill_detail(&state.client, id).await {
-        Ok(detail) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(detail).unwrap_or_default()),
-        ),
-        Err(e) => (
+    let Some(source) = state
+        .catalog_sources
+        .source_by_id(crate::catalog_source::CatalogKind::Skill, &source_id)
+    else {
+        return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": e.to_string() })),
+            Json(json!({ "error": "skill catalog source unavailable" })),
+        );
+    };
+    match source.detail(&state.client, id).await {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.to_string() })),
         ),
     }
 }
@@ -30222,6 +30430,8 @@ async fn skills_catalog_detail(
 #[derive(serde::Deserialize)]
 struct SkillInstallBody {
     id: String,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// `GET /api/skills/updates` — installed (through-Ryu) skills whose local
@@ -30239,7 +30449,7 @@ async fn skills_updates(State(state): State<ServerState>) -> Json<serde_json::Va
     Json(json!({ "updates": updates }))
 }
 
-/// `POST /api/skills/catalog/install { id }` — installs into the universal
+/// `POST /api/skills/catalog/install { id, source? }` — installs into the universal
 /// `~/.claude/skills/<slug>/SKILL.md` and reloads the live skill registry so the
 /// Skill is usable immediately (and visible to Claude Code / the skills CLI).
 ///
@@ -30260,6 +30470,16 @@ async fn skills_catalog_install(
     headers: axum::http::HeaderMap,
     Json(body): Json<SkillInstallBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let source_id = resolve_skill_source_id(&state, body.source.as_deref()).await;
+    if source_id == SKILL_ALL_SOURCES_ID {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "install requires the card's concrete source when browsing all marketplaces",
+            })),
+        );
+    }
     // Forward the caller's bearer to the marketplace install handoff (#491) so a
     // PAID Ryu-Marketplace skill is denied unless the buyer org holds a license.
     let buyer_token = buyer_bearer_from_headers(&headers);
@@ -30268,18 +30488,21 @@ async fn skills_catalog_install(
     // download center (#456): it shows in the overlay as active→done/failed and
     // is cancelable, without byte progress.
     let id = body.id.clone();
-    let label = format!("Skill: {id}");
+    let label = format!("Skill: {id} ({source_id})");
     let installed = state
         .downloads
         .register_indeterminate(
-            format!("skill:{id}"),
+            format!("skill:{source_id}:{id}"),
             crate::downloads::DownloadKind::Skill,
             label,
             crate::catalog_source::with_buyer_token(buyer_token, async {
                 // Dispatch through the active source's skill-install path. A
                 // non-skill source returns Ok(None), so fall back to the
                 // skills.sh helper for the built-in source.
-                let installed = match active_skill_source(&state).await {
+                let installed = match state
+                    .catalog_sources
+                    .source_by_id(crate::catalog_source::CatalogKind::Skill, &source_id)
+                {
                     Some(source) => source.install_skill(&state.client, &id).await,
                     None => crate::skills_catalog::install_skill(&state.client, &id)
                         .await

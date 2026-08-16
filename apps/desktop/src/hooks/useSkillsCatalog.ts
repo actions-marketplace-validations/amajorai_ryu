@@ -5,6 +5,7 @@
 // navigating back to a Skill you already opened is instant. Install runs as a
 // mutation with an optimistic cache update. All data decisions live in Core.
 
+import { ALL_SKILL_SOURCES_ID } from "@ryu/marketplace/catalog/types";
 import {
 	keepPreviousData,
 	useMutation,
@@ -25,7 +26,6 @@ import {
 	type SkillCatalogSource,
 	type SkillDetail,
 	searchSkills,
-	selectSkillSource,
 	setSkillActive,
 } from "@/src/lib/api/skills.ts";
 import { skillOrg } from "@/src/lib/catalog/friendly.ts";
@@ -41,7 +41,7 @@ import { useActiveNode } from "./useActiveNode.ts";
 export type SkillSort = "popular" | "name";
 
 export interface UseSkillsCatalogResult {
-	/** Id of the active catalog source (skills.sh by default). */
+	/** Id of the per-view catalog source (`all` by default). */
 	activeSource: string;
 	/** Whether a marketplace add is in flight. */
 	addingMarketplace: boolean;
@@ -68,9 +68,9 @@ export interface UseSkillsCatalogResult {
 	query: string;
 	select: (id: string) => void;
 	selectedId: string | null;
-	/** Whether a source switch is in flight. */
+	/** Kept for the shared Store contract; source selection is local and instant. */
 	selectingSource: boolean;
-	/** Switch the active source, then refetch the skills list. */
+	/** Narrow the current view to one source, then refetch the skills list. */
 	selectSource: (id: string) => void;
 	setInstalledOnly: (v: boolean) => void;
 	setOrg: (o: string) => void;
@@ -80,7 +80,7 @@ export interface UseSkillsCatalogResult {
 	setSort: (s: SkillSort) => void;
 	skills: SkillCard[];
 	sort: SkillSort;
-	/** Every source available for the skill kind (skills.sh + marketplaces). */
+	/** Every source available for the skill kind (shown under All marketplaces). */
 	sources: SkillCatalogSource[];
 	/** Id of the skill whose enable/disable toggle is in flight, if any. */
 	togglingSkill: string | null;
@@ -131,6 +131,7 @@ export function skillListQuery(
 				query: params.query,
 				installedOnly: params.installedOnly,
 				limit: FETCH_LIMIT,
+				source: params.source,
 			}),
 	};
 }
@@ -157,6 +158,7 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 	const [sort, setSort] = useState<SkillSort>("popular");
 	const [org, setOrg] = useState("");
 	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [selectedSource, setSelectedSource] = useState<string | null>(null);
 	const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 	const [togglingSkill, setTogglingSkill] = useState<string | null>(null);
 
@@ -167,26 +169,22 @@ export function useSkillsCatalog(initialQuery = ""): UseSkillsCatalogResult {
 		setVisibleCount(PAGE_SIZE);
 	}, [debouncedQuery, installedOnly, sort, org]);
 
-	// Catalog sources: list + active selection live in Core. Selecting a source
-	// or adding a marketplace re-keys the skills list against the new source.
+	// Catalog sources are listed by Core, while the selected view is local to this
+	// Store instance. This mirrors the Apps catalog: two open clients cannot
+	// re-point one another by writing a node-global preference, and the default is
+	// the live federated `all` view.
 	const sourcesQuery = useQuery(skillSourcesQuery(target));
-	const activeSource = sourcesQuery.data?.active ?? "";
-
-	const selectSourceMutation = useMutation({
-		mutationFn: (id: string) => selectSkillSource({ url, token }, id),
-		onSuccess: () => {
-			Promise.resolve(
-				qc.invalidateQueries({ queryKey: ["skills", "sources", url] })
-			).catch(() => undefined);
-			Promise.resolve(
-				qc.invalidateQueries({ queryKey: ["skills", "list", url] })
-			).catch(() => undefined);
-		},
-	});
-	const selectSource = useCallback(
-		(id: string) => selectSourceMutation.mutate(id),
-		[selectSourceMutation]
-	);
+	const sources = sourcesQuery.data?.sources ?? [];
+	const [sourceOverride, setSourceOverride] = useState<string | null>(null);
+	const activeSource = sourceOverride ?? ALL_SKILL_SOURCES_ID;
+	const selectSource = useCallback((id: string) => {
+		if (!id) {
+			return;
+		}
+		setSourceOverride(id);
+		setSelectedId(null);
+		setSelectedSource(null);
+	}, []);
 
 	const addMarketplaceMutation = useMutation({
 		mutationFn: (params: AddMarketplaceParams) =>

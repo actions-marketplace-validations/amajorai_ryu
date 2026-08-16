@@ -290,7 +290,6 @@ async fn run_unified_installer(app: &AppHandle) -> Result<(), String> {
         .env("RYU_PROGRESS_FORMAT", "json")
         .env("RYU_INSTALL_MARKER", app_version(app))
         .env("RYU_START_CORE", "1")
-        .env("RYU_INSTALL_DEFAULTS", "1")
         .env("RYU_CORE_BIND", core_bind)
         .env("RYU_CORE_URL", core_url)
         .env("RYU_CORE_LOG", core_log)

@@ -1,15 +1,18 @@
 // apps/desktop/src/lib/api/skills.ts
 //
 // Typed client for Core's skills-catalog endpoints (`/api/skills/catalog*`).
-// Browse and install Agent Skills from the public skills.sh directory. ALL logic
-// (search, featured ranking, install into ~/.ryu/skills, installed detection)
-// lives in Core over the public no-key skills.sh endpoints — this module only
-// shapes requests and parses responses, so desktop/mobile/extension reuse it.
+// Browse and install Agent Skills from the federated public registries. ALL logic
+// (search, source fan-out, install into ~/.ryu/skills, installed detection)
+// lives in Core — this module only shapes requests and parses responses, so
+// desktop/mobile/extension reuse it.
 
 import { type ApiTarget, buyerTokenHeader, request } from "./client.ts";
 
 /** A Skill row in the left-hand selector. */
 export interface SkillCard {
+	/** Source id/name stamped by Core when the card came from the all-marketplaces view. */
+	catalogSourceId?: string | null;
+	catalogSourceName?: string | null;
 	/** One-line "what this does". Core fills it for INSTALLED cards from the
 	 *  on-disk SKILL.md front matter and for the detail card; it is absent for a
 	 *  browse result, because skills.sh's search payload carries no description
@@ -22,6 +25,8 @@ export interface SkillCard {
 	name: string;
 	slug: string;
 	source: string;
+	/** Registry-level trust claim: builtin, trusted, or community. */
+	trustLevel?: string | null;
 }
 
 /** A file inside a Skill package. */
@@ -61,6 +66,8 @@ export interface SkillDetail {
 }
 
 interface CardWire {
+	catalog_source_id?: string | null;
+	catalog_source_name?: string | null;
 	description?: string | null;
 	downloads?: number;
 	id: string;
@@ -69,10 +76,13 @@ interface CardWire {
 	name?: string;
 	slug?: string;
 	source?: string;
+	trust_level?: string | null;
 }
 
 function toCard(w: CardWire): SkillCard {
 	return {
+		catalogSourceId: w.catalog_source_id ?? null,
+		catalogSourceName: w.catalog_source_name ?? null,
 		id: w.id,
 		source: w.source ?? "",
 		slug: w.slug ?? "",
@@ -85,6 +95,7 @@ function toCard(w: CardWire): SkillCard {
 		// the card renderer treats both as "fall back to the provenance line", but
 		// a single shape keeps the type honest.
 		description: w.description ?? null,
+		trustLevel: w.trust_level ?? null,
 	};
 }
 
@@ -92,6 +103,8 @@ export interface SkillSearchParams {
 	installedOnly?: boolean;
 	limit?: number;
 	query?: string;
+	/** Per-request source id; `all` builds the live federated view. */
+	source?: string;
 }
 
 /** Search/browse the skills directory. Core does ranking + installed lookup. */
@@ -109,6 +122,9 @@ export async function searchSkills(
 	if (params.installedOnly) {
 		q.set("installed_only", "true");
 	}
+	if (params.source) {
+		q.set("source", params.source);
+	}
 	const json = await request<{ skills?: CardWire[] }>(
 		target,
 		`/api/skills/catalog?${q.toString()}`
@@ -119,7 +135,8 @@ export async function searchSkills(
 /** Fetch a Skill's detail (SKILL.md docs, description, file list). */
 export async function fetchSkillDetail(
 	target: ApiTarget,
-	id: string
+	id: string,
+	source?: string
 ): Promise<SkillDetail> {
 	const json = await request<{
 		card: CardWire;
@@ -137,7 +154,10 @@ export async function fetchSkillDetail(
 			security_audits?: SkillAudit[];
 		};
 		url?: string;
-	}>(target, `/api/skills/catalog/detail?id=${encodeURIComponent(id)}`);
+	}>(
+		target,
+		`/api/skills/catalog/detail?id=${encodeURIComponent(id)}${source ? `&source=${encodeURIComponent(source)}` : ""}`
+	);
 	const metadata = json.metadata ?? {};
 	return {
 		card: toCard(json.card),
@@ -193,7 +213,8 @@ export async function listSkillUpdates(
 /** Install a Skill into ~/.ryu/skills and hot-reload Core's skill registry. */
 export async function installSkill(
 	target: ApiTarget,
-	id: string
+	id: string,
+	source?: string
 ): Promise<SkillInstallResult> {
 	const json = await request<{
 		success?: boolean;
@@ -201,7 +222,7 @@ export async function installSkill(
 		result?: { slug: string; path: string };
 	}>(target, "/api/skills/catalog/install", {
 		method: "POST",
-		body: { id },
+		body: { id, ...(source ? { source } : {}) },
 		// Forward the buyer's control-plane session so a PAID marketplace item's
 		// entitlement check (#491) can resolve the org + license. Free items ignore it.
 		headers: buyerTokenHeader(),

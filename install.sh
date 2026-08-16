@@ -26,7 +26,6 @@ INSTALL_DIR="${RYU_INSTALL_DIR:-$HOME/.ryu/bin}"
 BINARIES="ryu-core ryu-gateway ryu-cli"
 PROGRESS_FORMAT="${RYU_PROGRESS_FORMAT:-human}"
 START_CORE="${RYU_START_CORE:-1}"
-INSTALL_DEFAULTS="${RYU_INSTALL_DEFAULTS:-1}"
 CORE_BIND="${RYU_CORE_BIND:-127.0.0.1:7980}"
 CORE_URL="${RYU_CORE_URL:-http://127.0.0.1:7980}"
 INSTALL_MARKER="${RYU_INSTALL_MARKER:-latest}"
@@ -101,14 +100,26 @@ verify() { # <file> <sha_url>
     info "RYU_SKIP_CHECKSUM=1 — skipping checksum verification (not recommended)"
     return 0
   fi
-  [ -z "$sha_cmd" ] && err "no sha256 tool (sha256sum/shasum) on PATH — install one, or set RYU_SKIP_CHECKSUM=1 to bypass verification (not recommended)"
+  if [ -z "$sha_cmd" ]; then
+    printf '%s\n' 'error: no sha256 tool (sha256sum/shasum) on PATH — install one, or set RYU_SKIP_CHECKSUM=1 to bypass verification (not recommended)' >&2
+    return 1
+  fi
   tmp_sha="$file.sha256"
-  dl "$sha_url" "$tmp_sha" || err "could not download checksum $sha_url — refusing to install an unverified binary (set RYU_SKIP_CHECKSUM=1 to bypass)"
+  if ! dl "$sha_url" "$tmp_sha"; then
+    printf 'error: could not download checksum %s — refusing to install an unverified binary (set RYU_SKIP_CHECKSUM=1 to bypass)\n' "$sha_url" >&2
+    return 1
+  fi
   want="$(awk '{print $1; exit}' "$tmp_sha")"
   got="$($sha_cmd "$file" | awk '{print $1}')"
   rm -f "$tmp_sha"
-  [ "${#want}" -eq 64 ] || err "malformed checksum file at $sha_url — refusing to install (set RYU_SKIP_CHECKSUM=1 to bypass)"
-  [ "$want" = "$got" ] || err "checksum mismatch for $(basename "$file") (want $want, got $got)"
+  if [ "${#want}" -ne 64 ]; then
+    printf 'error: malformed checksum file at %s — refusing to install (set RYU_SKIP_CHECKSUM=1 to bypass)\n' "$sha_url" >&2
+    return 1
+  fi
+  if [ "$want" != "$got" ]; then
+    printf 'error: checksum mismatch for %s (want %s, got %s)\n' "$(basename "$file")" "$want" "$got" >&2
+    return 1
+  fi
 }
 
 # --- install ----------------------------------------------------------------
@@ -127,9 +138,9 @@ install_binary() {
   before=$(( (ordinal - 1) * 15 ))
   after=$(( ordinal * 15 ))
 
-  if [ "$FORCE_INSTALL" != "1" ] && [ -x "$dest" ]; then
+  if [ "$FORCE_INSTALL" != "1" ] && [ -x "$dest" ] && [ -f "$dest.version" ] \
+    && [ "$(cat "$dest.version")" = "$INSTALL_MARKER" ]; then
     info "$bin already installed"
-    printf '%s\n' "$INSTALL_MARKER" > "$dest.version"
     emit "binary" "$bin" "skipped" "$after"
     return 0
   fi
@@ -174,7 +185,6 @@ if [ "$START_CORE" = "1" ]; then
   # The desktop and the one-line install now share this exact Core bring-up. The
   # Core process owns the default model/engine/skill installers and continues
   # those downloads in the background after its health endpoint is ready.
-  export RYU_INSTALL_DEFAULTS="$INSTALL_DEFAULTS"
   emit "core" "ryu-core" "started" 55
   core_log="${RYU_CORE_LOG:-$HOME/.ryu/ryu-core.log}"
   core_dir="$(dirname "$core_log")"
@@ -209,13 +219,8 @@ if [ "$START_CORE" = "1" ]; then
   [ "$healthy" = "1" ] || fail "ryu-core" "Ryu Core did not become healthy at $CORE_URL"
   emit "core" "ryu-core" "complete" 75
 
-  if [ "$INSTALL_DEFAULTS" = "1" ]; then
-    info "Core is provisioning bundled models, engines, skills, and defaults"
-    emit "defaults" "bundled-defaults" "started" 80
-  else
-    info "bundled defaults were not requested"
-    emit "defaults" "bundled-defaults" "skipped" 80
-  fi
+  info "Core is provisioning bundled models, engines, skills, and defaults"
+  emit "defaults" "bundled-defaults" "started" 80
   info "Island and Ghost installs are disabled for this release"
   emit "defaults" "island" "skipped" 85
   emit "defaults" "ghost" "skipped" 85
