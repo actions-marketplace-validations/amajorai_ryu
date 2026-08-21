@@ -21,6 +21,7 @@ import {
 	IconPaperclip,
 	IconX,
 } from "@tabler/icons-react";
+import { ListEnd } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { CSSProperties } from "react";
 import { useRef, useState } from "react";
@@ -362,6 +363,7 @@ export function QueueBar({
 		>
 			<div className="flex h-7 items-center justify-between border-border border-b px-3 text-muted-foreground text-xs">
 				<div className="inline-flex items-center gap-1.5">
+					<ListEnd aria-hidden="true" className="size-3.5 shrink-0" />
 					Queued
 					<span className="tabular-nums">· {formatNumber(count)}</span>
 				</div>

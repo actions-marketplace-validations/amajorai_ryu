@@ -13,9 +13,23 @@ import { WorkspacePicker } from "./WorkspacePicker.tsx";
 
 interface WorkspaceBarProps {
 	conversationId?: string | null;
+	onWorktreeModeChange?: (enabled: boolean) => void;
 	target: ApiTarget;
+	worktreeModeOverride?: boolean;
 }
 
-export function WorkspaceBar({ target, conversationId }: WorkspaceBarProps) {
-	return <WorkspacePicker conversationId={conversationId} target={target} />;
+export function WorkspaceBar({
+	conversationId,
+	onWorktreeModeChange,
+	target,
+	worktreeModeOverride,
+}: WorkspaceBarProps) {
+	return (
+		<WorkspacePicker
+			conversationId={conversationId}
+			onWorktreeModeChange={onWorktreeModeChange}
+			target={target}
+			worktreeModeOverride={worktreeModeOverride}
+		/>
+	);
 }

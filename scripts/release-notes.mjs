@@ -37,7 +37,7 @@ const repo = args.get("repo") || "amajorai/ryu";
 const noCommitLinks = args.get("no-commit-links") === true;
 // CI runs this ON the mirror, whose history is only "mirror: sync from monorepo
 // @ <sha>" commits — a changelog computed there is noise. CI seeds the release
-// with the Install block only; tools/publish-release-notes.sh fills in the real
+// with a short seed only; tools/publish-release-notes.sh fills in the real
 // changelog afterwards from this repo's history.
 const noChangelog = args.get("no-changelog") === true;
 const commitRef = (sha, short) =>
@@ -183,38 +183,8 @@ if (channel === "canary" || channel === "nightly") {
 	out.push(`Built from commit ${commitRef(head, shortHead)}.`, "");
 }
 
-// Install block sits at the TOP, before the changelog: most people landing on a
-// release want the download, not the diff. Desktop first because that is what
-// most people want; the headless stack second for devs and self-hosters.
-if (channel === "release" || channel === "beta") {
-	out.push(
-		"### Install",
-		"",
-		"**Most people — the desktop app.** Download the installer for your OS from the assets below, or from https://ryuhq.com/download.",
-		"",
-		"| macOS | Windows | Linux |",
-		"|---|---|---|",
-		"| `.dmg` (Apple Silicon) | `.msi` / `.exe` | `.AppImage` / `.deb` |",
-		"",
-		"**Developers, self-hosters, servers — the headless stack** (`ryu-core`, `ryu-gateway`, `ryu-cli`) into `~/.ryu/bin`:",
-		"",
-		"```bash",
-		"# macOS / Linux",
-		"curl -fsSL https://raw.githubusercontent.com/amajorai/ryu/main/install.sh | sh",
-		"```",
-		"",
-		"```powershell",
-		"# Windows (PowerShell)",
-		"irm https://raw.githubusercontent.com/amajorai/ryu/main/install.ps1 | iex",
-		"```",
-		"",
-		"Then `ryu-cli` — it starts a local Core on first run, no API key needed. Individual binaries are attached below with `.sha256` checksums.",
-		""
-	);
-}
-
 if (noChangelog) {
-	// release/beta seed this placeholder for tools/publish-release-notes.sh to
+	// Release/beta seed this placeholder for tools/publish-release-notes.sh to
 	// fill in from private history later. Rolling canary/nightly builds have no
 	// such follow-up step, so they show just the banner — no dangling promise.
 	if (channel === "release" || channel === "beta") {

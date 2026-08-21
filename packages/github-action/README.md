@@ -1,4 +1,4 @@
-# Ryu GitHub Action
+# Ryu for GitHub
 
 Use a self-hosted or managed Ryu Core node from GitHub Actions. The action validates
 the node, exports reusable node variables, runs saved Ryu agents/teams/workflows, and

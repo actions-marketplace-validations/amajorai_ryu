@@ -1094,7 +1094,7 @@ export default function ChatPage({
 	 * click on this page's own row. Consumed once on mount. */
 	initialGhost?: boolean;
 	initialProject?: string;
-	/** Per-tab isolation requested by the fork destination dialog. */
+	/** Per-tab isolation requested by a fork destination or workspace handoff. */
 	tabWorktreeMode?: boolean;
 }) {
 	// Read gateway/core reachability from the shared provider so this page and
@@ -1364,6 +1364,7 @@ export default function ChatPage({
 	const {
 		openTab,
 		updateTabBusy,
+		updateTabWorktreeMode,
 		bindTabConversation,
 		tabs,
 		clearScrollToMessage,
@@ -5035,6 +5036,26 @@ export default function ChatPage({
 		[forkConversation, forkRequest, openTab]
 	);
 
+	const handleHandOffToWorktree = useCallback(
+		(branchName: string) => {
+			if (currentTabId) {
+				updateTabWorktreeMode(currentTabId, true);
+			}
+			toast.success("Chat handed off to worktree", {
+				description: `The next response will continue on ${branchName}.`,
+			});
+		},
+		[currentTabId, updateTabWorktreeMode]
+	);
+	const handleWorktreeModeChange = useCallback(
+		(enabled: boolean) => {
+			if (currentTabId) {
+				updateTabWorktreeMode(currentTabId, enabled);
+			}
+		},
+		[currentTabId, updateTabWorktreeMode]
+	);
+
 	// Load the persisted thumbs state when the active conversation changes, so a
 	// reloaded transcript restores its lit thumbs. Best-effort (empty on failure).
 	useEffect(() => {
@@ -6242,7 +6263,9 @@ export default function ChatPage({
 		interfaceLevel === "simple" || processedMessages.length > 0 ? null : (
 			<WorkspaceBar
 				conversationId={activeConversationId ?? draftConvId.current}
+				onWorktreeModeChange={handleWorktreeModeChange}
 				target={chatTarget}
+				worktreeModeOverride={tabWorktreeMode}
 			/>
 		);
 
@@ -6609,7 +6632,7 @@ export default function ChatPage({
 		messages,
 		runId: convId,
 		target: chatTarget,
-		chatStatus: status,
+		chatStatus: effectiveStatus,
 		planArtifacts,
 		onOpenArtifact: handleOpenArtifact,
 		onOpenSideChat: handleOpenSideChat,
@@ -6807,9 +6830,13 @@ export default function ChatPage({
 									folder={pinnedSummaryFolder}
 									onAttachTextFile={handleAttachTextFile}
 									onDismiss={floating ? dismissPinnedSummary : undefined}
+									onHandOffToWorktree={handleHandOffToWorktree}
+									onInterruptChat={handleStop}
+									onWorktreeModeChange={handleWorktreeModeChange}
 									pullRequestsEnabled={pullRequestsEnabled}
 									showLineStats={interfaceLevel !== "simple"}
 									target={chatTarget}
+									worktreeModeOverride={tabWorktreeMode}
 								/>
 							)
 						: null

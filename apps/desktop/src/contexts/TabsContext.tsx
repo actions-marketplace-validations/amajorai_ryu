@@ -128,8 +128,7 @@ export interface Tab {
 	unloaded?: boolean;
 	/** Bottom/right workspace dock state remembered with this chat tab. */
 	workspaceSession?: WorkspaceSessionState;
-	/** Per-tab run-mode override, used when a fork is explicitly sent to a new
-	 * worktree without changing the workspace mode of other open chats. */
+	/** Per-tab run-mode override for forks, handoffs, and explicit picker changes. */
 	worktreeMode?: boolean;
 }
 
@@ -389,6 +388,11 @@ interface TabsContextValue {
 	updateTabWorkspaceSession: (
 		id: string,
 		workspaceSession: WorkspaceSessionState
+	) => void;
+	/** Set or clear the per-tab worktree run-mode override. */
+	updateTabWorktreeMode: (
+		id: string,
+		worktreeMode: boolean | undefined
 	) => void;
 }
 
@@ -1653,6 +1657,23 @@ export function TabsProvider({
 		[]
 	);
 
+	const updateTabWorktreeMode = useCallback(
+		(id: string, worktreeMode: boolean | undefined) => {
+			setTabs((prev) => {
+				const current = prev.find((tab) => tab.id === id);
+				if (!current || current.worktreeMode === worktreeMode) {
+					return prev;
+				}
+				const next = prev.map((tab) =>
+					tab.id === id ? { ...tab, worktreeMode } : tab
+				);
+				tabsRef.current = next;
+				return next;
+			});
+		},
+		[]
+	);
+
 	// See the interface doc: this is the write-back that makes a chat tab's thread
 	// durable. `bindConversation` returns the array unchanged when nothing moves,
 	// so a repeat call from ChatPage's effect never re-snapshots the session.
@@ -2630,6 +2651,7 @@ export function TabsProvider({
 				updateTabBusy,
 				bindTabConversation,
 				updateTabWorkspaceSession,
+				updateTabWorktreeMode,
 				requestScrollToMessage,
 				clearScrollToMessage,
 				restoreTab,

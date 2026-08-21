@@ -78,17 +78,17 @@ export interface RyuPackageManifest {
 	id: string;
 	includes?: string[];
 	kind: PackageKind;
+	/** Safe presentation metadata carried into marketplace listings. */
+	metadata?: Record<string, unknown>;
 	name: string;
 	requires: Record<string, string>;
 	schemaVersion: typeof PACKAGE_SCHEMA_VERSION;
+	/** Export scopes this package can safely apply. */
+	scopes: PackageScope[];
 	security: PackageSecurity;
 	source?: PackageSource;
 	targets: string[];
 	version: string;
-	/** Export scopes this package can safely apply. */
-	scopes: PackageScope[];
-	/** Safe presentation metadata carried into marketplace listings. */
-	metadata?: Record<string, unknown>;
 }
 
 export interface PackageTree {
@@ -97,8 +97,8 @@ export interface PackageTree {
 }
 
 export interface PackageValidationIssue {
-	path: string;
 	message: string;
+	path: string;
 }
 
 export class PackageValidationError extends Error {
@@ -116,12 +116,12 @@ export class PackageValidationError extends Error {
 }
 
 export interface PackageChange {
-	path: string;
-	status: "added" | "modified" | "removed" | "unchanged" | "conflict";
 	baseDigest: string | null;
 	localDigest: string | null;
-	upstreamDigest: string | null;
+	path: string;
 	secret: boolean;
+	status: "added" | "modified" | "removed" | "unchanged" | "conflict";
+	upstreamDigest: string | null;
 }
 
 export interface PackageUpdateDiff {
@@ -150,8 +150,8 @@ export interface ResolvedGithubPackage {
 
 export interface GithubPackageReference {
 	path: string;
-	repository: string;
 	ref: string;
+	repository: string;
 }
 
 type PackageFetcher = (
@@ -182,7 +182,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item) => typeof item === "string");
+	return (
+		Array.isArray(value) && value.every((item) => typeof item === "string")
+	);
 }
 
 function cleanStringArray(value: unknown): string[] {
@@ -243,7 +245,13 @@ function packageSource(value: unknown): PackageSource | undefined {
 		return undefined;
 	}
 	const source: PackageSource = { type };
-	for (const key of ["repository", "path", "ref", "commit", "checksum"] as const) {
+	for (const key of [
+		"repository",
+		"path",
+		"ref",
+		"commit",
+		"checksum",
+	] as const) {
 		if (typeof value[key] === "string" && value[key].trim()) {
 			source[key] = value[key].trim();
 		}
@@ -287,8 +295,9 @@ export function validatePackageManifest(value: unknown): RyuPackageManifest {
 	}
 	const artifacts = cleanStringArray(value.artifacts);
 	const targets = cleanStringArray(value.targets);
-	const scopes = cleanStringArray(value.scopes).filter((scope): scope is PackageScope =>
-		PACKAGE_SCOPES.includes(scope as PackageScope)
+	const scopes = cleanStringArray(value.scopes).filter(
+		(scope): scope is PackageScope =>
+			PACKAGE_SCOPES.includes(scope as PackageScope)
 	);
 	const requirements: Record<string, string> = {};
 	if (isRecord(value.requires)) {
@@ -335,7 +344,10 @@ export function validatePackageManifest(value: unknown): RyuPackageManifest {
 		try {
 			normalizePath(path);
 		} catch {
-			issues.push({ path: "artifacts", message: `unsafe artifact path: ${path}` });
+			issues.push({
+				path: "artifacts",
+				message: `unsafe artifact path: ${path}`,
+			});
 		}
 	}
 	if (scopes.length !== cleanStringArray(value.scopes).length) {
@@ -405,7 +417,9 @@ export function packageDigest(tree: PackageTree): string {
 		if (!data) {
 			continue;
 		}
-		hash.update(new TextEncoder().encode(`${normalized}\0${data.byteLength}\0`));
+		hash.update(
+			new TextEncoder().encode(`${normalized}\0${data.byteLength}\0`)
+		);
 		hash.update(data);
 	}
 	return hash.digest("hex");
@@ -441,7 +455,8 @@ export function redactPackageTree(
 				...tree.manifest.security,
 				containsSecrets: false,
 				privateContent:
-					tree.manifest.security.privateContent && options.includePrivateContent !== true,
+					tree.manifest.security.privateContent &&
+					options.includePrivateContent !== true,
 				redacted: true,
 			},
 		},
@@ -457,7 +472,10 @@ function stringFromBytes(value: Uint8Array): string {
 }
 
 function packageAad(manifest: RyuPackageManifest): Buffer {
-	return Buffer.from(`${SECRET_AAD_PREFIX}${manifest.id}:${manifest.version}`, "utf8");
+	return Buffer.from(
+		`${SECRET_AAD_PREFIX}${manifest.id}:${manifest.version}`,
+		"utf8"
+	);
 }
 
 export function encryptSecrets(
@@ -523,7 +541,9 @@ export function decryptSecrets(
 		envelope.packageId !== manifest.id ||
 		envelope.packageVersion !== manifest.version
 	) {
-		throw new Error("Package secret envelope does not match the package manifest");
+		throw new Error(
+			"Package secret envelope does not match the package manifest"
+		);
 	}
 	const salt = Buffer.from(envelope.salt, "base64url");
 	const nonce = Buffer.from(envelope.nonce, "base64url");
@@ -545,7 +565,9 @@ export function decryptSecrets(
 		]).toString("utf8");
 		return JSON.parse(plaintext) as unknown;
 	} catch {
-		throw new Error("Unable to decrypt package secrets: the unlock key is incorrect");
+		throw new Error(
+			"Unable to decrypt package secrets: the unlock key is incorrect"
+		);
 	}
 }
 
@@ -575,15 +597,18 @@ export function withEncryptedSecrets(
 	};
 }
 
-function equalBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
-	if (!left || !right || left.byteLength !== right.byteLength) {
+function equalBytes(
+	left: Uint8Array | undefined,
+	right: Uint8Array | undefined
+): boolean {
+	if (!(left && right) || left.byteLength !== right.byteLength) {
 		return left === right;
 	}
 	for (let index = 0; index < left.byteLength; index++) {
 		if (left[index] !== right[index]) {
 			return false;
 		}
-		}
+	}
 	return true;
 }
 
@@ -649,12 +674,7 @@ function mergeJsonValue(
 		);
 		if (keyed) {
 			const byId = (items: unknown[]) =>
-				new Map(
-					items.map((item) => [
-						arrayKey(item) as string,
-						item,
-					])
-				);
+				new Map(items.map((item) => [arrayKey(item) as string, item]));
 			const baseById = byId(base);
 			const localById = byId(local);
 			const upstreamById = byId(upstream);
@@ -680,7 +700,9 @@ function mergeJsonValue(
 		}
 		if (
 			[base, local, upstream].every((items) =>
-				items.every((item) => ["string", "number", "boolean"].includes(typeof item))
+				items.every((item) =>
+					["string", "number", "boolean"].includes(typeof item)
+				)
 			)
 		) {
 			// Tool and skill lists are set-like agent configuration. When both sides
@@ -737,7 +759,13 @@ function mergeFile(
 		const localJson = parseJsonFile(local);
 		const upstreamJson = parseJsonFile(upstream);
 		if (localJson !== undefined && upstreamJson !== undefined) {
-			const merged = mergeJsonValue(baseJson, localJson, upstreamJson, path, conflicts);
+			const merged = mergeJsonValue(
+				baseJson,
+				localJson,
+				upstreamJson,
+				path,
+				conflicts
+			);
 			return bytesFromString(`${JSON.stringify(merged, null, 2)}\n`);
 		}
 	}
@@ -771,7 +799,7 @@ export function diffPackageTrees(
 		let status: PackageChange["status"] = "unchanged";
 		if (secret && changedUpstream) {
 			status = "conflict";
-		} else if (!changedLocal && !changedUpstream) {
+		} else if (!(changedLocal || changedUpstream)) {
 			status = "unchanged";
 		} else if (!changedLocal) {
 			status = upstreamFile ? (baseFile ? "modified" : "added") : "removed";
@@ -788,7 +816,13 @@ export function diffPackageTrees(
 			status,
 			upstreamDigest,
 		});
-		const merged = mergeFile(path, baseFile, localFile, upstreamFile, conflicts);
+		const merged = mergeFile(
+			path,
+			baseFile,
+			localFile,
+			upstreamFile,
+			conflicts
+		);
 		if (merged) {
 			mergedFiles[path] = merged;
 		}
@@ -819,7 +853,10 @@ export function diffPackageTrees(
 function assertInside(root: string, path: string): void {
 	const resolvedRoot = resolve(root);
 	const resolvedPath = resolve(path);
-	if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${sep}`)) {
+	if (
+		resolvedPath !== resolvedRoot &&
+		!resolvedPath.startsWith(`${resolvedRoot}${sep}`)
+	) {
 		throw new Error(`Package path escapes root: ${path}`);
 	}
 }
@@ -833,7 +870,9 @@ async function collectFiles(
 		const absolute = join(directory, entry.name);
 		assertInside(root, absolute);
 		if (entry.isSymbolicLink()) {
-			throw new Error(`Package folders cannot contain symbolic links: ${entry.name}`);
+			throw new Error(
+				`Package folders cannot contain symbolic links: ${entry.name}`
+			);
 		}
 		if (entry.isDirectory()) {
 			await collectFiles(root, absolute, files);
@@ -884,7 +923,10 @@ export async function writePackageFolder(
 
 function archiveEntries(tree: PackageTree): Zippable {
 	const entries: Zippable = {
-		[PACKAGE_MANIFEST_FILE]: [manifestBytes(tree.manifest), { mtime: ZIP_EPOCH }],
+		[PACKAGE_MANIFEST_FILE]: [
+			manifestBytes(tree.manifest),
+			{ mtime: ZIP_EPOCH },
+		],
 	};
 	for (const path of Object.keys(tree.files).sort()) {
 		const data = tree.files[path];
@@ -923,7 +965,10 @@ export function unpackPackage(data: Uint8Array): PackageTree {
 			totalBytes += originalSize;
 			if (totalBytes > MAX_PACKAGE_TOTAL_BYTES) {
 				throw new PackageValidationError([
-					{ path: "files", message: "archive exceeds the 64 MiB unpacked limit" },
+					{
+						path: "files",
+						message: "archive exceeds the 64 MiB unpacked limit",
+					},
 				]);
 			}
 			return true;
@@ -932,7 +977,10 @@ export function unpackPackage(data: Uint8Array): PackageTree {
 	const manifestData = entries[PACKAGE_MANIFEST_FILE];
 	if (!manifestData) {
 		throw new PackageValidationError([
-			{ path: PACKAGE_MANIFEST_FILE, message: "archive is missing the package manifest" },
+			{
+				path: PACKAGE_MANIFEST_FILE,
+				message: "archive is missing the package manifest",
+			},
 		]);
 	}
 	const manifest = validatePackageManifest(
@@ -958,15 +1006,33 @@ function githubHeaders(): Record<string, string> {
 
 function githubRepositoryParts(repository: string): [string, string] | null {
 	const parts = repository.split("/").filter(Boolean);
-	if (parts.length !== 2 || parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))) {
+	if (
+		parts.length !== 2 ||
+		parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))
+	) {
 		return null;
 	}
 	const owner = parts[0];
 	const name = parts[1];
-	if (!owner || !name) {
+	if (!(owner && name)) {
 		return null;
 	}
 	return [owner, name.replace(/\.git$/i, "")];
+}
+
+function githubRawPackageUrl(
+	repository: string,
+	commitSha: string,
+	packagePath: string,
+	relativePath: string
+): string {
+	const packageFilePath = [packagePath, relativePath]
+		.filter(Boolean)
+		.join("/")
+		.split("/")
+		.map((segment) => encodeURIComponent(segment))
+		.join("/");
+	return `https://raw.githubusercontent.com/${repository}/${encodeURIComponent(commitSha)}/${packageFilePath}`;
 }
 
 export function parseGithubPackageReference(
@@ -981,7 +1047,10 @@ export function parseGithubPackageReference(
 	let ref = "main";
 	if (/^https?:\/\/github\.com\//i.test(value)) {
 		const url = new URL(value);
-		const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+		const parts = url.pathname
+			.split("/")
+			.filter(Boolean)
+			.map(decodeURIComponent);
 		if (parts.length < 2) {
 			return null;
 		}
@@ -1050,15 +1119,15 @@ interface GithubPackageTreeEntry {
 	type: "blob";
 }
 
-function githubTreeEntries(value: Record<string, unknown>): Record<string, unknown>[] {
+function githubTreeEntries(
+	value: Record<string, unknown>
+): Record<string, unknown>[] {
 	if (value.truncated === true) {
 		throw new Error(
 			"GitHub package tree was truncated; select a package subdirectory or reduce the repository size"
 		);
 	}
-	return Array.isArray(value.tree)
-		? value.tree.filter(isRecord)
-		: [];
+	return Array.isArray(value.tree) ? value.tree.filter(isRecord) : [];
 }
 
 async function githubPackageTreeEntries(
@@ -1079,7 +1148,10 @@ async function githubPackageTreeEntries(
 			throw new Error("GitHub package contains too many directories");
 		}
 		const tree = githubTreeEntries(
-			await githubJson(fetcher, `${apiBase}/git/trees/${encodeURIComponent(sha)}`)
+			await githubJson(
+				fetcher,
+				`${apiBase}/git/trees/${encodeURIComponent(sha)}`
+			)
 		);
 		trees.set(sha, tree);
 		return tree;
@@ -1096,7 +1168,12 @@ async function githubPackageTreeEntries(
 	// Older GitHub mocks and a few enterprise proxies return a flat recursive
 	// listing even when `recursive=1` is omitted. Accept that shape only when the
 	// selected package is unambiguous; never accept a truncated listing.
-	if (packagePath && legacyEntries.some((entry) => entry.path === `${prefix}${PACKAGE_MANIFEST_FILE}`)) {
+	if (
+		packagePath &&
+		legacyEntries.some(
+			(entry) => entry.path === `${prefix}${PACKAGE_MANIFEST_FILE}`
+		)
+	) {
 		if (legacyEntries.length > MAX_PACKAGE_FILES) {
 			throw new Error("GitHub package contains too many files");
 		}
@@ -1105,11 +1182,15 @@ async function githubPackageTreeEntries(
 			const path = normalizePath(String(entry.path).slice(prefix.length));
 			const size = typeof entry.size === "number" ? entry.size : 0;
 			if (size > MAX_PACKAGE_FILE_BYTES) {
-				throw new Error(`GitHub package file exceeds the 32 MiB limit: ${path}`);
+				throw new Error(
+					`GitHub package file exceeds the 32 MiB limit: ${path}`
+				);
 			}
 			totalBytes += size;
 			if (totalBytes > MAX_PACKAGE_TOTAL_BYTES) {
-				throw new Error("GitHub package exceeds the 64 MiB declared size limit");
+				throw new Error(
+					"GitHub package exceeds the 64 MiB declared size limit"
+				);
 			}
 			return {
 				path,
@@ -1122,7 +1203,10 @@ async function githubPackageTreeEntries(
 	let fileCount = 0;
 	let totalBytes = 0;
 	const result: GithubPackageTreeEntry[] = [];
-	const addBlob = (entry: Record<string, unknown>, relativePath: string): void => {
+	const addBlob = (
+		entry: Record<string, unknown>,
+		relativePath: string
+	): void => {
 		const path = normalizePath(relativePath);
 		fileCount += 1;
 		if (fileCount > MAX_PACKAGE_FILES) {
@@ -1184,7 +1268,9 @@ export async function readGithubPackage(
 ): Promise<ResolvedGithubPackage> {
 	const reference = parseGithubPackageReference(input);
 	if (!reference) {
-		throw new Error("Expected a GitHub package folder URL or owner/repo/path reference");
+		throw new Error(
+			"Expected a GitHub package folder URL or owner/repo/path reference"
+		);
 	}
 	const [owner, repositoryName] = reference.repository.split("/");
 	const apiBase = `https://api.github.com/repos/${owner}/${repositoryName}`;
@@ -1196,16 +1282,16 @@ export async function readGithubPackage(
 	if (!commitSha) {
 		throw new Error("GitHub package response did not contain a commit SHA");
 	}
-	const commitTree = isRecord(commit.tree) && typeof commit.tree.sha === "string"
-		? commit.tree.sha
-		: commitSha;
+	const commitTree =
+		isRecord(commit.tree) && typeof commit.tree.sha === "string"
+			? commit.tree.sha
+			: commitSha;
 	const treeEntries = await githubPackageTreeEntries(
 		fetcher,
 		apiBase,
 		commitTree,
 		reference.path
 	);
-	const prefix = reference.path ? `${reference.path}/` : "";
 	const manifestEntry = treeEntries.find(
 		(entry) => entry.path === PACKAGE_MANIFEST_FILE
 	);
@@ -1219,16 +1305,25 @@ export async function readGithubPackage(
 			continue;
 		}
 		const response = await fetcher(
-			`https://raw.githubusercontent.com/${reference.repository}/${encodeURIComponent(commitSha)}/${prefix}${blob.path}`,
+			githubRawPackageUrl(
+				reference.repository,
+				commitSha,
+				reference.path,
+				blob.path
+			),
 			{ headers: githubHeaders() }
 		);
 		if (!response.ok) {
-			throw new Error(`GitHub package file request failed (${response.status})`);
+			throw new Error(
+				`GitHub package file request failed (${response.status})`
+			);
 		}
 		const relativePath = blob.path;
 		const data = new Uint8Array(await response.arrayBuffer());
 		if (data.byteLength > MAX_PACKAGE_FILE_BYTES) {
-			throw new Error(`GitHub package file exceeds the 32 MiB limit: ${relativePath}`);
+			throw new Error(
+				`GitHub package file exceeds the 32 MiB limit: ${relativePath}`
+			);
 		}
 		downloadedBytes += data.byteLength;
 		if (downloadedBytes > MAX_PACKAGE_TOTAL_BYTES) {
@@ -1237,11 +1332,18 @@ export async function readGithubPackage(
 		files[normalizePath(relativePath)] = data;
 	}
 	const manifestResponse = await fetcher(
-		`https://raw.githubusercontent.com/${reference.repository}/${encodeURIComponent(commitSha)}/${prefix}${manifestEntry.path}`,
+		githubRawPackageUrl(
+			reference.repository,
+			commitSha,
+			reference.path,
+			manifestEntry.path
+		),
 		{ headers: githubHeaders() }
 	);
 	if (!manifestResponse.ok) {
-		throw new Error(`GitHub package manifest request failed (${manifestResponse.status})`);
+		throw new Error(
+			`GitHub package manifest request failed (${manifestResponse.status})`
+		);
 	}
 	const manifestBytes = new Uint8Array(await manifestResponse.arrayBuffer());
 	if (manifestBytes.byteLength > MAX_PACKAGE_FILE_BYTES) {
@@ -1309,12 +1411,18 @@ export async function packagePathExists(path: string): Promise<boolean> {
 	}
 }
 
-export function packageFileText(tree: PackageTree, path: string): string | null {
+export function packageFileText(
+	tree: PackageTree,
+	path: string
+): string | null {
 	const data = tree.files[normalizePath(path)];
 	return data ? stringFromBytes(data) : null;
 }
 
-export function packageFileJson(tree: PackageTree, path: string): unknown | null {
+export function packageFileJson(
+	tree: PackageTree,
+	path: string
+): unknown | null {
 	const text = packageFileText(tree, path);
 	if (text === null) {
 		return null;
@@ -1357,7 +1465,7 @@ export function validatePackageTree(tree: PackageTree): PackageTree {
 }
 
 export function packageIsPublishable(tree: PackageTree): boolean {
-	return !hasEncryptedSecrets(tree) && !tree.manifest.security.containsSecrets;
+	return !(hasEncryptedSecrets(tree) || tree.manifest.security.containsSecrets);
 }
 
 export function validatePublishablePackage(tree: PackageTree): void {

@@ -100,10 +100,14 @@ interface WorkspacePickerProps {
 	 */
 	folderOverride?: string | null;
 	folderReadOnly?: boolean;
+	/** Keep manual run-mode changes aligned with the active chat tab. */
+	onWorktreeModeChange?: (enabled: boolean) => void;
 	/** Hide insertion/deletion counts while retaining the branch and file summary. */
 	showLineStats?: boolean;
 	stacked?: boolean;
 	target: ApiTarget;
+	/** The active chat's per-tab run-mode choice, when one exists. */
+	worktreeModeOverride?: boolean;
 }
 
 const PATH_SEP = /[\\/]/;
@@ -160,15 +164,17 @@ export function WorkspacePicker({
 	conversationId,
 	folderOverride,
 	folderReadOnly = false,
+	onWorktreeModeChange,
 	showLineStats = true,
 	stacked = false,
+	worktreeModeOverride,
 }: WorkspacePickerProps) {
 	const storeFolder = useWorkspaceStore((s) => s.folder);
 	const folder = folderOverride === undefined ? storeFolder : folderOverride;
 	const projectNames = useWorkspaceStore((s) => s.projectNames);
 	const projects = useWorkspaceStore((s) => s.projects);
 	const setFolder = useWorkspaceStore((s) => s.setFolder);
-	const worktreeMode = useWorkspaceStore((s) => s.worktreeMode);
+	const globalWorktreeMode = useWorkspaceStore((s) => s.worktreeMode);
 	const worktreeBranch = useWorkspaceStore((s) => s.worktreeBranch);
 	const setWorktreeMode = useWorkspaceStore((s) => s.setWorktreeMode);
 	const setWorktreeBranch = useWorkspaceStore((s) => s.setWorktreeBranch);
@@ -190,6 +196,7 @@ export function WorkspacePicker({
 	const activeEnvironment = projectEnvironments.find(
 		(environment) => environment.id === activeEnvironmentId
 	);
+	const worktreeMode = worktreeModeOverride ?? globalWorktreeMode;
 	const [runningActionId, setRunningActionId] = useState<string | null>(null);
 
 	// Both layouts use one direct menu per control. Tracking the active control
@@ -299,6 +306,13 @@ export function WorkspacePicker({
 		},
 		[folder, isRepo, loadBranches]
 	);
+	const handleSetWorktreeMode = useCallback(
+		(enabled: boolean) => {
+			setWorktreeMode(enabled);
+			onWorktreeModeChange?.(enabled);
+		},
+		[onWorktreeModeChange, setWorktreeMode]
+	);
 
 	const handleSwitchBranch = useCallback(
 		async (nextBranch: string) => {
@@ -384,7 +398,7 @@ export function WorkspacePicker({
 		<RunModeContent
 			onRegenerate={regenerateWorktreeBranch}
 			onSetBranch={setWorktreeBranch}
-			onSetMode={setWorktreeMode}
+			onSetMode={handleSetWorktreeMode}
 			status={worktreeStatus}
 			worktreeBranch={worktreeBranch}
 			worktreeMode={worktreeMode}

@@ -38,6 +38,7 @@ import {
 	DiffStat,
 	WorkspacePicker,
 } from "@/src/components/chat/WorkspacePicker.tsx";
+import { WorktreeHandoffControl } from "@/src/components/chat/WorktreeHandoffControl.tsx";
 import type { CoworkContextPanelProps } from "@/src/components/panels/CoworkContextPanel.tsx";
 import { CoworkContextPanel } from "@/src/components/panels/CoworkContextPanel.tsx";
 import {
@@ -54,7 +55,11 @@ import {
 	invalidateGitPullRequest,
 	useGitPullRequest,
 } from "@/src/hooks/useGitPullRequest.ts";
-import { invalidateGitStatus, useGitStatus } from "@/src/hooks/useGitStatus.ts";
+import {
+	invalidateGitStatus,
+	useGitStatus,
+	useWorktreeStatus,
+} from "@/src/hooks/useGitStatus.ts";
 import {
 	type BackgroundProcess,
 	listBackgroundProcesses,
@@ -82,6 +87,7 @@ import {
 	pullRequestHasMergeConflicts,
 } from "@/src/lib/api/pull-requests.ts";
 import { textToDataUrl } from "@/src/lib/composer/attachments.ts";
+import { useWorkspaceStore } from "@/src/store/useWorkspaceStore.ts";
 
 interface PinnedSummaryPanelProps {
 	conversationId?: string | null;
@@ -100,10 +106,18 @@ interface PinnedSummaryPanelProps {
 	 * the message column); the docked column never self-dismisses.
 	 */
 	onDismiss?: () => void;
+	/** Update the active tab's run-mode override after a handoff. */
+	onHandOffToWorktree?: (branchName: string) => void;
+	/** Interrupt a live response before moving this chat to a worktree. */
+	onInterruptChat?: () => void;
+	/** Keep manual run-mode changes aligned with the active chat tab. */
+	onWorktreeModeChange?: (enabled: boolean) => void;
 	/** True when the app-owned GitHub provider can answer PR/check lookups. */
 	pullRequestsEnabled?: boolean;
 	showLineStats?: boolean;
 	target: ApiTarget;
+	/** The active chat's per-tab run-mode choice, when one exists. */
+	worktreeModeOverride?: boolean;
 }
 
 type GitOperationState =
@@ -180,6 +194,9 @@ function EnvironmentDescription({
 	existingPullRequest,
 	githubAppEnabled,
 	hasWork,
+	chatRunning,
+	onHandOffToWorktree,
+	onInterruptChat,
 	onOpenCommit,
 	onOpenPullRequest,
 	onPull,
@@ -187,12 +204,17 @@ function EnvironmentDescription({
 	onFixCi,
 	onFixMergeConflicts,
 	onStop,
+	onWorktreeModeChange,
 	pullRequest,
 	pullRequestLoading,
 	canCreatePullRequest,
+	worktreeActive,
+	worktreeBranch,
+	worktreeModeOverride,
 	showLineStats,
 }: {
 	canCreatePullRequest: boolean;
+	chatRunning: boolean;
 	commit: GitOperationState;
 	conversationId?: string | null;
 	existingPullRequest: GitPullRequest | null;
@@ -202,16 +224,22 @@ function EnvironmentDescription({
 	hasWork: boolean;
 	onFixCi?: () => void;
 	onFixMergeConflicts?: () => void;
+	onHandOffToWorktree: (branchName: string) => void;
+	onInterruptChat?: () => void;
 	onOpenCommit: () => void;
 	onOpenPullRequest: () => void;
 	onPull: () => void;
 	onSync: () => void;
 	onStop: () => void;
+	onWorktreeModeChange?: (enabled: boolean) => void;
 	pullRequest: GitOperationState;
 	pullRequestLoading: boolean;
 	remote: GitOperationState;
 	showLineStats: boolean;
 	target: ApiTarget;
+	worktreeActive: boolean;
+	worktreeBranch: string;
+	worktreeModeOverride?: boolean;
 }) {
 	const insertions = git?.insertions ?? 0;
 	const deletions = git?.deletions ?? 0;
@@ -236,9 +264,11 @@ function EnvironmentDescription({
 					conversationId={conversationId}
 					folderOverride={folder}
 					folderReadOnly
+					onWorktreeModeChange={onWorktreeModeChange}
 					showLineStats={showLineStats}
 					stacked
 					target={target}
+					worktreeModeOverride={worktreeModeOverride}
 				/>
 				<p className="text-muted-foreground text-xs">
 					No project folder is attached to this chat yet. A local-file request
@@ -259,10 +289,21 @@ function EnvironmentDescription({
 				conversationId={conversationId}
 				folderOverride={folder}
 				folderReadOnly
+				onWorktreeModeChange={onWorktreeModeChange}
 				showLineStats={showLineStats}
 				stacked
 				target={target}
+				worktreeModeOverride={worktreeModeOverride}
 			/>
+
+			{conversationId && git && !worktreeActive && (
+				<WorktreeHandoffControl
+					branchName={worktreeBranch}
+					chatRunning={chatRunning}
+					onHandOff={onHandOffToWorktree}
+					onInterrupt={onInterruptChat}
+				/>
+			)}
 
 			{!git && (
 				<p className="text-muted-foreground text-xs">Not a git repository.</p>
@@ -403,9 +444,18 @@ export function PinnedSummaryPanel({
 	cowork,
 	onDismiss,
 	onAttachTextFile,
+	onInterruptChat,
+	onHandOffToWorktree,
+	onWorktreeModeChange,
 	pullRequestsEnabled = false,
 	showLineStats = true,
+	worktreeModeOverride,
 }: PinnedSummaryPanelProps) {
+	const worktreeBranch = useWorkspaceStore((state) => state.worktreeBranch);
+	const setWorktreeBranch = useWorkspaceStore(
+		(state) => state.setWorktreeBranch
+	);
+	const setWorktreeMode = useWorkspaceStore((state) => state.setWorktreeMode);
 	const [commit, setCommit] = useState<GitOperationState>({ status: "idle" });
 	const [pullRequest, setPullRequest] = useState<GitOperationState>({
 		status: "idle",
@@ -501,6 +551,7 @@ export function PinnedSummaryPanel({
 	// Shared with every other git surface, so this panel's counts can never
 	// disagree with the branch pill above it.
 	const { status: gitStatus } = useGitStatus(target, folder);
+	const worktreeStatus = useWorktreeStatus(target, conversationId);
 	const git = gitStatus.is_repo ? gitStatus : null;
 	const branch = git?.branch ?? "Repository";
 	const { data: queriedPullRequest, isLoading: pullRequestLoading } =
@@ -530,6 +581,12 @@ export function PinnedSummaryPanel({
 	// An agent run mutates the tree, so re-read the moment it goes idle instead
 	// of waiting out the poll interval.
 	const chatStatus = cowork.chatStatus;
+	const chatRunning = chatStatus === "streaming" || chatStatus === "submitted";
+	const handleHandOffToWorktree = (branchName: string) => {
+		setWorktreeBranch(branchName);
+		setWorktreeMode(true);
+		onHandOffToWorktree?.(branchName);
+	};
 	useEffect(() => {
 		if (folder && chatStatus !== "streaming" && chatStatus !== "submitted") {
 			invalidateGitStatus(folder);
@@ -932,6 +989,7 @@ export function PinnedSummaryPanel({
 		description: (
 			<EnvironmentDescription
 				canCreatePullRequest={canCreatePullRequest}
+				chatRunning={chatRunning}
 				commit={commit}
 				conversationId={conversationId}
 				existingPullRequest={existingPullRequest}
@@ -943,6 +1001,8 @@ export function PinnedSummaryPanel({
 				onFixMergeConflicts={
 					onAttachTextFile ? handleFixMergeConflicts : undefined
 				}
+				onHandOffToWorktree={handleHandOffToWorktree}
+				onInterruptChat={onInterruptChat}
 				onOpenCommit={openCommitDialog}
 				onOpenPullRequest={openPullRequestDialog}
 				onPull={() => {
@@ -952,11 +1012,15 @@ export function PinnedSummaryPanel({
 				onSync={() => {
 					void handleRemoteGit("sync");
 				}}
+				onWorktreeModeChange={onWorktreeModeChange}
 				pullRequest={pullRequest}
 				pullRequestLoading={pullRequestLoading}
 				remote={remote}
 				showLineStats={showLineStats}
 				target={target}
+				worktreeActive={worktreeStatus.active}
+				worktreeBranch={worktreeBranch}
+				worktreeModeOverride={worktreeModeOverride}
 			/>
 		),
 	};

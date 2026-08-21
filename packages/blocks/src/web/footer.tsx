@@ -3,12 +3,18 @@
 import Aurora from "./aurora.tsx";
 import BackedBy from "./backed-by.tsx";
 import FooterBuildInfo from "./footer-build-info.tsx";
+import { GitHubStars } from "./github-stars.tsx";
 import { ThemeToggle } from "./theme-toggle.tsx";
 
 // Cache Components requires client prerenders to be deterministic.
 const COPYRIGHT_YEAR = 2026;
+const GITHUB_CORE_URL = "https://github.com/amajorai/ryu";
 
-export default function Footer() {
+export default function Footer({
+	githubStargazersCount,
+}: {
+	githubStargazersCount?: number | null;
+}) {
 	return (
 		<footer className="relative overflow-x-clip pt-16">
 			{/* Content - sits above the gradient */}
@@ -83,6 +89,18 @@ export default function Footer() {
 									href="/products/mcp"
 								>
 									MCP
+								</a>
+								<a
+									className="inline-flex items-center gap-2 text-muted-foreground transition-colors hover:text-foreground"
+									href={GITHUB_CORE_URL}
+									rel="noopener noreferrer"
+									target="_blank"
+								>
+									<span>Open Source</span>
+									{githubStargazersCount != null &&
+									githubStargazersCount > 0 ? (
+										<GitHubStars stargazersCount={githubStargazersCount} />
+									) : null}
 								</a>
 							</div>
 						</div>

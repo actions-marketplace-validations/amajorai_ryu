@@ -42,7 +42,9 @@ const manifest = {
 	version: "1.0.0",
 };
 
-function tree(agentText = '{"id":"agent-1","tools":["search"]}\n'): PackageTree {
+function tree(
+	agentText = '{"id":"agent-1","tools":["search"]}\n'
+): PackageTree {
 	return {
 		files: {
 			"agent.json": new TextEncoder().encode(agentText),
@@ -56,9 +58,9 @@ test("validates and canonicalizes the package envelope", () => {
 	const parsed = validatePackageManifest({ ...manifest, scopes: ["agent"] });
 	expect(parsed.schemaVersion).toBe(1);
 	expect(canonicalJson({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
-	expect(() => validatePackageManifest({ ...manifest, id: "../unsafe" })).toThrow(
-		"unsupported characters"
-	);
+	expect(() =>
+		validatePackageManifest({ ...manifest, id: "../unsafe" })
+	).toThrow("unsupported characters");
 });
 
 test("validates declared artifacts and preserves safe metadata", () => {
@@ -96,15 +98,29 @@ test("folder trees pack and unpack deterministically", () => {
 });
 
 test("encrypted secrets are detected and require the unlock key", () => {
-	const encrypted = withEncryptedSecrets(tree(), { token: "do-not-log" }, "correct horse");
+	const encrypted = withEncryptedSecrets(
+		tree(),
+		{ token: "do-not-log" },
+		"correct horse"
+	);
 	expect(hasEncryptedSecrets(encrypted)).toBe(true);
-	expect(decryptSecrets(encrypted.files["secrets.enc"]!, "correct horse", encrypted.manifest)).toEqual({
+	expect(
+		decryptSecrets(
+			encrypted.files["secrets.enc"]!,
+			"correct horse",
+			encrypted.manifest
+		)
+	).toEqual({
 		token: "do-not-log",
 	});
 	expect(() =>
-		decryptSecrets(encrypted.files["secrets.enc"]!, "wrong key", encrypted.manifest)
+		decryptSecrets(
+			encrypted.files["secrets.enc"]!,
+			"wrong key",
+			encrypted.manifest
+		)
 	).toThrow("unlock key is incorrect");
-	});
+});
 
 test("redaction removes secret and private-content files", () => {
 	const encrypted = withEncryptedSecrets(
@@ -124,12 +140,16 @@ test("redaction removes secret and private-content files", () => {
 	expect(redacted.files["credentials.json"]).toBeUndefined();
 	expect(redacted.files["content/private.md"]).toBeUndefined();
 	expect(redacted.manifest.security.containsSecrets).toBe(false);
-	});
+});
 
 test("three-way JSON merge preserves local edits and accepts upstream edits", () => {
 	const base = tree('{"id":"agent-1","tools":["search"],"prompt":"base"}\n');
-	const local = tree('{"id":"agent-1","tools":["search","calendar"],"prompt":"base"}\n');
-	const upstream = tree('{"id":"agent-1","tools":["search"],"prompt":"upstream"}\n');
+	const local = tree(
+		'{"id":"agent-1","tools":["search","calendar"],"prompt":"base"}\n'
+	);
+	const upstream = tree(
+		'{"id":"agent-1","tools":["search"],"prompt":"upstream"}\n'
+	);
 	const diff = diffPackageTrees(base, local, upstream);
 	expect(diff.conflicts).toEqual([]);
 	expect(diff.merged).not.toBeNull();
@@ -146,12 +166,22 @@ test("conflicts are explicit and secret files remain opaque", () => {
 	expect(diff.conflicts).toContain("agent.json.prompt");
 	expect(diff.merged).toBeNull();
 
-	const secretTree = withEncryptedSecrets(base, { token: "secret" }, "passphrase");
-	const secretUpstream = withEncryptedSecrets(base, { token: "new" }, "passphrase");
+	const secretTree = withEncryptedSecrets(
+		base,
+		{ token: "secret" },
+		"passphrase"
+	);
+	const secretUpstream = withEncryptedSecrets(
+		base,
+		{ token: "new" },
+		"passphrase"
+	);
 	const secretDiff = diffPackageTrees(secretTree, secretTree, secretUpstream);
-	const secretChange = secretDiff.changes.find((change) => change.path === "secrets.enc");
+	const secretChange = secretDiff.changes.find(
+		(change) => change.path === "secrets.enc"
+	);
 	expect(secretChange?.secret).toBe(true);
-	});
+});
 
 test("publish validation rejects secret-bearing packages", () => {
 	const clean = tree();
@@ -202,9 +232,7 @@ test("resolves a GitHub package folder and pins its commit", async () => {
 		repository: "acme/agents",
 	});
 	expect(
-		parseGithubPackageReference(
-			"https://github.com/acme/agents/tree/main/demo"
-		)
+		parseGithubPackageReference("https://github.com/acme/agents/tree/main/demo")
 	).toEqual({ path: "demo", ref: "main", repository: "acme/agents" });
 
 	const remoteManifest = {
@@ -246,6 +274,68 @@ test("resolves a GitHub package folder and pins its commit", async () => {
 	expect(resolved.source.commit).toBe("abc123");
 	expect(resolved.tree.manifest.source?.commit).toBeUndefined();
 	expect(resolved.tree.files["agent.json"]).toBeDefined();
+});
+
+test("keeps encoded dot-segment GitHub entries inside the pinned package path", async () => {
+	const encodedTraversalPath = "%2e%2e/%2e%2e/main/payload.json";
+	const remoteManifest = {
+		...manifest,
+		id: "ryu/encoded-path-agent",
+		name: "Encoded Path Agent",
+	};
+	const canonicalRawUrls: string[] = [];
+	const fetcher = async (url: string): Promise<Response> => {
+		if (url.includes("/commits/main")) {
+			return new Response(JSON.stringify({ sha: "pinnedsha" }), {
+				status: 200,
+			});
+		}
+		if (url.includes("/git/trees/pinnedsha")) {
+			return new Response(
+				JSON.stringify({
+					tree: [
+						{ path: "demo/ryu.package.json", type: "blob" },
+						{ path: "demo/agent.json", type: "blob" },
+						{ path: `demo/${encodedTraversalPath}`, type: "blob" },
+					],
+				}),
+				{ status: 200 }
+			);
+		}
+		const canonicalUrl = new Request(url).url;
+		canonicalRawUrls.push(canonicalUrl);
+		if (canonicalUrl.endsWith("/demo/ryu.package.json")) {
+			return new Response(JSON.stringify(remoteManifest), { status: 200 });
+		}
+		if (canonicalUrl.endsWith("/demo/agent.json")) {
+			return new Response('{"template":{}}\n', { status: 200 });
+		}
+		if (
+			canonicalUrl.endsWith("/demo/%252e%252e/%252e%252e/main/payload.json")
+		) {
+			return new Response("BYTES_FROM_PINNED_PACKAGE_PATH\n", { status: 200 });
+		}
+		if (canonicalUrl.endsWith("/main/payload.json")) {
+			return new Response("BYTES_FROM_MUTABLE_REF\n", { status: 200 });
+		}
+		return new Response("not found", { status: 404 });
+	};
+
+	const resolved = await readGithubPackage(
+		"https://github.com/acme/agents/tree/main/demo",
+		fetcher
+	);
+
+	expect(canonicalRawUrls).toContain(
+		"https://raw.githubusercontent.com/acme/agents/pinnedsha/demo/%252e%252e/%252e%252e/main/payload.json"
+	);
+	expect(canonicalRawUrls).not.toContain(
+		"https://raw.githubusercontent.com/acme/agents/main/payload.json"
+	);
+	expect(resolved.source.commit).toBe("pinnedsha");
+	expect(
+		new TextDecoder().decode(resolved.tree.files[encodedTraversalPath])
+	).toBe("BYTES_FROM_PINNED_PACKAGE_PATH\n");
 });
 
 test("prefers a local package path before GitHub shorthand resolution", async () => {

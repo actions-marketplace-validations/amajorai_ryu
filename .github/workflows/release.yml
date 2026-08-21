@@ -8,10 +8,9 @@ name: release
 #                pushed DIRECTLY to the public repo (rare — tags normally live on
 #                the private repo). Builds cli/tui, desktop, island, core, gateway.
 #   private `.github/workflows/release.yml` (ryu-closed) → the authoritative
-#                producer. Builds all of the above PLUS the ghost/shadow archives
+#                producer. Builds all of the above plus the hub headless assets
 #                and the apps-store sidecar bins, into a draft release there;
-#                `mirror-releases.yml` then copies EVERY asset here under the
-#                same tag.
+#                `mirror-releases.yml` then copies those hub assets here.
 #
 # They are NOT copies and must not be kept in sync job-for-job. The overlap is
 # real, but the difference is forced by source availability: `tools/mirror-public.sh`
@@ -22,10 +21,10 @@ name: release
 # the code it compiles is not in this repo.
 #
 # CONSEQUENCE for anyone tagging: a `v*` tag pushed here yields a release with no
-# ghost/shadow archives and no app sidecar bins. If it becomes `latest`, Core's
-# `GhostDownloader`/`ShadowDownloader` (apps/core/src/sidecar/tools/) — which
-# synthesize `releases/latest/download/<name>-<os>-<arch>.tar.gz` against THIS
-# repo, deliberately unpinned — get a 404. Tag on the private repo instead.
+# app sidecar bins. Ghost and Shadow archives are intentionally owned by the
+# `amajorai/ghost` and `amajorai/shadow` satellite releases, so Core's
+# downloaders resolve independently of this hub release. Tag the private repo for
+# the complete train.
 #
 # See docs/RELEASING.md §2 ("two mechanisms — do not conflate").
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +99,7 @@ jobs:
           fi
 
   # Comes FIRST so the release exists before any binary is attached to it. It
-  # only SEEDS the notes (Install block, no changelog) — the real changelog is
+  # only SEEDS the notes (short banner, no changelog) — the real changelog is
   # generated from the private monorepo by tools/publish-release-notes.sh, since
   # this repo's history is nothing but "mirror: sync from monorepo @ <sha>".
   notes:
@@ -657,39 +656,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # ── `--latest` gate. This workflow CANNOT build the ghost/shadow archives
-          #    (the header explains why: mirror-public.sh does not mirror apps/ghost
-          #    or apps/shadow), and Core's GhostDownloader/ShadowDownloader resolve
-          #    `releases/latest/download/<name>-<os>-<arch>.<ext>` against whatever is
-          #    latest, unpinned. So flipping an overlay-built release to `--latest`
-          #    silently 404s both downloaders. v0.1.12 did exactly that: 41 assets,
-          #    no ghost/shadow, promoted to latest, green run.
-          #
-          #    The release is still published and installable by its tag — tagging
-          #    here is the documented escape hatch when Actions is blocked on the
-          #    private repo, and hard-failing before publish would remove it. What is
-          #    refused is only the `latest` pointer, so the unpinned downloads keep
-          #    resolving against the last COMPLETE release. The job exits non-zero so
-          #    the omission is a red job, not a silent one.
-          names="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
-          missing=()
-          for want in \
-            ghost-linux-x86_64.tar.gz ghost-macos-aarch64.tar.gz ghost-windows-x86_64.zip \
-            shadow-linux-x86_64.tar.gz shadow-macos-aarch64.tar.gz shadow-windows-x86_64.zip; do
-            printf '%s\n' "$names" | grep -qx "$want" || missing+=("$want")
-          done
-          if (( ${#missing[@]} )); then
-            echo "Publishing $TAG as stable, but NOT as latest — these are absent:"
-            printf '  %s\n' "${missing[@]}"
-            gh release edit "$TAG" --prerelease=false
-            echo "::error::$TAG is not latest: ghost/shadow archives are missing, and Core"
-            echo "::error::downloads them from releases/latest/download unpinned."
-            echo "::error::Remedy: tag on the private repo (amajorai/ryu-closed) instead —"
-            echo "::error::its release.yml builds them and mirror-releases.yml copies every"
-            echo "::error::asset here under the same tag, at which point latest is safe."
-            exit 1
-          fi
-          echo "All build jobs green — promoting $TAG to stable."
+          # Ghost and Shadow are satellite-owned assets, so this gate validates
+          # only the hub's own build outputs before promoting the release.
+          echo "All hub build jobs green — promoting $TAG to stable."
           gh release edit "$TAG" --prerelease=false --latest
           gh release view "$TAG" --json tagName,isPrerelease,isDraft \
             --jq '"promoted: \(.tagName) prerelease=\(.isPrerelease) draft=\(.isDraft)"'

@@ -24,7 +24,6 @@ import {
 	resourcesByCategory,
 } from "./data/resources.tsx";
 import { solutionCategories, solutionsByCategory } from "./data/solutions.ts";
-import { GitHubStars } from "./github-stars.tsx";
 import { ProgressiveBlur } from "./progressive-blur.tsx";
 
 interface HeaderLink {
@@ -42,10 +41,6 @@ interface HeaderLink {
 const MARKETING_LINKS: readonly HeaderLink[] = [
 	{ to: "/marketplace", label: "Marketplace" },
 ];
-
-// Public link to the open-source Core repository, surfaced next to the Resources
-// menu so visitors can jump straight to the code.
-const GITHUB_CORE_URL = "https://github.com/amajorai/ryu";
 
 function ProductCategoryColumn({ category }: { category: ProductCategory }) {
 	return (
@@ -76,9 +71,7 @@ export default function Header({
 	orgSlot,
 	links = MARKETING_LINKS,
 	showCatalogMenus = true,
-	showOpenSource = true,
 	homeHref = "/",
-	githubStargazersCount,
 	signedIn = false,
 }: {
 	className?: string;
@@ -99,16 +92,8 @@ export default function Header({
 	 * signed-in Dashboard shortcut now lives in the user menu dropdown.
 	 */
 	showCatalogMenus?: boolean;
-	/**
-	 * Whether to render the "Open Source" GitHub link. It is marketing copy —
-	 * portal surfaces pass `false` so the dashboard header carries only product
-	 * nav, not an outbound link to the repo.
-	 */
-	showOpenSource?: boolean;
 	/** Where the logo links to. Marketing → "/", portal → "/dashboard". */
 	homeHref?: string;
-	/** Cached GitHub star count for the open-source repo (marketing header). */
-	githubStargazersCount?: number | null;
 }) {
 	const pathname = usePathname();
 
@@ -339,23 +324,6 @@ export default function Header({
 							</a>
 						);
 					})}
-
-					{showOpenSource && (
-						<a
-							className={cn(
-								buttonVariants({ variant: "ghost" }),
-								"gap-2 rounded-4xl px-3 font-medium hover:bg-muted hover:text-foreground"
-							)}
-							href={GITHUB_CORE_URL}
-							rel="noopener noreferrer"
-							target="_blank"
-						>
-							Open Source
-							{githubStargazersCount != null && githubStargazersCount > 0 ? (
-								<GitHubStars stargazersCount={githubStargazersCount} />
-							) : null}
-						</a>
-					)}
 				</nav>
 
 				<div className="hidden flex-1 items-center justify-end md:flex">

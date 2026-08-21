@@ -31,17 +31,11 @@ const PRODUCT_HUNT_HREF = "https://www.producthunt.com/products/ryu";
 const SHOW_AWARD_BADGE = false;
 
 /**
- * Leads with the buyer's pain, not our category. Small teams are often capped
- * by the work they can safely take on, not by demand. The safety half of the
- * pitch (the record, the cost ceiling) is why they are ALLOWED to buy, never
- * why they want to, so it stays out of the hero and lands in the trust strip
- * directly below it.
- *
- * Two lines. Anything longer stops reading as a claim and starts reading as
- * a paragraph.
+ * Leads with the buyer's outcome and makes the trust promise part of the same
+ * claim. Keep the hero as one heading with no separate subtitle.
  */
 const HERO_TITLE =
-	"Small teams use Ryu to scale their work output without hiring";
+	"Startups use Ryu to scale and do more at a fraction of the cost of hiring.";
 
 /**
  * The headline gets the same chromatic sweep every section header on this page
@@ -133,7 +127,6 @@ export default function Hero() {
 							<PageHeader
 								className="max-w-2xl whitespace-pre-line"
 								stagger={false}
-								subtitle="Hire agents, not headcount. Start with the document-heavy process that is quietly capping your team's capacity."
 								title={
 									<>
 										{HERO_TITLE_PREFIX}

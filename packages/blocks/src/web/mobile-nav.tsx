@@ -28,8 +28,9 @@ import { ProgressiveBlur } from "./progressive-blur.tsx";
 // The mobile bottom nav mirrors the desktop header's primary navigation:
 // Products, Solutions, and Resources are the same mega-menu groups (fed from the
 // same data files), but tapping them opens a bottom sheet instead of a hover
-// dropdown. Marketplace/Open Source/Book a demo/Sign in stay in the header — the
-// bottom bar only carries the destinations a visitor reaches for every page.
+// dropdown. Marketplace/Book a demo/Sign in stay in the header, while Open Source
+// stays in the footer — the bottom bar only carries destinations a visitor reaches
+// for every page.
 const RESOURCE_ACTIVE_PREFIXES = [
 	"/docs",
 	"/marketplace",
