@@ -413,10 +413,11 @@ async fn handle_search(
     let surfaced_a_skill = descriptors
         .iter()
         .any(|d| d.kind == catalog_client::ToolKind::Skill);
-    if surfaced_a_skill && !existing.contains(SKILLS_LOAD_TOOL_ID) {
+    let skills_load_model_name = catalog_client::model_tool_name(SKILLS_LOAD_TOOL_ID);
+    if surfaced_a_skill && !existing.contains(&skills_load_model_name) {
         match catalog.describe(SKILLS_LOAD_TOOL_ID).await {
             Ok(described) => {
-                existing.insert(SKILLS_LOAD_TOOL_ID.to_string());
+                existing.insert(skills_load_model_name);
                 to_inject.push(described.to_tool_def());
             }
             // `warn`, not `debug`: every other describe failure costs the model one
@@ -686,6 +687,10 @@ mod tests {
         })
     }
 
+    fn model_tool(id: &str) -> String {
+        catalog_client::model_tool_name(id)
+    }
+
     fn final_text(text: &str) -> Value {
         json!({
             "id": "chatcmpl-x",
@@ -752,7 +757,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert!(names.contains(&"exa.search"), "{names:?}");
+        assert!(names.contains(&model_tool("exa.search").as_str()), "{names:?}");
         assert!(
             !names.contains(&"skills.merge-conflicts"),
             "a skill must never be offered as a callable function: {names:?}"
@@ -792,7 +797,7 @@ mod tests {
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
         assert!(
-            names.contains(&SKILLS_LOAD_TOOL_ID),
+            names.contains(&model_tool(SKILLS_LOAD_TOOL_ID).as_str()),
             "an all-skills result must still leave the model able to load: {names:?}"
         );
         // The skill itself is still not a function.
@@ -804,7 +809,7 @@ mod tests {
             .as_array()
             .expect("tools")
             .iter()
-            .filter(|t| t["function"]["name"] == json!(SKILLS_LOAD_TOOL_ID))
+            .filter(|t| t["function"]["name"] == json!(model_tool(SKILLS_LOAD_TOOL_ID)))
             .count();
         assert_eq!(loaders, 1, "the loader must be injected once");
     }
@@ -835,7 +840,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["exa.search"], "{names:?}");
+        assert_eq!(names, vec![model_tool("exa.search").as_str()], "{names:?}");
     }
 
     /// The skip happens **before** `describe_top_n` is applied. With a budget of 1
@@ -868,7 +873,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["exa.search"],
+            vec![model_tool("exa.search").as_str()],
             "the one injection slot must go to the one callable hit"
         );
     }
@@ -886,7 +891,7 @@ mod tests {
         // Round 3: model returns final text.
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", "exa.search", r#"{"query":"rust"}"#),
+            tool_call("c2", model_tool("exa.search").as_str(), r#"{"query":"rust"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
@@ -912,7 +917,7 @@ mod tests {
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
         assert!(names.contains(&TOOL_SEARCH_NAME));
-        assert!(names.contains(&"exa.search"));
+        assert!(names.contains(&model_tool("exa.search").as_str()));
         // The allowed tool was executed.
         assert_eq!(catalog.executed.lock().unwrap().as_slice(), &["exa.search"]);
     }
@@ -968,7 +973,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", "composio__SLACK_SEND_MESSAGE", "{}"),
             tool_call("c2", "composio__GITHUB_CREATE_ISSUE", "{}"),
-            tool_call("c3", "exa.search", r#"{"query":"x"}"#),
+            tool_call("c3", model_tool("exa.search").as_str(), r#"{"query":"x"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
@@ -1016,7 +1021,7 @@ mod tests {
     async fn allowlist_denial_returns_error_not_execution() {
         let catalog = MockCatalog::default();
         let provider = ScriptedProvider::new(vec![
-            tool_call("c1", "exa.search", r#"{"query":"x"}"#),
+            tool_call("c1", model_tool("exa.search").as_str(), r#"{"query":"x"}"#),
             final_text("ok"),
         ]);
         let ctx = ToolLoopContext {
@@ -1059,7 +1064,7 @@ mod tests {
         };
         let provider = ScriptedProvider::new(vec![
             tool_call("c1", TOOL_SEARCH_NAME, r#"{"query":"web search"}"#),
-            tool_call("c2", "exa.search", r#"{"query":"rust"}"#),
+            tool_call("c2", model_tool("exa.search").as_str(), r#"{"query":"rust"}"#),
             final_text("done"),
         ]);
         let ctx = ToolLoopContext {
@@ -1106,7 +1111,7 @@ mod tests {
         crate::untrusted::set_enabled(false);
         let catalog2 = MockCatalog::default();
         let provider2 = ScriptedProvider::new(vec![
-            tool_call("d1", "exa.search", r#"{"query":"x"}"#),
+            tool_call("d1", model_tool("exa.search").as_str(), r#"{"query":"x"}"#),
             final_text("done"),
         ]);
         let ctx2 = ToolLoopContext {
